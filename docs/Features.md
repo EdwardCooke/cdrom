@@ -25,7 +25,7 @@ Before adding features, note the baseline that is already built and working:
 | Job lifecycle | `pending → running → succeeded / failed / cancelled` |
 | Dispatch | `target_group` set → fan out to live workers; empty → ephemeral K8s agent |
 | Execution targets | Long-lived **workers** (register, `WatchJobs` stream, heartbeat) and ephemeral **agents** (`GetJob` → run → report) |
-| Job execution | **Real** — a job carries a `JobSpec` (ordered steps: command, args, workdir, env, per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors |
+| Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that runs a command with args, workdir, env, per-step timeout, and an optional shell override); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors |
 | Job tokens | Minted per job by the API (via IdP), audience exchange, verified on status/artifact RPCs |
 | UI auth | OIDC authorization-code + PKCE, signed session cookie |
 | Artifacts | Streamed upload/download, per-job, proxied through the API |
@@ -47,8 +47,11 @@ These are the foundation every other feature depends on.
 ### F-01 · Job execution spec
 
 **What.** A job carries a declarative spec describing the work to perform: an
-ordered list of **steps**, each with a command (or script), working directory,
-environment variables, and optional per-step timeout. The worker/agent executes
+ordered list of **steps**. Each step is agnostic about how it runs: a `type`
+field selects a step handler, and the remaining fields (`command`, `args`,
+`workdir`, `env`, `timeout`, `shell`, `params`) are interpreted by that
+handler. The built-in `shell` handler (default when `type` is empty) runs a
+command, directly or through a user-chosen shell. The worker/agent executes
 the steps in order and the job fails on the first step that errors.
 
 **Why.** CD jobs are fundamentally "run these commands in this environment".
@@ -76,6 +79,12 @@ missing piece.
 - [x] The spec is portable: the same job spec executes on a Windows worker and
       a Linux worker (no shell-specific assumptions, or an explicit shell
       contract is documented).
+- [x] A step's `shell` override runs the step through a user-chosen shell
+      (`<shell> <args> <command>`), e.g. `pwsh` on Windows.
+- [x] A step's `type` selects its handler: the built-in `shell` handler runs
+      by default, a target can register new types via
+      `executor.RegisterStepType`, and an unregistered type fails the job with
+      a clear error.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
@@ -86,10 +95,26 @@ missing piece.
   protos reference it rather than redefining it.
 - Execution is shared by worker and agent in `internal/executor`
   (`executor.Execute(ctx, spec, logger)`).
+- **Step types & handlers:** the executor (`internal/executor`) is the generic
+  dispatch engine; a step's `type` selects an `executor.StepHandler` (empty →
+  the handler registered under `executor.DefaultType`). The concrete handlers
+  live in `internal/stephandlers`; the built-in `shell` handler registers
+  itself under `executor.DefaultType` at package init. A target or plugin adds
+  new types with `executor.RegisterStepType(name, handler)` (e.g. `ansible`,
+  `terraform`, `argo`). An unregistered type fails the job with a clear error.
+  `params` carries handler-specific configuration so a new type needs no
+  spec-schema change. The worker and agent blank-import `internal/stephandlers`
+  so the built-in handlers are registered before any job runs. This is the
+  seam for the later plugin architecture.
 - **Shell contract:** a step's command is executed directly by the target OS —
   no implicit shell. Steps needing shell behavior invoke a shell explicitly
   (`sh -c ...` / `cmd /c ...`). Step stdout/stderr are inherited from the
   target (local logging); streaming to the API is F-02.
+- **Shell override:** a step may set `shell` to run through a user-chosen
+  interpreter; the target executes `<shell> <args> <command>` (e.g.
+  `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,
+  `command: "Get-ChildItem"`). When `shell` is empty the step runs `command`
+  directly, preserving the no-implicit-shell contract.
 - Per-step `timeout` is enforced by the target via a derived context; a
   scheduler-side watchdog for dead targets is F-03.
 

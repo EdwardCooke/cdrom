@@ -109,6 +109,10 @@ wait_for "$WORK/api.log" 'worker watching' 'worker watch stream on the api'
 # --- submit a multi-step shell job to the worker group ---------------------
 # The heredoc is unquoted so $WORKDIR expands to the real path; the shell
 # snippets ($MY_VAR, $(pwd)) are escaped so they reach the worker verbatim.
+# Step 4 names its step type explicitly ("shell") and uses the `shell`
+# override: the worker runs `<shell> <args> <command>` (sh -c "echo step4:
+# ...") instead of executing command directly. This proves the step-type
+# discriminator is honored end-to-end (a step's type selects its handler).
 log ">> submitting worker job"
 BODY=$(cat <<EOF
 {
@@ -118,7 +122,8 @@ BODY=$(cat <<EOF
     "steps": [
       {"command": "sh", "args": ["-c", "echo step1: plain command"]},
       {"command": "sh", "args": ["-c", "echo step2: env=\$MY_VAR"], "env": {"MY_VAR": "from-spec"}},
-      {"command": "sh", "args": ["-c", "echo step3: pwd=\$(pwd)"], "workdir": "$WORKDIR"}
+      {"command": "sh", "args": ["-c", "echo step3: pwd=\$(pwd)"], "workdir": "$WORKDIR"},
+      {"type": "shell", "shell": "sh", "args": ["-c"], "command": "echo step4: shell override"}
     ]
   }
 }
@@ -138,6 +143,7 @@ log ">> waiting for the worker to execute the job"
 wait_for "$WORK/worker.log" 'step1: plain command' 'step 1 output'
 wait_for "$WORK/worker.log" 'step2: env=from-spec' 'step 2 env var'
 wait_for "$WORK/worker.log" "step3: pwd=$WORKDIR" 'step 3 workdir'
+wait_for "$WORK/worker.log" 'step4: shell override' 'step 4 shell override'
 wait_for "$WORK/worker.log" 'job succeeded' 'job success'
 
 # --- verify the API persisted the job as succeeded -------------------------

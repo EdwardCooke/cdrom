@@ -20,6 +20,10 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
+
+	// Register the built-in step handlers (e.g. the shell handler) with the
+	// executor. A target or plugin adds more step types the same way.
+	_ "cdrom/internal/stephandlers"
 )
 
 // Dependencies are the gRPC clients a worker needs. The worker talks only to

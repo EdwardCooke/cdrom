@@ -423,11 +423,14 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 	steps := make([]models.JobStep, 0, len(spec.GetSteps()))
 	for _, step := range spec.GetSteps() {
 		steps = append(steps, models.JobStep{
+			Type:    step.GetType(),
 			Command: step.GetCommand(),
 			Args:    step.GetArgs(),
 			Workdir: step.GetWorkdir(),
 			Env:     step.GetEnv(),
 			Timeout: step.GetTimeout().AsDuration(),
+			Shell:   step.GetShell(),
+			Params:  step.GetParams(),
 		})
 	}
 	return models.JobSpec{Steps: steps}
@@ -442,11 +445,14 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
 	for _, step := range spec.Steps {
 		steps = append(steps, &dbpb.JobStep{
+			Type:    step.Type,
 			Command: step.Command,
 			Args:    step.Args,
 			Workdir: step.Workdir,
 			Env:     step.Env,
 			Timeout: durationpb.New(step.Timeout),
+			Shell:   step.Shell,
+			Params:  step.Params,
 		})
 	}
 	return &dbpb.JobSpec{Steps: steps}

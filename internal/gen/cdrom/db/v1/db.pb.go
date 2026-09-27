@@ -438,19 +438,47 @@ func (x *DeletePipelineRequest) GetId() int64 {
 	return 0
 }
 
-// JobStep is a single unit of work in a job's execution spec: a command
-// (optionally with arguments) run in a working directory with an environment.
+// JobStep is a single unit of work in a job's execution spec. A step is
+// agnostic about *how* it runs: `type` selects a step handler, and the
+// remaining fields are interpreted by that handler. The built-in default
+// handler ("shell", used when `type` is empty) runs a command — optionally
+// through a user-chosen shell — in a working directory with an environment.
 //
-// Portability contract: `command` is resolved and executed directly by the
-// execution target's OS (no shell is involved), so the same spec executes
-// identically on Windows and Linux. `workdir` is interpreted with the
-// target's native path separator; a relative workdir is resolved against the
-// target's current working directory.
+// Portability contract (shell handler): `command` is resolved and executed
+// directly by the execution target's OS (no shell is involved), so the same
+// spec executes identically on Windows and Linux. `workdir` is interpreted
+// with the target's native path separator; a relative workdir is resolved
+// against the target's current working directory.
+//
+// Shell override (shell handler): when `shell` is set, the step is run
+// through that shell instead of executing `command` directly — the target
+// invokes `<shell> <args> <command>`, so `command` is passed as the final
+// argument (e.g. `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,
+// `command: "Get-ChildItem"`). This lets a step opt into shell behavior
+// (pipes, globbing, `$VAR` expansion) with an explicit, user-chosen shell
+// rather than a platform default. When `shell` is empty the step runs
+// `command` directly, preserving the no-implicit-shell contract.
+//
+// Extensibility: `type` names a step handler registered on the execution
+// target (the built-in "shell" handler is always available; a target may
+// register more, e.g. "ansible", "terraform", "argo", or a user plugin).
+// `params` carries handler-specific configuration that does not fit the
+// common fields, so a new step type can be added without changing the spec
+// schema. A step whose `type` is not registered on the target fails the job
+// with a clear error.
 type JobStep struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// command is the executable to run (e.g. "go", "pwsh", "bash").
+	// type selects the step handler that runs this step. Empty means the
+	// built-in "shell" handler. A target that has not registered the named
+	// handler rejects the step.
+	Type string `protobuf:"bytes,7,opt,name=type,proto3" json:"type,omitempty"`
+	// command is the executable to run (e.g. "go", "pwsh", "bash"). For the
+	// shell handler, when `shell` is set, command is instead passed as the
+	// final argument to the shell. Other handlers may interpret or ignore it.
 	Command string `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
-	// args are the command's arguments, in order.
+	// args are the command's arguments, in order. For the shell handler, when
+	// `shell` is set, args are the shell's own arguments (e.g.
+	// ["-NoProfile", "-Command"]) and command is appended after them.
 	Args []string `protobuf:"bytes,2,rep,name=args,proto3" json:"args,omitempty"`
 	// workdir is the directory the command runs in; empty means the target's
 	// current working directory.
@@ -460,7 +488,17 @@ type JobStep struct {
 	Env map[string]string `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// timeout is the maximum duration for this step; 0 means no per-step
 	// timeout.
-	Timeout       *durationpb.Duration `protobuf:"bytes,5,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	Timeout *durationpb.Duration `protobuf:"bytes,5,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	// shell, when set, is the interpreter the step is run through: the target
+	// executes `<shell> <args> <command>` instead of `command` directly. This
+	// is how a step opts into shell behavior with a user-chosen shell (e.g.
+	// "pwsh" on Windows, "bash" on Linux) instead of a platform default. Empty
+	// means run `command` directly (no shell).
+	Shell string `protobuf:"bytes,6,opt,name=shell,proto3" json:"shell,omitempty"`
+	// params are handler-specific key/value settings for the step (e.g. an
+	// ansible inventory or a terraform workspace). The built-in shell handler
+	// ignores them; a new step type reads the keys it understands.
+	Params        map[string]string `protobuf:"bytes,8,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -495,6 +533,13 @@ func (*JobStep) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{7}
 }
 
+func (x *JobStep) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
 func (x *JobStep) GetCommand() string {
 	if x != nil {
 		return x.Command
@@ -526,6 +571,20 @@ func (x *JobStep) GetEnv() map[string]string {
 func (x *JobStep) GetTimeout() *durationpb.Duration {
 	if x != nil {
 		return x.Timeout
+	}
+	return nil
+}
+
+func (x *JobStep) GetShell() string {
+	if x != nil {
+		return x.Shell
+	}
+	return ""
+}
+
+func (x *JobStep) GetParams() map[string]string {
+	if x != nil {
+		return x.Params
 	}
 	return nil
 }
@@ -1845,14 +1904,20 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\"'\n" +
 	"\x15DeletePipelineRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x03R\x02id\"\xef\x01\n" +
-	"\aJobStep\x12\x18\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"\x8e\x03\n" +
+	"\aJobStep\x12\x12\n" +
+	"\x04type\x18\a \x01(\tR\x04type\x12\x18\n" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12\x12\n" +
 	"\x04args\x18\x02 \x03(\tR\x04args\x12\x18\n" +
 	"\aworkdir\x18\x03 \x01(\tR\aworkdir\x12/\n" +
 	"\x03env\x18\x04 \x03(\v2\x1d.cdrom.db.v1.JobStep.EnvEntryR\x03env\x123\n" +
-	"\atimeout\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x1a6\n" +
+	"\atimeout\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12\x14\n" +
+	"\x05shell\x18\x06 \x01(\tR\x05shell\x128\n" +
+	"\x06params\x18\b \x03(\v2 .cdrom.db.v1.JobStep.ParamsEntryR\x06params\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a9\n" +
+	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"5\n" +
 	"\aJobSpec\x12*\n" +
@@ -1990,7 +2055,7 @@ func file_cdrom_db_v1_db_proto_rawDescGZIP() []byte {
 }
 
 var file_cdrom_db_v1_db_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cdrom_db_v1_db_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
+var file_cdrom_db_v1_db_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(JobStatus)(0),                     // 0: cdrom.db.v1.JobStatus
 	(*Pipeline)(nil),                   // 1: cdrom.db.v1.Pipeline
@@ -2025,83 +2090,85 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*ConsumeIDPAuthCodeRequest)(nil),  // 30: cdrom.db.v1.ConsumeIDPAuthCodeRequest
 	(*PruneIDPAuthCodesRequest)(nil),   // 31: cdrom.db.v1.PruneIDPAuthCodesRequest
 	nil,                                // 32: cdrom.db.v1.JobStep.EnvEntry
-	(*timestamppb.Timestamp)(nil),      // 33: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),        // 34: google.protobuf.Duration
-	(*emptypb.Empty)(nil),              // 35: google.protobuf.Empty
+	nil,                                // 33: cdrom.db.v1.JobStep.ParamsEntry
+	(*timestamppb.Timestamp)(nil),      // 34: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),        // 35: google.protobuf.Duration
+	(*emptypb.Empty)(nil),              // 36: google.protobuf.Empty
 }
 var file_cdrom_db_v1_db_proto_depIdxs = []int32{
-	33, // 0: cdrom.db.v1.Pipeline.created_at:type_name -> google.protobuf.Timestamp
-	33, // 1: cdrom.db.v1.Pipeline.updated_at:type_name -> google.protobuf.Timestamp
+	34, // 0: cdrom.db.v1.Pipeline.created_at:type_name -> google.protobuf.Timestamp
+	34, // 1: cdrom.db.v1.Pipeline.updated_at:type_name -> google.protobuf.Timestamp
 	1,  // 2: cdrom.db.v1.ListPipelinesResponse.pipelines:type_name -> cdrom.db.v1.Pipeline
 	32, // 3: cdrom.db.v1.JobStep.env:type_name -> cdrom.db.v1.JobStep.EnvEntry
-	34, // 4: cdrom.db.v1.JobStep.timeout:type_name -> google.protobuf.Duration
-	8,  // 5: cdrom.db.v1.JobSpec.steps:type_name -> cdrom.db.v1.JobStep
-	0,  // 6: cdrom.db.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
-	33, // 7: cdrom.db.v1.Job.started_at:type_name -> google.protobuf.Timestamp
-	33, // 8: cdrom.db.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
-	33, // 9: cdrom.db.v1.Job.created_at:type_name -> google.protobuf.Timestamp
-	33, // 10: cdrom.db.v1.Job.updated_at:type_name -> google.protobuf.Timestamp
-	9,  // 11: cdrom.db.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
-	9,  // 12: cdrom.db.v1.CreateJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
-	0,  // 13: cdrom.db.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
-	10, // 14: cdrom.db.v1.ListJobsResponse.jobs:type_name -> cdrom.db.v1.Job
-	0,  // 15: cdrom.db.v1.UpdateJobRequest.status:type_name -> cdrom.db.v1.JobStatus
-	33, // 16: cdrom.db.v1.UpdateJobRequest.started_at:type_name -> google.protobuf.Timestamp
-	33, // 17: cdrom.db.v1.UpdateJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	33, // 18: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
-	17, // 19: cdrom.db.v1.ListWorkersResponse.workers:type_name -> cdrom.db.v1.Worker
-	33, // 20: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
-	33, // 21: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
-	24, // 22: cdrom.db.v1.ListIDPSigningKeysResponse.keys:type_name -> cdrom.db.v1.IDPSigningKey
-	24, // 23: cdrom.db.v1.SetIDPSigningKeysRequest.keys:type_name -> cdrom.db.v1.IDPSigningKey
-	33, // 24: cdrom.db.v1.IDPAuthCode.created_at:type_name -> google.protobuf.Timestamp
-	28, // 25: cdrom.db.v1.StoreIDPAuthCodeRequest.code:type_name -> cdrom.db.v1.IDPAuthCode
-	33, // 26: cdrom.db.v1.PruneIDPAuthCodesRequest.created_before:type_name -> google.protobuf.Timestamp
-	2,  // 27: cdrom.db.v1.Database.CreatePipeline:input_type -> cdrom.db.v1.CreatePipelineRequest
-	3,  // 28: cdrom.db.v1.Database.GetPipeline:input_type -> cdrom.db.v1.GetPipelineRequest
-	4,  // 29: cdrom.db.v1.Database.ListPipelines:input_type -> cdrom.db.v1.ListPipelinesRequest
-	6,  // 30: cdrom.db.v1.Database.UpdatePipeline:input_type -> cdrom.db.v1.UpdatePipelineRequest
-	7,  // 31: cdrom.db.v1.Database.DeletePipeline:input_type -> cdrom.db.v1.DeletePipelineRequest
-	11, // 32: cdrom.db.v1.Database.CreateJob:input_type -> cdrom.db.v1.CreateJobRequest
-	12, // 33: cdrom.db.v1.Database.GetJob:input_type -> cdrom.db.v1.GetJobRequest
-	13, // 34: cdrom.db.v1.Database.ListJobs:input_type -> cdrom.db.v1.ListJobsRequest
-	15, // 35: cdrom.db.v1.Database.UpdateJob:input_type -> cdrom.db.v1.UpdateJobRequest
-	16, // 36: cdrom.db.v1.Database.DeleteJob:input_type -> cdrom.db.v1.DeleteJobRequest
-	18, // 37: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
-	19, // 38: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
-	20, // 39: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
-	22, // 40: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
-	23, // 41: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
-	25, // 42: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
-	27, // 43: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
-	29, // 44: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
-	30, // 45: cdrom.db.v1.Database.ConsumeIDPAuthCode:input_type -> cdrom.db.v1.ConsumeIDPAuthCodeRequest
-	31, // 46: cdrom.db.v1.Database.PruneIDPAuthCodes:input_type -> cdrom.db.v1.PruneIDPAuthCodesRequest
-	1,  // 47: cdrom.db.v1.Database.CreatePipeline:output_type -> cdrom.db.v1.Pipeline
-	1,  // 48: cdrom.db.v1.Database.GetPipeline:output_type -> cdrom.db.v1.Pipeline
-	5,  // 49: cdrom.db.v1.Database.ListPipelines:output_type -> cdrom.db.v1.ListPipelinesResponse
-	1,  // 50: cdrom.db.v1.Database.UpdatePipeline:output_type -> cdrom.db.v1.Pipeline
-	35, // 51: cdrom.db.v1.Database.DeletePipeline:output_type -> google.protobuf.Empty
-	10, // 52: cdrom.db.v1.Database.CreateJob:output_type -> cdrom.db.v1.Job
-	10, // 53: cdrom.db.v1.Database.GetJob:output_type -> cdrom.db.v1.Job
-	14, // 54: cdrom.db.v1.Database.ListJobs:output_type -> cdrom.db.v1.ListJobsResponse
-	10, // 55: cdrom.db.v1.Database.UpdateJob:output_type -> cdrom.db.v1.Job
-	35, // 56: cdrom.db.v1.Database.DeleteJob:output_type -> google.protobuf.Empty
-	17, // 57: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
-	17, // 58: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
-	21, // 59: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
-	17, // 60: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
-	35, // 61: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
-	26, // 62: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
-	35, // 63: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
-	35, // 64: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
-	28, // 65: cdrom.db.v1.Database.ConsumeIDPAuthCode:output_type -> cdrom.db.v1.IDPAuthCode
-	35, // 66: cdrom.db.v1.Database.PruneIDPAuthCodes:output_type -> google.protobuf.Empty
-	47, // [47:67] is the sub-list for method output_type
-	27, // [27:47] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	35, // 4: cdrom.db.v1.JobStep.timeout:type_name -> google.protobuf.Duration
+	33, // 5: cdrom.db.v1.JobStep.params:type_name -> cdrom.db.v1.JobStep.ParamsEntry
+	8,  // 6: cdrom.db.v1.JobSpec.steps:type_name -> cdrom.db.v1.JobStep
+	0,  // 7: cdrom.db.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
+	34, // 8: cdrom.db.v1.Job.started_at:type_name -> google.protobuf.Timestamp
+	34, // 9: cdrom.db.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
+	34, // 10: cdrom.db.v1.Job.created_at:type_name -> google.protobuf.Timestamp
+	34, // 11: cdrom.db.v1.Job.updated_at:type_name -> google.protobuf.Timestamp
+	9,  // 12: cdrom.db.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
+	9,  // 13: cdrom.db.v1.CreateJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
+	0,  // 14: cdrom.db.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
+	10, // 15: cdrom.db.v1.ListJobsResponse.jobs:type_name -> cdrom.db.v1.Job
+	0,  // 16: cdrom.db.v1.UpdateJobRequest.status:type_name -> cdrom.db.v1.JobStatus
+	34, // 17: cdrom.db.v1.UpdateJobRequest.started_at:type_name -> google.protobuf.Timestamp
+	34, // 18: cdrom.db.v1.UpdateJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	34, // 19: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
+	17, // 20: cdrom.db.v1.ListWorkersResponse.workers:type_name -> cdrom.db.v1.Worker
+	34, // 21: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
+	34, // 22: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
+	24, // 23: cdrom.db.v1.ListIDPSigningKeysResponse.keys:type_name -> cdrom.db.v1.IDPSigningKey
+	24, // 24: cdrom.db.v1.SetIDPSigningKeysRequest.keys:type_name -> cdrom.db.v1.IDPSigningKey
+	34, // 25: cdrom.db.v1.IDPAuthCode.created_at:type_name -> google.protobuf.Timestamp
+	28, // 26: cdrom.db.v1.StoreIDPAuthCodeRequest.code:type_name -> cdrom.db.v1.IDPAuthCode
+	34, // 27: cdrom.db.v1.PruneIDPAuthCodesRequest.created_before:type_name -> google.protobuf.Timestamp
+	2,  // 28: cdrom.db.v1.Database.CreatePipeline:input_type -> cdrom.db.v1.CreatePipelineRequest
+	3,  // 29: cdrom.db.v1.Database.GetPipeline:input_type -> cdrom.db.v1.GetPipelineRequest
+	4,  // 30: cdrom.db.v1.Database.ListPipelines:input_type -> cdrom.db.v1.ListPipelinesRequest
+	6,  // 31: cdrom.db.v1.Database.UpdatePipeline:input_type -> cdrom.db.v1.UpdatePipelineRequest
+	7,  // 32: cdrom.db.v1.Database.DeletePipeline:input_type -> cdrom.db.v1.DeletePipelineRequest
+	11, // 33: cdrom.db.v1.Database.CreateJob:input_type -> cdrom.db.v1.CreateJobRequest
+	12, // 34: cdrom.db.v1.Database.GetJob:input_type -> cdrom.db.v1.GetJobRequest
+	13, // 35: cdrom.db.v1.Database.ListJobs:input_type -> cdrom.db.v1.ListJobsRequest
+	15, // 36: cdrom.db.v1.Database.UpdateJob:input_type -> cdrom.db.v1.UpdateJobRequest
+	16, // 37: cdrom.db.v1.Database.DeleteJob:input_type -> cdrom.db.v1.DeleteJobRequest
+	18, // 38: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
+	19, // 39: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
+	20, // 40: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
+	22, // 41: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
+	23, // 42: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
+	25, // 43: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
+	27, // 44: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
+	29, // 45: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
+	30, // 46: cdrom.db.v1.Database.ConsumeIDPAuthCode:input_type -> cdrom.db.v1.ConsumeIDPAuthCodeRequest
+	31, // 47: cdrom.db.v1.Database.PruneIDPAuthCodes:input_type -> cdrom.db.v1.PruneIDPAuthCodesRequest
+	1,  // 48: cdrom.db.v1.Database.CreatePipeline:output_type -> cdrom.db.v1.Pipeline
+	1,  // 49: cdrom.db.v1.Database.GetPipeline:output_type -> cdrom.db.v1.Pipeline
+	5,  // 50: cdrom.db.v1.Database.ListPipelines:output_type -> cdrom.db.v1.ListPipelinesResponse
+	1,  // 51: cdrom.db.v1.Database.UpdatePipeline:output_type -> cdrom.db.v1.Pipeline
+	36, // 52: cdrom.db.v1.Database.DeletePipeline:output_type -> google.protobuf.Empty
+	10, // 53: cdrom.db.v1.Database.CreateJob:output_type -> cdrom.db.v1.Job
+	10, // 54: cdrom.db.v1.Database.GetJob:output_type -> cdrom.db.v1.Job
+	14, // 55: cdrom.db.v1.Database.ListJobs:output_type -> cdrom.db.v1.ListJobsResponse
+	10, // 56: cdrom.db.v1.Database.UpdateJob:output_type -> cdrom.db.v1.Job
+	36, // 57: cdrom.db.v1.Database.DeleteJob:output_type -> google.protobuf.Empty
+	17, // 58: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
+	17, // 59: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
+	21, // 60: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
+	17, // 61: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
+	36, // 62: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
+	26, // 63: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
+	36, // 64: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
+	36, // 65: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
+	28, // 66: cdrom.db.v1.Database.ConsumeIDPAuthCode:output_type -> cdrom.db.v1.IDPAuthCode
+	36, // 67: cdrom.db.v1.Database.PruneIDPAuthCodes:output_type -> google.protobuf.Empty
+	48, // [48:68] is the sub-list for method output_type
+	28, // [28:48] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_db_v1_db_proto_init() }
@@ -2115,7 +2182,7 @@ func file_cdrom_db_v1_db_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_db_v1_db_proto_rawDesc), len(file_cdrom_db_v1_db_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   32,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

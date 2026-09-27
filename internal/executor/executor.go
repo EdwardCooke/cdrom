@@ -1,26 +1,25 @@
-// Package executor runs a job's execution spec: an ordered list of steps,
-// each a command (with optional arguments, working directory, environment
-// variables, and per-step timeout). It is shared by the long-lived worker and
-// the ephemeral agent, and must run on both Windows and Linux.
+// Package executor runs a job's execution spec: an ordered list of steps.
+// Each step is agnostic about *how* it runs: a step's Type selects a
+// StepHandler that executes it. A step with no type is dispatched to the
+// handler registered under DefaultType (the built-in "shell" handler, which
+// runs a command — directly, or through a user-chosen shell — in a working
+// directory with an environment). A target (or a plugin) can register
+// additional step types via RegisterStepType (e.g. "ansible", "terraform",
+// "argo"); a step whose type is not registered on the target fails the job
+// with a clear error.
 //
-// Portability contract: a step's command is resolved and executed directly by
-// the target's OS — no shell is involved. This means the same spec executes
-// identically on Windows and Linux: there are no shell-specific assumptions
-// (no `&&`, no pipes, no globbing, no `$VAR` expansion). A step that needs
-// shell behavior must invoke a shell explicitly (e.g. command "bash" with
-// args ["-c", "..."], or "pwsh" with args ["-NoProfile", "-Command", "..."]).
-// A step's workdir is interpreted with the target's native path separator; a
-// relative workdir is resolved against the target's current working directory.
+// The concrete handlers live in internal/stephandlers (and, later, in
+// plugins); this package is the generic dispatch engine and knows only the
+// DefaultType name, not the handlers themselves. The package is shared by the
+// long-lived worker and the ephemeral agent, and must run on both Windows and
+// Linux.
 package executor
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
-	"sort"
-	"strings"
+	"sync"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
@@ -47,17 +46,50 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 	return nil
 }
 
-// runStep executes a single step and returns a descriptive error when it
-// fails. The step's stdout and stderr are inherited from the execution target
-// (the worker/agent's own stdout/stderr, which go to stdout or the log file)
-// — there is no central logs service, and streaming output to the API is a
-// later concern (F-02). Inheriting (rather than capturing into pipes) also
-// means a per-step timeout returns promptly: killing the step's process does
-// not leave open pipes that would block the wait.
+// StepHandler executes a single step of a job. A handler is selected by the
+// step's Type (an empty Type selects the handler registered under
+// DefaultType). A handler receives the step's context — already bounded by
+// the step's per-step timeout, when set — and the step itself, and returns a
+// descriptive error when the step fails.
+//
+// Handlers are expected to be safe for concurrent use: a worker may run steps
+// from different jobs on different goroutines.
+type StepHandler func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error
+
+// DefaultType is the step type a step is dispatched to when its Type is
+// empty. The built-in shell handler (internal/stephandlers) registers itself
+// under this name, so a step with no type runs through the shell handler.
+const DefaultType = "shell"
+
+// stepTypes maps a step type to its handler. Handlers register themselves via
+// RegisterStepType (the built-in shell handler does so at package init in
+// internal/stephandlers); targets and plugins add more the same way.
+var stepTypes sync.Map // map[string]StepHandler
+
+// RegisterStepType registers a handler for a step type so steps of that type
+// can be executed. The built-in "shell" handler is always registered; this is
+// how a target (or a plugin) adds new step types such as "ansible",
+// "terraform", or "argo". Registering a type that is already registered
+// replaces its handler.
+func RegisterStepType(name string, handler StepHandler) {
+	if name == "" || handler == nil {
+		return
+	}
+	stepTypes.Store(name, handler)
+}
+
+// runStep executes a single step by dispatching to the handler registered for
+// the step's type (the built-in "shell" handler when the type is empty). It
+// returns a descriptive error when the step fails or its type is not
+// registered on this target.
 func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Logger) error {
-	command := step.GetCommand()
-	if command == "" {
-		return fmt.Errorf("executor: step %d: command is required", index)
+	name := step.GetType()
+	if name == "" {
+		name = DefaultType
+	}
+	handler, ok := stepTypes.Load(name)
+	if !ok {
+		return fmt.Errorf("executor: step %d: unknown step type %q (no handler registered on this target)", index, name)
 	}
 
 	// A per-step timeout derives a context that expires after the step's
@@ -70,56 +102,8 @@ func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Lo
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(stepCtx, command, step.GetArgs()...)
-	if workdir := step.GetWorkdir(); workdir != "" {
-		cmd.Dir = workdir
-	}
-	cmd.Env = mergeEnv(os.Environ(), step.GetEnv())
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	logger.Info("executor: running step",
-		"step", index, "command", command, "args", step.GetArgs(), "workdir", step.GetWorkdir())
-
-	err := cmd.Run()
-
-	if err != nil {
-		// Distinguish a per-step timeout from any other failure. A timeout
-		// manifests as the derived context hitting its deadline; a parent
-		// cancellation surfaces as context.Canceled instead.
-		if stepCtx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("executor: step %d (%q) timed out after %s", index, command, step.GetTimeout().AsDuration())
-		}
-		return fmt.Errorf("executor: step %d (%q): %w", index, command, err)
+	if err := handler.(StepHandler)(stepCtx, step, logger); err != nil {
+		return fmt.Errorf("executor: step %d (type %q): %w", index, name, err)
 	}
 	return nil
-}
-
-// mergeEnv returns the base environment with the extra variables applied. An
-// extra variable overrides a base variable with the same name. Extra
-// variables are appended in sorted order so the result is deterministic.
-func mergeEnv(base []string, extra map[string]string) []string {
-	if len(extra) == 0 {
-		return base
-	}
-	env := make([]string, 0, len(base)+len(extra))
-	for _, kv := range base {
-		name := kv
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			name = kv[:i]
-		}
-		if _, overridden := extra[name]; overridden {
-			continue
-		}
-		env = append(env, kv)
-	}
-	names := make([]string, 0, len(extra))
-	for name := range extra {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		env = append(env, name+"="+extra[name])
-	}
-	return env
 }

@@ -171,3 +171,28 @@ func TestToProtoSpecTimeout(t *testing.T) {
 		t.Errorf("timeout = %s, want 45s", got)
 	}
 }
+
+// TestToProtoSpecStepType verifies that a step's type and params are carried
+// into the proto, and that a non-shell step type does not require a command
+// (only the built-in shell handler does).
+func TestToProtoSpecStepType(t *testing.T) {
+	spec := &jobSpecRequest{Steps: []jobStepRequest{
+		{Type: "ansible", Params: map[string]string{"inventory": "prod"}},
+	}}
+	proto, err := spec.toProtoSpec()
+	if err != nil {
+		t.Fatalf("toProtoSpec: %v", err)
+	}
+	step := proto.GetSteps()[0]
+	if step.GetType() != "ansible" {
+		t.Errorf("type = %q, want %q", step.GetType(), "ansible")
+	}
+	if step.GetParams()["inventory"] != "prod" {
+		t.Errorf("params = %v, want inventory=prod", step.GetParams())
+	}
+
+	// A shell step (empty type) with no command is still rejected.
+	if _, err := (&jobSpecRequest{Steps: []jobStepRequest{{}}}).toProtoSpec(); err == nil {
+		t.Error("expected an error for a shell step with no command, got nil")
+	}
+}

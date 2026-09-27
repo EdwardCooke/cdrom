@@ -104,14 +104,23 @@ func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 // Jobs
 // ---------------------------------------------------------------------------
 
-// jobStepRequest is the JSON form of a single execution step. Timeout is a
-// duration string (e.g. "30s", "5m"); empty means no per-step timeout.
+// jobStepRequest is the JSON form of a single execution step. Type selects the
+// step handler that runs the step; empty means the built-in "shell" handler.
+// Timeout is a duration string (e.g. "30s", "5m"); empty means no per-step
+// timeout. For the shell handler, Shell, when set, is the interpreter the step
+// is run through: the target executes `<shell> <args> <command>` instead of
+// command directly (e.g. shell "pwsh", args ["-NoProfile", "-Command"],
+// command "Get-ChildItem"). Empty means run command directly (no shell).
+// Params carries handler-specific settings (ignored by the shell handler).
 type jobStepRequest struct {
+	Type    string            `json:"type,omitempty"`
 	Command string            `json:"command"`
 	Args    []string          `json:"args,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Timeout string            `json:"timeout,omitempty"`
+	Shell   string            `json:"shell,omitempty"`
+	Params  map[string]string `json:"params,omitempty"`
 }
 
 // jobRequest is the body of POST /api/jobs. Spec is the execution spec to
@@ -137,14 +146,20 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 	}
 	spec := &dbpb.JobSpec{}
 	for i, step := range r.Steps {
-		if step.Command == "" {
+		// A command is required for the built-in shell handler (the default
+		// when type is empty); other step types may carry their work in
+		// params instead.
+		if step.Type == "" && step.Command == "" {
 			return nil, fmt.Errorf("spec: step %d: command is required", i)
 		}
 		protoStep := &dbpb.JobStep{
+			Type:    step.Type,
 			Command: step.Command,
 			Args:    step.Args,
 			Workdir: step.Workdir,
 			Env:     step.Env,
+			Shell:   step.Shell,
+			Params:  step.Params,
 		}
 		if step.Timeout != "" {
 			duration, err := time.ParseDuration(step.Timeout)
