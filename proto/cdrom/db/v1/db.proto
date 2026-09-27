@@ -1,0 +1,269 @@
+syntax = "proto3";
+
+package cdrom.db.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "cdrom/internal/gen/cdrom/db/v1;dbv1";
+
+// Database is the gRPC interface for all persisted pipeline data.
+//
+// It is the only component allowed to touch the storage backend (SQLite in
+// development, PostgreSQL in deployment). Every other component — the API,
+// the scheduler, workers, and agents — reads and writes data exclusively
+// through this service.
+service Database {
+  // Pipelines
+  rpc CreatePipeline(CreatePipelineRequest) returns (Pipeline);
+  rpc GetPipeline(GetPipelineRequest) returns (Pipeline);
+  rpc ListPipelines(ListPipelinesRequest) returns (ListPipelinesResponse);
+  rpc UpdatePipeline(UpdatePipelineRequest) returns (Pipeline);
+  rpc DeletePipeline(DeletePipelineRequest) returns (google.protobuf.Empty);
+
+  // Jobs
+  rpc CreateJob(CreateJobRequest) returns (Job);
+  rpc GetJob(GetJobRequest) returns (Job);
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  rpc UpdateJob(UpdateJobRequest) returns (Job);
+  rpc DeleteJob(DeleteJobRequest) returns (google.protobuf.Empty);
+
+  // Workers
+  rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
+  rpc GetWorker(GetWorkerRequest) returns (Worker);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (Worker);
+  rpc DeleteWorker(DeleteWorkerRequest) returns (google.protobuf.Empty);
+
+  // IdP signing keys. The IdP persists its RSA signing keyring here so that
+  // multiple IdP replicas share the same keys and serve a consistent JWKS.
+  // ListIDPSigningKeys returns the current key plus any not-yet-expired
+  // predecessors; SetIDPSigningKeys atomically replaces the whole keyring.
+  rpc ListIDPSigningKeys(ListIDPSigningKeysRequest) returns (ListIDPSigningKeysResponse);
+  rpc SetIDPSigningKeys(SetIDPSigningKeysRequest) returns (google.protobuf.Empty);
+
+  // IdP authorization codes. The IdP stores single-use OIDC authorization
+  // codes here so /auth and /token can be served by different replicas.
+  rpc StoreIDPAuthCode(StoreIDPAuthCodeRequest) returns (google.protobuf.Empty);
+  rpc ConsumeIDPAuthCode(ConsumeIDPAuthCodeRequest) returns (IDPAuthCode);
+  rpc PruneIDPAuthCodes(PruneIDPAuthCodesRequest) returns (google.protobuf.Empty);
+}
+
+message Pipeline {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message CreatePipelineRequest {
+  string name = 1;
+  string description = 2;
+}
+
+message GetPipelineRequest {
+  int64 id = 1;
+}
+
+message ListPipelinesRequest {}
+
+message ListPipelinesResponse {
+  repeated Pipeline pipelines = 1;
+}
+
+message UpdatePipelineRequest {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message DeletePipelineRequest {
+  int64 id = 1;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_PENDING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_SUCCEEDED = 3;
+  JOB_STATUS_FAILED = 4;
+  JOB_STATUS_CANCELLED = 5;
+}
+
+// JobStep is a single unit of work in a job's execution spec: a command
+// (optionally with arguments) run in a working directory with an environment.
+//
+// Portability contract: `command` is resolved and executed directly by the
+// execution target's OS (no shell is involved), so the same spec executes
+// identically on Windows and Linux. `workdir` is interpreted with the
+// target's native path separator; a relative workdir is resolved against the
+// target's current working directory.
+message JobStep {
+  // command is the executable to run (e.g. "go", "pwsh", "bash").
+  string command = 1;
+  // args are the command's arguments, in order.
+  repeated string args = 2;
+  // workdir is the directory the command runs in; empty means the target's
+  // current working directory.
+  string workdir = 3;
+  // env are extra environment variables for the command, in addition to the
+  // target's inherited environment.
+  map<string, string> env = 4;
+  // timeout is the maximum duration for this step; 0 means no per-step
+  // timeout.
+  google.protobuf.Duration timeout = 5;
+}
+
+// JobSpec is the declarative execution spec of a job: an ordered list of
+// steps. The execution target runs the steps in order and the job fails on
+// the first step that errors.
+message JobSpec {
+  repeated JobStep steps = 1;
+}
+
+message Job {
+  int64 id = 1;
+  // pipeline_id is 0 when the job does not belong to a pipeline.
+  int64 pipeline_id = 2;
+  string name = 3;
+  JobStatus status = 4;
+  // target_group selects a group of long-lived workers; empty means the job
+  // runs on an ephemeral Kubernetes agent.
+  string target_group = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp finished_at = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  // spec is the execution spec snapshot taken when the job was created. A
+  // pipeline edit never changes what a past run did.
+  JobSpec spec = 10;
+}
+
+message CreateJobRequest {
+  int64 pipeline_id = 1;
+  string name = 2;
+  string target_group = 3;
+  // spec is the execution spec to snapshot onto the job; when absent the job
+  // has no steps and succeeds without doing any work.
+  JobSpec spec = 4;
+}
+
+message GetJobRequest {
+  int64 id = 1;
+}
+
+message ListJobsRequest {
+  // pipeline_id of 0 lists jobs from all pipelines.
+  int64 pipeline_id = 1;
+  // status of JOB_STATUS_UNSPECIFIED lists jobs in all states.
+  JobStatus status = 2;
+}
+
+message ListJobsResponse {
+  repeated Job jobs = 1;
+}
+
+message UpdateJobRequest {
+  int64 id = 1;
+  JobStatus status = 2;
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp finished_at = 4;
+}
+
+message DeleteJobRequest {
+  int64 id = 1;
+}
+
+message Worker {
+  int64 id = 1;
+  string name = 2;
+  string group = 3;
+  string address = 4;
+  google.protobuf.Timestamp last_seen_at = 5;
+}
+
+message RegisterWorkerRequest {
+  string name = 1;
+  string group = 2;
+  string address = 3;
+}
+
+message GetWorkerRequest {
+  string name = 1;
+}
+
+message ListWorkersRequest {
+  // group of "" lists workers in all groups.
+  string group = 1;
+}
+
+message ListWorkersResponse {
+  repeated Worker workers = 1;
+}
+
+message HeartbeatWorkerRequest {
+  string name = 1;
+}
+
+message DeleteWorkerRequest {
+  string name = 1;
+}
+
+// ---------------------------------------------------------------------------
+// IdP signing keys
+// ---------------------------------------------------------------------------
+
+// IDPSigningKey is a single RSA signing key used by the IdP to sign JWTs.
+message IDPSigningKey {
+  string kid = 1;
+  // is_current marks the key the IdP signs new tokens with.
+  bool is_current = 2;
+  google.protobuf.Timestamp not_before = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  // pem is the PKCS8 PEM encoding of the RSA private key.
+  string pem = 5;
+}
+
+message ListIDPSigningKeysRequest {}
+
+message ListIDPSigningKeysResponse {
+  repeated IDPSigningKey keys = 1;
+}
+
+message SetIDPSigningKeysRequest {
+  repeated IDPSigningKey keys = 1;
+}
+
+// ---------------------------------------------------------------------------
+// IdP authorization codes
+// ---------------------------------------------------------------------------
+
+// IDPAuthCode is a single-use OIDC authorization code issued by the IdP's
+// authorization endpoint and redeemed at the token endpoint.
+message IDPAuthCode {
+  string code = 1;
+  string client_id = 2;
+  string redirect_uri = 3;
+  // code_challenge is empty when PKCE was not used.
+  string code_challenge = 4;
+  string subject = 5;
+  string name = 6;
+  string email = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message StoreIDPAuthCodeRequest {
+  IDPAuthCode code = 1;
+}
+
+message ConsumeIDPAuthCodeRequest {
+  string code = 1;
+}
+
+message PruneIDPAuthCodesRequest {
+  // created_before drops codes created before this instant; when unset, all
+  // codes are pruned.
+  google.protobuf.Timestamp created_before = 1;
+}

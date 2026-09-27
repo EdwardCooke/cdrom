@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package cdrom.api.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+import "cdrom/db/v1/db.proto";
+import "cdrom/artifacts/v1/artifacts.proto";
+
+option go_package = "cdrom/internal/gen/cdrom/api/v1;apiv1";
+
+// API is the gRPC surface the API/controller service exposes to execution
+// targets (long-lived workers and ephemeral agents) and to the scheduler.
+//
+// Workers and agents talk ONLY to the API. The API is the single control
+// plane: it holds the workers' WatchJobs streams, relays job assignments
+// pushed by the scheduler (DispatchJob), and proxies artifact
+// uploads/downloads to the artifacts service.
+service API {
+  // Worker lifecycle (called by long-lived workers).
+  rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
+  rpc DeregisterWorker(DeregisterWorkerRequest) returns (google.protobuf.Empty);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Execution side (called by workers and agents).
+  //
+  // WatchJobs is a server stream: the worker identifies itself and receives
+  // a JobAssignment for every job dispatched to its group.
+  rpc WatchJobs(WatchJobsRequest) returns (stream JobAssignment);
+  rpc GetJob(GetJobRequest) returns (Job);
+  rpc ReportJobStatus(ReportJobStatusRequest) returns (Job);
+
+  // ExchangeJobToken lets a running job request a new job token with a
+  // different audience (e.g. for an outside resource the job needs to call).
+  // The caller presents its current job token; the API mints a replacement
+  // scoped to the same job but the requested audience. Like GitHub Actions
+  // runners requesting a new token for a different audience mid-job.
+  rpc ExchangeJobToken(ExchangeJobTokenRequest) returns (ExchangeJobTokenResponse);
+
+  // Dispatch (called by the scheduler). The scheduler pushes a job here; the
+  // API fans it out to the live workers in the job's target group.
+  rpc DispatchJob(DispatchJobRequest) returns (DispatchJobResponse);
+
+  // Artifact proxy (called by workers and agents). The API forwards these to
+  // the artifacts service so execution targets never talk to it directly.
+  rpc UploadArtifact(stream cdrom.artifacts.v1.ArtifactChunk)
+      returns (cdrom.artifacts.v1.UploadArtifactResponse);
+  rpc DownloadArtifact(cdrom.artifacts.v1.DownloadArtifactRequest)
+      returns (stream cdrom.artifacts.v1.ArtifactChunk);
+  rpc GetArtifact(cdrom.artifacts.v1.GetArtifactRequest)
+      returns (cdrom.artifacts.v1.Artifact);
+  rpc ListArtifacts(cdrom.artifacts.v1.ListArtifactsRequest)
+      returns (cdrom.artifacts.v1.ListArtifactsResponse);
+  rpc DeleteArtifact(cdrom.artifacts.v1.DeleteArtifactRequest)
+      returns (google.protobuf.Empty);
+}
+
+message Worker {
+  string name = 1;
+  string group = 2;
+  string address = 3;
+  google.protobuf.Timestamp last_seen_at = 4;
+}
+
+message RegisterWorkerRequest {
+  string name = 1;
+  string group = 2;
+  string address = 3;
+}
+
+message DeregisterWorkerRequest {
+  string name = 1;
+}
+
+message HeartbeatRequest {
+  string name = 1;
+}
+
+message HeartbeatResponse {
+  // poll_interval_seconds is the interval the API recommends the worker use
+  // for heartbeats.
+  int32 poll_interval_seconds = 1;
+}
+
+message Job {
+  int64 id = 1;
+  int64 pipeline_id = 2;
+  string name = 3;
+  cdrom.db.v1.JobStatus status = 4;
+  string target_group = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp finished_at = 7;
+  // token is the job token the API hands to the execution target that
+  // fetches this job (set on GetJob for agents). It authenticates the target
+  // back to the API and to outside resources for the duration of the job.
+  string token = 8;
+  // spec is the execution spec snapshot taken when the job was created. The
+  // execution target runs the steps in order and the job fails on the first
+  // step that errors.
+  cdrom.db.v1.JobSpec spec = 9;
+}
+
+message JobAssignment {
+  Job job = 1;
+  // worker_name is the worker this assignment was dispatched to.
+  string worker_name = 2;
+  // token is the job token the worker presents to the API (and to outside
+  // resources) while executing the job.
+  string token = 3;
+}
+
+message WatchJobsRequest {
+  string worker_name = 1;
+  string group = 2;
+}
+
+message GetJobRequest {
+  int64 id = 1;
+}
+
+message ReportJobStatusRequest {
+  int64 job_id = 1;
+  cdrom.db.v1.JobStatus status = 2;
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp finished_at = 4;
+}
+
+message DispatchJobRequest {
+  Job job = 1;
+}
+
+message DispatchJobResponse {
+  // dispatched is the number of live workers that received the assignment.
+  int32 dispatched = 1;
+}
+
+message ExchangeJobTokenRequest {
+  // job_id is the job the caller is executing.
+  int64 job_id = 1;
+  // audience is the audience the new token should be valid for (e.g. an
+  // outside resource the job needs to authenticate to).
+  string audience = 2;
+}
+
+message ExchangeJobTokenResponse {
+  // token is the new job token, scoped to the same job but the requested
+  // audience.
+  string token = 1;
+}

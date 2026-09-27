@@ -1,0 +1,105 @@
+# Example Cdrom configuration file.
+#
+# Pass it to any cdrom binary with:
+#
+#   ./bin/api --config-file config.yaml
+#
+# Every key is optional; omitted keys fall back to built-in defaults.
+# Environment variables (see AGENTS.md) take precedence over this file.
+
+# Address this binary's own gRPC server binds to (the gRPC port for the
+# service servers and for the API). The API's HTTP port for the UI is set
+# separately with api_http_address.
+#listen_address: 127.0.0.1:7105
+
+# gRPC addresses of the services.
+#db_address: 127.0.0.1:7101
+#scheduler_address: 127.0.0.1:7102
+#artifacts_address: 127.0.0.1:7103
+#api_address: 127.0.0.1:7105
+
+# HTTP address the API binds for the UI.
+#api_http_address: 127.0.0.1:8080
+
+# Storage backend (used by the db service).
+db:
+  backend: sqlite # sqlite | postgres
+  sqlite_path: cdrom.db
+  #postgres_dsn: "host=... user=... password=... dbname=... sslmode=..."
+
+# Filesystem root for artifact storage (used by the artifacts service).
+#artifacts_root: artifacts
+
+# Worker identity (used by the worker).
+#worker_name: worker-1
+#worker_group: default
+
+# Job an ephemeral agent was spawned to execute (used by the agent).
+#agent_job_id: "123"
+
+# Mutual TLS for gRPC communication between services. When ca_file is set,
+# all gRPC traffic uses mTLS; otherwise it is plaintext. Generate a local
+# dev certificate set with `make certs`, then point all three paths at it.
+# The same config file works for every binary (services and clients).
+#tls:
+#  ca_file: certs/ca.crt
+#  cert_file: certs/cert.crt
+#  key_file: certs/cert.key
+
+# OIDC authentication for the API's UI-facing HTTP surface and its WebSocket
+# endpoint. Disabled by default: when enabled is false (or unset) the API is
+# open and no identity provider is required. When enabled, the UI signs in
+# via the authorization-code + PKCE flow (issuer/client_id/redirect_url) and
+# subsequent requests present a signed session cookie.
+#auth:
+#  enabled: true
+#  issuer: https://accounts.example.com/realms/cdrom
+#  client_id: cdrom-ui
+#  redirect_url: http://localhost:8080/api/auth/callback
+#  # scopes: [openid, profile, email]   # defaults to these when omitted
+#  cookie_secret: "a long random string"
+#  # cookie_domain: example.com
+
+# Local OIDC identity provider (used by the idp binary, cmd/idp). It acts as a
+# JWT issuer for the API's OIDC authentication: it serves the discovery doc, a
+# JWKS, an authorization endpoint (authorization-code + PKCE), and a token
+# endpoint that mints RS256 ID tokens. It signs with an RSA key and rotates it
+# automatically when the key is within rotate_before of its expiry; the JWKS
+# keeps serving predecessor keys until they expire so clients keep verifying
+# older tokens.
+#
+# The IdP's state — its signing keyring and its OIDC authorization codes — is
+# persisted through the Database service (db_address), not on the IdP's local
+# filesystem. This makes the IdP horizontally scalable: multiple IdP replicas
+# share the same keys and codes and can run behind a load balancer. The IdP
+# therefore requires the db service to be running.
+# Point the API's auth.issuer at this IdP's address (default 127.0.0.1:7104).
+#
+# The IdP also mints job tokens on the job_token grant. When the tls section
+# is set the IdP serves TLS and the job_token grant requires the caller to
+# present a CA-signed client certificate (the API's mTLS identity); in
+# plaintext mode the grant is open. audiences are the default audience values
+# stamped on minted job tokens (a mint request may override them).
+#idp:
+#  issuer: http://127.0.0.1:7104
+#  key_lifetime: 2160h      # 90 days
+#  rotate_before: 336h      # rotate 14 days before expiry
+#  token_lifetime: 1h
+#  check_interval: 1h       # how often to check whether to rotate
+#  # Default audience values stamped on minted job tokens.
+#  audiences: [cdrom-api]
+
+# Job-token authentication on the API's gRPC surface (used by workers and
+# agents). Disabled by default: when enabled is false (or unset) the API
+# accepts gRPC calls without a job token. When enabled, the API mints a
+# short-lived job token from the IdP (via the job_token grant, authenticating
+# with its mTLS client certificate) for every job it dispatches or hands to an
+# agent, and requires callers to present it as a Bearer token on
+# ReportJobStatus and artifact operations. The token is scoped to a single
+# job; a token for one job is rejected on another. A job can also request a
+# new token for a different audience (e.g. an outside resource it must call)
+# via the ExchangeJobToken RPC.
+#grpc_auth:
+#  enabled: true
+#  idp_address: http://127.0.0.1:7104
+#  audiences: [cdrom-api]

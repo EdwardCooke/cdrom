@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package cdrom.artifacts.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "cdrom/internal/gen/cdrom/artifacts/v1;artifactsv1";
+
+// Artifacts stores and retrieves job artifacts (files produced by job
+// execution).
+//
+// Uploads and downloads are streamed so arbitrarily large artifacts do not
+// have to be buffered in memory on either side.
+service Artifacts {
+  // UploadArtifact is a client stream. The first chunk must carry metadata
+  // (job_id and name); subsequent chunks carry data. The server returns the
+  // stored Artifact once the stream ends.
+  rpc UploadArtifact(stream ArtifactChunk) returns (UploadArtifactResponse);
+
+  // DownloadArtifact is a server stream. The first chunk carries metadata;
+  // all chunks carry data.
+  rpc DownloadArtifact(DownloadArtifactRequest) returns (stream ArtifactChunk);
+
+  rpc GetArtifact(GetArtifactRequest) returns (Artifact);
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+  rpc DeleteArtifact(DeleteArtifactRequest) returns (google.protobuf.Empty);
+}
+
+message Artifact {
+  // job_id identifies the job that produced the artifact.
+  string job_id = 1;
+  // name is the artifact file name within the job.
+  string name = 2;
+  int64 size = 3;
+  string content_type = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message ArtifactChunk {
+  // metadata is set on the first chunk of an upload and on the first chunk
+  // of a download; it is empty on all other chunks.
+  Artifact metadata = 1;
+  bytes data = 2;
+}
+
+message UploadArtifactResponse {
+  Artifact artifact = 1;
+}
+
+message DownloadArtifactRequest {
+  string job_id = 1;
+  string name = 2;
+}
+
+message GetArtifactRequest {
+  string job_id = 1;
+  string name = 2;
+}
+
+message ListArtifactsRequest {
+  // job_id of "" lists artifacts of all jobs.
+  string job_id = 1;
+}
+
+message ListArtifactsResponse {
+  repeated Artifact artifacts = 1;
+}
+
+message DeleteArtifactRequest {
+  string job_id = 1;
+  string name = 2;
+}
