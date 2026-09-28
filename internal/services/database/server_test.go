@@ -170,8 +170,12 @@ func TestJobSpecRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
-		{Command: "go", Args: []string{"build", "./..."}, Workdir: "repo", Env: map[string]string{"GOFLAGS": "-mod=vendor"}},
-		{Command: "sh", Args: []string{"-c", "make test"}, Timeout: durationpb.New(30 * time.Second)},
+		{
+			Params:  map[string]*dbpb.ParamValue{"command": {String_: "go"}, "args": {Strings: []string{"build", "./..."}}},
+			Workdir: "repo",
+			Env:     map[string]string{"GOFLAGS": "-mod=vendor"},
+		},
+		{Params: map[string]*dbpb.ParamValue{"command": {String_: "sh"}, "args": {Strings: []string{"-c", "make test"}}}, Timeout: durationpb.New(30 * time.Second)},
 	}}
 
 	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", Spec: spec})
@@ -193,11 +197,11 @@ func TestJobSpecRoundTrip(t *testing.T) {
 	}
 
 	step0 := got.GetSteps()[0]
-	if step0.GetCommand() != "go" {
-		t.Errorf("step 0 command = %q, want go", step0.GetCommand())
+	if step0.GetParams()["command"].GetString_() != "go" {
+		t.Errorf("step 0 command = %q, want go", step0.GetParams()["command"].GetString_())
 	}
-	if len(step0.GetArgs()) != 2 || step0.GetArgs()[0] != "build" {
-		t.Errorf("step 0 args = %v, want [build ./...]", step0.GetArgs())
+	if args := step0.GetParams()["args"].GetStrings(); len(args) != 2 || args[0] != "build" {
+		t.Errorf("step 0 args = %v, want [build ./...]", args)
 	}
 	if step0.GetWorkdir() != "repo" {
 		t.Errorf("step 0 workdir = %q, want repo", step0.GetWorkdir())

@@ -120,10 +120,10 @@ BODY=$(cat <<EOF
   "target_group": "default",
   "spec": {
     "steps": [
-      {"command": "sh", "args": ["-c", "echo step1: plain command"]},
-      {"command": "sh", "args": ["-c", "echo step2: env=\$MY_VAR"], "env": {"MY_VAR": "from-spec"}},
-      {"command": "sh", "args": ["-c", "echo step3: pwd=\$(pwd)"], "workdir": "$WORKDIR"},
-      {"type": "shell", "shell": "sh", "args": ["-c"], "command": "echo step4: shell override"}
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step1: plain command"]}}},
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step2: env=\$MY_VAR"]}}, "env": {"MY_VAR": "from-spec"}},
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step3: pwd=\$(pwd)"]}}, "workdir": "$WORKDIR"},
+      {"type": "shell", "params": {"shell": {"string": "sh"}, "args": {"strings": ["-c"]}, "command": {"string": "echo step4: shell override"}}}
     ]
   }
 }

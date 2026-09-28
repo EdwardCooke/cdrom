@@ -63,12 +63,14 @@ func TestExecuteCustomStepType(t *testing.T) {
 	RegisterStepType("marker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
 		// A stand-in for a non-shell step type (e.g. "ansible"): it does its
 		// own work from the step's params rather than running a command.
-		return os.WriteFile(out, []byte(step.GetParams()["value"]), 0o644)
+		return os.WriteFile(out, []byte(step.GetParams()["value"].GetString_()), 0o644)
 	})
 
 	step := &dbpb.JobStep{
-		Type:   "marker",
-		Params: map[string]string{"value": "custom-type-ran"},
+		Type: "marker",
+		Params: map[string]*dbpb.ParamValue{
+			"value": {String_: "custom-type-ran"},
+		},
 	}
 	if err := Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)

@@ -52,8 +52,8 @@ func TestSubmitJobWithSpec(t *testing.T) {
 		"target_group": "linux-pool",
 		"spec": {
 			"steps": [
-				{"command": "go", "args": ["build", "./..."], "workdir": "repo", "env": {"GOFLAGS": "-mod=vendor"}},
-				{"command": "sh", "args": ["-c", "make test"], "timeout": "30s"}
+				{"params": {"command": {"string": "go"}, "args": {"strings": ["build", "./..."]}}, "workdir": "repo", "env": {"GOFLAGS": "-mod=vendor"}},
+				{"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "make test"]}}, "timeout": "30s"}
 			]
 		}
 	}`
@@ -78,8 +78,11 @@ func TestSubmitJobWithSpec(t *testing.T) {
 		t.Fatalf("steps = %d, want 2", got)
 	}
 	step0 := spec.GetSteps()[0]
-	if step0.GetCommand() != "go" || step0.GetWorkdir() != "repo" || step0.GetEnv()["GOFLAGS"] != "-mod=vendor" {
+	if step0.GetParams()["command"].GetString_() != "go" || step0.GetWorkdir() != "repo" || step0.GetEnv()["GOFLAGS"] != "-mod=vendor" {
 		t.Errorf("step 0 = %+v, want go build in repo with GOFLAGS", step0)
+	}
+	if got := step0.GetParams()["args"].GetStrings(); len(got) != 2 || got[0] != "build" || got[1] != "./..." {
+		t.Errorf("step 0 args = %v, want [build ./...]", got)
 	}
 	step1 := spec.GetSteps()[1]
 	if step1.GetTimeout().AsDuration().Seconds() != 30 {
@@ -113,8 +116,8 @@ func TestSubmitJobWithoutSpec(t *testing.T) {
 // a malformed timeout) is rejected with a 400 before reaching the scheduler.
 func TestSubmitJobInvalidSpec(t *testing.T) {
 	cases := []string{
-		`{"name": "x", "spec": {"steps": [{"args": ["build"]}]}}`,
-		`{"name": "x", "spec": {"steps": [{"command": "go", "timeout": "not-a-duration"}]}}`,
+		`{"name": "x", "spec": {"steps": [{"params": {"args": {"strings": ["build"]}}}]}}`,
+		`{"name": "x", "spec": {"steps": [{"params": {"command": {"string": "go"}}, "timeout": "not-a-duration"}]}}`,
 	}
 	for _, body := range cases {
 		fake := &fakeScheduler{}
@@ -141,7 +144,7 @@ func TestSubmitJobInvalidSpec(t *testing.T) {
 // including the no-steps → nil case.
 func TestToProtoSpec(t *testing.T) {
 	spec := &jobSpecRequest{Steps: []jobStepRequest{
-		{Command: "go", Args: []string{"build"}, Timeout: "1m"},
+		{Params: map[string]*paramValueRequest{"command": {String: "go"}, "args": {Strings: []string{"build"}}}, Timeout: "1m"},
 	}}
 	proto, err := spec.toProtoSpec()
 	if err != nil {
@@ -162,7 +165,7 @@ func TestToProtoSpec(t *testing.T) {
 // TestToProtoSpecTimeout is a guard that durationpb is exercised by the
 // conversion (kept separate so a regression in timeout parsing is obvious).
 func TestToProtoSpecTimeout(t *testing.T) {
-	spec := &jobSpecRequest{Steps: []jobStepRequest{{Command: "sleep", Timeout: "45s"}}}
+	spec := &jobSpecRequest{Steps: []jobStepRequest{{Params: map[string]*paramValueRequest{"command": {String: "sleep"}}, Timeout: "45s"}}}
 	proto, err := spec.toProtoSpec()
 	if err != nil {
 		t.Fatalf("toProtoSpec: %v", err)
@@ -177,7 +180,7 @@ func TestToProtoSpecTimeout(t *testing.T) {
 // (only the built-in shell handler does).
 func TestToProtoSpecStepType(t *testing.T) {
 	spec := &jobSpecRequest{Steps: []jobStepRequest{
-		{Type: "ansible", Params: map[string]string{"inventory": "prod"}},
+		{Type: "ansible", Params: map[string]*paramValueRequest{"inventory": {String: "prod"}}},
 	}}
 	proto, err := spec.toProtoSpec()
 	if err != nil {
@@ -187,7 +190,7 @@ func TestToProtoSpecStepType(t *testing.T) {
 	if step.GetType() != "ansible" {
 		t.Errorf("type = %q, want %q", step.GetType(), "ansible")
 	}
-	if step.GetParams()["inventory"] != "prod" {
+	if step.GetParams()["inventory"].GetString_() != "prod" {
 		t.Errorf("params = %v, want inventory=prod", step.GetParams())
 	}
 

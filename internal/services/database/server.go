@@ -424,13 +424,10 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 	for _, step := range spec.GetSteps() {
 		steps = append(steps, models.JobStep{
 			Type:    step.GetType(),
-			Command: step.GetCommand(),
-			Args:    step.GetArgs(),
 			Workdir: step.GetWorkdir(),
 			Env:     step.GetEnv(),
 			Timeout: step.GetTimeout().AsDuration(),
-			Shell:   step.GetShell(),
-			Params:  step.GetParams(),
+			Params:  paramsFromProto(step.GetParams()),
 		})
 	}
 	return models.JobSpec{Steps: steps}
@@ -446,16 +443,43 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 	for _, step := range spec.Steps {
 		steps = append(steps, &dbpb.JobStep{
 			Type:    step.Type,
-			Command: step.Command,
-			Args:    step.Args,
 			Workdir: step.Workdir,
 			Env:     step.Env,
 			Timeout: durationpb.New(step.Timeout),
-			Shell:   step.Shell,
-			Params:  step.Params,
+			Params:  paramsToProto(step.Params),
 		})
 	}
 	return &dbpb.JobSpec{Steps: steps}
+}
+
+// paramsFromProto converts a proto params map into the model's params map.
+func paramsFromProto(in map[string]*dbpb.ParamValue) map[string]*models.ParamValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]*models.ParamValue, len(in))
+	for k, v := range in {
+		out[k] = &models.ParamValue{
+			String:  v.GetString_(),
+			Strings: v.GetStrings(),
+		}
+	}
+	return out
+}
+
+// paramsToProto converts the model's params map into a proto params map.
+func paramsToProto(in map[string]*models.ParamValue) map[string]*dbpb.ParamValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]*dbpb.ParamValue, len(in))
+	for k, v := range in {
+		out[k] = &dbpb.ParamValue{
+			String_: v.String,
+			Strings: v.Strings,
+		}
+	}
+	return out
 }
 
 func toProtoWorker(worker *models.Worker) *dbpb.Worker {

@@ -104,23 +104,32 @@ func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 // Jobs
 // ---------------------------------------------------------------------------
 
+// paramValueRequest is the JSON form of a single step param value: either a
+// scalar String or a list of Strings (by convention, only one is set).
+type paramValueRequest struct {
+	String  string   `json:"string,omitempty"`
+	Strings []string `json:"strings,omitempty"`
+}
+
 // jobStepRequest is the JSON form of a single execution step. Type selects the
 // step handler that runs the step; empty means the built-in "shell" handler.
 // Timeout is a duration string (e.g. "30s", "5m"); empty means no per-step
-// timeout. For the shell handler, Shell, when set, is the interpreter the step
-// is run through: the target executes `<shell> <args> <command>` instead of
-// command directly (e.g. shell "pwsh", args ["-NoProfile", "-Command"],
-// command "Get-ChildItem"). Empty means run command directly (no shell).
-// Params carries handler-specific settings (ignored by the shell handler).
+// timeout. Handler-specific settings live in Params, not in the step's own
+// fields, so a new step type can be added without changing the request schema.
+// The built-in shell handler reads its command, args, and shell from Params:
+//   - "command" (string) — the executable to run (required for the shell
+//     handler).
+//   - "args" (list of strings) — the command's arguments, in order.
+//   - "shell" (string) — when set, the command is run through this shell
+//     instead of directly: the target executes `<shell> <args> <command>`
+//     (e.g. shell "pwsh", args ["-NoProfile", "-Command"], command
+//     "Get-ChildItem"). Empty means run command directly (no shell).
 type jobStepRequest struct {
-	Type    string            `json:"type,omitempty"`
-	Command string            `json:"command"`
-	Args    []string          `json:"args,omitempty"`
-	Workdir string            `json:"workdir,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	Timeout string            `json:"timeout,omitempty"`
-	Shell   string            `json:"shell,omitempty"`
-	Params  map[string]string `json:"params,omitempty"`
+	Type    string                        `json:"type,omitempty"`
+	Workdir string                        `json:"workdir,omitempty"`
+	Env     map[string]string             `json:"env,omitempty"`
+	Timeout string                        `json:"timeout,omitempty"`
+	Params  map[string]*paramValueRequest `json:"params,omitempty"`
 }
 
 // jobRequest is the body of POST /api/jobs. Spec is the execution spec to
@@ -149,17 +158,14 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 		// A command is required for the built-in shell handler (the default
 		// when type is empty); other step types may carry their work in
 		// params instead.
-		if step.Type == "" && step.Command == "" {
+		if step.Type == "" && paramString(step.Params, "command") == "" {
 			return nil, fmt.Errorf("spec: step %d: command is required", i)
 		}
 		protoStep := &dbpb.JobStep{
 			Type:    step.Type,
-			Command: step.Command,
-			Args:    step.Args,
 			Workdir: step.Workdir,
 			Env:     step.Env,
-			Shell:   step.Shell,
-			Params:  step.Params,
+			Params:  paramsToProto(step.Params),
 		}
 		if step.Timeout != "" {
 			duration, err := time.ParseDuration(step.Timeout)
@@ -171,6 +177,30 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 		spec.Steps = append(spec.Steps, protoStep)
 	}
 	return spec, nil
+}
+
+// paramsToProto converts the JSON params map into the proto params map.
+func paramsToProto(in map[string]*paramValueRequest) map[string]*dbpb.ParamValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]*dbpb.ParamValue, len(in))
+	for k, v := range in {
+		out[k] = &dbpb.ParamValue{
+			String_: v.String,
+			Strings: v.Strings,
+		}
+	}
+	return out
+}
+
+// paramString returns the string value of a param, or "" if the param is
+// absent or not a string.
+func paramString(in map[string]*paramValueRequest, key string) string {
+	if v := in[key]; v != nil {
+		return v.String
+	}
+	return ""
 }
 
 func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {

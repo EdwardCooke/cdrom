@@ -80,14 +80,18 @@ Two kinds of execution targets, both of which talk **only** to the API:
 
 **Job execution spec.** A job carries a declarative `JobSpec`: an ordered
 list of steps. Each step is **agnostic about how it runs**: a `type` field
-selects a step handler, and the remaining fields (`command`, `args`,
-`workdir`, `env`, `timeout`, `shell`, `params`) are interpreted by that
-handler. The built-in **`shell`** handler (also the default when `type` is
-empty) runs a command — directly, or through a user-chosen shell. The spec is
-a **per-run snapshot** stored on the `Job` row (a JSON `text` column via
-GORM's `serializer:json`), so a pipeline edit never changes what a past run
-did. The canonical spec type is `cdrom.db.v1.JobSpec`; the API and scheduler
-protos reference it rather than redefining it.
+selects a step handler, and the handler reads everything it needs from the
+common fields (`workdir`, `env`, `timeout`) and from `params`. Handler-specific
+settings live in `params` (a map of name → value, where a value is either a
+scalar string or a list of strings), not in the step's own fields, so a new
+step type can be added without changing the spec schema. The built-in
+**`shell`** handler (also the default when `type` is empty) runs a command —
+directly, or through a user-chosen shell — reading its `command`, `args`, and
+`shell` from `params`. The spec is a **per-run snapshot** stored on the `Job`
+row (a JSON `text` column via GORM's `serializer:json`), so a pipeline edit
+never changes what a past run did. The canonical spec type is
+`cdrom.db.v1.JobSpec`; the API and scheduler protos reference it rather than
+redefining it.
 
 Both targets execute the spec through the shared `internal/executor`
 (`executor.Execute(ctx, spec, logger)`): steps run in order and the job fails
@@ -108,23 +112,26 @@ before any job runs. This is the seam for the later plugin architecture:
 writing a new step type is a matter of registering a handler, not changing the
 executor core.
 
-**Shell contract (shell handler):** a step's command is executed **directly by
-the target OS — no implicit shell**. This is what makes a spec portable across
-Windows and Linux (no `&&`, pipes, globbing, or `$VAR` expansion). A step that
-needs shell behavior must invoke a shell explicitly (`sh -c ...` on Linux,
-`cmd /c ...` on Windows). Step stdout/stderr are inherited from the target's
-own stdout/stderr (local logging); streaming output to the API is a later
-feature (F-02). A per-step `timeout` is enforced by the target via a derived
-context; a scheduler-side watchdog for dead targets is a later feature (F-03).
+**Shell contract (shell handler):** the shell handler reads its `command`
+(string param), `args` (list param), and `shell` (string param) from the
+step's `params`. The command is executed **directly by the target OS — no
+implicit shell**. This is what makes a spec portable across Windows and Linux
+(no `&&`, pipes, globbing, or `$VAR` expansion). A step that needs shell
+behavior must invoke a shell explicitly (`sh -c ...` on Linux, `cmd /c ...` on
+Windows). Step stdout/stderr are inherited from the target's own stdout/stderr
+(local logging); streaming output to the API is a later feature (F-02). A
+per-step `timeout` is enforced by the target via a derived context; a
+scheduler-side watchdog for dead targets is a later feature (F-03).
 
-**Shell override (shell handler):** a step may set `shell` to run through a
-user-chosen interpreter instead of executing `command` directly. When `shell`
-is set the target executes `<shell> <args> <command>` — `args` are the shell's
-own flags and `command` is passed as the final argument (e.g. `shell: "pwsh"`,
-`args: ["-NoProfile", "-Command"]`, `command: "Get-ChildItem"`). This is the
-portable way to opt a step into shell behavior with a specific shell rather
-than a platform default. When `shell` is empty the step runs `command`
-directly, preserving the no-implicit-shell contract.
+**Shell override (shell handler):** a step may set the `shell` param to run
+through a user-chosen interpreter instead of executing `command` directly.
+When `shell` is set the target executes `<shell> <args> <command>` — `args`
+are the shell's own flags and `command` is passed as the final argument (e.g.
+`shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,
+`command: "Get-ChildItem"`). This is the portable way to opt a step into shell
+behavior with a specific shell rather than a platform default. When `shell` is
+empty the step runs `command` directly, preserving the no-implicit-shell
+contract.
 
 ### Logging
 
@@ -160,11 +167,11 @@ are still controlled by `CDROM_LOG_FORMAT` and `CDROM_LOG_LEVEL`.
   file paths for portability.
 - Job steps are type-agnostic: the built-in `shell` handler executes a command
   directly (no implicit shell) — see the shell contract in the Execution Model.
-  Never rely on shell features in a step's `command`/`args`; invoke a shell
-  explicitly when shell behavior is required, either by naming the shell as
-  `command` or by setting the step's `shell` override (e.g. `pwsh`). New step
-  types (e.g. `ansible`, `terraform`) are registered handlers and must also be
-  portable across Windows and Linux.
+  Never rely on shell features in a step's `command`/`args` params; invoke a
+  shell explicitly when shell behavior is required, either by naming the shell
+  as the `command` param or by setting the step's `shell` param (e.g. `pwsh`).
+  New step types (e.g. `ansible`, `terraform`) are registered handlers and must
+  also be portable across Windows and Linux.
 
 ## Repository Layout
 

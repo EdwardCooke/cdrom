@@ -27,6 +27,12 @@ import (
 // TypeShell is the step type of the built-in shell handler. It is also the
 // executor's default: a step with no type is dispatched to it.
 //
+// The handler reads its settings from the step's Params map:
+//   - "command" (string) — the executable to run (required).
+//   - "args" (list of strings) — the command's arguments, in order.
+//   - "shell" (string) — when set, the command is run through this shell
+//     instead of directly.
+//
 // Portability contract: a step's command is resolved and executed directly by
 // the target's OS — no shell is involved. This means the same spec executes
 // identically on Windows and Linux: there are no shell-specific assumptions
@@ -36,15 +42,22 @@ import (
 // A step's workdir is interpreted with the target's native path separator; a
 // relative workdir is resolved against the target's current working directory.
 //
-// Shell override: a step may set Shell to run through a user-chosen shell
-// instead of executing Command directly. When Shell is set the target
-// executes `<Shell> <Args> <Command>` — Command is passed as the final
-// argument to the shell (e.g. Shell "pwsh", Args ["-NoProfile", "-Command"],
-// Command "Get-ChildItem"). This is the portable way to opt a step into shell
-// behavior with a specific shell rather than a platform default. When Shell
-// is empty the step runs Command directly, preserving the no-implicit-shell
-// contract.
+// Shell override: a step may set the "shell" param to run through a
+// user-chosen shell instead of executing the command directly. When it is set
+// the target executes `<shell> <args> <command>` — the command is passed as
+// the final argument to the shell (e.g. shell "pwsh", args
+// ["-NoProfile", "-Command"], command "Get-ChildItem"). This is the portable
+// way to opt a step into shell behavior with a specific shell rather than a
+// platform default. When shell is empty the step runs the command directly,
+// preserving the no-implicit-shell contract.
 const TypeShell = executor.DefaultType
+
+// Param keys the shell handler reads from a step's Params map.
+const (
+	ParamCommand = "command"
+	ParamArgs    = "args"
+	ParamShell   = "shell"
+)
 
 func init() {
 	executor.RegisterStepType(TypeShell, runShellStep)
@@ -59,7 +72,7 @@ func init() {
 // returns promptly: killing the step's process does not leave open pipes that
 // would block the wait.
 func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
-	command := step.GetCommand()
+	command := paramString(step, ParamCommand)
 	if command == "" {
 		return fmt.Errorf("command is required")
 	}
@@ -71,8 +84,8 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 	// argument. This lets a step opt into shell behavior with a user-chosen
 	// shell (e.g. "pwsh" on Windows) instead of a platform default.
 	executable := command
-	args := step.GetArgs()
-	if shell := step.GetShell(); shell != "" {
+	args := paramStrings(step, ParamArgs)
+	if shell := paramString(step, ParamShell); shell != "" {
 		executable = shell
 		args = append(append([]string{}, args...), command)
 	}
@@ -86,7 +99,7 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 	cmd.Stderr = os.Stderr
 
 	logger.Info("executor: running step",
-		"command", command, "args", args, "shell", step.GetShell(), "workdir", step.GetWorkdir())
+		"command", command, "args", args, "shell", paramString(step, ParamShell), "workdir", step.GetWorkdir())
 
 	err := cmd.Run()
 
@@ -98,6 +111,24 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 			return fmt.Errorf("%q timed out after %s", command, step.GetTimeout().AsDuration())
 		}
 		return fmt.Errorf("%q: %w", command, err)
+	}
+	return nil
+}
+
+// paramString returns the string value of a step param, or "" if the param is
+// absent or not a string.
+func paramString(step *dbpb.JobStep, key string) string {
+	if v := step.GetParams()[key]; v != nil {
+		return v.GetString_()
+	}
+	return ""
+}
+
+// paramStrings returns the list value of a step param, or nil if the param is
+// absent or not a list.
+func paramStrings(step *dbpb.JobStep, key string) []string {
+	if v := step.GetParams()[key]; v != nil {
+		return v.GetStrings()
 	}
 	return nil
 }

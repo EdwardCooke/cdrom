@@ -22,16 +22,33 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+// stringParam builds a scalar string param value.
+func stringParam(s string) *dbpb.ParamValue {
+	return &dbpb.ParamValue{String_: s}
+}
+
+// stringsParam builds a list-of-strings param value.
+func stringsParam(s []string) *dbpb.ParamValue {
+	return &dbpb.ParamValue{Strings: s}
+}
+
 // shellStep builds a step that runs script in the platform's shell. The
 // shell handler's portability contract is that a command is executed directly
 // (no implicit shell); a step that needs shell behavior invokes a shell
-// explicitly, which is exactly what this helper does.
+// explicitly, which is exactly what this helper does. The command and args
+// are carried in the step's Params map, as the shell handler reads them.
 func shellStep(t *testing.T, script string) *dbpb.JobStep {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		return &dbpb.JobStep{Command: "cmd", Args: []string{"/c", script}}
+		return &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamCommand: stringParam("cmd"),
+			ParamArgs:    stringsParam([]string{"/c", script}),
+		}}
 	}
-	return &dbpb.JobStep{Command: "sh", Args: []string{"-c", script}}
+	return &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+		ParamCommand: stringParam("sh"),
+		ParamArgs:    stringsParam([]string{"-c", script}),
+	}}
 }
 
 // TestExecuteMultiStepInOrder verifies that steps run in order: step 1 writes
@@ -86,15 +103,19 @@ func TestExecuteEnvVars(t *testing.T) {
 	var step *dbpb.JobStep
 	if runtime.GOOS == "windows" {
 		step = &dbpb.JobStep{
-			Command: "cmd",
-			Args:    []string{"/c", "echo %MY_VAR% > " + shellQuote(out)},
-			Env:     map[string]string{"MY_VAR": "hello"},
+			Params: map[string]*dbpb.ParamValue{
+				ParamCommand: stringParam("cmd"),
+				ParamArgs:    stringsParam([]string{"/c", "echo %MY_VAR% > " + shellQuote(out)}),
+			},
+			Env: map[string]string{"MY_VAR": "hello"},
 		}
 	} else {
 		step = &dbpb.JobStep{
-			Command: "sh",
-			Args:    []string{"-c", `printf '%s' "$MY_VAR" > ` + shellQuote(out)},
-			Env:     map[string]string{"MY_VAR": "hello"},
+			Params: map[string]*dbpb.ParamValue{
+				ParamCommand: stringParam("sh"),
+				ParamArgs:    stringsParam([]string{"-c", `printf '%s' "$MY_VAR" > ` + shellQuote(out)}),
+			},
+			Env: map[string]string{"MY_VAR": "hello"},
 		}
 	}
 	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
@@ -136,9 +157,15 @@ func TestExecutePerStepTimeout(t *testing.T) {
 	var step *dbpb.JobStep
 	if runtime.GOOS == "windows" {
 		// ping is the portable Windows sleep idiom (timeout needs a console).
-		step = &dbpb.JobStep{Command: "ping", Args: []string{"-n", "6", "127.0.0.1"}}
+		step = &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamCommand: stringParam("ping"),
+			ParamArgs:    stringsParam([]string{"-n", "6", "127.0.0.1"}),
+		}}
 	} else {
-		step = &dbpb.JobStep{Command: "sleep", Args: []string{"5"}}
+		step = &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamCommand: stringParam("sleep"),
+			ParamArgs:    stringsParam([]string{"5"}),
+		}}
 	}
 	step.Timeout = durationpb.New(100 * time.Millisecond)
 
@@ -168,17 +195,21 @@ func TestExecuteShellOverride(t *testing.T) {
 	var step *dbpb.JobStep
 	if runtime.GOOS == "windows" {
 		step = &dbpb.JobStep{
-			Shell:   "cmd",
-			Args:    []string{"/c"},
-			Command: "echo %MY_VAR% > " + shellQuote(out),
-			Env:     map[string]string{"MY_VAR": "via-shell"},
+			Params: map[string]*dbpb.ParamValue{
+				ParamShell:   stringParam("cmd"),
+				ParamArgs:    stringsParam([]string{"/c"}),
+				ParamCommand: stringParam("echo %MY_VAR% > " + shellQuote(out)),
+			},
+			Env: map[string]string{"MY_VAR": "via-shell"},
 		}
 	} else {
 		step = &dbpb.JobStep{
-			Shell:   "sh",
-			Args:    []string{"-c"},
-			Command: `printf '%s' "$MY_VAR" > ` + shellQuote(out),
-			Env:     map[string]string{"MY_VAR": "via-shell"},
+			Params: map[string]*dbpb.ParamValue{
+				ParamShell:   stringParam("sh"),
+				ParamArgs:    stringsParam([]string{"-c"}),
+				ParamCommand: stringParam(`printf '%s' "$MY_VAR" > ` + shellQuote(out)),
+			},
+			Env: map[string]string{"MY_VAR": "via-shell"},
 		}
 	}
 	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
@@ -211,10 +242,10 @@ func TestExecuteNoShellByDefault(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out.txt")
 
-	step := &dbpb.JobStep{
-		Command: "echo",
-		Args:    []string{"$(pwd)", ">", out},
-	}
+	step := &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+		ParamCommand: stringParam("echo"),
+		ParamArgs:    stringsParam([]string{"$(pwd)", ">", out}),
+	}}
 	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

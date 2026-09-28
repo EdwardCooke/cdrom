@@ -30,66 +30,66 @@ const (
 	JobStatusCancelled JobStatus = "cancelled"
 )
 
+// ParamValue is a single value in a step's Params map. A value is either a
+// scalar String or a list of Strings (by convention, only one is set), so a
+// handler can carry both simple settings (e.g. an ansible inventory name) and
+// ordered lists (e.g. a command's arguments) in the same map.
+type ParamValue struct {
+	// String is a scalar value.
+	String string `json:"string,omitempty"`
+	// Strings is an ordered list of values.
+	Strings []string `json:"strings,omitempty"`
+}
+
 // JobStep is a single unit of work in a job's execution spec. A step is
-// agnostic about *how* it runs: Type selects a step handler, and the
-// remaining fields are interpreted by that handler. The built-in default
-// handler ("shell", used when Type is empty) runs a command — optionally
-// through a user-chosen shell — in a working directory with an environment.
+// agnostic about *how* it runs: Type selects a step handler, and the handler
+// reads everything it needs from the common fields (Workdir, Env, Timeout)
+// and from Params. The built-in default handler ("shell", used when Type is
+// empty) runs a command — optionally through a user-chosen shell — in a
+// working directory with an environment.
 //
-// Portability contract (shell handler): Command is resolved and executed
+// Handler-specific settings live in Params, not in the step's own fields, so
+// a new step type can be added without changing the spec schema. The built-in
+// shell handler reads its command, args, and shell from Params.
+//
+// Portability contract (shell handler): the command is resolved and executed
 // directly by the execution target's OS (no shell is involved), so the same
 // spec executes identically on Windows and Linux. Workdir is interpreted with
 // the target's native path separator; a relative workdir is resolved against
 // the target's current working directory.
 //
-// Shell override (shell handler): when Shell is set, the step is run through
-// that shell instead of executing Command directly — the target invokes
-// `<Shell> <Args> <Command>`, so Command is passed as the final argument
-// (e.g. Shell "pwsh", Args ["-NoProfile", "-Command"], Command
-// "Get-ChildItem"). This lets a step opt into shell behavior (pipes,
+// Shell override (shell handler): when the shell param is set, the step is
+// run through that shell instead of executing the command directly — the
+// target invokes `<shell> <args> <command>`, so the command is passed as the
+// final argument (e.g. shell "pwsh", args ["-NoProfile", "-Command"],
+// command "Get-ChildItem"). This lets a step opt into shell behavior (pipes,
 // globbing, $VAR expansion) with an explicit, user-chosen shell rather than a
-// platform default. When Shell is empty the step runs Command directly,
+// platform default. When shell is empty the step runs the command directly,
 // preserving the no-implicit-shell contract.
 //
 // Extensibility: Type names a step handler registered on the execution
 // target (the built-in "shell" handler is always available; a target may
-// register more, e.g. "ansible", "terraform", "argo", or a user plugin).
-// Params carries handler-specific configuration that does not fit the common
-// fields, so a new step type can be added without changing the spec schema.
-// A step whose Type is not registered on the target fails the job with a
-// clear error.
+// register more, e.g. "ansible", "terraform", "argo", or a user plugin). A
+// step whose Type is not registered on the target fails the job with a clear
+// error.
 type JobStep struct {
 	// Type selects the step handler that runs this step. Empty means the
 	// built-in "shell" handler. A target that has not registered the named
 	// handler rejects the step.
 	Type string `json:"type,omitempty"`
-	// Command is the executable to run (e.g. "go", "pwsh", "bash"). For the
-	// shell handler, when Shell is set, Command is instead passed as the final
-	// argument to the shell. Other handlers may interpret or ignore it.
-	Command string `json:"command"`
-	// Args are the command's arguments, in order. For the shell handler, when
-	// Shell is set, Args are the shell's own arguments (e.g.
-	// ["-NoProfile", "-Command"]) and Command is appended after them.
-	Args []string `json:"args,omitempty"`
-	// Workdir is the directory the command runs in; empty means the target's
+	// Workdir is the directory the step runs in; empty means the target's
 	// current working directory.
 	Workdir string `json:"workdir,omitempty"`
-	// Env are extra environment variables for the command, in addition to the
+	// Env are extra environment variables for the step, in addition to the
 	// target's inherited environment.
 	Env map[string]string `json:"env,omitempty"`
 	// Timeout is the maximum duration for this step; zero means no per-step
 	// timeout.
 	Timeout time.Duration `json:"timeout,omitempty"`
-	// Shell, when set, is the interpreter the step is run through: the target
-	// executes `<Shell> <Args> <Command>` instead of Command directly. This is
-	// how a step opts into shell behavior with a user-chosen shell (e.g.
-	// "pwsh" on Windows, "bash" on Linux) instead of a platform default. Empty
-	// means run Command directly (no shell).
-	Shell string `json:"shell,omitempty"`
-	// Params are handler-specific key/value settings for the step (e.g. an
-	// ansible inventory or a terraform workspace). The built-in shell handler
-	// ignores them; a new step type reads the keys it understands.
-	Params map[string]string `json:"params,omitempty"`
+	// Params are the handler-specific settings for the step. The built-in
+	// shell handler reads command (string), args (list of strings), and shell
+	// (string) from here; a new step type reads the keys it understands.
+	Params map[string]*ParamValue `json:"params,omitempty"`
 }
 
 // JobSpec is the declarative execution spec of a job: an ordered list of
