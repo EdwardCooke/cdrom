@@ -27,6 +27,7 @@ const (
 	API_WatchJobs_FullMethodName        = "/cdrom.api.v1.API/WatchJobs"
 	API_GetJob_FullMethodName           = "/cdrom.api.v1.API/GetJob"
 	API_ReportJobStatus_FullMethodName  = "/cdrom.api.v1.API/ReportJobStatus"
+	API_StreamJobLogs_FullMethodName    = "/cdrom.api.v1.API/StreamJobLogs"
 	API_ExchangeJobToken_FullMethodName = "/cdrom.api.v1.API/ExchangeJobToken"
 	API_DispatchJob_FullMethodName      = "/cdrom.api.v1.API/DispatchJob"
 	API_UploadArtifact_FullMethodName   = "/cdrom.api.v1.API/UploadArtifact"
@@ -59,6 +60,15 @@ type APIClient interface {
 	WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[JobAssignment], error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
 	ReportJobStatus(ctx context.Context, in *ReportJobStatusRequest, opts ...grpc.CallOption) (*Job, error)
+	// StreamJobLogs is a client stream: an execution target (worker or agent)
+	// opens it at the start of a job and sends a JobLogChunk for each chunk of
+	// step output (stdout/stderr). The first chunk of each step carries
+	// metadata (job_id, step_index, stream); subsequent chunks carry data. The
+	// API persists the output to the artifacts service (one file per step plus
+	// a combined job.log) and fans it out to the UI over the WebSocket event
+	// hub as a job_log event. When job-token auth is enabled the caller must
+	// present a job token scoped to the job.
+	StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[JobLogChunk, StreamJobLogsResponse], error)
 	// ExchangeJobToken lets a running job request a new job token with a
 	// different audience (e.g. for an outside resource the job needs to call).
 	// The caller presents its current job token; the API mints a replacement
@@ -154,6 +164,19 @@ func (c *aPIClient) ReportJobStatus(ctx context.Context, in *ReportJobStatusRequ
 	return out, nil
 }
 
+func (c *aPIClient) StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[JobLogChunk, StreamJobLogsResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[1], API_StreamJobLogs_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[JobLogChunk, StreamJobLogsResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type API_StreamJobLogsClient = grpc.ClientStreamingClient[JobLogChunk, StreamJobLogsResponse]
+
 func (c *aPIClient) ExchangeJobToken(ctx context.Context, in *ExchangeJobTokenRequest, opts ...grpc.CallOption) (*ExchangeJobTokenResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExchangeJobTokenResponse)
@@ -176,7 +199,7 @@ func (c *aPIClient) DispatchJob(ctx context.Context, in *DispatchJobRequest, opt
 
 func (c *aPIClient) UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.ArtifactChunk, v1.UploadArtifactResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[1], API_UploadArtifact_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[2], API_UploadArtifact_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +212,7 @@ type API_UploadArtifactClient = grpc.ClientStreamingClient[v1.ArtifactChunk, v1.
 
 func (c *aPIClient) DownloadArtifact(ctx context.Context, in *v1.DownloadArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[2], API_DownloadArtifact_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[3], API_DownloadArtifact_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +282,15 @@ type APIServer interface {
 	WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[JobAssignment]) error
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
 	ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error)
+	// StreamJobLogs is a client stream: an execution target (worker or agent)
+	// opens it at the start of a job and sends a JobLogChunk for each chunk of
+	// step output (stdout/stderr). The first chunk of each step carries
+	// metadata (job_id, step_index, stream); subsequent chunks carry data. The
+	// API persists the output to the artifacts service (one file per step plus
+	// a combined job.log) and fans it out to the UI over the WebSocket event
+	// hub as a job_log event. When job-token auth is enabled the caller must
+	// present a job token scoped to the job.
+	StreamJobLogs(grpc.ClientStreamingServer[JobLogChunk, StreamJobLogsResponse]) error
 	// ExchangeJobToken lets a running job request a new job token with a
 	// different audience (e.g. for an outside resource the job needs to call).
 	// The caller presents its current job token; the API mints a replacement
@@ -302,6 +334,9 @@ func (UnimplementedAPIServer) GetJob(context.Context, *GetJobRequest) (*Job, err
 }
 func (UnimplementedAPIServer) ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportJobStatus not implemented")
+}
+func (UnimplementedAPIServer) StreamJobLogs(grpc.ClientStreamingServer[JobLogChunk, StreamJobLogsResponse]) error {
+	return status.Error(codes.Unimplemented, "method StreamJobLogs not implemented")
 }
 func (UnimplementedAPIServer) ExchangeJobToken(context.Context, *ExchangeJobTokenRequest) (*ExchangeJobTokenResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExchangeJobToken not implemented")
@@ -445,6 +480,13 @@ func _API_ReportJobStatus_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _API_StreamJobLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(APIServer).StreamJobLogs(&grpc.GenericServerStream[JobLogChunk, StreamJobLogsResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type API_StreamJobLogsServer = grpc.ClientStreamingServer[JobLogChunk, StreamJobLogsResponse]
 
 func _API_ExchangeJobToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExchangeJobTokenRequest)
@@ -607,6 +649,11 @@ var API_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "WatchJobs",
 			Handler:       _API_WatchJobs_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "StreamJobLogs",
+			Handler:       _API_StreamJobLogs_Handler,
+			ClientStreams: true,
 		},
 		{
 			StreamName:    "UploadArtifact",

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strconv"
@@ -26,6 +27,27 @@ const heartbeatInterval = 10 * time.Second
 // assignmentQueueSize bounds how many assignments can be queued for a worker
 // between deliveries.
 const assignmentQueueSize = 64
+
+// maxLogChunkSize bounds a single streamed log chunk to keep memory bounded.
+const maxLogChunkSize = 4 << 20 // 4 MiB
+
+// jobLogName is the name of the combined per-job log file (the concatenation
+// of every step's output, in order). Per-step logs are named step-<n>.log.
+const jobLogName = "job.log"
+
+// appendLogAttempts and appendLogRetryDelay bound how long the API keeps
+// retrying a single log chunk against the artifacts service before giving up
+// (and dropping the chunk). The gRPC channel to the artifacts service
+// reconnects on its own, so a brief outage (a pod restart or scale event) is
+// ridden out: the chunk is retried until the channel recovers, then persisted.
+// If the outage outlasts the budget the chunk is dropped and the stream
+// continues, so a slow or down artifacts service never blocks or tears down a
+// target's log stream. They are variables (not constants) so tests can
+// shorten the budget.
+var (
+	appendLogAttempts   = 20
+	appendLogRetryDelay = 500 * time.Millisecond
+)
 
 // GRPCServer implements the cdrom.api.v1.API gRPC service. It is the
 // control-plane hub that long-lived workers and ephemeral agents talk to: it
@@ -232,6 +254,170 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	return toAPIJob(updated), nil
 }
 
+// StreamJobLogs is a client stream: an execution target (worker or agent)
+// opens it at the start of a job and sends a JobLogChunk for each chunk of
+// step output (stdout/stderr). The first chunk of each step's output carries
+// metadata (job_id, step_index, stream); subsequent chunks carry data. The
+// API persists the output to the artifacts service — one file per step
+// (step-<n>.log) plus a combined job.log — and fans it out to the UI over the
+// event hub as a job_log event. When job-token auth is enabled the caller
+// must present a job token scoped to the job.
+//
+// Backpressure: the gRPC stream itself provides flow control between the
+// target and the API (a slow API blocks the target's sends). A slow UI
+// subscriber does not block the target: job_log events are dropped for
+// subscribers whose buffer is full, and the UI resynchronizes from the
+// persisted log (which is always complete) on reconnect.
+//
+// Resilience: a transient artifacts-service outage (a pod restart or scale
+// event) does not tear down the target's stream. The API retries persisting
+// each chunk (appendLogWithRetry) and, if the outage outlasts the retry
+// budget, drops the chunk and continues — the stream stays alive and resumes
+// persisting once the artifacts service recovers.
+func (s *GRPCServer) StreamJobLogs(stream grpc.ClientStreamingServer[apipb.JobLogChunk, apipb.StreamJobLogsResponse]) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	metadata := first.GetMetadata()
+	if metadata == nil || metadata.GetJobId() == 0 {
+		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with job_id")
+	}
+	jobID := metadata.GetJobId()
+	// Verify the caller's job token is scoped to this job, once, up front.
+	if err := s.checkJobToken(stream.Context(), jobID); err != nil {
+		return err
+	}
+	var received int64
+	if err := s.handleLogChunk(stream.Context(), jobID, metadata, first.GetData(), &received); err != nil {
+		return err
+	}
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if size := len(chunk.GetData()); size > maxLogChunkSize {
+			return status.Errorf(codes.InvalidArgument, "log chunk of %d bytes exceeds limit of %d", size, maxLogChunkSize)
+		}
+		if err := s.handleLogChunk(stream.Context(), jobID, chunk.GetMetadata(), chunk.GetData(), &received); err != nil {
+			return err
+		}
+	}
+	return stream.SendAndClose(&apipb.StreamJobLogsResponse{Received: received})
+}
+
+// handleLogChunk persists a chunk of job output to the artifacts service and
+// publishes a job_log event. A chunk that carries metadata (the first chunk
+// of a step's output) is attributed to that step; a chunk without metadata
+// continues the current step.
+//
+// Persistence is best-effort: if the artifacts service is unreachable the
+// chunk is retried (appendLogWithRetry) and, if it still cannot be persisted
+// within the retry budget, dropped — the stream is never torn down by an
+// artifacts outage. The job_log event is always published so the UI sees the
+// output in real time.
+func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *apipb.JobLogMetadata, data []byte, received *int64) error {
+	if len(data) == 0 {
+		return nil
+	}
+	stepIndex := int32(0)
+	streamName := JobLogStreamStdout
+	if metadata != nil {
+		stepIndex = metadata.GetStepIndex()
+		streamName = jobLogStreamName(metadata.GetStream())
+	}
+	jobIDStr := strconv.FormatInt(jobID, 10)
+	// Persist to the artifacts service: one file per step plus the combined
+	// job log. A nil artifacts client (e.g. in tests) skips persistence but
+	// still fans the output out to the UI. A failure to persist (the artifacts
+	// service is down and the retry budget is exhausted) drops the chunk
+	// rather than failing the stream, so an artifacts outage never tears down
+	// a target's log stream.
+	if s.artifacts != nil {
+		stepName := fmt.Sprintf("step-%d.log", stepIndex)
+		// Persist the per-step log first. If it cannot be persisted (the
+		// artifacts service is down and the retry budget is exhausted) the
+		// chunk is dropped and the combined job log is skipped too — both
+		// files live in the same (unreachable) store, so retrying the second
+		// would only double the time spent blocked on a down service.
+		if err := s.appendLogWithRetry(ctx, jobIDStr, stepName, data); err != nil {
+			s.logger.Warn("api: dropping log chunk (artifacts unreachable)",
+				"job", jobID, "step", stepIndex, "err", err)
+		} else if err := s.appendLogWithRetry(ctx, jobIDStr, jobLogName, data); err != nil {
+			s.logger.Warn("api: dropping job log chunk (artifacts unreachable)",
+				"job", jobID, "log", jobLogName, "err", err)
+		}
+	}
+	*received += int64(len(data))
+	s.publish(Event{
+		Type:      EventJobLog,
+		JobID:     jobID,
+		StepIndex: stepIndex,
+		Stream:    streamName,
+		Data:      string(data),
+	})
+	return nil
+}
+
+// appendLogWithRetry appends data to the named log for the job via the
+// artifacts service's AppendLog client stream, retrying on failure up to
+// appendLogAttempts times (appendLogRetryDelay apart). It returns the last
+// error if the chunk could not be persisted within the budget, so the caller
+// can drop it. The gRPC channel to the artifacts service reconnects on its
+// own, so a brief outage (a pod restart or scale event) is ridden out by
+// these retries: the chunk is persisted once the channel recovers.
+func (s *GRPCServer) appendLogWithRetry(ctx context.Context, jobID, name string, data []byte) error {
+	var err error
+	for attempt := 0; attempt < appendLogAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(appendLogRetryDelay):
+			}
+		}
+		if err = s.appendLog(ctx, jobID, name, data); err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return err
+}
+
+// appendLog appends data to the named log for the job via the artifacts
+// service's AppendLog client stream. A single chunk carries both the log's
+// metadata and the data.
+func (s *GRPCServer) appendLog(ctx context.Context, jobID, name string, data []byte) error {
+	stream, err := s.artifacts.AppendLog(ctx)
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(&artifactspb.ArtifactChunk{
+		Metadata: &artifactspb.Artifact{Namespace: jobID, Name: name},
+		Data:     data,
+	}); err != nil {
+		return err
+	}
+	_, err = stream.CloseAndRecv()
+	return err
+}
+
+// jobLogStreamName maps a JobLogStream enum to the short name the UI uses.
+func jobLogStreamName(stream apipb.JobLogStream) string {
+	switch stream {
+	case apipb.JobLogStream_JOB_LOG_STREAM_STDERR:
+		return JobLogStreamStderr
+	default:
+		return JobLogStreamStdout
+	}
+}
+
 // ExchangeJobToken lets a running job request a new job token with a
 // different audience (e.g. for an outside resource the job needs to call).
 // The caller presents its current job token (scoped to the job); the API
@@ -350,13 +536,13 @@ func (s *GRPCServer) mintJobToken(ctx context.Context, job *apipb.Job) string {
 // UploadArtifact proxies a client-streaming artifact upload to the artifacts
 // service.
 func (s *GRPCServer) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) error {
-	// The first chunk carries the job_id; verify the caller's job token is
+	// The first chunk carries the namespace; verify the caller's job token is
 	// scoped to it before proxying the upload.
 	first, err := stream.Recv()
 	if err != nil {
 		return err
 	}
-	if err := s.checkArtifactToken(stream.Context(), first.GetMetadata().GetJobId()); err != nil {
+	if err := s.checkArtifactToken(stream.Context(), first.GetMetadata().GetNamespace()); err != nil {
 		return err
 	}
 	remote, err := s.artifacts.UploadArtifact(stream.Context())
@@ -388,7 +574,7 @@ func (s *GRPCServer) UploadArtifact(stream grpc.ClientStreamingServer[artifactsp
 // DownloadArtifact proxies a server-streaming artifact download from the
 // artifacts service.
 func (s *GRPCServer) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
-	if err := s.checkArtifactToken(stream.Context(), req.GetJobId()); err != nil {
+	if err := s.checkArtifactToken(stream.Context(), req.GetNamespace()); err != nil {
 		return err
 	}
 	remote, err := s.artifacts.DownloadArtifact(stream.Context(), req)
@@ -411,18 +597,18 @@ func (s *GRPCServer) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, 
 
 // GetArtifact proxies an artifact metadata lookup to the artifacts service.
 func (s *GRPCServer) GetArtifact(ctx context.Context, req *artifactspb.GetArtifactRequest) (*artifactspb.Artifact, error) {
-	if err := s.checkArtifactToken(ctx, req.GetJobId()); err != nil {
+	if err := s.checkArtifactToken(ctx, req.GetNamespace()); err != nil {
 		return nil, err
 	}
 	return s.artifacts.GetArtifact(ctx, req)
 }
 
 // ListArtifacts proxies an artifact listing to the artifacts service. A
-// non-empty job_id is scoped to that job's token; an empty job_id lists all
-// artifacts and is not job-scoped.
+// non-empty namespace is scoped to that namespace's token; an empty namespace
+// lists all artifacts and is not job-scoped.
 func (s *GRPCServer) ListArtifacts(ctx context.Context, req *artifactspb.ListArtifactsRequest) (*artifactspb.ListArtifactsResponse, error) {
-	if req.GetJobId() != "" {
-		if err := s.checkArtifactToken(ctx, req.GetJobId()); err != nil {
+	if req.GetNamespace() != "" {
+		if err := s.checkArtifactToken(ctx, req.GetNamespace()); err != nil {
 			return nil, err
 		}
 	}
@@ -431,22 +617,25 @@ func (s *GRPCServer) ListArtifacts(ctx context.Context, req *artifactspb.ListArt
 
 // DeleteArtifact proxies an artifact deletion to the artifacts service.
 func (s *GRPCServer) DeleteArtifact(ctx context.Context, req *artifactspb.DeleteArtifactRequest) (*emptypb.Empty, error) {
-	if err := s.checkArtifactToken(ctx, req.GetJobId()); err != nil {
+	if err := s.checkArtifactToken(ctx, req.GetNamespace()); err != nil {
 		return nil, err
 	}
 	return s.artifacts.DeleteArtifact(ctx, req)
 }
 
 // checkArtifactToken, when job-token auth is enabled, verifies the caller's
-// job token is scoped to the job that owns the artifact. It is a no-op when
-// job-token auth is disabled or jobID is empty (not job-scoped).
-func (s *GRPCServer) checkArtifactToken(ctx context.Context, jobID string) error {
-	if !s.jobAuth.Enabled() || jobID == "" {
+// job token is scoped to the job that owns the artifact. A job's artifacts
+// and logs use the job's id as the namespace, so the namespace is parsed back
+// to a job id and checked against the token. It is a no-op when job-token
+// auth is disabled or the namespace is empty (not job-scoped). Namespaces
+// that are not numeric job ids cannot be job-token-scoped.
+func (s *GRPCServer) checkArtifactToken(ctx context.Context, namespace string) error {
+	if !s.jobAuth.Enabled() || namespace == "" {
 		return nil
 	}
-	id, err := strconv.ParseInt(jobID, 10, 64)
+	id, err := strconv.ParseInt(namespace, 10, 64)
 	if err != nil {
-		return status.Error(codes.InvalidArgument, "invalid artifact job_id")
+		return status.Error(codes.InvalidArgument, "invalid artifact namespace")
 	}
 	return s.checkJobToken(ctx, id)
 }

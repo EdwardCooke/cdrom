@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -56,6 +57,11 @@ func (s *Server) Handler() http.Handler {
 
 	// Artifacts (via the artifacts service).
 	mux.HandleFunc("GET /api/jobs/{id}/artifacts", s.listJobArtifacts)
+
+	// Job logs (via the artifacts service). A job's logs are stored as one
+	// file per step (step-<n>.log) plus a combined job.log.
+	mux.HandleFunc("GET /api/jobs/{id}/logs", s.listJobLogs)
+	mux.HandleFunc("GET /api/jobs/{id}/logs/{name}", s.getJobLog)
 
 	// Live event stream (WebSocket).
 	if s.hub != nil {
@@ -299,13 +305,85 @@ func (s *Server) listJobArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := s.clients.Artifacts.ListArtifacts(r.Context(), &artifactspb.ListArtifactsRequest{
-		JobId: strconv.FormatInt(jobID, 10),
+		Namespace: strconv.FormatInt(jobID, 10),
 	})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nonNil(response.GetArtifacts()))
+}
+
+// ---------------------------------------------------------------------------
+// Job logs
+// ---------------------------------------------------------------------------
+
+// listJobLogs lists a job's log files (one per step plus the combined
+// job.log) via the artifacts service.
+func (s *Server) listJobLogs(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.clients.Artifacts.ListLogs(r.Context(), &artifactspb.ListLogsRequest{
+		Namespace: strconv.FormatInt(jobID, 10),
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(response.GetLogs()))
+}
+
+// getJobLog streams a job's log file (a step's output or the combined
+// job.log) to the caller. The name is the log file name, e.g. "step-0.log"
+// or "job.log".
+func (s *Server) getJobLog(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		httpError(w, http.StatusBadRequest, "log name is required")
+		return
+	}
+	stream, err := s.clients.Artifacts.DownloadLog(r.Context(), &artifactspb.DownloadLogRequest{
+		Namespace: strconv.FormatInt(jobID, 10),
+		Name:      name,
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	// The first chunk carries metadata; set the content type from it, then
+	// stream the data chunks to the response body.
+	first, err := stream.Recv()
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	if contentType := first.GetMetadata().GetContentType(); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(first.GetData()); err != nil {
+		return
+	}
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			return
+		}
+		if _, err := w.Write(chunk.GetData()); err != nil {
+			return
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

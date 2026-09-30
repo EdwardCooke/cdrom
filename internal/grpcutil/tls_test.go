@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"cdrom/internal/config"
@@ -140,18 +139,15 @@ func TestMTLSRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ServerCreds: %v", err)
 	}
-	if _, ok := serverCreds.(credentials.TransportCredentials); !ok {
-		t.Fatal("ServerCreds: expected TLS transport credentials")
-	}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	srv := grpc.NewServer(grpc.Creds(serverCreds))
-	artSrv, err := artifacts.NewServer(t.TempDir())
+	artSrv, err := artifacts.NewFilesystemServer(t.TempDir())
 	if err != nil {
-		t.Fatalf("artifacts.NewServer: %v", err)
+		t.Fatalf("artifacts.NewFilesystemServer: %v", err)
 	}
 	artifactspb.RegisterArtifactsServer(srv, artSrv)
 	go func() { _ = srv.Serve(lis) }()
@@ -164,7 +160,7 @@ func TestMTLSRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := artifactspb.NewArtifactsClient(conn)
-	resp, err := client.ListArtifacts(context.Background(), &artifactspb.ListArtifactsRequest{JobId: "job-1"})
+	resp, err := client.ListArtifacts(context.Background(), &artifactspb.ListArtifactsRequest{Namespace: "job-1"})
 	if err != nil {
 		t.Fatalf("ListArtifacts over mTLS: %v", err)
 	}
@@ -188,9 +184,9 @@ func TestMTLSRequiresClientCert(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	srv := grpc.NewServer(grpc.Creds(serverCreds))
-	artSrv, err := artifacts.NewServer(t.TempDir())
+	artSrv, err := artifacts.NewFilesystemServer(t.TempDir())
 	if err != nil {
-		t.Fatalf("artifacts.NewServer: %v", err)
+		t.Fatalf("artifacts.NewFilesystemServer: %v", err)
 	}
 	artifactspb.RegisterArtifactsServer(srv, artSrv)
 	go func() { _ = srv.Serve(lis) }()
@@ -206,7 +202,7 @@ func TestMTLSRequiresClientCert(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := artifactspb.NewArtifactsClient(conn)
-	if _, err := client.ListArtifacts(context.Background(), &artifactspb.ListArtifactsRequest{JobId: "job-1"}); err == nil {
+	if _, err := client.ListArtifacts(context.Background(), &artifactspb.ListArtifactsRequest{Namespace: "job-1"}); err == nil {
 		t.Fatal("ListArtifacts: expected the mTLS server to reject a client without a certificate")
 	}
 }

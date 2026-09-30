@@ -13,11 +13,13 @@ package stephandlers
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 
 	"cdrom/internal/executor"
 
@@ -64,13 +66,18 @@ func init() {
 }
 
 // runShellStep is the built-in "shell" step handler. It runs the step's
-// command, directly or through the step's shell. The step's stdout and stderr
-// are inherited from the execution target (the worker/agent's own
-// stdout/stderr, which go to stdout or the log file) — there is no central
-// logs service, and streaming output to the API is a later concern (F-02).
-// Inheriting (rather than capturing into pipes) also means a per-step timeout
-// returns promptly: killing the step's process does not leave open pipes that
-// would block the wait.
+// command, directly or through the step's shell.
+//
+// Output handling: the step's stdout and stderr are always written to the
+// execution target's own stdout/stderr (local logging). When the step's
+// context carries a LogSink (set by a target that streams logs to the API,
+// see F-02), the output is additionally captured and streamed to the sink in
+// near-real-time: the command's stdout/stderr are read from pipes and teed to
+// both the target's local streams and the sink. When no sink is present the
+// command's streams are inherited directly from the target — inheriting
+// (rather than capturing into pipes) means a per-step timeout returns
+// promptly: killing the step's process does not leave open pipes that would
+// block the wait.
 func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
 	command := paramString(step, ParamCommand)
 	if command == "" {
@@ -95,13 +102,62 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		cmd.Dir = workdir
 	}
 	cmd.Env = mergeEnv(os.Environ(), step.GetEnv())
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+
+	sink := executor.LogSinkFromContext(ctx)
+	stepIndex := executor.StepIndexFromContext(ctx)
+
+	// When a sink is present, capture the command's output into pipes and tee
+	// it to both the target's local streams and the sink. Otherwise inherit
+	// the target's streams directly (no capture, prompt timeout).
+	var stdout, stderr io.ReadCloser
+	if sink != nil {
+		var err error
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("%q: stdout pipe: %w", command, err)
+		}
+		stderr, err = cmd.StderrPipe()
+		if err != nil {
+			return fmt.Errorf("%q: stderr pipe: %w", command, err)
+		}
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	logger.Info("executor: running step",
 		"command", command, "args", args, "shell", paramString(step, ParamShell), "workdir", step.GetWorkdir())
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%q: %w", command, err)
+	}
+
+	// Copy the command's output to the target's local streams and (when a
+	// sink is present) to the sink. Both copies run concurrently so output is
+	// streamed as it is produced. The copies finish when the command's pipes
+	// close (on exit or on the context killing the process).
+	var wg sync.WaitGroup
+	if sink != nil {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			teeToSink(stdout, os.Stdout, sink, stepIndex, executor.StreamStdout)
+		}()
+		go func() {
+			defer wg.Done()
+			teeToSink(stderr, os.Stderr, sink, stepIndex, executor.StreamStderr)
+		}()
+	}
+
+	// When capturing, finish reading the command's pipes before Wait: with
+	// StdoutPipe/StderrPipe, Wait closes the pipes, so it must not run before
+	// the reads complete (or output would be lost). The tee goroutines finish
+	// when the command exits and its pipes close, so wg.Wait() blocks until
+	// the command has run to completion (or been killed by its context).
+	if sink != nil {
+		wg.Wait()
+	}
+	err := cmd.Wait()
 
 	if err != nil {
 		// Distinguish a per-step timeout from any other failure. A timeout
@@ -113,6 +169,27 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		return fmt.Errorf("%q: %w", command, err)
 	}
 	return nil
+}
+
+// teeToSink copies from src to both local (the target's own stream) and to
+// sink (attributed to stepIndex/stream). It runs until src is exhausted (the
+// command's pipe closes). Writes to the sink are best-effort: the sink drops
+// output it cannot keep up with, so this never blocks the command.
+func teeToSink(src io.Reader, local io.Writer, sink executor.LogSink, stepIndex int, stream string) {
+	buffer := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buffer)
+		if n > 0 {
+			data := buffer[:n]
+			// Local logging first (the target's own stdout/stderr).
+			_, _ = local.Write(data)
+			// Stream to the API (best-effort, non-blocking).
+			sink.WriteStepOutput(stepIndex, stream, data)
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // paramString returns the string value of a step param, or "" if the param is

@@ -25,21 +25,41 @@ const (
 	Artifacts_GetArtifact_FullMethodName      = "/cdrom.artifacts.v1.Artifacts/GetArtifact"
 	Artifacts_ListArtifacts_FullMethodName    = "/cdrom.artifacts.v1.Artifacts/ListArtifacts"
 	Artifacts_DeleteArtifact_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/DeleteArtifact"
+	Artifacts_AppendLog_FullMethodName        = "/cdrom.artifacts.v1.Artifacts/AppendLog"
+	Artifacts_DownloadLog_FullMethodName      = "/cdrom.artifacts.v1.Artifacts/DownloadLog"
+	Artifacts_GetLog_FullMethodName           = "/cdrom.artifacts.v1.Artifacts/GetLog"
+	Artifacts_ListLogs_FullMethodName         = "/cdrom.artifacts.v1.Artifacts/ListLogs"
 )
 
 // ArtifactsClient is the client API for Artifacts service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Artifacts stores and retrieves job artifacts (files produced by job
-// execution).
+// Artifacts is a general-purpose, namespaced file store. It stores and
+// retrieves files of two kinds:
 //
-// Uploads and downloads are streamed so arbitrarily large artifacts do not
-// have to be buffered in memory on either side.
+//   - artifacts: immutable files (one per namespace/name); and
+//   - logs: append-only files that grow over time (so a log can be read while
+//     it is still being written and replayed in full afterwards).
+//
+// Every file lives in a *namespace*: an opaque scope string that groups
+// related files. The service is agnostic about what a namespace means — it is
+// up to the caller. For example, a job's artifacts and logs use the job's id
+// as the namespace, while a deployed release's artifacts might use a release
+// identifier. This keeps the store general enough to hold both job-owned
+// artifacts and deployed/published artifacts.
+//
+// Uploads and downloads are streamed so arbitrarily large files do not have to
+// be buffered in memory on either side.
+//
+// Job logs are stored as one file per step (named step-<n>.log) plus a
+// combined file (job.log) that concatenates every step's output in order.
+// Logs are *appended* to as a step progresses, so a log can be read while the
+// job is still running (tail) and replayed in full after it finishes.
 type ArtifactsClient interface {
 	// UploadArtifact is a client stream. The first chunk must carry metadata
-	// (job_id and name); subsequent chunks carry data. The server returns the
-	// stored Artifact once the stream ends.
+	// (namespace and name); subsequent chunks carry data. The server returns
+	// the stored Artifact once the stream ends.
 	UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error)
 	// DownloadArtifact is a server stream. The first chunk carries metadata;
 	// all chunks carry data.
@@ -47,6 +67,19 @@ type ArtifactsClient interface {
 	GetArtifact(ctx context.Context, in *GetArtifactRequest, opts ...grpc.CallOption) (*Artifact, error)
 	ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (*ListArtifactsResponse, error)
 	DeleteArtifact(ctx context.Context, in *DeleteArtifactRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// AppendLog appends data to a log file. The first chunk must carry metadata
+	// (namespace and name); subsequent chunks carry data. The server returns
+	// the updated Artifact (size, modified time) once the stream ends.
+	// Appending to a log that does not exist creates it.
+	AppendLog(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error)
+	// DownloadLog is a server stream of a log: the first chunk carries metadata,
+	// all chunks carry data. Reading a log that is still being written returns
+	// the output captured so far.
+	DownloadLog(ctx context.Context, in *DownloadLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error)
+	// GetLog returns the metadata of a log file.
+	GetLog(ctx context.Context, in *GetLogRequest, opts ...grpc.CallOption) (*Artifact, error)
+	// ListLogs lists the log files in a namespace.
+	ListLogs(ctx context.Context, in *ListLogsRequest, opts ...grpc.CallOption) (*ListLogsResponse, error)
 }
 
 type artifactsClient struct {
@@ -119,19 +152,87 @@ func (c *artifactsClient) DeleteArtifact(ctx context.Context, in *DeleteArtifact
 	return out, nil
 }
 
+func (c *artifactsClient) AppendLog(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[2], Artifacts_AppendLog_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ArtifactChunk, UploadArtifactResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_AppendLogClient = grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse]
+
+func (c *artifactsClient) DownloadLog(ctx context.Context, in *DownloadLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[3], Artifacts_DownloadLog_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DownloadLogRequest, ArtifactChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_DownloadLogClient = grpc.ServerStreamingClient[ArtifactChunk]
+
+func (c *artifactsClient) GetLog(ctx context.Context, in *GetLogRequest, opts ...grpc.CallOption) (*Artifact, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Artifact)
+	err := c.cc.Invoke(ctx, Artifacts_GetLog_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *artifactsClient) ListLogs(ctx context.Context, in *ListLogsRequest, opts ...grpc.CallOption) (*ListLogsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListLogsResponse)
+	err := c.cc.Invoke(ctx, Artifacts_ListLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ArtifactsServer is the server API for Artifacts service.
 // All implementations must embed UnimplementedArtifactsServer
 // for forward compatibility.
 //
-// Artifacts stores and retrieves job artifacts (files produced by job
-// execution).
+// Artifacts is a general-purpose, namespaced file store. It stores and
+// retrieves files of two kinds:
 //
-// Uploads and downloads are streamed so arbitrarily large artifacts do not
-// have to be buffered in memory on either side.
+//   - artifacts: immutable files (one per namespace/name); and
+//   - logs: append-only files that grow over time (so a log can be read while
+//     it is still being written and replayed in full afterwards).
+//
+// Every file lives in a *namespace*: an opaque scope string that groups
+// related files. The service is agnostic about what a namespace means — it is
+// up to the caller. For example, a job's artifacts and logs use the job's id
+// as the namespace, while a deployed release's artifacts might use a release
+// identifier. This keeps the store general enough to hold both job-owned
+// artifacts and deployed/published artifacts.
+//
+// Uploads and downloads are streamed so arbitrarily large files do not have to
+// be buffered in memory on either side.
+//
+// Job logs are stored as one file per step (named step-<n>.log) plus a
+// combined file (job.log) that concatenates every step's output in order.
+// Logs are *appended* to as a step progresses, so a log can be read while the
+// job is still running (tail) and replayed in full after it finishes.
 type ArtifactsServer interface {
 	// UploadArtifact is a client stream. The first chunk must carry metadata
-	// (job_id and name); subsequent chunks carry data. The server returns the
-	// stored Artifact once the stream ends.
+	// (namespace and name); subsequent chunks carry data. The server returns
+	// the stored Artifact once the stream ends.
 	UploadArtifact(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error
 	// DownloadArtifact is a server stream. The first chunk carries metadata;
 	// all chunks carry data.
@@ -139,6 +240,19 @@ type ArtifactsServer interface {
 	GetArtifact(context.Context, *GetArtifactRequest) (*Artifact, error)
 	ListArtifacts(context.Context, *ListArtifactsRequest) (*ListArtifactsResponse, error)
 	DeleteArtifact(context.Context, *DeleteArtifactRequest) (*emptypb.Empty, error)
+	// AppendLog appends data to a log file. The first chunk must carry metadata
+	// (namespace and name); subsequent chunks carry data. The server returns
+	// the updated Artifact (size, modified time) once the stream ends.
+	// Appending to a log that does not exist creates it.
+	AppendLog(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error
+	// DownloadLog is a server stream of a log: the first chunk carries metadata,
+	// all chunks carry data. Reading a log that is still being written returns
+	// the output captured so far.
+	DownloadLog(*DownloadLogRequest, grpc.ServerStreamingServer[ArtifactChunk]) error
+	// GetLog returns the metadata of a log file.
+	GetLog(context.Context, *GetLogRequest) (*Artifact, error)
+	// ListLogs lists the log files in a namespace.
+	ListLogs(context.Context, *ListLogsRequest) (*ListLogsResponse, error)
 	mustEmbedUnimplementedArtifactsServer()
 }
 
@@ -163,6 +277,18 @@ func (UnimplementedArtifactsServer) ListArtifacts(context.Context, *ListArtifact
 }
 func (UnimplementedArtifactsServer) DeleteArtifact(context.Context, *DeleteArtifactRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteArtifact not implemented")
+}
+func (UnimplementedArtifactsServer) AppendLog(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error {
+	return status.Error(codes.Unimplemented, "method AppendLog not implemented")
+}
+func (UnimplementedArtifactsServer) DownloadLog(*DownloadLogRequest, grpc.ServerStreamingServer[ArtifactChunk]) error {
+	return status.Error(codes.Unimplemented, "method DownloadLog not implemented")
+}
+func (UnimplementedArtifactsServer) GetLog(context.Context, *GetLogRequest) (*Artifact, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLog not implemented")
+}
+func (UnimplementedArtifactsServer) ListLogs(context.Context, *ListLogsRequest) (*ListLogsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListLogs not implemented")
 }
 func (UnimplementedArtifactsServer) mustEmbedUnimplementedArtifactsServer() {}
 func (UnimplementedArtifactsServer) testEmbeddedByValue()                   {}
@@ -257,6 +383,60 @@ func _Artifacts_DeleteArtifact_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Artifacts_AppendLog_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ArtifactsServer).AppendLog(&grpc.GenericServerStream[ArtifactChunk, UploadArtifactResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_AppendLogServer = grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]
+
+func _Artifacts_DownloadLog_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(DownloadLogRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ArtifactsServer).DownloadLog(m, &grpc.GenericServerStream[DownloadLogRequest, ArtifactChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_DownloadLogServer = grpc.ServerStreamingServer[ArtifactChunk]
+
+func _Artifacts_GetLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLogRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArtifactsServer).GetLog(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Artifacts_GetLog_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArtifactsServer).GetLog(ctx, req.(*GetLogRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Artifacts_ListLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArtifactsServer).ListLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Artifacts_ListLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArtifactsServer).ListLogs(ctx, req.(*ListLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Artifacts_ServiceDesc is the grpc.ServiceDesc for Artifacts service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -276,6 +456,14 @@ var Artifacts_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "DeleteArtifact",
 			Handler:    _Artifacts_DeleteArtifact_Handler,
 		},
+		{
+			MethodName: "GetLog",
+			Handler:    _Artifacts_GetLog_Handler,
+		},
+		{
+			MethodName: "ListLogs",
+			Handler:    _Artifacts_ListLogs_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -286,6 +474,16 @@ var Artifacts_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "DownloadArtifact",
 			Handler:       _Artifacts_DownloadArtifact_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "AppendLog",
+			Handler:       _Artifacts_AppendLog_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "DownloadLog",
+			Handler:       _Artifacts_DownloadLog_Handler,
 			ServerStreams: true,
 		},
 	},

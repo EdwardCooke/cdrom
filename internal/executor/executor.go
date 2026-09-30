@@ -61,6 +61,59 @@ type StepHandler func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logg
 // under this name, so a step with no type runs through the shell handler.
 const DefaultType = "shell"
 
+// LogSink receives a job's step output (stdout/stderr) as it is produced, so
+// an execution target can stream it to the API in near-real-time (F-02). A
+// target that wants to stream output sets a sink in the context (via
+// ContextWithLogSink) before calling Execute; step handlers that capture
+// output (the built-in shell handler) write to it. When no sink is set, step
+// output is not streamed (it still goes to the target's local stdout/stderr).
+//
+// Implementations must be safe for concurrent use and must not block: output
+// is produced by the step's command, and a blocking sink would stall the
+// command. A sink that cannot keep up should drop output — the persisted log
+// (written by the API) is the source of truth for replay, and the UI
+// resynchronizes from it on reconnect.
+type LogSink interface {
+	// WriteStepOutput records a chunk of a step's output. stepIndex is the
+	// 0-based index of the step in the job's spec; stream is "stdout" or
+	// "stderr" (see the JobLogStreamStdout/Stderr constants in internal/api).
+	WriteStepOutput(stepIndex int, stream string, data []byte)
+}
+
+// Output stream names a LogSink reports for a chunk of step output.
+const (
+	StreamStdout = "stdout"
+	StreamStderr = "stderr"
+)
+
+type logSinkKey struct{}
+
+type stepIndexKey struct{}
+
+// ContextWithLogSink returns a context that carries sink, so step handlers
+// can stream a step's output to it. A nil sink returns ctx unchanged.
+func ContextWithLogSink(ctx context.Context, sink LogSink) context.Context {
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, logSinkKey{}, sink)
+}
+
+// LogSinkFromContext returns the LogSink carried by ctx, or nil when none is
+// set. Step handlers call this to stream a step's output to the sink.
+func LogSinkFromContext(ctx context.Context) LogSink {
+	sink, _ := ctx.Value(logSinkKey{}).(LogSink)
+	return sink
+}
+
+// StepIndexFromContext returns the 0-based index of the step being executed,
+// as set by runStep, or -1 when absent. Step handlers use it to attribute
+// streamed output to the right step.
+func StepIndexFromContext(ctx context.Context) int {
+	index, _ := ctx.Value(stepIndexKey{}).(int)
+	return index
+}
+
 // stepTypes maps a step type to its handler. Handlers register themselves via
 // RegisterStepType (the built-in shell handler does so at package init in
 // internal/stephandlers); targets and plugins add more the same way.
@@ -101,6 +154,9 @@ func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Lo
 		stepCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// Propagate the step's index so a step handler that captures output can
+	// attribute it to the right step (for the LogSink).
+	stepCtx = context.WithValue(stepCtx, stepIndexKey{}, index)
 
 	if err := handler.(StepHandler)(stepCtx, step, logger); err != nil {
 		return fmt.Errorf("executor: step %d (type %q): %w", index, name, err)

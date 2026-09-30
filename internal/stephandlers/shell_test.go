@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -260,4 +261,73 @@ func shellQuote(path string) string {
 		return `"` + path + `"`
 	}
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// recordingSink is an executor.LogSink that records the step output it is
+// given, so a test can assert the shell handler streamed a step's stdout and
+// stderr to the sink (F-02).
+type recordingSink struct {
+	mu     sync.Mutex
+	stdout []string
+	stderr []string
+}
+
+func (s *recordingSink) WriteStepOutput(stepIndex int, stream string, data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stepIndex != 0 {
+		return
+	}
+	switch stream {
+	case executor.StreamStdout:
+		s.stdout = append(s.stdout, string(data))
+	case executor.StreamStderr:
+		s.stderr = append(s.stderr, string(data))
+	}
+}
+
+// TestExecuteStreamsOutputToSink verifies that when the step's context carries
+// a LogSink, the shell handler captures the command's stdout and stderr and
+// streams them to the sink (attributed to the step), in addition to writing
+// them to the target's local streams.
+func TestExecuteStreamsOutputToSink(t *testing.T) {
+	sink := &recordingSink{}
+
+	var step *dbpb.JobStep
+	if runtime.GOOS == "windows" {
+		step = &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamShell:   stringParam("cmd"),
+			ParamArgs:    stringsParam([]string{"/c"}),
+			ParamCommand: stringParam(`echo out && echo err 1>&2`),
+		}}
+	} else {
+		step = &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamShell:   stringParam("sh"),
+			ParamArgs:    stringsParam([]string{"-c"}),
+			ParamCommand: stringParam(`echo out; echo err >&2`),
+		}}
+	}
+
+	ctx := executor.ContextWithLogSink(context.Background(), sink)
+	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if got := strings.Join(sink.stdout, ""); !strings.Contains(got, "out") {
+		t.Errorf("sink stdout = %q, want it to contain %q", got, "out")
+	}
+	if got := strings.Join(sink.stderr, ""); !strings.Contains(got, "err") {
+		t.Errorf("sink stderr = %q, want it to contain %q", got, "err")
+	}
+}
+
+// TestExecuteNoSinkStillRuns verifies that a job with no LogSink in the
+// context still runs (output is only written to the target's local streams).
+func TestExecuteNoSinkStillRuns(t *testing.T) {
+	step := shellStep(t, "echo hi")
+	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
 }

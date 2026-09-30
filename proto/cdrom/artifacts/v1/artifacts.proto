@@ -7,15 +7,31 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "cdrom/internal/gen/cdrom/artifacts/v1;artifactsv1";
 
-// Artifacts stores and retrieves job artifacts (files produced by job
-// execution).
+// Artifacts is a general-purpose, namespaced file store. It stores and
+// retrieves files of two kinds:
 //
-// Uploads and downloads are streamed so arbitrarily large artifacts do not
-// have to be buffered in memory on either side.
+//   - artifacts: immutable files (one per namespace/name); and
+//   - logs: append-only files that grow over time (so a log can be read while
+//     it is still being written and replayed in full afterwards).
+//
+// Every file lives in a *namespace*: an opaque scope string that groups
+// related files. The service is agnostic about what a namespace means — it is
+// up to the caller. For example, a job's artifacts and logs use the job's id
+// as the namespace, while a deployed release's artifacts might use a release
+// identifier. This keeps the store general enough to hold both job-owned
+// artifacts and deployed/published artifacts.
+//
+// Uploads and downloads are streamed so arbitrarily large files do not have to
+// be buffered in memory on either side.
+//
+// Job logs are stored as one file per step (named step-<n>.log) plus a
+// combined file (job.log) that concatenates every step's output in order.
+// Logs are *appended* to as a step progresses, so a log can be read while the
+// job is still running (tail) and replayed in full after it finishes.
 service Artifacts {
   // UploadArtifact is a client stream. The first chunk must carry metadata
-  // (job_id and name); subsequent chunks carry data. The server returns the
-  // stored Artifact once the stream ends.
+  // (namespace and name); subsequent chunks carry data. The server returns
+  // the stored Artifact once the stream ends.
   rpc UploadArtifact(stream ArtifactChunk) returns (UploadArtifactResponse);
 
   // DownloadArtifact is a server stream. The first chunk carries metadata;
@@ -25,12 +41,30 @@ service Artifacts {
   rpc GetArtifact(GetArtifactRequest) returns (Artifact);
   rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
   rpc DeleteArtifact(DeleteArtifactRequest) returns (google.protobuf.Empty);
+
+  // AppendLog appends data to a log file. The first chunk must carry metadata
+  // (namespace and name); subsequent chunks carry data. The server returns
+  // the updated Artifact (size, modified time) once the stream ends.
+  // Appending to a log that does not exist creates it.
+  rpc AppendLog(stream ArtifactChunk) returns (UploadArtifactResponse);
+
+  // DownloadLog is a server stream of a log: the first chunk carries metadata,
+  // all chunks carry data. Reading a log that is still being written returns
+  // the output captured so far.
+  rpc DownloadLog(DownloadLogRequest) returns (stream ArtifactChunk);
+
+  // GetLog returns the metadata of a log file.
+  rpc GetLog(GetLogRequest) returns (Artifact);
+
+  // ListLogs lists the log files in a namespace.
+  rpc ListLogs(ListLogsRequest) returns (ListLogsResponse);
 }
 
 message Artifact {
-  // job_id identifies the job that produced the artifact.
-  string job_id = 1;
-  // name is the artifact file name within the job.
+  // namespace is the opaque scope the file belongs to (e.g. a job id for a
+  // job's artifacts, or a release identifier for a deployed artifact).
+  string namespace = 1;
+  // name is the file name within the namespace.
   string name = 2;
   int64 size = 3;
   string content_type = 4;
@@ -49,18 +83,18 @@ message UploadArtifactResponse {
 }
 
 message DownloadArtifactRequest {
-  string job_id = 1;
+  string namespace = 1;
   string name = 2;
 }
 
 message GetArtifactRequest {
-  string job_id = 1;
+  string namespace = 1;
   string name = 2;
 }
 
 message ListArtifactsRequest {
-  // job_id of "" lists artifacts of all jobs.
-  string job_id = 1;
+  // namespace of "" lists artifacts of all namespaces.
+  string namespace = 1;
 }
 
 message ListArtifactsResponse {
@@ -68,6 +102,32 @@ message ListArtifactsResponse {
 }
 
 message DeleteArtifactRequest {
-  string job_id = 1;
+  string namespace = 1;
   string name = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------
+
+// DownloadLogRequest addresses a log file. name is the log file name (e.g.
+// "step-0.log" for a step's output, or "job.log" for the combined output of
+// the whole job).
+message DownloadLogRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+message GetLogRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+message ListLogsRequest {
+  // namespace of "" lists the logs of all namespaces.
+  string namespace = 1;
+}
+
+message ListLogsResponse {
+  repeated Artifact logs = 1;
 }

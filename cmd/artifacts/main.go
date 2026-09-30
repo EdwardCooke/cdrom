@@ -1,7 +1,9 @@
 // Command artifacts is the Cdrom artifacts service.
 //
-// It stores and retrieves job artifacts on the local filesystem and exposes
-// them over gRPC with streamed uploads and downloads.
+// It stores and retrieves job artifacts and job logs and exposes them over
+// gRPC with streamed uploads and downloads. The storage backend is
+// configurable (artifacts_store / CDROM_ARTIFACTS_STORE); the built-in
+// default is the local filesystem.
 package main
 
 import (
@@ -35,11 +37,12 @@ func main() {
 		addr = config.DefaultArtifactsAddress
 	}
 
-	srvImpl, err := artifacts.NewServer(cfg.ArtifactsRoot)
+	store, err := artifacts.NewStore(artifacts.StoreKind(cfg.ArtifactsStore), cfg.ArtifactsRoot)
 	if err != nil {
-		logger.Error("artifacts: init", "err", err)
+		logger.Error("artifacts: init store", "store", cfg.ArtifactsStore, "err", err)
 		os.Exit(1)
 	}
+	srvImpl := artifacts.NewServer(store)
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -55,7 +58,7 @@ func main() {
 	srv := grpc.NewServer(grpc.Creds(creds))
 	artifactspb.RegisterArtifactsServer(srv, srvImpl)
 
-	logger.Info("cdrom artifacts service starting", "addr", addr, "root", cfg.ArtifactsRoot)
+	logger.Info("cdrom artifacts service starting", "addr", addr, "store", cfg.ArtifactsStore, "root", cfg.ArtifactsRoot)
 	if err := grpcutil.Serve(lis, srv, logger); err != nil {
 		logger.Error("serve", "err", err)
 		os.Exit(1)

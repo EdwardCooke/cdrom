@@ -15,13 +15,27 @@ type Event struct {
 	Worker string `json:"worker,omitempty"`
 	Group  string `json:"group,omitempty"`
 	Action string `json:"action,omitempty"`
-	At     int64  `json:"at"`
+	// StepIndex is the 0-based index of the step a job_log event belongs to.
+	StepIndex int32 `json:"step_index,omitempty"`
+	// Stream is the output stream a job_log event came from ("stdout" or
+	// "stderr").
+	Stream string `json:"stream,omitempty"`
+	// Data is the log text a job_log event carries.
+	Data string `json:"data,omitempty"`
+	At   int64  `json:"at"`
 }
 
 // Event type constants.
 const (
 	EventJobStatus = "job_status"
 	EventWorker    = "worker"
+	EventJobLog    = "job_log"
+)
+
+// Job log stream names (the Event.Stream values for job_log events).
+const (
+	JobLogStreamStdout = "stdout"
+	JobLogStreamStderr = "stderr"
 )
 
 // Worker action constants.

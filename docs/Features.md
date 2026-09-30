@@ -28,12 +28,12 @@ Before adding features, note the baseline that is already built and working:
 | Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors |
 | Job tokens | Minted per job by the API (via IdP), audience exchange, verified on status/artifact RPCs |
 | UI auth | OIDC authorization-code + PKCE, signed session cookie |
-| Artifacts | Streamed upload/download, per-job, proxied through the API |
-| Live events | WebSocket `/api/ws` — `job_status` and `worker` events |
+| Artifacts | General-purpose, namespaced file store (streamed upload/download); jobs scope files by job id, other callers (e.g. deployed releases) use their own namespaces; proxied through the API |
+| Live events | WebSocket `/api/ws` — `job_status`, `worker`, and `job_log` events |
+| Job logs | Streamed from the target to the API (`StreamJobLogs`), persisted to the artifacts service (one file per step + `job.log`), fanned out to the UI as `job_log` events, and retrievable via `GET /api/jobs/{id}/logs[/{name}]` |
 | Transport | gRPC everywhere, optional mutual TLS |
 
-The biggest remaining gaps: **a job's execution is not observable** (no log
-streaming, F-02) and **jobs are not orchestrated** (no runs, DAG, or
+The biggest remaining gap: **jobs are not orchestrated** (no runs, DAG, or
 triggers). Everything below builds toward orchestrating real jobs, then
 governing them.
 
@@ -115,8 +115,8 @@ missing piece.
   `args` (list param), and `shell` (string param) from the step's `params`.
   The command is executed directly by the target OS — no implicit shell. Steps
   needing shell behavior invoke a shell explicitly (`sh -c ...` / `cmd /c ...`).
-  Step stdout/stderr are inherited from the target (local logging); streaming
-  to the API is F-02.
+  Step stdout/stderr are inherited from the target (local logging) and, when a
+  log sink is present, also streamed to the API (F-02).
 - **Shell override:** a step may set the `shell` param to run through a
   user-chosen interpreter; the target executes `<shell> <args> <command>`
   (e.g. `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,
@@ -145,13 +145,71 @@ local to the worker/agent and there is no central view.
   logs survive past the run.
 - `internal/worker`, `internal/agent` — capture step output and stream it.
 - `internal/api/ws.go` — new event type; UI consumes it.
-
+- `proto/cdrom/artifacts/v1/artifacts.proto` - new store, retrieve and append to log
+  endpoints.
+- `internal/artifacts/filesystem/` - filesystem based implementation for storing and
+  updating artifacts on the local file system. Currently focused on logs, will focus
+  on package storage later.
+- `cmd/artifacts/main.go` - wire up the filesystem based artifact implementation.
+  Implementation type should be configurable to allow for other builtin implementations
+  example: S3 or Azure Blob.
 **Acceptance criteria.**
-- [ ] While a job runs, its stdout/stderr appears in the UI within ~1s.
-- [ ] Logs are attributed to the correct step.
-- [ ] After a job finishes, its full log can still be fetched (replay).
-- [ ] A slow UI client does not block the worker (backpressure/drop policy
+- [x] While a job runs, its stdout/stderr appears in the UI within ~1s.
+- [x] Logs are attributed to the correct step.
+- [x] After a job finishes, its full log can still be fetched (replay).
+- [x] A slow UI client does not block the worker (backpressure/drop policy
       defined, consistent with the existing EventHub drop-and-resync behavior).
+- [x] The step logs should be stored via the artifact service and updated as
+      the step progresses.
+- [x] Ability to retrieve the logs for a particular step and job from the api server.
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **Transport:** a new `StreamJobLogs` client-stream RPC on the API
+  (`proto/cdrom/api/v1/api.proto`). The target opens one stream per job and
+  sends a `JobLogChunk` per output chunk; the first chunk of a step's output
+  carries `JobLogMetadata` (job_id, step_index, stream) and the rest carry
+  data. The API verifies the caller's job token once, up front.
+- **Storage:** logs are stored in the **artifacts service** (not the DB), as
+  files under `<root>/<namespace>/logs/` where the namespace is the job's id —
+  one file per step (`step-<n>.log`) plus a combined `job.log`. New artifacts
+  RPCs `AppendLog` (client stream, append-or-create), `DownloadLog` (server
+  stream), `GetLog`, and `ListLogs` back them. The artifacts service is a
+  general-purpose, namespaced file store: its store is an interface
+  (`internal/services/artifacts/store.go`) with a filesystem implementation
+  (`filesystem.go`); the store kind is configurable (`artifacts_store`,
+  `CDROM_ARTIFACTS_STORE`, default `filesystem`) so S3 / Azure Blob can be
+  added later without touching the server.
+- **Capture:** the executor takes an optional `executor.LogSink`
+  (`WriteStepOutput(stepIndex, stream, data)`) via the context. The built-in
+  shell handler tees each step's stdout/stderr to the target's local streams
+  *and* to the sink when one is present (via `StdoutPipe`/`StderrPipe`); with
+  no sink it inherits `os.Stdout`/`os.Stderr` as before, so local logging is
+  unchanged.
+- **Sink & backpressure:** `internal/logstream.Sink` buffers chunks in a
+  bounded channel (1024) drained by a background goroutine to the gRPC
+  stream. When the queue is full (the API is slower than the command produces
+  output) chunks are **dropped** — the sink never blocks or fails the job.
+  This is consistent with the EventHub drop-and-resync behavior: the
+  persisted log (written by the API from the chunks it did receive) is the
+  source of truth for replay, and a slow UI client resynchronizes from it on
+  reconnect.
+- **Resilience (outages & redeploys):** both sides ride out a peer going away
+  (a pod restart or scale event in Kubernetes). *Target side:* if the API's
+  `StreamJobLogs` stream breaks, the sink reopens a fresh stream (the gRPC
+  channel reconnects on its own) and resumes; chunks queued while the API was
+  down are resent, and if the API is still down when the queue fills they are
+  dropped. *API side:* if the artifacts service is unreachable, the API
+  retries persisting each chunk (`appendLogWithRetry`) and, if the outage
+  outlasts the retry budget, drops the chunk and continues — an artifacts
+  outage never tears down a target's log stream. The gRPC connections
+  themselves (API↔artifacts, target↔API) are long-lived `*grpc.ClientConn`s
+  that reconnect transparently.
+- **Fan-out:** the API publishes a `job_log` event (job id, step index,
+  stream, data) on the `EventHub` for each chunk, so the UI can tail a
+  running job's logs over the existing `/api/ws` WebSocket.
+- **Retrieval:** `GET /api/jobs/{id}/logs` lists a job's log files and
+  `GET /api/jobs/{id}/logs/{name}` streams one (a step's output or the
+  combined `job.log`) — both proxied through the artifacts service.
 
 ### F-03 · Job timeouts
 
@@ -555,7 +613,7 @@ environments deploy the *same* artifact rather than rebuilding.
 
 **Scope.**
 - `proto/cdrom/artifacts/v1/artifacts.proto` — a promote/copy operation
-  (source job → target job/environment).
+  (source namespace → target namespace/environment).
 - `internal/services/artifacts` — implement the copy (streamed).
 - `internal/api/server.go` — `POST /api/artifacts/promote`.
 - Ties to F-17 (environments) and F-07 (runs).
@@ -652,7 +710,7 @@ The phases are ordered so each builds on the last. A pragmatic first cut:
 Tick each feature off as it lands.
 
 - [x] F-01 Job execution spec
-- [ ] F-02 Job log streaming
+- [x] F-02 Job log streaming
 - [ ] F-03 Job timeouts
 - [ ] F-04 Retry & re-run
 - [ ] F-05 Cancellation propagation

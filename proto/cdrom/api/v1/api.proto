@@ -31,6 +31,16 @@ service API {
   rpc GetJob(GetJobRequest) returns (Job);
   rpc ReportJobStatus(ReportJobStatusRequest) returns (Job);
 
+  // StreamJobLogs is a client stream: an execution target (worker or agent)
+  // opens it at the start of a job and sends a JobLogChunk for each chunk of
+  // step output (stdout/stderr). The first chunk of each step carries
+  // metadata (job_id, step_index, stream); subsequent chunks carry data. The
+  // API persists the output to the artifacts service (one file per step plus
+  // a combined job.log) and fans it out to the UI over the WebSocket event
+  // hub as a job_log event. When job-token auth is enabled the caller must
+  // present a job token scoped to the job.
+  rpc StreamJobLogs(stream JobLogChunk) returns (StreamJobLogsResponse);
+
   // ExchangeJobToken lets a running job request a new job token with a
   // different audience (e.g. for an outside resource the job needs to call).
   // The caller presents its current job token; the API mints a replacement
@@ -124,6 +134,40 @@ message ReportJobStatusRequest {
   cdrom.db.v1.JobStatus status = 2;
   google.protobuf.Timestamp started_at = 3;
   google.protobuf.Timestamp finished_at = 4;
+}
+
+// JobLogStream names which output stream a chunk of log data belongs to.
+enum JobLogStream {
+  JOB_LOG_STREAM_UNSPECIFIED = 0;
+  // JOB_LOG_STREAM_STDOUT is the step's standard output.
+  JOB_LOG_STREAM_STDOUT = 1;
+  // JOB_LOG_STREAM_STDERR is the step's standard error.
+  JOB_LOG_STREAM_STDERR = 2;
+}
+
+// JobLogMetadata identifies the log a chunk of data belongs to. It is set on
+// the first chunk of each step's output (and on the first chunk of the
+// stream); it is empty on all other chunks.
+message JobLogMetadata {
+  // job_id is the job the log belongs to.
+  int64 job_id = 1;
+  // step_index is the 0-based index of the step in the job's spec.
+  int32 step_index = 2;
+  // stream is which output (stdout or stderr) the data came from.
+  JobLogStream stream = 3;
+}
+
+// JobLogChunk is a single unit of streamed job output. The first chunk of a
+// step's output carries metadata; all chunks carry data.
+message JobLogChunk {
+  JobLogMetadata metadata = 1;
+  bytes data = 2;
+}
+
+message StreamJobLogsResponse {
+  // received is the total number of log bytes the API has persisted for the
+  // job so far.
+  int64 received = 1;
 }
 
 message DispatchJobRequest {

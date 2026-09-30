@@ -30,6 +30,11 @@ db:
 # Filesystem root for artifact storage (used by the artifacts service).
 #artifacts_root: artifacts
 
+# Storage backend for the artifacts service (artifacts and job logs). The
+# built-in default is "filesystem"; "s3" and "azureblob" are reserved for
+# future built-in implementations.
+#artifacts_store: filesystem
+
 # Worker identity (used by the worker).
 #worker_name: worker-1
 #worker_group: default

@@ -1,27 +1,15 @@
-// Package artifacts implements the cdrom.artifacts.v1.Artifacts gRPC
-// service: storage and retrieval of job artifacts on the local filesystem.
-//
-// Artifacts are stored as files under a root directory, one subdirectory
-// per job: <root>/<job_id>/<name>. Metadata (size, creation time, content
-// type) is derived from the file itself, so the service is stateless and
-// portable across Windows and Linux.
+// This file implements the Artifacts gRPC service: it handles the
+// streaming/chunking protocol and delegates the actual I/O to a Store.
 package artifacts
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"mime"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 )
@@ -29,52 +17,116 @@ import (
 // maxChunkSize bounds a single streamed chunk to keep memory bounded.
 const maxChunkSize = 4 << 20 // 4 MiB
 
-// safeSegment matches a single path segment: no separators, no "..".
-var safeSegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-
-// Server implements the Artifacts gRPC service over a filesystem root.
+// Server implements the Artifacts gRPC service over a Store.
 type Server struct {
 	artifactspb.UnimplementedArtifactsServer
-	root string
+	store Store
 }
 
-// NewServer creates an Artifacts gRPC service storing artifacts under root.
-func NewServer(root string) (*Server, error) {
-	if root == "" {
-		return nil, fmt.Errorf("artifacts: root must not be empty")
-	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, fmt.Errorf("artifacts: create root: %w", err)
-	}
-	return &Server{root: root}, nil
+// NewServer creates an Artifacts gRPC service over the given store.
+func NewServer(store Store) *Server {
+	return &Server{store: store}
 }
+
+// NewFilesystemServer creates an Artifacts gRPC service backed by a local
+// filesystem store rooted at root.
+func NewFilesystemServer(root string) (*Server, error) {
+	store, err := NewFilesystemStore(root)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{store: store}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts
+// ---------------------------------------------------------------------------
 
 // UploadArtifact consumes a client stream of chunks. The first chunk must
-// carry metadata (job_id and name); the rest carry data.
+// carry metadata (namespace and name); the rest carry data. The data is
+// written to the store as it arrives (streamed, not buffered in memory).
 func (s *Server) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) error {
 	firstChunk, err := stream.Recv()
 	if err != nil {
 		return grpcErr(err)
 	}
 	metadata := firstChunk.GetMetadata()
-	if metadata == nil || metadata.GetJobId() == "" || metadata.GetName() == "" {
-		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with job_id and name")
+	if metadata == nil || metadata.GetNamespace() == "" || metadata.GetName() == "" {
+		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
 	}
-	path, err := s.artifactPath(metadata.GetJobId(), metadata.GetName())
+	reader := &streamReader{stream: stream, first: firstChunk}
+	artifact, err := s.store.UploadArtifact(stream.Context(), metadata.GetNamespace(), metadata.GetName(), reader)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return status.Errorf(codes.Internal, "artifacts: mkdir: %v", err)
-	}
-	file, err := os.Create(path)
-	if err != nil {
-		return status.Errorf(codes.Internal, "artifacts: create: %v", err)
-	}
-	defer file.Close()
+	return stream.SendAndClose(&artifactspb.UploadArtifactResponse{Artifact: artifact})
+}
 
-	if _, err := file.Write(firstChunk.GetData()); err != nil {
-		return status.Errorf(codes.Internal, "artifacts: write: %v", err)
+// DownloadArtifact streams an artifact back: the first chunk carries
+// metadata, subsequent chunks carry data.
+func (s *Server) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
+	namespace, name := req.GetNamespace(), req.GetName()
+	if namespace == "" || name == "" {
+		return status.Error(codes.InvalidArgument, "namespace and name are required")
+	}
+	artifact, reader, err := s.store.DownloadArtifact(stream.Context(), namespace, name)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	if err := stream.Send(&artifactspb.ArtifactChunk{Metadata: artifact}); err != nil {
+		return grpcErr(err)
+	}
+	return streamFromReader(stream, reader)
+}
+
+func (s *Server) GetArtifact(ctx context.Context, req *artifactspb.GetArtifactRequest) (*artifactspb.Artifact, error) {
+	if req.GetNamespace() == "" || req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace and name are required")
+	}
+	return s.store.GetArtifact(ctx, req.GetNamespace(), req.GetName())
+}
+
+func (s *Server) ListArtifacts(ctx context.Context, req *artifactspb.ListArtifactsRequest) (*artifactspb.ListArtifactsResponse, error) {
+	artifacts, err := s.store.ListArtifacts(ctx, req.GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+	return &artifactspb.ListArtifactsResponse{Artifacts: artifacts}, nil
+}
+
+func (s *Server) DeleteArtifact(ctx context.Context, req *artifactspb.DeleteArtifactRequest) (*emptypb.Empty, error) {
+	if req.GetNamespace() == "" || req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace and name are required")
+	}
+	if err := s.store.DeleteArtifact(ctx, req.GetNamespace(), req.GetName()); err != nil {
+		return nil, err
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------
+
+// AppendLog consumes a client stream of chunks and appends them to a log.
+// The first chunk must carry metadata (namespace and name); the rest carry
+// data. The server returns the updated log's metadata once the stream ends.
+func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) error {
+	firstChunk, err := stream.Recv()
+	if err != nil {
+		return grpcErr(err)
+	}
+	metadata := firstChunk.GetMetadata()
+	if metadata == nil || metadata.GetNamespace() == "" || metadata.GetName() == "" {
+		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
+	}
+	var artifact *artifactspb.Artifact
+	if len(firstChunk.GetData()) > 0 {
+		artifact, err = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), firstChunk.GetData())
+		if err != nil {
+			return err
+		}
 	}
 	for {
 		chunk, err := stream.Recv()
@@ -87,50 +139,114 @@ func (s *Server) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.Ar
 		if size := len(chunk.GetData()); size > maxChunkSize {
 			return status.Errorf(codes.InvalidArgument, "chunk of %d bytes exceeds limit of %d", size, maxChunkSize)
 		}
-		if _, err := file.Write(chunk.GetData()); err != nil {
-			return status.Errorf(codes.Internal, "artifacts: write: %v", err)
+		if len(chunk.GetData()) == 0 {
+			continue
+		}
+		artifact, err = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), chunk.GetData())
+		if err != nil {
+			return err
 		}
 	}
-	if err := file.Close(); err != nil {
-		return status.Errorf(codes.Internal, "artifacts: close: %v", err)
-	}
-	artifact, err := s.stat(metadata.GetJobId(), metadata.GetName())
-	if err != nil {
-		return err
+	if artifact == nil {
+		// No data was sent; report the (possibly newly created) log's state.
+		artifact, err = s.store.GetLog(stream.Context(), metadata.GetNamespace(), metadata.GetName())
+		if err != nil {
+			return err
+		}
 	}
 	return stream.SendAndClose(&artifactspb.UploadArtifactResponse{Artifact: artifact})
 }
 
-// DownloadArtifact streams an artifact back: the first chunk carries
-// metadata, subsequent chunks carry data.
-func (s *Server) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream artifactspb.Artifacts_DownloadArtifactServer) error {
-	jobID, name := req.GetJobId(), req.GetName()
-	if jobID == "" || name == "" {
-		return status.Error(codes.InvalidArgument, "job_id and name are required")
+// DownloadLog streams a log back: the first chunk carries metadata,
+// subsequent chunks carry data. Reading a log that is still being written
+// returns the output captured so far.
+func (s *Server) DownloadLog(req *artifactspb.DownloadLogRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
+	namespace, name := req.GetNamespace(), req.GetName()
+	if namespace == "" || name == "" {
+		return status.Error(codes.InvalidArgument, "namespace and name are required")
 	}
-	path, err := s.artifactPath(jobID, name)
+	artifact, reader, err := s.store.DownloadLog(stream.Context(), namespace, name)
 	if err != nil {
 		return err
 	}
-	artifact, err := s.stat(jobID, name)
-	if err != nil {
-		return err
-	}
+	defer reader.Close()
 	if err := stream.Send(&artifactspb.ArtifactChunk{Metadata: artifact}); err != nil {
 		return grpcErr(err)
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return status.Errorf(codes.Internal, "artifacts: open: %v", err)
-	}
-	defer file.Close()
+	return streamFromReader(stream, reader)
+}
 
+func (s *Server) GetLog(ctx context.Context, req *artifactspb.GetLogRequest) (*artifactspb.Artifact, error) {
+	if req.GetNamespace() == "" || req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "namespace and name are required")
+	}
+	return s.store.GetLog(ctx, req.GetNamespace(), req.GetName())
+}
+
+func (s *Server) ListLogs(ctx context.Context, req *artifactspb.ListLogsRequest) (*artifactspb.ListLogsResponse, error) {
+	logs, err := s.store.ListLogs(ctx, req.GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+	return &artifactspb.ListLogsResponse{Logs: logs}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// streamReader adapts a client-streaming gRPC stream to an io.Reader so the
+// store can consume the upload as it arrives (streamed, not buffered). The
+// first chunk (already received) is served before subsequent Recv calls.
+type streamReader struct {
+	stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]
+	first  *artifactspb.ArtifactChunk
+	buf    []byte
+}
+
+func (r *streamReader) Read(p []byte) (int, error) {
+	if len(r.buf) == 0 {
+		chunk, err := r.next()
+		if err != nil {
+			return 0, err
+		}
+		if len(chunk) == 0 {
+			return 0, io.EOF
+		}
+		r.buf = chunk
+	}
+	n := copy(p, r.buf)
+	r.buf = r.buf[n:]
+	return n, nil
+}
+
+// next returns the next chunk's data, or (nil, io.EOF) at the end of the
+// stream.
+func (r *streamReader) next() ([]byte, error) {
+	if r.first != nil {
+		chunk := r.first
+		r.first = nil
+		return chunk.GetData(), nil
+	}
+	chunk, err := r.stream.Recv()
+	if err == io.EOF {
+		return nil, io.EOF
+	}
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	return chunk.GetData(), nil
+}
+
+// streamFromReader reads from reader in bounded chunks and sends each as a
+// data chunk on stream.
+func streamFromReader(stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk], reader io.Reader) error {
 	buffer := make([]byte, maxChunkSize)
 	for {
-		read, err := file.Read(buffer)
+		read, err := reader.Read(buffer)
 		if read > 0 {
-			if err := stream.Send(&artifactspb.ArtifactChunk{Data: append([]byte(nil), buffer[:read]...)}); err != nil {
-				return grpcErr(err)
+			if sendErr := stream.Send(&artifactspb.ArtifactChunk{Data: append([]byte(nil), buffer[:read]...)}); sendErr != nil {
+				return grpcErr(sendErr)
 			}
 		}
 		if err == io.EOF {
@@ -140,126 +256,6 @@ func (s *Server) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stre
 			return status.Errorf(codes.Internal, "artifacts: read: %v", err)
 		}
 	}
-}
-
-func (s *Server) GetArtifact(_ context.Context, req *artifactspb.GetArtifactRequest) (*artifactspb.Artifact, error) {
-	if req.GetJobId() == "" || req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "job_id and name are required")
-	}
-	return s.stat(req.GetJobId(), req.GetName())
-}
-
-func (s *Server) ListArtifacts(_ context.Context, req *artifactspb.ListArtifactsRequest) (*artifactspb.ListArtifactsResponse, error) {
-	response := &artifactspb.ListArtifactsResponse{}
-	baseDir := s.root
-	if req.GetJobId() != "" {
-		jobDir, err := s.artifactPath(req.GetJobId(), "")
-		if err != nil {
-			return nil, err
-		}
-		baseDir = jobDir
-	}
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return response, nil
-		}
-		return nil, status.Errorf(codes.Internal, "artifacts: list: %v", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			if req.GetJobId() != "" {
-				continue // a job directory contains files, not subdirectories
-			}
-			jobID := entry.Name()
-			files, err := os.ReadDir(filepath.Join(baseDir, jobID))
-			if err != nil {
-				return nil, status.Errorf(codes.Internal, "artifacts: list: %v", err)
-			}
-			for _, file := range files {
-				if file.IsDir() {
-					continue
-				}
-				if artifact, err := s.stat(jobID, file.Name()); err == nil {
-					response.Artifacts = append(response.Artifacts, artifact)
-				}
-			}
-			continue
-		}
-		if req.GetJobId() == "" {
-			continue
-		}
-		if artifact, err := s.stat(req.GetJobId(), entry.Name()); err == nil {
-			response.Artifacts = append(response.Artifacts, artifact)
-		}
-	}
-	return response, nil
-}
-
-func (s *Server) DeleteArtifact(_ context.Context, req *artifactspb.DeleteArtifactRequest) (*emptypb.Empty, error) {
-	if req.GetJobId() == "" || req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "job_id and name are required")
-	}
-	path, err := s.artifactPath(req.GetJobId(), req.GetName())
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Remove(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, status.Error(codes.NotFound, "artifact not found")
-		}
-		return nil, status.Errorf(codes.Internal, "artifacts: delete: %v", err)
-	}
-	return &emptypb.Empty{}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// artifactPath resolves and validates the on-disk path for an artifact.
-// name may be empty to address the job directory itself.
-func (s *Server) artifactPath(jobID, name string) (string, error) {
-	if !safeSegment.MatchString(jobID) {
-		return "", status.Error(codes.InvalidArgument, "invalid job_id")
-	}
-	if name != "" && !safeSegment.MatchString(name) {
-		return "", status.Error(codes.InvalidArgument, "invalid artifact name")
-	}
-	path := filepath.Join(s.root, jobID)
-	if name != "" {
-		path = filepath.Join(path, name)
-	}
-	// Defense in depth: the resolved path must stay inside the root.
-	root := filepath.Clean(s.root)
-	resolved := filepath.Clean(path)
-	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
-		return "", status.Error(codes.InvalidArgument, "path escapes artifact root")
-	}
-	return resolved, nil
-}
-
-// stat derives artifact metadata from the file on disk.
-func (s *Server) stat(jobID, name string) (*artifactspb.Artifact, error) {
-	path, err := s.artifactPath(jobID, name)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, status.Error(codes.NotFound, "artifact not found")
-		}
-		return nil, status.Errorf(codes.Internal, "artifacts: stat: %v", err)
-	}
-	contentType := mime.TypeByExtension(filepath.Ext(name))
-	return &artifactspb.Artifact{
-		JobId:       jobID,
-		Name:        name,
-		Size:        info.Size(),
-		ContentType: contentType,
-		CreatedAt:   timestamppb.New(info.ModTime()),
-	}, nil
 }
 
 func grpcErr(err error) error {

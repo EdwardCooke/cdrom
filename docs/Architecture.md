@@ -135,6 +135,7 @@ The gRPC surface exposes these RPCs (see `proto/cdrom/api/v1/api.proto`):
 | Token exchange | `ExchangeJobToken` | workers, agents |
 | Dispatch | `DispatchJob` | scheduler |
 | Artifact proxy | `UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts`, `DeleteArtifact` | workers, agents |
+| Job logs | `StreamJobLogs` (client stream) | workers, agents |
 
 ---
 
@@ -180,8 +181,19 @@ flowchart TB
   holds **no durable state of its own**; all pipelines and jobs are persisted
   through the Database service. When a job targets a worker group it pushes it
   to the API (`DispatchJob`), which fans it out to the live workers.
-- **Artifacts** (`cmd/artifacts`) — job artifact storage and retrieval,
-  filesystem-backed with streamed uploads/downloads.
+- **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
+  store**, filesystem-backed with streamed uploads/downloads. Every file lives
+  in an opaque *namespace* that groups related files; the service is agnostic
+  about what a namespace means. A job's artifacts and logs use the job's id as
+  the namespace, while a deployed release's artifacts might use a release
+  identifier — so the same store holds both job-owned and deployed/published
+  artifacts. It also provides **job-log storage**: the API persists a job's
+  streamed step output here (one file per step, `step-<n>.log`, plus a
+  combined `job.log`, under `<root>/<namespace>/logs/` where the namespace is
+  the job id) via the `AppendLog`/`DownloadLog`/`GetLog`/`ListLogs` RPCs. The
+  store is an interface with a filesystem implementation; the store kind is
+  configurable (`artifacts_store` / `CDROM_ARTIFACTS_STORE`, default
+  `filesystem`) so S3 / Azure Blob can be added later.
 - **IdP** (`cmd/idp`) — a local OIDC identity provider that acts as a JWT
   issuer for the API's OIDC authentication. It is an **HTTP** service (not
   gRPC) serving the discovery doc, JWKS, authorization, and token endpoints,
@@ -292,10 +304,12 @@ reference it rather than redefining it.
   and Linux (no `&&`, pipes, globbing, or `$VAR` expansion). A step that needs
   shell behavior invokes a shell explicitly (`sh -c ...` on Linux, `cmd /c ...`
   on Windows). Step stdout/stderr are inherited from the target's own
-  stdout/stderr (local logging); streaming output to the API is a later
-  concern (F-02). A per-step `timeout` is enforced by the target via a derived
-  context; a scheduler-side watchdog for dead targets is a later concern
-  (F-03).
+  stdout/stderr (local logging) and, when the target has a log sink, also
+  streamed to the API in near-real-time (F-02, `internal/logstream`); the API
+  persists the output to the artifacts service and fans it out to the UI as
+  `job_log` events. A per-step `timeout` is enforced by the target via a
+  derived context; a scheduler-side watchdog for dead targets is a later
+  concern (F-03).
 - **Shell override (shell handler).** A step may set the `shell` param to run
   through a user-chosen interpreter instead of executing `command` directly.
   When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -437,11 +451,13 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   audience. Any audience is accepted — the IdP stamps whatever is requested.
 - **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs
   (`UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts` with a
-  `job_id`, `DeleteArtifact`) require a `Bearer <token>` in the gRPC
+  `namespace`, `DeleteArtifact`) require a `Bearer <token>` in the gRPC
   `authorization` metadata. The API verifies the token against the IdP's JWKS
   (OIDC discovery against `grpc_auth.idp_address`), checks that one of the
   configured audiences is present, and rejects the call unless the token's
-  `job_id` matches the job the call targets (missing/invalid token →
+  `job_id` matches the job the call targets — for artifact RPCs the namespace
+  is parsed back to a job id (a job's artifacts and logs use the job's id as
+  the namespace) before the check (missing/invalid token →
   `Unauthenticated`, wrong job → `PermissionDenied`). Workers and agents
   present the token via `grpcutil.WithBearerToken`.
 
@@ -478,10 +494,22 @@ sequenceDiagram
 - A job's **execution spec** is persisted on the `Job` row as a JSON document
   (GORM `serializer:json` on a `text` column), so the spec snapshot survives
   across the gRPC boundary and is identical on every execution target.
-- **Artifacts** are stored by the Artifacts service on the filesystem under a
-  configured root. Uploads and downloads are **streamed** (chunked) and are
-  **proxied through the API** so execution targets never talk to the artifacts
-  service directly.
+- **Artifacts** are stored by the Artifacts service — a general-purpose,
+  **namespaced file store** — on the filesystem under a configured root. Every
+  file lives in an opaque *namespace* that groups related files (a job's
+  artifacts and logs use the job's id; a deployed release's artifacts might
+  use a release identifier). Uploads and downloads are **streamed** (chunked)
+  and are **proxied through the API** so execution targets never talk to the
+  artifacts service directly.
+- **Job logs** are stored by the same Artifacts service, under
+  `<root>/<namespace>/logs/` where the namespace is the job's id (one file per
+  step, `step-<n>.log`, plus a combined `job.log`). Execution targets stream a
+  job's step output to the API (`StreamJobLogs`); the API appends each chunk to
+  the per-step and combined logs via the artifacts service's `AppendLog` RPC
+  and fans the output out to
+  the UI as `job_log` events. Finished logs are replayable:
+  `GET /api/jobs/{id}/logs` lists a job's log files and
+  `GET /api/jobs/{id}/logs/{name}` streams one.
 
 ```mermaid
 flowchart LR
@@ -546,21 +574,26 @@ cmd/
   agent/      ephemeral Kubernetes agent entrypoint
 internal/
   api/        API/controller layer: HTTP routing + gRPC control-plane server
-              (worker hub, artifact proxy, event hub + /api/ws WebSocket, job-token auth)
+              (worker hub, artifact proxy, StreamJobLogs persistence + job_log
+              fan-out, event hub + /api/ws WebSocket, job-token auth)
   auth/       OIDC authentication (provider, PKCE, signed session cookie, middleware)
   config/     shared configuration loading for all binaries
   models/     GORM entities (single source of truth for the schema)
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)
   grpcutil/   shared gRPC plumbing (client dial, serve-until-signal, TLS credentials)
   logging/    centralized logging (stdout or CDROM_LOG_FILE)
+  logstream/  executor.LogSink that streams a job's step output to the API's
+              StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
   executor/   shared job-step executor: the generic dispatch engine (selects a
-              StepHandler by step type, enforces per-step timeout; used by worker + agent)
+              StepHandler by step type, enforces per-step timeout, carries an
+              optional LogSink in the context; used by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
-              executor.DefaultType); a target or plugin adds more via
-              executor.RegisterStepType
+              executor.DefaultType, tees step output to a LogSink when present);
+              a target or plugin adds more via executor.RegisterStepType
   services/
     data/     pipeline/job data service
-    artifacts/ job artifact storage & retrieval (gRPC server)
+    artifacts/ general namespaced file store (artifacts + job logs; gRPC server;
+              store interface with a filesystem implementation)
     scheduler/ job lifecycle + dispatch (gRPC server)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation

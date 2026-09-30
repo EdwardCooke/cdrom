@@ -69,6 +69,12 @@ type Config struct {
 	// the artifacts service).
 	ArtifactsRoot string
 
+	// ArtifactsStore selects the artifacts service's storage backend
+	// (e.g. "filesystem", the default; "s3" and "azureblob" are reserved
+	// for future built-in implementations). Only the artifacts service uses
+	// it; other binaries ignore it.
+	ArtifactsStore string
+
 	// WorkerName and WorkerGroup identify a worker process.
 	WorkerName  string
 	WorkerGroup string
@@ -298,9 +304,8 @@ func LoadWithFile(file string) (*Config, error) {
 		ArtifactsAddress: DefaultArtifactsAddress,
 		APIAddress:       DefaultAPIAddress,
 		APIHTTPAddress:   DefaultAPIHTTPAddress,
-		ArtifactsRoot:    "artifacts",
-		WorkerName:       "worker-1",
-		WorkerGroup:      "default",
+		ArtifactsRoot:    "artifacts", ArtifactsStore: "filesystem", WorkerName: "worker-1",
+		WorkerGroup: "default",
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
 			SQLitePath:  "cdrom.db",
@@ -346,6 +351,7 @@ type fileConfig struct {
 	APIAddress       *string `yaml:"api_address"`
 	APIHTTPAddress   *string `yaml:"api_http_address"`
 	ArtifactsRoot    *string `yaml:"artifacts_root"`
+	ArtifactsStore   *string `yaml:"artifacts_store"`
 	WorkerName       *string `yaml:"worker_name"`
 	WorkerGroup      *string `yaml:"worker_group"`
 	AgentJobID       *string `yaml:"agent_job_id"`
@@ -413,6 +419,9 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.ArtifactsRoot != nil {
 		cfg.ArtifactsRoot = *f.ArtifactsRoot
+	}
+	if f.ArtifactsStore != nil {
+		cfg.ArtifactsStore = *f.ArtifactsStore
 	}
 	if f.WorkerName != nil {
 		cfg.WorkerName = *f.WorkerName
@@ -527,6 +536,7 @@ func applyEnv(cfg *Config) {
 	cfg.APIHTTPAddress = envOr("CDROM_API_HTTP_ADDR", cfg.APIHTTPAddress)
 	cfg.ListenAddress = envOr("CDROM_LISTEN_ADDR", cfg.ListenAddress)
 	cfg.ArtifactsRoot = envOr("CDROM_ARTIFACTS_ROOT", cfg.ArtifactsRoot)
+	cfg.ArtifactsStore = envOr("CDROM_ARTIFACTS_STORE", cfg.ArtifactsStore)
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.WorkerGroup = envOr("CDROM_WORKER_GROUP", cfg.WorkerGroup)
 	cfg.AgentJobID = envOr("CDROM_AGENT_JOB_ID", cfg.AgentJobID)

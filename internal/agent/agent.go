@@ -19,6 +19,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
+	"cdrom/internal/logstream"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
 	// executor. A target or plugin adds more step types the same way.
@@ -82,8 +83,19 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 // runJob executes the job's execution spec: the steps run in order and the
 // job fails on the first step that errors. A job with no spec (or an empty
 // spec) succeeds without doing any work.
+//
+// A log sink is opened for the job so each step's stdout/stderr is streamed
+// to the API in near-real-time (F-02); the API persists it and fans it out to
+// the UI. Streaming is best-effort and resilient: if the API goes away mid-job
+// the sink reopens its stream and resumes, and if it cannot be opened at all
+// the job still runs (its output is only logged locally).
 func (a *Agent) runJob(ctx context.Context, job *apipb.Job) error {
-	return executor.Execute(ctx, job.GetSpec(), a.logger)
+	sink, err := logstream.NewSink(a.deps.API, ctx, a.jobID, a.token, a.logger)
+	if err != nil {
+		a.logger.Warn("agent: open log stream; continuing without streaming", "job", a.jobID, "err", err)
+	}
+	defer sink.Close()
+	return executor.Execute(executor.ContextWithLogSink(ctx, sink), job.GetSpec(), a.logger)
 }
 
 func (a *Agent) report(ctx context.Context, status dbpb.JobStatus) {

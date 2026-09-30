@@ -20,6 +20,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
+	"cdrom/internal/logstream"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
 	// executor. A target or plugin adds more step types the same way.
@@ -144,7 +145,7 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	}
 
 	w.logger.Info("job started", "job", jobID)
-	err := w.runJob(ctx, job)
+	err := w.runJob(ctx, job, token)
 	if err != nil {
 		w.logger.Error("job failed", "job", jobID, "err", err.Error())
 		w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_FAILED)
@@ -157,8 +158,19 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 // runJob executes the job's execution spec: the steps run in order and the
 // job fails on the first step that errors. A job with no spec (or an empty
 // spec) succeeds without doing any work.
-func (w *Worker) runJob(ctx context.Context, job *apipb.Job) error {
-	return executor.Execute(ctx, job.GetSpec(), w.logger)
+//
+// A log sink is opened for the job so each step's stdout/stderr is streamed
+// to the API in near-real-time (F-02); the API persists it and fans it out to
+// the UI. Streaming is best-effort and resilient: if the API goes away mid-job
+// the sink reopens its stream and resumes, and if it cannot be opened at all
+// the job still runs (its output is only logged locally).
+func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string) error {
+	sink, err := logstream.NewSink(w.deps.API, ctx, job.GetId(), token, w.logger)
+	if err != nil {
+		w.logger.Warn("worker: open log stream; continuing without streaming", "job", job.GetId(), "err", err)
+	}
+	defer sink.Close()
+	return executor.Execute(executor.ContextWithLogSink(ctx, sink), job.GetSpec(), w.logger)
 }
 
 // report sets the finished timestamp and final status, presenting the job

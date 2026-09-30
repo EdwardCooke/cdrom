@@ -4,11 +4,15 @@
 #
 # Boots a full local stack (db, scheduler, artifacts, api, worker) against a
 # throwaway SQLite database, submits a multi-step shell job to the worker
-# group, and verifies the job runs to completion and is persisted as
-# succeeded. Exercises the full path:
+# group, and verifies the job runs to completion, is persisted as succeeded,
+# and its step output was streamed to the API, persisted to the artifacts
+# service, and is retrievable over HTTP (F-02). Exercises the full path:
 #
 #   submit (HTTP) -> api -> scheduler -> db
 #        -> api dispatch -> worker WatchJobs stream -> worker executes steps
+#        -> step output streamed to api (StreamJobLogs) -> persisted to
+#           artifacts (step-<n>.log + job.log) -> retrievable via
+#           GET /api/jobs/{id}/logs[/{name}]
 #        -> status reported back -> persisted as succeeded
 #
 # The job spec covers the three JobSpec features: a plain command, a per-step
@@ -160,4 +164,61 @@ log "   $FINAL"
 printf '%s' "$FINAL" | grep -q '"status":3' \
   || { echo ">> job did not reach status=succeeded" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps and persisted as succeeded"
+# --- verify job logs were streamed, persisted, and are retrievable (F-02) ---
+# The API persists streamed output to the artifacts service (one file per step
+# plus a combined job.log) and exposes it over HTTP. The worker reports
+# "succeeded" before the API has necessarily finished persisting every chunk,
+# so poll until the logs are complete.
+log ">> verifying job logs (F-02)"
+
+# Poll the log listing until all four step logs plus job.log are present.
+LOG_LISTING=""
+for i in $(seq 1 100); do
+  LOG_LISTING=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs")
+  if printf '%s' "$LOG_LISTING" | grep -q 'step-0.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step-1.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step-2.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step-3.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'job.log'; then
+    break
+  fi
+  sleep 0.2
+done
+log "   log listing: $LOG_LISTING"
+printf '%s' "$LOG_LISTING" | grep -q 'step-0.log' \
+  || { echo ">> step-0.log missing from log listing" >&2; exit 1; }
+printf '%s' "$LOG_LISTING" | grep -q 'job.log' \
+  || { echo ">> job.log missing from log listing" >&2; exit 1; }
+
+# Poll the combined job.log until it contains every step's output line.
+JOB_LOG=""
+for i in $(seq 1 100); do
+  JOB_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs/job.log")
+  if printf '%s' "$JOB_LOG" | grep -q 'step1: plain command' \
+    && printf '%s' "$JOB_LOG" | grep -q 'step2: env=from-spec' \
+    && printf '%s' "$JOB_LOG" | grep -q "step3: pwd=$WORKDIR" \
+    && printf '%s' "$JOB_LOG" | grep -q 'step4: shell override'; then
+    break
+  fi
+  sleep 0.2
+done
+log "   job.log contents:"
+printf '%s\n' "$JOB_LOG" | sed 's/^/     /'
+printf '%s' "$JOB_LOG" | grep -q 'step1: plain command' \
+  || { echo ">> step1 output missing from job.log" >&2; exit 1; }
+printf '%s' "$JOB_LOG" | grep -q 'step2: env=from-spec' \
+  || { echo ">> step2 output missing from job.log" >&2; exit 1; }
+printf '%s' "$JOB_LOG" | grep -q "step3: pwd=$WORKDIR" \
+  || { echo ">> step3 output missing from job.log" >&2; exit 1; }
+printf '%s' "$JOB_LOG" | grep -q 'step4: shell override' \
+  || { echo ">> step4 output missing from job.log" >&2; exit 1; }
+
+# Verify a per-step log is retrievable and contains only that step's output.
+STEP0_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs/step-0.log")
+log "   step-0.log: $STEP0_LOG"
+printf '%s' "$STEP0_LOG" | grep -q 'step1: plain command' \
+  || { echo ">> step1 output missing from step-0.log" >&2; exit 1; }
+printf '%s' "$STEP0_LOG" | grep -q 'step2' \
+  && { echo ">> step-0.log contains step2 output (step attribution broken)" >&2; exit 1; }
+
+log ">> e2e PASSED: worker job ran all steps, persisted as succeeded, and logs are retrievable"
