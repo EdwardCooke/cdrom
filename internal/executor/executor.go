@@ -17,6 +17,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -24,13 +25,27 @@ import (
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
+// ErrTimeout is returned by Execute (and wrapped by step handlers) when a job
+// or a step exceeds its declared timeout. Callers (the worker and agent) use
+// errors.Is(err, ErrTimeout) to report the job as timed_out rather than
+// failed. A step handler that runs a command should wrap the context's
+// DeadlineExceeded error with ErrTimeout so the distinction survives the
+// executor's per-step error wrapping.
+var ErrTimeout = errors.New("executor: timed out")
+
 // Execute runs the steps of spec in order. It returns nil when every step
 // succeeds, or the error from the first step that fails — subsequent steps
 // are not run. A nil or empty spec succeeds without doing any work (a job
 // with no execution spec is a no-op).
 //
-// The provided ctx bounds the whole job; a per-step timeout (when set)
-// additionally bounds an individual step.
+// The provided ctx bounds the whole job. Two further deadlines may apply:
+//   - a job-level timeout (spec.Timeout, when set) bounds the sum of all
+//     steps; and
+//   - a per-step timeout (step.Timeout, when set) bounds an individual step.
+//
+// When a deadline expires the running step is cancelled and Execute returns
+// ErrTimeout (wrapped with context). A job with no timeouts runs unbounded
+// (bounded only by ctx).
 func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -38,8 +53,17 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 	if spec == nil {
 		return nil
 	}
+	// A job-level timeout derives a context that bounds the whole job (all
+	// steps combined). A zero timeout means no job-level limit; the parent
+	// ctx still bounds the job.
+	jobCtx := ctx
+	if timeout := spec.GetTimeout().AsDuration(); timeout > 0 {
+		var cancel context.CancelFunc
+		jobCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	for i, step := range spec.GetSteps() {
-		if err := runStep(ctx, i, step, logger); err != nil {
+		if err := runStep(jobCtx, i, step, logger); err != nil {
 			return err
 		}
 	}
@@ -135,6 +159,12 @@ func RegisterStepType(name string, handler StepHandler) {
 // the step's type (the built-in "shell" handler when the type is empty). It
 // returns a descriptive error when the step fails or its type is not
 // registered on this target.
+//
+// When the step's context expires (a per-step timeout, or the job-level
+// timeout inherited from the parent context), the error is wrapped with
+// ErrTimeout so the caller can report the job as timed_out. This is checked
+// here (rather than relying on each handler to do it) so that any step
+// handler — not just the shell handler — has its step-level timeout detected.
 func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Logger) error {
 	name := step.GetType()
 	if name == "" {
@@ -146,8 +176,8 @@ func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Lo
 	}
 
 	// A per-step timeout derives a context that expires after the step's
-	// timeout. A zero timeout means no per-step limit; the parent ctx still
-	// bounds the step.
+	// timeout. A zero timeout means no per-step limit; the parent ctx (which
+	// may itself carry the job-level timeout) still bounds the step.
 	stepCtx := ctx
 	if timeout := step.GetTimeout().AsDuration(); timeout > 0 {
 		var cancel context.CancelFunc
@@ -159,7 +189,14 @@ func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Lo
 	stepCtx = context.WithValue(stepCtx, stepIndexKey{}, index)
 
 	if err := handler.(StepHandler)(stepCtx, step, logger); err != nil {
-		return fmt.Errorf("executor: step %d (type %q): %w", index, name, err)
+		err = fmt.Errorf("executor: step %d (type %q): %w", index, name, err)
+		// A deadline (the step's own timeout, or the job-level timeout
+		// inherited from the parent context) expired while the step ran: mark
+		// it as a timeout so the job is reported as timed_out.
+		if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("%w: %w", ErrTimeout, err)
+		}
+		return err
 	}
 	return nil
 }

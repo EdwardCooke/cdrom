@@ -30,6 +30,7 @@ const (
 	Database_ListJobs_FullMethodName           = "/cdrom.db.v1.Database/ListJobs"
 	Database_UpdateJob_FullMethodName          = "/cdrom.db.v1.Database/UpdateJob"
 	Database_DeleteJob_FullMethodName          = "/cdrom.db.v1.Database/DeleteJob"
+	Database_ReapJob_FullMethodName            = "/cdrom.db.v1.Database/ReapJob"
 	Database_RegisterWorker_FullMethodName     = "/cdrom.db.v1.Database/RegisterWorker"
 	Database_GetWorker_FullMethodName          = "/cdrom.db.v1.Database/GetWorker"
 	Database_ListWorkers_FullMethodName        = "/cdrom.db.v1.Database/ListWorkers"
@@ -65,6 +66,13 @@ type DatabaseClient interface {
 	ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
 	UpdateJob(ctx context.Context, in *UpdateJobRequest, opts ...grpc.CallOption) (*Job, error)
 	DeleteJob(ctx context.Context, in *DeleteJobRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ReapJob conditionally marks a job as timed_out: it sets the status to
+	// TIMED_OUT (and the finished timestamp) only if the job is still in a
+	// non-terminal state (pending or running). It returns whether the job was
+	// reaped. This is how the scheduler's watchdog reaps a job whose target
+	// went silent (F-03): a job that already reported a terminal status is
+	// left untouched.
+	ReapJob(ctx context.Context, in *ReapJobRequest, opts ...grpc.CallOption) (*ReapJobResponse, error)
 	// Workers
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
@@ -186,6 +194,16 @@ func (c *databaseClient) DeleteJob(ctx context.Context, in *DeleteJobRequest, op
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_DeleteJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReapJob(ctx context.Context, in *ReapJobRequest, opts ...grpc.CallOption) (*ReapJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReapJobResponse)
+	err := c.cc.Invoke(ctx, Database_ReapJob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +333,13 @@ type DatabaseServer interface {
 	ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error)
 	UpdateJob(context.Context, *UpdateJobRequest) (*Job, error)
 	DeleteJob(context.Context, *DeleteJobRequest) (*emptypb.Empty, error)
+	// ReapJob conditionally marks a job as timed_out: it sets the status to
+	// TIMED_OUT (and the finished timestamp) only if the job is still in a
+	// non-terminal state (pending or running). It returns whether the job was
+	// reaped. This is how the scheduler's watchdog reaps a job whose target
+	// went silent (F-03): a job that already reported a terminal status is
+	// left untouched.
+	ReapJob(context.Context, *ReapJobRequest) (*ReapJobResponse, error)
 	// Workers
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
 	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
@@ -371,6 +396,9 @@ func (UnimplementedDatabaseServer) UpdateJob(context.Context, *UpdateJobRequest)
 }
 func (UnimplementedDatabaseServer) DeleteJob(context.Context, *DeleteJobRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteJob not implemented")
+}
+func (UnimplementedDatabaseServer) ReapJob(context.Context, *ReapJobRequest) (*ReapJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReapJob not implemented")
 }
 func (UnimplementedDatabaseServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
@@ -603,6 +631,24 @@ func _Database_DeleteJob_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ReapJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReapJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReapJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReapJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReapJob(ctx, req.(*ReapJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkerRequest)
 	if err := dec(in); err != nil {
@@ -829,6 +875,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteJob",
 			Handler:    _Database_DeleteJob_Handler,
+		},
+		{
+			MethodName: "ReapJob",
+			Handler:    _Database_ReapJob_Handler,
 		},
 		{
 			MethodName: "RegisterWorker",

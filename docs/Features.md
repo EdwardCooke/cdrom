@@ -25,7 +25,7 @@ Before adding features, note the baseline that is already built and working:
 | Job lifecycle | `pending → running → succeeded / failed / cancelled` |
 | Dispatch | `target_group` set → fan out to live workers; empty → ephemeral K8s agent |
 | Execution targets | Long-lived **workers** (register, `WatchJobs` stream, heartbeat) and ephemeral **agents** (`GetJob` → run → report) |
-| Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors |
+| Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors. A job-level `timeout` bounds the whole job and a per-step `timeout` bounds a step; exceeding either terminates the job as `timed_out` (F-03), and a scheduler watchdog reaps jobs whose target goes silent |
 | Job tokens | Minted per job by the API (via IdP), audience exchange, verified on status/artifact RPCs |
 | UI auth | OIDC authorization-code + PKCE, signed session cookie |
 | Artifacts | General-purpose, namespaced file store (streamed upload/download); jobs scope files by job id, other callers (e.g. deployed releases) use their own namespaces; proxied through the API |
@@ -123,7 +123,8 @@ missing piece.
   `command: "Get-ChildItem"`). When `shell` is empty the step runs `command`
   directly, preserving the no-implicit-shell contract.
 - Per-step `timeout` is enforced by the target via a derived context; a
-  scheduler-side watchdog for dead targets is F-03.
+  job-level `timeout` bounds the whole job (F-03), and a scheduler-side
+  watchdog reaps jobs whose target goes silent (F-03).
 
 ### F-02 · Job log streaming
 
@@ -214,8 +215,10 @@ local to the worker/agent and there is no central view.
 ### F-03 · Job timeouts
 
 **What.** A job (and optionally each step) can declare a maximum duration. If
-execution exceeds it, the job is marked `failed` (or `timed_out`) and the
-running process is terminated.
+execution exceeds it, the job is marked `timed_out` and the running process is
+terminated. A job-level timeout bounds the whole job (all steps combined); a
+per-step timeout bounds an individual step. When both are set, whichever
+expires first terminates the job.
 
 **Why.** Hung jobs hold workers forever; timeouts are a basic safety valve.
 
@@ -227,11 +230,46 @@ running process is terminated.
   timeout even if the target goes silent (covers a dead worker).
 
 **Acceptance criteria.**
-- [ ] A job whose command sleeps past its timeout is terminated and marked
+- [x] A job whose command sleeps past its timeout is terminated and marked
       failed/timed-out.
-- [ ] The timeout is enforced by the target *and* by the scheduler watchdog
+- [x] The timeout is enforced by the target *and* by the scheduler watchdog
       (a target that stops reporting is still reaped).
-- [ ] A job with no timeout runs unbounded.
+- [x] A job with no timeout runs unbounded.
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **Two levels of timeout.** A job declares a job-level `timeout` on its
+  `JobSpec` (the sum of all steps) and each step may declare its own `timeout`
+  (an individual step). The executor derives a context for the job-level
+  timeout in `Execute` and a nested context for a step's timeout in `runStep`;
+  whichever deadline expires first cancels the running step. A job with no
+  job-level timeout and no per-step timeouts runs unbounded (bounded only by
+  the caller's context).
+- **`timed_out` is a distinct terminal status.** A new `JOB_STATUS_TIMED_OUT`
+  (proto) / `JobStatusTimedOut` (model) status is added alongside the existing
+  terminal states. The executor returns a sentinel `executor.ErrTimeout` (wrapped
+  with the context) when a deadline expires; the worker and agent check
+  `errors.Is(err, executor.ErrTimeout)` and report `timed_out` rather than
+  `failed`, so the UI can tell a hung job apart from one that ran and errored.
+  The shell handler wraps `executor.ErrTimeout` with a clear message (the
+  command name and, for a per-step timeout, its duration).
+- **Scheduler watchdog.** The scheduler runs a background watchdog
+  (`internal/services/scheduler/watchdog.go`, started from `cmd/scheduler`)
+  that periodically lists running jobs and reaps any that have exceeded their
+  effective timeout. A job's **effective timeout** is its job-level timeout
+  when set, otherwise the longest per-step timeout; a job with neither is never
+  reaped. The deadline is measured from the job's `started_at`. Reaping is
+  **conditional** (`Database.ReapJob`): it marks the job `timed_out` only if it
+  is still `pending` or `running` (an atomic `WHERE status IN (...)` update),
+  so a job that already reported a terminal status is left untouched. When a
+  job is reaped the watchdog calls the API's `NotifyJobStatus` RPC to fan the
+  status change out to the UI over the WebSocket event hub, mirroring the
+  `job_status` events a target's report would produce.
+- **New RPCs.** `Database.ReapJob` (conditional `timed_out` update, returns
+  whether the job was reaped) and `API.NotifyJobStatus` (fan a status change
+  out to the UI; does not touch the database — the scheduler already persisted
+  it). The job-level `timeout` is carried on `JobSpec` in the db proto and
+  round-trips through the model (a `text` JSON column) and the API's
+  `POST /api/jobs` body (`spec.timeout`, a duration string).
 
 ### F-04 · Retry & re-run
 
@@ -711,7 +749,7 @@ Tick each feature off as it lands.
 
 - [x] F-01 Job execution spec
 - [x] F-02 Job log streaming
-- [ ] F-03 Job timeouts
+- [x] F-03 Job timeouts
 - [ ] F-04 Retry & re-run
 - [ ] F-05 Cancellation propagation
 - [ ] F-06 `skipped` job status

@@ -52,6 +52,14 @@ service API {
   // API fans it out to the live workers in the job's target group.
   rpc DispatchJob(DispatchJobRequest) returns (DispatchJobResponse);
 
+  // NotifyJobStatus (called by the scheduler). The scheduler's watchdog uses
+  // it to fan a job-status change (e.g. a job reaped as timed_out) out to the
+  // UI over the WebSocket event hub, mirroring the job_status events the API
+  // publishes when a target reports a status. It does not touch the database
+  // (the scheduler already persisted the change); it only publishes the
+  // event.
+  rpc NotifyJobStatus(NotifyJobStatusRequest) returns (google.protobuf.Empty);
+
   // Artifact proxy (called by workers and agents). The API forwards these to
   // the artifacts service so execution targets never talk to it directly.
   rpc UploadArtifact(stream cdrom.artifacts.v1.ArtifactChunk)
@@ -177,6 +185,11 @@ message DispatchJobRequest {
 message DispatchJobResponse {
   // dispatched is the number of live workers that received the assignment.
   int32 dispatched = 1;
+}
+
+message NotifyJobStatusRequest {
+  int64 job_id = 1;
+  cdrom.db.v1.JobStatus status = 2;
 }
 
 message ExchangeJobTokenRequest {

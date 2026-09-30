@@ -184,6 +184,36 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 	return toProtoJob(&job), nil
 }
 
+// ReapJob conditionally marks a job as timed_out: it sets the status to
+// timed_out (and the finished timestamp) only if the job is still in a
+// non-terminal state (pending or running). It returns whether the job was
+// reaped. This is how the scheduler's watchdog reaps a job whose target went
+// silent (F-03): a job that already reported a terminal status (succeeded,
+// failed, cancelled, or timed_out) is left untouched. The conditional update
+// is done atomically with a WHERE clause on the status so a concurrent status
+// report from the target cannot be clobbered.
+func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.ReapJobResponse, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	finishedAt := time.Now()
+	if timestamp := req.GetFinishedAt(); timestamp != nil {
+		finishedAt = timestamp.AsTime()
+	}
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning}).
+		Updates(map[string]any{
+			"status":      models.JobStatusTimedOut,
+			"finished_at": &finishedAt,
+			"updated_at":  time.Now(),
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.ReapJobResponse{Reaped: result.RowsAffected > 0}, nil
+}
+
 func (s *Server) DeleteJob(ctx context.Context, req *dbpb.DeleteJobRequest) (*emptypb.Empty, error) {
 	result := s.db.WithContext(ctx).Delete(&models.Job{}, req.GetId())
 	if result.Error != nil {
@@ -430,13 +460,13 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 			Params:  paramsFromProto(step.GetParams()),
 		})
 	}
-	return models.JobSpec{Steps: steps}
+	return models.JobSpec{Steps: steps, Timeout: spec.GetTimeout().AsDuration()}
 }
 
 // specToProto converts the model's JobSpec into a proto JobSpec. A spec with
 // no steps yields a nil proto (so it round-trips to an empty spec).
 func specToProto(spec models.JobSpec) *dbpb.JobSpec {
-	if len(spec.Steps) == 0 {
+	if len(spec.Steps) == 0 && spec.Timeout == 0 {
 		return nil
 	}
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
@@ -449,7 +479,7 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 			Params:  paramsToProto(step.Params),
 		})
 	}
-	return &dbpb.JobSpec{Steps: steps}
+	return &dbpb.JobSpec{Steps: steps, Timeout: durationpb.New(spec.Timeout)}
 }
 
 // paramsFromProto converts a proto params map into the model's params map.
@@ -548,6 +578,8 @@ func jobStatusToProto(status models.JobStatus) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_FAILED
 	case models.JobStatusCancelled:
 		return dbpb.JobStatus_JOB_STATUS_CANCELLED
+	case models.JobStatusTimedOut:
+		return dbpb.JobStatus_JOB_STATUS_TIMED_OUT
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}
@@ -565,6 +597,8 @@ func jobStatusFromProto(status dbpb.JobStatus) (models.JobStatus, error) {
 		return models.JobStatusFailed, nil
 	case dbpb.JobStatus_JOB_STATUS_CANCELLED:
 		return models.JobStatusCancelled, nil
+	case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+		return models.JobStatusTimedOut, nil
 	default:
 		return "", fmt.Errorf("unknown job status %v", status)
 	}

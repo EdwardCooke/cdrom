@@ -148,18 +148,29 @@ type jobRequest struct {
 	Spec        *jobSpecRequest `json:"spec,omitempty"`
 }
 
-// jobSpecRequest is the JSON form of a job's execution spec.
+// jobSpecRequest is the JSON form of a job's execution spec. Timeout is a
+// duration string (e.g. "30s", "5m") bounding the whole job (all steps
+// combined); empty means no job-level timeout.
 type jobSpecRequest struct {
-	Steps []jobStepRequest `json:"steps,omitempty"`
+	Steps   []jobStepRequest `json:"steps,omitempty"`
+	Timeout string           `json:"timeout,omitempty"`
 }
 
 // toProtoSpec converts the JSON spec into the proto JobSpec carried to the
-// scheduler. It returns nil when the spec is absent or has no steps.
+// scheduler. It returns nil when the spec is absent and has no steps and no
+// job-level timeout.
 func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
-	if r == nil || len(r.Steps) == 0 {
+	if r == nil || (len(r.Steps) == 0 && r.Timeout == "") {
 		return nil, nil
 	}
 	spec := &dbpb.JobSpec{}
+	if r.Timeout != "" {
+		duration, err := time.ParseDuration(r.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("spec: invalid timeout %q: %w", r.Timeout, err)
+		}
+		spec.Timeout = durationpb.New(duration)
+	}
 	for i, step := range r.Steps {
 		// A command is required for the built-in shell handler (the default
 		// when type is empty); other step types may carry their work in
@@ -419,6 +430,8 @@ func jobStatusFromName(name string) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_FAILED
 	case "cancelled":
 		return dbpb.JobStatus_JOB_STATUS_CANCELLED
+	case "timed_out":
+		return dbpb.JobStatus_JOB_STATUS_TIMED_OUT
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}

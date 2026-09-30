@@ -235,6 +235,95 @@ func TestJobWithoutSpec(t *testing.T) {
 	}
 }
 
+// TestJobLevelTimeoutRoundTrip verifies that a job-level timeout (spec.timeout)
+// is persisted and returned intact through the storage backend (F-03).
+func TestJobLevelTimeoutRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		Timeout: durationpb.New(5 * time.Minute),
+		Steps:   []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: created.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := fetched.GetSpec().GetTimeout().AsDuration(); got != 5*time.Minute {
+		t.Errorf("job timeout = %s, want 5m", got)
+	}
+}
+
+// TestReapJob verifies the conditional reap used by the scheduler's watchdog
+// (F-03): a running job is marked timed_out, while a job that already reached
+// a terminal state is left untouched.
+func TestReapJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// A running job is reaped.
+	running, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "running"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:        running.GetId(),
+		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
+		StartedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	reaped, err := client.ReapJob(ctx, &dbpb.ReapJobRequest{Id: running.GetId()})
+	if err != nil {
+		t.Fatalf("ReapJob: %v", err)
+	}
+	if !reaped.GetReaped() {
+		t.Fatal("running job was not reaped, want reaped=true")
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: running.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_TIMED_OUT {
+		t.Errorf("status = %v, want TIMED_OUT", fetched.GetStatus())
+	}
+	if fetched.GetFinishedAt() == nil {
+		t.Error("finished_at not set on reaped job")
+	}
+
+	// A job that already reached a terminal state is not reaped.
+	finished, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "finished"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         finished.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	reaped, err = client.ReapJob(ctx, &dbpb.ReapJobRequest{Id: finished.GetId()})
+	if err != nil {
+		t.Fatalf("ReapJob: %v", err)
+	}
+	if reaped.GetReaped() {
+		t.Fatal("terminal job was reaped, want reaped=false")
+	}
+	fetched, err = client.GetJob(ctx, &dbpb.GetJobRequest{Id: finished.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Errorf("status = %v, want SUCCEEDED (unchanged)", fetched.GetStatus())
+	}
+}
+
 func TestIDPSigningKeys(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()

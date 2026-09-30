@@ -221,4 +221,48 @@ printf '%s' "$STEP0_LOG" | grep -q 'step1: plain command' \
 printf '%s' "$STEP0_LOG" | grep -q 'step2' \
   && { echo ">> step-0.log contains step2 output (step attribution broken)" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps, persisted as succeeded, and logs are retrievable"
+# --- verify a job-level timeout terminates the job (F-03) ------------------
+# A job whose single step sleeps well past the job's declared timeout is
+# terminated by the worker and reported as timed_out (status 6), not failed.
+# The step declares no per-step timeout, so only the job-level timeout applies.
+log ">> submitting a job that exceeds its job-level timeout"
+TIMEOUT_BODY=$(cat <<EOF
+{
+  "name": "e2e-timeout-job",
+  "target_group": "default",
+  "spec": {
+    "timeout": "2s",
+    "steps": [
+      {"params": {"command": {"string": "sleep"}, "args": {"strings": ["30"]}}}
+    ]
+  }
+}
+EOF
+)
+TIMEOUT_RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d "$TIMEOUT_BODY")
+log "   $TIMEOUT_RESPONSE"
+
+TIMEOUT_JOB_ID=$(printf '%s' "$TIMEOUT_RESPONSE" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$TIMEOUT_JOB_ID" ] || { echo ">> could not parse timeout job id" >&2; exit 1; }
+log ">> timeout job id: $TIMEOUT_JOB_ID"
+
+# The worker terminates the sleeping step at the job's 2s deadline and reports
+# timed_out. Wait for the worker to log the timeout.
+wait_for "$WORK/worker.log" 'job timed out' 'worker reports the job timed out'
+
+# Verify the API persisted the job as timed_out (status 6).
+TIMEOUT_FINAL=""
+for i in $(seq 1 100); do
+  TIMEOUT_FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$TIMEOUT_JOB_ID")
+  if printf '%s' "$TIMEOUT_FINAL" | grep -q '"status":6'; then
+    break
+  fi
+  sleep 0.2
+done
+log "   $TIMEOUT_FINAL"
+printf '%s' "$TIMEOUT_FINAL" | grep -q '"status":6' \
+  || { echo ">> timeout job did not reach status=timed_out" >&2; exit 1; }
+
+log ">> e2e PASSED: worker job ran all steps, persisted as succeeded, logs are retrievable, and a job-level timeout terminates the job as timed_out"

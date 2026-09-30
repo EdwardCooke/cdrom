@@ -15,6 +15,7 @@ import (
 
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/services/artifacts"
 )
 
@@ -174,6 +175,49 @@ func TestStreamJobLogsRequiresMetadata(t *testing.T) {
 	}
 	if _, err := stream.CloseAndRecv(); err == nil {
 		t.Error("expected an error for a first chunk without metadata")
+	}
+}
+
+// TestNotifyJobStatusPublishes verifies that the scheduler's watchdog can fan
+// a job-status change (e.g. a job reaped as timed_out) out to the UI over the
+// event hub (F-03), mirroring the job_status events a target's report would
+// produce. It does not touch the database.
+func TestNotifyJobStatusPublishes(t *testing.T) {
+	hub := NewEventHub()
+	events, cancel := hub.Subscribe()
+	defer cancel()
+
+	client := startAPIServer(t, startArtifactsServer(t), hub)
+	ctx := context.Background()
+
+	if _, err := client.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{
+		JobId:  42,
+		Status: dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
+	}); err != nil {
+		t.Fatalf("NotifyJobStatus: %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != EventJobStatus || ev.JobID != 42 || ev.Status != "timed_out" {
+			t.Errorf("event = %+v, want a job_status event for job 42 (timed_out)", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no job_status event published for NotifyJobStatus")
+	}
+}
+
+// TestNotifyJobStatusValidation verifies that a NotifyJobStatus call with a
+// missing job id or status is rejected.
+func TestNotifyJobStatusValidation(t *testing.T) {
+	client := startAPIServer(t, startArtifactsServer(t), nil)
+	ctx := context.Background()
+
+	if _, err := client.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{Status: dbpb.JobStatus_JOB_STATUS_TIMED_OUT}); err == nil {
+		t.Error("expected an error for a missing job id")
+	}
+	if _, err := client.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{JobId: 42}); err == nil {
+		t.Error("expected an error for a missing status")
 	}
 }
 

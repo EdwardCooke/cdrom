@@ -9,6 +9,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -147,6 +148,14 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	w.logger.Info("job started", "job", jobID)
 	err := w.runJob(ctx, job, token)
 	if err != nil {
+		// A timeout (the job-level or a step's per-step timeout, F-03) is
+		// reported as timed_out rather than failed, so the UI can tell a hung
+		// job apart from one that ran and errored.
+		if errors.Is(err, executor.ErrTimeout) {
+			w.logger.Error("job timed out", "job", jobID, "err", err.Error())
+			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_TIMED_OUT)
+			return
+		}
 		w.logger.Error("job failed", "job", jobID, "err", err.Error())
 		w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_FAILED)
 		return

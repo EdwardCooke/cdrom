@@ -133,7 +133,7 @@ The gRPC surface exposes these RPCs (see `proto/cdrom/api/v1/api.proto`):
 | Worker lifecycle | `RegisterWorker`, `DeregisterWorker`, `Heartbeat` | workers |
 | Execution | `WatchJobs` (server stream), `GetJob`, `ReportJobStatus` | workers, agents |
 | Token exchange | `ExchangeJobToken` | workers, agents |
-| Dispatch | `DispatchJob` | scheduler |
+| Dispatch | `DispatchJob`, `NotifyJobStatus` | scheduler |
 | Artifact proxy | `UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts`, `DeleteArtifact` | workers, agents |
 | Job logs | `StreamJobLogs` (client stream) | workers, agents |
 
@@ -307,9 +307,21 @@ reference it rather than redefining it.
   stdout/stderr (local logging) and, when the target has a log sink, also
   streamed to the API in near-real-time (F-02, `internal/logstream`); the API
   persists the output to the artifacts service and fans it out to the UI as
-  `job_log` events. A per-step `timeout` is enforced by the target via a
-  derived context; a scheduler-side watchdog for dead targets is a later
-  concern (F-03).
+  `job_log` events.
+- **Timeouts (F-03).** A job declares a job-level `timeout` on its `JobSpec`
+  (the sum of all steps) and each step may declare its own `timeout` (an
+  individual step); whichever deadline expires first terminates the job. The
+  executor derives a context for the job-level timeout in `Execute` and a
+  nested context for a step's timeout in `runStep`, cancelling the running
+  step when a deadline passes. A job with no job-level and no per-step timeout
+  runs unbounded. When a deadline expires the executor returns the sentinel
+  `executor.ErrTimeout`; the worker and agent check `errors.Is(err,
+  executor.ErrTimeout)` and report the terminal status `timed_out` (distinct
+  from `failed`). As a safety valve for a target that goes silent, the
+  scheduler runs a background **watchdog** that reaps running jobs past their
+  effective timeout (job-level timeout, else the longest per-step timeout) via
+  the conditional `Database.ReapJob` RPC and tells the API (`NotifyJobStatus`)
+  to fan the status change out to the UI.
 - **Shell override (shell handler).** A step may set the `shell` param to run
   through a user-chosen interpreter instead of executing `command` directly.
   When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -353,9 +365,10 @@ sequenceDiagram
     W->>W: run spec steps in order (internal/executor)
     W->>API: ReportJobStatus (running) [Bearer token]
     W->>API: UploadArtifact (streamed, proxied)
-    W->>API: ReportJobStatus (succeeded/failed) [Bearer token]
+    W->>API: ReportJobStatus (succeeded/failed/timed_out) [Bearer token]
     API->>DB: UpdateJob (status)
     API-->>UI: /api/ws event: job_status
+    Note over SCHED,DB: watchdog: if a job runs past its timeout and the target goes silent, SCHED reaps it (DB.ReapJob → timed_out) and tells the API (NotifyJobStatus) to fan it out to the UI
 ```
 
 Job status transitions (see `proto/cdrom/db/v1/db.proto`):
@@ -366,10 +379,13 @@ stateDiagram-v2
     PENDING --> RUNNING: picked up by worker / agent
     RUNNING --> SUCCEEDED: job completes
     RUNNING --> FAILED: job errors
+    RUNNING --> TIMED_OUT: job/step timeout (target) or watchdog reap
+    PENDING --> TIMED_OUT: watchdog reap
     PENDING --> CANCELLED: cancel requested
     RUNNING --> CANCELLED: cancel requested
     SUCCEEDED --> [*]
     FAILED --> [*]
+    TIMED_OUT --> [*]
     CANCELLED --> [*]
 ```
 
@@ -585,8 +601,9 @@ internal/
   logstream/  executor.LogSink that streams a job's step output to the API's
               StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
   executor/   shared job-step executor: the generic dispatch engine (selects a
-              StepHandler by step type, enforces per-step timeout, carries an
-              optional LogSink in the context; used by worker + agent)
+              StepHandler by step type, enforces the job-level and per-step
+              timeouts, returns ErrTimeout on a deadline, carries an optional
+              LogSink in the context; used by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
               executor.DefaultType, tees step output to a LogSink when present);
               a target or plugin adds more via executor.RegisterStepType
@@ -594,7 +611,8 @@ internal/
     data/     pipeline/job data service
     artifacts/ general namespaced file store (artifacts + job logs; gRPC server;
               store interface with a filesystem implementation)
-    scheduler/ job lifecycle + dispatch (gRPC server)
+    scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
+              that reaps running jobs past their timeout (F-03)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation

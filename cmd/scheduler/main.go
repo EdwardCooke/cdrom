@@ -66,9 +66,16 @@ func main() {
 		logger.Error("tls: server creds", "err", err)
 		os.Exit(1)
 	}
+	sched := scheduler.NewServer(
+		dbpb.NewDatabaseClient(dbConn), apipb.NewAPIClient(apiConn), logger)
+	// Start the job-timeout watchdog (F-03): it reaps running jobs that have
+	// exceeded their declared timeout even if the execution target goes
+	// silent. It runs until the process shuts down.
+	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
+	defer stopWatchdog()
+	sched.StartWatchdog(watchdogCtx)
 	srv := grpc.NewServer(grpc.Creds(creds))
-	schedpb.RegisterSchedulerServer(srv, scheduler.NewServer(
-		dbpb.NewDatabaseClient(dbConn), apipb.NewAPIClient(apiConn), logger))
+	schedpb.RegisterSchedulerServer(srv, sched)
 
 	logger.Info("cdrom scheduler service starting", "addr", addr, "db", cfg.DBAddress, "api", cfg.APIAddress)
 	if err := grpcutil.Serve(lis, srv, logger); err != nil {

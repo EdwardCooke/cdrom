@@ -30,7 +30,9 @@ N-tier architecture with the following layers (top to bottom):
    - **Scheduler** (`cmd/scheduler`) — manages job lifecycle and dispatch.
      When a job targets a worker group it pushes it to the API (DispatchJob),
      which fans it out to the live workers. Persists state through the
-     Database service.
+     Database service. It also runs a background **watchdog** that reaps
+     running jobs that have exceeded their declared timeout even if the
+     execution target goes silent (F-03).
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -134,9 +136,25 @@ behavior must invoke a shell explicitly (`sh -c ...` on Linux, `cmd /c ...` on
 Windows). Step stdout/stderr are inherited from the target's own stdout/stderr
 (local logging) and, when the target has a log sink, also streamed to the API
 in near-real-time (F-02, `internal/logstream`); the API persists the output to
-the artifacts service and fans it out to the UI as `job_log` events. A
-per-step `timeout` is enforced by the target via a derived context; a
-scheduler-side watchdog for dead targets is a later feature (F-03).
+the artifacts service and fans it out to the UI as `job_log` events.
+
+**Timeouts (F-03):** a job declares a job-level `timeout` on its `JobSpec`
+(the sum of all steps) and each step may declare its own `timeout` (an
+individual step); whichever deadline expires first terminates the job. The
+executor derives a context for the job-level timeout in `Execute` and a nested
+context for a step's timeout in `runStep`, cancelling the running step when a
+deadline passes. A job with no job-level and no per-step timeout runs
+unbounded. When a deadline expires the executor returns the sentinel
+`executor.ErrTimeout` (wrapped with the context); the worker and agent check
+`errors.Is(err, executor.ErrTimeout)` and report the new terminal status
+`timed_out` (distinct from `failed`) so the UI can tell a hung job apart from
+one that ran and errored. As a safety valve for a target that goes silent (a
+dead worker, a crashed agent), the scheduler runs a background **watchdog**
+(`internal/services/scheduler/watchdog.go`, started from `cmd/scheduler`) that
+periodically reaps running jobs past their effective timeout (job-level
+timeout, else the longest per-step timeout) via the conditional
+`Database.ReapJob` RPC and tells the API (`NotifyJobStatus`) to fan the status
+change out to the UI.
 
 **Shell override (shell handler):** a step may set the `shell` param to run
 through a user-chosen interpreter instead of executing `command` directly.
@@ -211,8 +229,9 @@ internal/
   logstream/  executor.LogSink that streams a job's step output to the API's
               StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
   executor/   shared job-step executor: the generic dispatch engine (selects a
-              StepHandler by step type, enforces per-step timeout, carries an
-              optional LogSink in the context; used by worker + agent)
+              StepHandler by step type, enforces the job-level and per-step
+              timeouts, returns ErrTimeout on a deadline, carries an optional
+              LogSink in the context; used by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
               executor.DefaultType, tees step output to a LogSink when present);
               a target or plugin adds more via executor.RegisterStepType
@@ -220,7 +239,8 @@ internal/
     data/     pipeline/job data service
     artifacts/ general namespaced file store (artifacts + job logs; gRPC
               server; store interface with a filesystem implementation)
-    scheduler/ job lifecycle + dispatch (gRPC server)
+    scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
+              that reaps running jobs past their timeout (F-03)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation

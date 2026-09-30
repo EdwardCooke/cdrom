@@ -28,6 +28,11 @@ const (
 	JobStatusSucceeded JobStatus = "succeeded"
 	JobStatusFailed    JobStatus = "failed"
 	JobStatusCancelled JobStatus = "cancelled"
+	// JobStatusTimedOut is a terminal state: the job (or a step within it)
+	// exceeded its declared timeout and was terminated. It is distinct from
+	// failed so the UI and operators can tell a hung job apart from a job that
+	// ran to completion and reported an error.
+	JobStatusTimedOut JobStatus = "timed_out"
 )
 
 // ParamValue is a single value in a step's Params map. A value is either a
@@ -97,6 +102,13 @@ type JobStep struct {
 // the first step that errors.
 type JobSpec struct {
 	Steps []JobStep `json:"steps,omitempty"`
+	// Timeout is the maximum total duration for the whole job (all steps
+	// combined); zero means no job-level timeout. A step's own Timeout bounds
+	// an individual step; the job-level Timeout bounds the sum of all steps.
+	// When both are set, whichever expires first terminates the job. The
+	// execution target enforces it by cancelling the running step; the
+	// scheduler's watchdog reaps the job if the target goes silent (F-03).
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // Job is a single unit of work belonging to a pipeline.

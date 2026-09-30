@@ -28,6 +28,13 @@ service Database {
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc UpdateJob(UpdateJobRequest) returns (Job);
   rpc DeleteJob(DeleteJobRequest) returns (google.protobuf.Empty);
+  // ReapJob conditionally marks a job as timed_out: it sets the status to
+  // TIMED_OUT (and the finished timestamp) only if the job is still in a
+  // non-terminal state (pending or running). It returns whether the job was
+  // reaped. This is how the scheduler's watchdog reaps a job whose target
+  // went silent (F-03): a job that already reported a terminal status is
+  // left untouched.
+  rpc ReapJob(ReapJobRequest) returns (ReapJobResponse);
 
   // Workers
   rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
@@ -90,6 +97,11 @@ enum JobStatus {
   JOB_STATUS_SUCCEEDED = 3;
   JOB_STATUS_FAILED = 4;
   JOB_STATUS_CANCELLED = 5;
+  // JOB_STATUS_TIMED_OUT is a terminal state: the job (or a step within it)
+  // exceeded its declared timeout and was terminated. It is distinct from
+  // FAILED so the UI and operators can tell a hung job apart from a job that
+  // ran to completion and reported an error.
+  JOB_STATUS_TIMED_OUT = 6;
 }
 
 // ParamValue is a single value in a step's params map. A value is either a
@@ -165,6 +177,13 @@ message JobStep {
 // the first step that errors.
 message JobSpec {
   repeated JobStep steps = 1;
+  // timeout is the maximum total duration for the whole job (all steps
+  // combined); 0 means no job-level timeout. A step's own `timeout` bounds an
+  // individual step; the job-level timeout bounds the sum of all steps. When
+  // both are set, whichever expires first terminates the job. The execution
+  // target enforces it by cancelling the running step; the scheduler's
+  // watchdog reaps the job if the target goes silent (F-03).
+  google.protobuf.Duration timeout = 2;
 }
 
 message Job {
@@ -214,6 +233,19 @@ message UpdateJobRequest {
   JobStatus status = 2;
   google.protobuf.Timestamp started_at = 3;
   google.protobuf.Timestamp finished_at = 4;
+}
+
+message ReapJobRequest {
+  int64 id = 1;
+  // finished_at is the timestamp to record when the job is reaped; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp finished_at = 2;
+}
+
+message ReapJobResponse {
+  // reaped is true when the job was still in a non-terminal state and was
+  // marked timed_out; false when it had already reached a terminal state.
+  bool reaped = 1;
 }
 
 message DeleteJobRequest {

@@ -10,6 +10,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -71,6 +72,14 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 
 	a.logger.Info("job started", "job", a.jobID)
 	if err := a.runJob(ctx, job); err != nil {
+		// A timeout (the job-level or a step's per-step timeout, F-03) is
+		// reported as timed_out rather than failed, so the UI can tell a hung
+		// job apart from one that ran and errored.
+		if errors.Is(err, executor.ErrTimeout) {
+			a.logger.Error("job timed out", "job", a.jobID, "err", err.Error())
+			a.report(ctx, dbpb.JobStatus_JOB_STATUS_TIMED_OUT)
+			return dbpb.JobStatus_JOB_STATUS_TIMED_OUT, nil
+		}
 		a.logger.Error("job failed", "job", a.jobID, "err", err.Error())
 		a.report(ctx, dbpb.JobStatus_JOB_STATUS_FAILED)
 		return dbpb.JobStatus_JOB_STATUS_FAILED, nil

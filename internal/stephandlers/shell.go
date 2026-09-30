@@ -160,11 +160,17 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 	err := cmd.Wait()
 
 	if err != nil {
-		// Distinguish a per-step timeout from any other failure. A timeout
-		// manifests as the derived context hitting its deadline; a parent
-		// cancellation surfaces as context.Canceled instead.
+		// Distinguish a timeout from any other failure. A timeout manifests as
+		// the step's context hitting its deadline — either the step's own
+		// per-step timeout or the job-level timeout inherited from the parent
+		// context (F-03). A parent cancellation (e.g. a job cancel) surfaces
+		// as context.Canceled instead. Wrapping executor.ErrTimeout lets the
+		// worker/agent report the job as timed_out rather than failed.
 		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("%q timed out after %s", command, step.GetTimeout().AsDuration())
+			if timeout := step.GetTimeout().AsDuration(); timeout > 0 {
+				return fmt.Errorf("%w: %q timed out after %s", executor.ErrTimeout, command, timeout)
+			}
+			return fmt.Errorf("%w: %q timed out", executor.ErrTimeout, command)
 		}
 		return fmt.Errorf("%q: %w", command, err)
 	}

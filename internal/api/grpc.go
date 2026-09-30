@@ -488,6 +488,24 @@ func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequ
 	return &apipb.DispatchJobResponse{Dispatched: int32(dispatched)}, nil
 }
 
+// NotifyJobStatus is called by the scheduler's watchdog to fan a job-status
+// change (e.g. a job reaped as timed_out) out to the UI over the WebSocket
+// event hub. It mirrors the job_status events the API publishes when a target
+// reports a status via ReportJobStatus. It does not touch the database — the
+// scheduler already persisted the change through the Database service — it
+// only publishes the event.
+func (s *GRPCServer) NotifyJobStatus(ctx context.Context, req *apipb.NotifyJobStatusRequest) (*emptypb.Empty, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
+		return nil, status.Error(codes.InvalidArgument, "status is required")
+	}
+	s.logger.Info("api: job status notified", "job", req.GetJobId(), "status", req.GetStatus())
+	s.publish(Event{Type: EventJobStatus, JobID: req.GetJobId(), Status: jobStatusName(req.GetStatus())})
+	return &emptypb.Empty{}, nil
+}
+
 // dispatch pushes an assignment (with the job token) to every live worker in
 // the group and returns how many workers received it.
 func (s *GRPCServer) dispatch(group string, job *apipb.Job, token string) int {

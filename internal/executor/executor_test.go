@@ -2,10 +2,14 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
@@ -95,5 +99,62 @@ func TestExecuteUnknownStepType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown step type") {
 		t.Errorf("error = %q, want an unknown-step-type error", err)
+	}
+}
+
+// TestExecuteJobLevelTimeout verifies that a job-level timeout (spec.Timeout)
+// bounds the whole job: a step that would run past the job's deadline is
+// cancelled and Execute returns ErrTimeout (F-03). The step itself declares
+// no per-step timeout, so only the job-level timeout applies.
+func TestExecuteJobLevelTimeout(t *testing.T) {
+	RegisterStepType("blocker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		// Block until the context (carrying the job-level timeout) is done.
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	spec := &dbpb.JobSpec{
+		Timeout: durationpb.New(150 * time.Millisecond),
+		Steps:   []*dbpb.JobStep{{Type: "blocker"}},
+	}
+	start := time.Now()
+	err := Execute(context.Background(), spec, testLogger())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !errors.Is(err, ErrTimeout) {
+		t.Errorf("error = %q, want it to wrap ErrTimeout", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Errorf("job was not terminated at its timeout (elapsed %s)", elapsed)
+	}
+}
+
+// TestExecuteNoTimeoutUnbounded verifies that a job with no job-level timeout
+// and no per-step timeout runs unbounded (bounded only by the caller's
+// context): the executor imposes no deadline of its own. The test cancels the
+// caller's context to unblock the step; a cancellation must not be reported
+// as a timeout (ErrTimeout).
+func TestExecuteNoTimeoutUnbounded(t *testing.T) {
+	RegisterStepType("blocker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel the caller's context after a short delay to unblock the step.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "blocker"}}}
+	err := Execute(ctx, spec, testLogger())
+	if err == nil {
+		t.Fatal("expected an error when the caller's context was cancelled, got nil")
+	}
+	if errors.Is(err, ErrTimeout) {
+		t.Errorf("error = %q, want a cancellation (not a timeout) for a job with no timeout", err)
 	}
 }

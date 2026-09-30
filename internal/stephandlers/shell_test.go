@@ -2,6 +2,7 @@ package stephandlers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -179,8 +180,51 @@ func TestExecutePerStepTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("error = %q, want a timeout error", err)
 	}
+	if !errors.Is(err, executor.ErrTimeout) {
+		t.Errorf("error = %q, want it to wrap executor.ErrTimeout", err)
+	}
 	if elapsed >= 5*time.Second {
 		t.Errorf("step was not terminated at its timeout (elapsed %s)", elapsed)
+	}
+}
+
+// TestExecuteJobLevelTimeout verifies that a job-level timeout (spec.Timeout)
+// terminates a step that has no per-step timeout of its own (F-03): the
+// command is killed when the job's deadline expires and the error wraps
+// executor.ErrTimeout, so the target reports the job as timed_out.
+func TestExecuteJobLevelTimeout(t *testing.T) {
+	var step *dbpb.JobStep
+	if runtime.GOOS == "windows" {
+		step = &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamCommand: stringParam("ping"),
+			ParamArgs:    stringsParam([]string{"-n", "6", "127.0.0.1"}),
+		}}
+	} else {
+		step = &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+			ParamCommand: stringParam("sleep"),
+			ParamArgs:    stringsParam([]string{"5"}),
+		}}
+	}
+	// No per-step timeout: only the job-level timeout applies.
+	spec := &dbpb.JobSpec{
+		Timeout: durationpb.New(150 * time.Millisecond),
+		Steps:   []*dbpb.JobStep{step},
+	}
+
+	start := time.Now()
+	err := executor.Execute(context.Background(), spec, testLogger())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	}
+	if !errors.Is(err, executor.ErrTimeout) {
+		t.Errorf("error = %q, want it to wrap executor.ErrTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want a timeout error", err)
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("step was not terminated at the job's timeout (elapsed %s)", elapsed)
 	}
 }
 

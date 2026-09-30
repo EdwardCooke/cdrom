@@ -61,7 +61,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("cdrom agent finished", "job", jobID, "status", fmt.Sprint(status))
-	if status == dbpb.JobStatus_JOB_STATUS_FAILED {
+	if status == dbpb.JobStatus_JOB_STATUS_FAILED || status == dbpb.JobStatus_JOB_STATUS_TIMED_OUT {
 		os.Exit(1)
 	}
 }

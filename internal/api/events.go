@@ -108,6 +108,8 @@ func jobStatusName(status dbpb.JobStatus) string {
 		return "failed"
 	case dbpb.JobStatus_JOB_STATUS_CANCELLED:
 		return "cancelled"
+	case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+		return "timed_out"
 	default:
 		return "unknown"
 	}
