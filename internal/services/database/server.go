@@ -104,11 +104,19 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "job name is required")
 	}
+	spec := specFromProto(req.GetSpec())
 	job := &models.Job{
 		Name:        req.GetName(),
 		TargetGroup: req.GetTargetGroup(),
 		Status:      models.JobStatusPending,
-		Spec:        specFromProto(req.GetSpec()),
+		Spec:        spec,
+		// A new job starts on its first attempt (F-04). The retry budget is
+		// denormalized from the spec's retry policy so the UI can render
+		// "attempt N of M" without the spec.
+		Attempt: 1,
+	}
+	if spec.Retry != nil {
+		job.MaxAttempts = spec.Retry.MaxAttempts
 	}
 	if req.GetPipelineId() > 0 {
 		pipelineID := uint(req.GetPipelineId())
@@ -146,6 +154,30 @@ func (s *Server) ListJobs(ctx context.Context, req *dbpb.ListJobsRequest) (*dbpb
 	}
 	var jobs []models.Job
 	if err := query.Order("id").Find(&jobs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListJobsResponse{}
+	for i := range jobs {
+		response.Jobs = append(response.Jobs, toProtoJob(&jobs[i]))
+	}
+	return response, nil
+}
+
+// ListRetriableJobs returns the jobs the scheduler's retry loop should
+// re-dispatch (F-04): jobs that are failed and still have retries remaining
+// (a retry policy with max_attempts > 0 and an attempt counter below the
+// budget, i.e. attempt < max_attempts + 1). The filter is applied in the
+// database so the retry loop never pulls every failed job over the wire as
+// the system grows. A job that has exhausted its retries (attempt >=
+// max_attempts + 1) or has no retry policy (max_attempts = 0) is not returned.
+func (s *Server) ListRetriableJobs(ctx context.Context, req *dbpb.ListRetriableJobsRequest) (*dbpb.ListJobsResponse, error) {
+	var jobs []models.Job
+	err := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("status = ? AND max_attempts > 0 AND attempt < max_attempts + 1", models.JobStatusFailed).
+		Order("id").
+		Find(&jobs).Error
+	if err != nil {
 		return nil, grpcErr(err)
 	}
 	response := &dbpb.ListJobsResponse{}
@@ -212,6 +244,103 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 		return nil, grpcErr(result.Error)
 	}
 	return &dbpb.ReapJobResponse{Reaped: result.RowsAffected > 0}, nil
+}
+
+// ClaimJobRetry atomically claims the next retry attempt for a job (F-04):
+// it increments the job's attempt counter and resets it to pending (clearing
+// the finished timestamp) only if the job is in a retryable state (pending,
+// running, failed, or timed_out) and has not exhausted its retry budget. The
+// conditional update is done atomically with a WHERE clause on the status and
+// the attempt counter, so a job that reported a terminal status (succeeded or
+// cancelled) between the check and the claim is left untouched, and a job
+// that has used up its retries is never re-dispatched. It returns the claimed
+// attempt number (1-based) and whether the claim succeeded.
+func (s *Server) ClaimJobRetry(ctx context.Context, req *dbpb.ClaimJobRetryRequest) (*dbpb.ClaimJobRetryResponse, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	var job models.Job
+	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// A job that succeeded or was cancelled is not retried.
+	switch job.Status {
+	case models.JobStatusSucceeded, models.JobStatusCancelled:
+		return &dbpb.ClaimJobRetryResponse{Claimed: false, Attempt: int32(job.Attempt)}, nil
+	}
+	// A job with no retry policy (max_attempts 0) is never retried.
+	if job.MaxAttempts == 0 {
+		return &dbpb.ClaimJobRetryResponse{Claimed: false, Attempt: int32(job.Attempt)}, nil
+	}
+	// A job that has exhausted its retry budget is not retried. The budget is
+	// the number of retries after the initial attempt, so the attempt counter
+	// may reach at most 1 + max_attempts; once it has, no further attempt is
+	// claimed.
+	if job.Attempt >= job.MaxAttempts+1 {
+		return &dbpb.ClaimJobRetryResponse{Claimed: false, Attempt: int32(job.Attempt)}, nil
+	}
+	nextAttempt := job.Attempt + 1
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status IN ? AND attempt = ?", req.GetId(),
+			[]models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusFailed, models.JobStatusTimedOut}, job.Attempt).
+		Updates(map[string]any{
+			"status":      models.JobStatusPending,
+			"attempt":     nextAttempt,
+			"finished_at": nil, // clear the previous attempt's finished timestamp
+			"updated_at":  time.Now(),
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		// The job changed state (or attempt) between the read and the update;
+		// it was not claimed.
+		return &dbpb.ClaimJobRetryResponse{Claimed: false, Attempt: int32(job.Attempt)}, nil
+	}
+	return &dbpb.ClaimJobRetryResponse{Claimed: true, Attempt: int32(nextAttempt)}, nil
+}
+
+// RerunJob resets a finished job to pending with a fresh attempt (F-04): it
+// sets the status to pending, the attempt to 1, and clears the finished
+// timestamp. Only jobs in a terminal state (succeeded, failed, cancelled, or
+// timed_out) can be re-run; a job that is still pending or running is
+// rejected. The conditional update is atomic, so a job that is re-run
+// concurrently is not clobbered.
+func (s *Server) RerunJob(ctx context.Context, req *dbpb.RerunJobRequest) (*dbpb.Job, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	var job models.Job
+	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// Only a job in a terminal state can be re-run.
+	switch job.Status {
+	case models.JobStatusPending, models.JobStatusRunning:
+		return nil, status.Errorf(codes.FailedPrecondition, "job %d is %s and cannot be re-run", req.GetId(), job.Status)
+	}
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status IN ?", req.GetId(),
+			[]models.JobStatus{models.JobStatusSucceeded, models.JobStatusFailed, models.JobStatusCancelled, models.JobStatusTimedOut}).
+		Updates(map[string]any{
+			"status":      models.JobStatusPending,
+			"attempt":     1,
+			"finished_at": nil, // clear the previous attempt's finished timestamp
+			"updated_at":  time.Now(),
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, status.Errorf(codes.FailedPrecondition, "job %d is no longer in a terminal state", req.GetId())
+	}
+	updated, err := s.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func (s *Server) DeleteJob(ctx context.Context, req *dbpb.DeleteJobRequest) (*emptypb.Empty, error) {
@@ -431,6 +560,8 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		CreatedAt:   timestamppb.New(job.CreatedAt),
 		UpdatedAt:   timestamppb.New(job.UpdatedAt),
 		Spec:        specToProto(job.Spec),
+		Attempt:     int32(job.Attempt),
+		MaxAttempts: int32(job.MaxAttempts),
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
@@ -460,13 +591,18 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 			Params:  paramsFromProto(step.GetParams()),
 		})
 	}
-	return models.JobSpec{Steps: steps, Timeout: spec.GetTimeout().AsDuration()}
+	return models.JobSpec{
+		Steps:   steps,
+		Timeout: spec.GetTimeout().AsDuration(),
+		Retry:   retryPolicyFromProto(spec.GetRetry()),
+	}
 }
 
 // specToProto converts the model's JobSpec into a proto JobSpec. A spec with
-// no steps yields a nil proto (so it round-trips to an empty spec).
+// no steps, no timeout, and no retry policy yields a nil proto (so it
+// round-trips to an empty spec).
 func specToProto(spec models.JobSpec) *dbpb.JobSpec {
-	if len(spec.Steps) == 0 && spec.Timeout == 0 {
+	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil {
 		return nil
 	}
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
@@ -479,7 +615,35 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 			Params:  paramsToProto(step.Params),
 		})
 	}
-	return &dbpb.JobSpec{Steps: steps, Timeout: durationpb.New(spec.Timeout)}
+	return &dbpb.JobSpec{
+		Steps:   steps,
+		Timeout: durationpb.New(spec.Timeout),
+		Retry:   retryPolicyToProto(spec.Retry),
+	}
+}
+
+// retryPolicyFromProto converts a proto RetryPolicy into the model's
+// RetryPolicy. A nil proto yields a nil policy (the job is never retried).
+func retryPolicyFromProto(policy *dbpb.RetryPolicy) *models.RetryPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &models.RetryPolicy{
+		MaxAttempts: int(policy.GetMaxAttempts()),
+		Backoff:     policy.GetBackoff().AsDuration(),
+	}
+}
+
+// retryPolicyToProto converts the model's RetryPolicy into a proto
+// RetryPolicy. A nil policy yields a nil proto.
+func retryPolicyToProto(policy *models.RetryPolicy) *dbpb.RetryPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &dbpb.RetryPolicy{
+		MaxAttempts: int32(policy.MaxAttempts),
+		Backoff:     durationpb.New(policy.Backoff),
+	}
 }
 
 // paramsFromProto converts a proto params map into the model's params map.

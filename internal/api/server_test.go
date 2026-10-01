@@ -15,10 +15,11 @@ import (
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 )
 
-// fakeScheduler is a stub SchedulerClient that records the last SubmitJob
-// request and returns a canned job.
+// fakeScheduler is a stub SchedulerClient that records the last SubmitJob and
+// RerunJob requests and returns a canned job.
 type fakeScheduler struct {
 	submitted *schedpb.SubmitJobRequest
+	rerun     *schedpb.RerunJobRequest
 	job       *schedpb.Job
 }
 
@@ -36,6 +37,11 @@ func (f *fakeScheduler) ListJobs(ctx context.Context, in *schedpb.ListJobsReques
 }
 
 func (f *fakeScheduler) CancelJob(ctx context.Context, in *schedpb.CancelJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
+	return f.job, nil
+}
+
+func (f *fakeScheduler) RerunJob(ctx context.Context, in *schedpb.RerunJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
+	f.rerun = in
 	return f.job, nil
 }
 
@@ -175,6 +181,44 @@ func TestToProtoSpecTimeout(t *testing.T) {
 	}
 }
 
+// TestToProtoSpecRetry verifies that a job's retry policy (F-04) is carried
+// into the proto, and that a spec with only a retry policy (no steps) is still
+// a real spec.
+func TestToProtoSpecRetry(t *testing.T) {
+	spec := &jobSpecRequest{
+		Retry: &retryPolicyRequest{MaxAttempts: 3, Backoff: "10s"},
+		Steps: []jobStepRequest{{Params: map[string]*paramValueRequest{"command": {String: "go"}}}},
+	}
+	proto, err := spec.toProtoSpec()
+	if err != nil {
+		t.Fatalf("toProtoSpec: %v", err)
+	}
+	retry := proto.GetRetry()
+	if retry == nil {
+		t.Fatal("retry policy was not forwarded to the proto")
+	}
+	if retry.GetMaxAttempts() != 3 {
+		t.Errorf("retry max_attempts = %d, want 3", retry.GetMaxAttempts())
+	}
+	if retry.GetBackoff().AsDuration() != 10*time.Second {
+		t.Errorf("retry backoff = %s, want 10s", retry.GetBackoff().AsDuration())
+	}
+
+	// A spec with only a retry policy (no steps) is still a real spec.
+	onlyRetry, err := (&jobSpecRequest{Retry: &retryPolicyRequest{MaxAttempts: 1}}).toProtoSpec()
+	if err != nil {
+		t.Fatalf("toProtoSpec: %v", err)
+	}
+	if onlyRetry == nil || onlyRetry.GetRetry() == nil {
+		t.Error("spec with only a retry policy was dropped, want it kept")
+	}
+
+	// An invalid backoff is rejected.
+	if _, err := (&jobSpecRequest{Retry: &retryPolicyRequest{Backoff: "not-a-duration"}}).toProtoSpec(); err == nil {
+		t.Error("expected an error for an invalid retry backoff, got nil")
+	}
+}
+
 // TestToProtoSpecStepType verifies that a step's type and params are carried
 // into the proto, and that a non-shell step type does not require a command
 // (only the built-in shell handler does).
@@ -197,5 +241,30 @@ func TestToProtoSpecStepType(t *testing.T) {
 	// A shell step (empty type) with no command is still rejected.
 	if _, err := (&jobSpecRequest{Steps: []jobStepRequest{{}}}).toProtoSpec(); err == nil {
 		t.Error("expected an error for a shell step with no command, got nil")
+	}
+}
+
+// TestRerunJob verifies that POST /api/jobs/{id}/rerun (F-04) forwards the job
+// id to the scheduler's RerunJob RPC and returns the re-run job.
+func TestRerunJob(t *testing.T) {
+	fake := &fakeScheduler{job: &schedpb.Job{Id: 9, Name: "build", Status: dbpb.JobStatus_JOB_STATUS_PENDING, Attempt: 1}}
+	srv := New(Clients{Scheduler: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/jobs/9/rerun", "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	if fake.rerun == nil {
+		t.Fatal("scheduler.RerunJob was not called")
+	}
+	if fake.rerun.GetId() != 9 {
+		t.Errorf("rerun job id = %d, want 9", fake.rerun.GetId())
 	}
 }

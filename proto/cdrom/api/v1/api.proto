@@ -54,10 +54,11 @@ service API {
 
   // NotifyJobStatus (called by the scheduler). The scheduler's watchdog uses
   // it to fan a job-status change (e.g. a job reaped as timed_out) out to the
-  // UI over the WebSocket event hub, mirroring the job_status events the API
-  // publishes when a target reports a status. It does not touch the database
-  // (the scheduler already persisted the change); it only publishes the
-  // event.
+  // UI over the WebSocket event hub, and the retry loop (F-04) uses it to fan
+  // out a retried job's reset to pending. It mirrors the job_status events
+  // the API publishes when a target reports a status. It does not touch the
+  // database (the scheduler already persisted the change); it only publishes
+  // the event.
   rpc NotifyJobStatus(NotifyJobStatusRequest) returns (google.protobuf.Empty);
 
   // Artifact proxy (called by workers and agents). The API forwards these to
@@ -117,6 +118,12 @@ message Job {
   // execution target runs the steps in order and the job fails on the first
   // step that errors.
   cdrom.db.v1.JobSpec spec = 9;
+  // attempt is the 1-based attempt number of the execution (F-04); 0 means
+  // the field is unset (e.g. a job that has not been dispatched yet).
+  int32 attempt = 10;
+  // max_attempts is the job's retry budget (0 means the job is never
+  // retried), so the UI can render "attempt N of M".
+  int32 max_attempts = 11;
 }
 
 message JobAssignment {
@@ -190,6 +197,13 @@ message DispatchJobResponse {
 message NotifyJobStatusRequest {
   int64 job_id = 1;
   cdrom.db.v1.JobStatus status = 2;
+  // attempt is the 1-based attempt number of the job (F-04); 0 means the
+  // field is unset. The scheduler passes it so the UI can render "attempt N
+  // of M" on the fanned-out job_status event.
+  int32 attempt = 3;
+  // max_attempts is the job's retry budget (0 means the job is never
+  // retried).
+  int32 max_attempts = 4;
 }
 
 message ExchangeJobTokenRequest {

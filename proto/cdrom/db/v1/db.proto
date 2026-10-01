@@ -26,8 +26,29 @@ service Database {
   rpc CreateJob(CreateJobRequest) returns (Job);
   rpc GetJob(GetJobRequest) returns (Job);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  // ListRetriableJobs returns the jobs the scheduler's retry loop should
+  // re-dispatch (F-04): jobs that are failed and still have retries remaining
+  // (a retry policy with max_attempts > 0 and an attempt counter below the
+  // budget). Filtering in the database keeps the retry loop from pulling every
+  // failed job over the wire as the system grows.
+  rpc ListRetriableJobs(ListRetriableJobsRequest) returns (ListJobsResponse);
   rpc UpdateJob(UpdateJobRequest) returns (Job);
   rpc DeleteJob(DeleteJobRequest) returns (google.protobuf.Empty);
+  // ClaimJobRetry atomically claims the next retry attempt for a job: it
+  // increments the job's attempt counter and resets it to pending only if the
+  // job is still in a non-terminal state (pending or running) and has not
+  // exhausted its retry budget. It returns the claimed attempt number (1-based)
+  // and whether the claim succeeded. This is how the scheduler re-dispatches a
+  // failed job (F-04): the conditional update is atomic, so a job that
+  // reported a terminal status between the check and the claim is left
+  // untouched, and a job that has used up its retries is never re-dispatched.
+  rpc ClaimJobRetry(ClaimJobRetryRequest) returns (ClaimJobRetryResponse);
+  // RerunJob resets a finished job to pending with a fresh attempt (F-04): it
+  // sets the status to pending, the attempt to 1, and clears the finished
+  // timestamp. Only jobs in a terminal state (succeeded, failed, cancelled,
+  // or timed_out) can be re-run; a job that is still pending or running is
+  // rejected. This is how the scheduler's RerunJob RPC re-runs a finished job.
+  rpc RerunJob(RerunJobRequest) returns (Job);
   // ReapJob conditionally marks a job as timed_out: it sets the status to
   // TIMED_OUT (and the finished timestamp) only if the job is still in a
   // non-terminal state (pending or running). It returns whether the job was
@@ -172,6 +193,18 @@ message JobStep {
   map<string, ParamValue> params = 8;
 }
 
+// RetryPolicy is a job's retry policy (F-04): how many times a failed job is
+// re-dispatched and how long the scheduler waits between attempts.
+message RetryPolicy {
+  // max_attempts is the number of retries after the initial attempt; 0 means
+  // the job is never retried. A job with max_attempts 2 runs at most 3 times
+  // (the initial attempt plus 2 retries).
+  int32 max_attempts = 1;
+  // backoff is the delay before each retry; 0 means retries are dispatched
+  // immediately.
+  google.protobuf.Duration backoff = 2;
+}
+
 // JobSpec is the declarative execution spec of a job: an ordered list of
 // steps. The execution target runs the steps in order and the job fails on
 // the first step that errors.
@@ -184,6 +217,9 @@ message JobSpec {
   // target enforces it by cancelling the running step; the scheduler's
   // watchdog reaps the job if the target goes silent (F-03).
   google.protobuf.Duration timeout = 2;
+  // retry is the job's retry policy (F-04); when absent the job is never
+  // retried.
+  RetryPolicy retry = 3;
 }
 
 message Job {
@@ -202,6 +238,16 @@ message Job {
   // spec is the execution spec snapshot taken when the job was created. A
   // pipeline edit never changes what a past run did.
   JobSpec spec = 10;
+  // attempt is the 1-based number of the attempt currently in flight (or the
+  // last attempt, once the job is terminal). It is 1 for a job that has run
+  // once and is incremented by the scheduler each time it re-dispatches a
+  // failed job (F-04). The UI shows "attempt N of M" from this and
+  // max_attempts.
+  int32 attempt = 11;
+  // max_attempts is the retry budget copied from the spec's retry policy when
+  // the job was created (0 means the job is never retried). It is denormalized
+  // onto the job so the UI can render "attempt N of M" without the spec.
+  int32 max_attempts = 12;
 }
 
 message CreateJobRequest {
@@ -228,6 +274,10 @@ message ListJobsResponse {
   repeated Job jobs = 1;
 }
 
+// ListRetriableJobsRequest is the (empty) request for ListRetriableJobs; it
+// is present so the RPC has a request message and can grow filters later.
+message ListRetriableJobsRequest {}
+
 message UpdateJobRequest {
   int64 id = 1;
   JobStatus status = 2;
@@ -246,6 +296,25 @@ message ReapJobResponse {
   // reaped is true when the job was still in a non-terminal state and was
   // marked timed_out; false when it had already reached a terminal state.
   bool reaped = 1;
+}
+
+message ClaimJobRetryRequest {
+  int64 id = 1;
+}
+
+message RerunJobRequest {
+  int64 id = 1;
+}
+
+message ClaimJobRetryResponse {
+  // claimed is true when the job was still in a non-terminal state and had
+  // retries remaining; the attempt counter was incremented and the job reset
+  // to pending. It is false when the job had already reached a terminal state
+  // or had exhausted its retry budget.
+  bool claimed = 1;
+  // attempt is the 1-based attempt number the job was reset to (valid when
+  // claimed is true).
+  int32 attempt = 2;
 }
 
 message DeleteJobRequest {

@@ -42,6 +42,12 @@ type wsJob struct {
 	Name        string `json:"name"`
 	Status      string `json:"status"`
 	TargetGroup string `json:"target_group"`
+	// Attempt is the 1-based attempt number of the execution (F-04); 0 means
+	// the field is unset.
+	Attempt int32 `json:"attempt,omitempty"`
+	// MaxAttempts is the job's retry budget (0 means the job is never
+	// retried), so the UI can render "attempt N of M".
+	MaxAttempts int32 `json:"max_attempts,omitempty"`
 }
 
 type wsWorker struct {
@@ -120,6 +126,8 @@ func (s *Server) snapshot() (*wsSnapshot, error) {
 				Name:        job.GetName(),
 				Status:      jobStatusName(job.GetStatus()),
 				TargetGroup: job.GetTargetGroup(),
+				Attempt:     job.GetAttempt(),
+				MaxAttempts: job.GetMaxAttempts(),
 			})
 		}
 	}

@@ -97,6 +97,18 @@ type JobStep struct {
 	Params map[string]*ParamValue `json:"params,omitempty"`
 }
 
+// RetryPolicy is a job's retry policy (F-04): how many times a failed job is
+// re-dispatched and how long the scheduler waits between attempts.
+type RetryPolicy struct {
+	// MaxAttempts is the number of retries after the initial attempt; zero
+	// means the job is never retried. A job with MaxAttempts 2 runs at most 3
+	// times (the initial attempt plus 2 retries).
+	MaxAttempts int `json:"max_attempts,omitempty"`
+	// Backoff is the delay before each retry; zero means retries are
+	// dispatched immediately.
+	Backoff time.Duration `json:"backoff,omitempty"`
+}
+
 // JobSpec is the declarative execution spec of a job: an ordered list of
 // steps. The execution target runs the steps in order and the job fails on
 // the first step that errors.
@@ -109,6 +121,9 @@ type JobSpec struct {
 	// execution target enforces it by cancelling the running step; the
 	// scheduler's watchdog reaps the job if the target goes silent (F-03).
 	Timeout time.Duration `json:"timeout,omitempty"`
+	// Retry is the job's retry policy (F-04); a nil policy means the job is
+	// never retried.
+	Retry *RetryPolicy `json:"retry,omitempty"`
 }
 
 // Job is a single unit of work belonging to a pipeline.
@@ -118,6 +133,12 @@ type JobSpec struct {
 //
 // Spec is a snapshot of the execution spec taken when the job was created,
 // so a pipeline edit never changes what a past run did.
+//
+// Attempt and MaxAttempts track the job's retry progress (F-04): a retry is
+// a new attempt on the same row (not a new Job), so the pipeline run stays
+// coherent. Attempt is the 1-based number of the attempt currently in flight
+// (or the last attempt, once the job is terminal); MaxAttempts is the retry
+// budget copied from the spec's retry policy when the job was created.
 type Job struct {
 	gorm.Model
 	PipelineID  *uint      `gorm:"index" json:"pipeline_id"`
@@ -130,6 +151,16 @@ type Job struct {
 	// Spec is the execution spec snapshot, serialized to a JSON document in a
 	// text column (portable across SQLite and PostgreSQL).
 	Spec JobSpec `gorm:"type:text;serializer:json" json:"spec,omitempty"`
+	// Attempt is the 1-based number of the attempt currently in flight (or
+	// the last attempt, once the job is terminal). It is 1 for a job that has
+	// run once and is incremented by the scheduler each time it re-dispatches
+	// a failed job (F-04).
+	Attempt int `json:"attempt"`
+	// MaxAttempts is the retry budget copied from the spec's retry policy when
+	// the job was created (0 means the job is never retried). It is
+	// denormalized onto the job so the UI can render "attempt N of M" without
+	// the spec.
+	MaxAttempts int `json:"max_attempts"`
 }
 
 // Worker is a long-lived worker process registered on a deployment target.

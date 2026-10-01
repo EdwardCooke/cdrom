@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
+	mux.HandleFunc("POST /api/jobs/{id}/rerun", s.rerunJob)
 
 	// Workers (via the scheduler service).
 	mux.HandleFunc("GET /api/workers", s.listWorkers)
@@ -150,17 +151,28 @@ type jobRequest struct {
 
 // jobSpecRequest is the JSON form of a job's execution spec. Timeout is a
 // duration string (e.g. "30s", "5m") bounding the whole job (all steps
-// combined); empty means no job-level timeout.
+// combined); empty means no job-level timeout. Retry is the job's retry
+// policy (F-04); when omitted the job is never retried.
 type jobSpecRequest struct {
-	Steps   []jobStepRequest `json:"steps,omitempty"`
-	Timeout string           `json:"timeout,omitempty"`
+	Steps   []jobStepRequest    `json:"steps,omitempty"`
+	Timeout string              `json:"timeout,omitempty"`
+	Retry   *retryPolicyRequest `json:"retry,omitempty"`
+}
+
+// retryPolicyRequest is the JSON form of a job's retry policy (F-04).
+// MaxAttempts is the number of retries after the initial attempt (0 means the
+// job is never retried); Backoff is a duration string (e.g. "10s") to wait
+// before each retry (empty means retries are dispatched immediately).
+type retryPolicyRequest struct {
+	MaxAttempts int    `json:"max_attempts,omitempty"`
+	Backoff     string `json:"backoff,omitempty"`
 }
 
 // toProtoSpec converts the JSON spec into the proto JobSpec carried to the
-// scheduler. It returns nil when the spec is absent and has no steps and no
-// job-level timeout.
+// scheduler. It returns nil when the spec is absent and has no steps, no job
+// level timeout, and no retry policy.
 func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
-	if r == nil || (len(r.Steps) == 0 && r.Timeout == "") {
+	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil) {
 		return nil, nil
 	}
 	spec := &dbpb.JobSpec{}
@@ -170,6 +182,17 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 			return nil, fmt.Errorf("spec: invalid timeout %q: %w", r.Timeout, err)
 		}
 		spec.Timeout = durationpb.New(duration)
+	}
+	if r.Retry != nil {
+		retry := &dbpb.RetryPolicy{MaxAttempts: int32(r.Retry.MaxAttempts)}
+		if r.Retry.Backoff != "" {
+			duration, err := time.ParseDuration(r.Retry.Backoff)
+			if err != nil {
+				return nil, fmt.Errorf("spec: invalid retry backoff %q: %w", r.Retry.Backoff, err)
+			}
+			retry.Backoff = durationpb.New(duration)
+		}
+		spec.Retry = retry
 	}
 	for i, step := range r.Steps {
 		// A command is required for the built-in shell handler (the default
@@ -283,6 +306,23 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, err := s.clients.Scheduler.CancelJob(r.Context(), &schedpb.CancelJobRequest{Id: jobID})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
+	writeJSON(w, http.StatusOK, job)
+}
+
+// rerunJob re-runs a finished job (F-04): it resets the job to pending with a
+// fresh attempt and re-dispatches it, so the job runs again with the same
+// spec. Only jobs in a terminal state can be re-run.
+func (s *Server) rerunJob(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	job, err := s.clients.Scheduler.RerunJob(r.Context(), &schedpb.RerunJobRequest{Id: jobID})
 	if err != nil {
 		grpcError(w, err)
 		return

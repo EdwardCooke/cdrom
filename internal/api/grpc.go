@@ -250,7 +250,13 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		return nil, err
 	}
 	s.logger.Info("api: job status reported", "job", req.GetJobId(), "status", req.GetStatus())
-	s.publish(Event{Type: EventJobStatus, JobID: req.GetJobId(), Status: jobStatusName(req.GetStatus())})
+	s.publish(Event{
+		Type:        EventJobStatus,
+		JobID:       req.GetJobId(),
+		Status:      jobStatusName(req.GetStatus()),
+		Attempt:     updated.GetAttempt(),
+		MaxAttempts: updated.GetMaxAttempts(),
+	})
 	return toAPIJob(updated), nil
 }
 
@@ -502,7 +508,13 @@ func (s *GRPCServer) NotifyJobStatus(ctx context.Context, req *apipb.NotifyJobSt
 		return nil, status.Error(codes.InvalidArgument, "status is required")
 	}
 	s.logger.Info("api: job status notified", "job", req.GetJobId(), "status", req.GetStatus())
-	s.publish(Event{Type: EventJobStatus, JobID: req.GetJobId(), Status: jobStatusName(req.GetStatus())})
+	s.publish(Event{
+		Type:        EventJobStatus,
+		JobID:       req.GetJobId(),
+		Status:      jobStatusName(req.GetStatus()),
+		Attempt:     req.GetAttempt(),
+		MaxAttempts: req.GetMaxAttempts(),
+	})
 	return &emptypb.Empty{}, nil
 }
 
@@ -721,6 +733,8 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		StartedAt:   job.GetStartedAt(),
 		FinishedAt:  job.GetFinishedAt(),
 		Spec:        job.GetSpec(),
+		Attempt:     job.GetAttempt(),
+		MaxAttempts: job.GetMaxAttempts(),
 	}
 }
 

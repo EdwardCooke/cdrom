@@ -355,7 +355,13 @@ type Job struct {
 	// spec is the execution spec snapshot taken when the job was created. The
 	// execution target runs the steps in order and the job fails on the first
 	// step that errors.
-	Spec          *v1.JobSpec `protobuf:"bytes,9,opt,name=spec,proto3" json:"spec,omitempty"`
+	Spec *v1.JobSpec `protobuf:"bytes,9,opt,name=spec,proto3" json:"spec,omitempty"`
+	// attempt is the 1-based attempt number of the execution (F-04); 0 means
+	// the field is unset (e.g. a job that has not been dispatched yet).
+	Attempt int32 `protobuf:"varint,10,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// max_attempts is the job's retry budget (0 means the job is never
+	// retried), so the UI can render "attempt N of M".
+	MaxAttempts   int32 `protobuf:"varint,11,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -451,6 +457,20 @@ func (x *Job) GetSpec() *v1.JobSpec {
 		return x.Spec
 	}
 	return nil
+}
+
+func (x *Job) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *Job) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
 }
 
 type JobAssignment struct {
@@ -936,9 +956,16 @@ func (x *DispatchJobResponse) GetDispatched() int32 {
 }
 
 type NotifyJobStatusRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	JobId         int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	Status        v1.JobStatus           `protobuf:"varint,2,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	JobId  int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Status v1.JobStatus           `protobuf:"varint,2,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
+	// attempt is the 1-based attempt number of the job (F-04); 0 means the
+	// field is unset. The scheduler passes it so the UI can render "attempt N
+	// of M" on the fanned-out job_status event.
+	Attempt int32 `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// max_attempts is the job's retry budget (0 means the job is never
+	// retried).
+	MaxAttempts   int32 `protobuf:"varint,4,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -985,6 +1012,20 @@ func (x *NotifyJobStatusRequest) GetStatus() v1.JobStatus {
 		return x.Status
 	}
 	return v1.JobStatus(0)
+}
+
+func (x *NotifyJobStatusRequest) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *NotifyJobStatusRequest) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
 }
 
 type ExchangeJobTokenRequest struct {
@@ -1108,7 +1149,7 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x10HeartbeatRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"G\n" +
 	"\x11HeartbeatResponse\x122\n" +
-	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\xd5\x02\n" +
+	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\x92\x03\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -1121,7 +1162,10 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\vfinished_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"finishedAt\x12\x14\n" +
 	"\x05token\x18\b \x01(\tR\x05token\x12(\n" +
-	"\x04spec\x18\t \x01(\v2\x14.cdrom.db.v1.JobSpecR\x04spec\"k\n" +
+	"\x04spec\x18\t \x01(\v2\x14.cdrom.db.v1.JobSpecR\x04spec\x12\x18\n" +
+	"\aattempt\x18\n" +
+	" \x01(\x05R\aattempt\x12!\n" +
+	"\fmax_attempts\x18\v \x01(\x05R\vmaxAttempts\"k\n" +
 	"\rJobAssignment\x12#\n" +
 	"\x03job\x18\x01 \x01(\v2\x11.cdrom.api.v1.JobR\x03job\x12\x1f\n" +
 	"\vworker_name\x18\x02 \x01(\tR\n" +
@@ -1155,10 +1199,12 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x13DispatchJobResponse\x12\x1e\n" +
 	"\n" +
 	"dispatched\x18\x01 \x01(\x05R\n" +
-	"dispatched\"_\n" +
+	"dispatched\"\x9c\x01\n" +
 	"\x16NotifyJobStatusRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12.\n" +
-	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\"L\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x12\x18\n" +
+	"\aattempt\x18\x03 \x01(\x05R\aattempt\x12!\n" +
+	"\fmax_attempts\x18\x04 \x01(\x05R\vmaxAttempts\"L\n" +
 	"\x17ExchangeJobTokenRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1a\n" +
 	"\baudience\x18\x02 \x01(\tR\baudience\"0\n" +

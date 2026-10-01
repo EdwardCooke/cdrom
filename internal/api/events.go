@@ -22,7 +22,13 @@ type Event struct {
 	Stream string `json:"stream,omitempty"`
 	// Data is the log text a job_log event carries.
 	Data string `json:"data,omitempty"`
-	At   int64  `json:"at"`
+	// Attempt is the 1-based attempt number of a job_status event (F-04); 0
+	// means the field is unset.
+	Attempt int32 `json:"attempt,omitempty"`
+	// MaxAttempts is the job's retry budget (0 means the job is never
+	// retried), so the UI can render "attempt N of M" on a job_status event.
+	MaxAttempts int32 `json:"max_attempts,omitempty"`
+	At          int64 `json:"at"`
 }
 
 // Event type constants.

@@ -33,7 +33,13 @@ type Job struct {
 	StartedAt   *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	FinishedAt  *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
 	// spec is the execution spec snapshot taken when the job was created.
-	Spec          *v1.JobSpec `protobuf:"bytes,8,opt,name=spec,proto3" json:"spec,omitempty"`
+	Spec *v1.JobSpec `protobuf:"bytes,8,opt,name=spec,proto3" json:"spec,omitempty"`
+	// attempt is the 1-based number of the attempt currently in flight (or the
+	// last attempt, once the job is terminal); 0 means the field is unset.
+	Attempt int32 `protobuf:"varint,9,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// max_attempts is the job's retry budget (0 means the job is never
+	// retried), so the UI can render "attempt N of M" (F-04).
+	MaxAttempts   int32 `protobuf:"varint,10,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -122,6 +128,20 @@ func (x *Job) GetSpec() *v1.JobSpec {
 		return x.Spec
 	}
 	return nil
+}
+
+func (x *Job) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *Job) GetMaxAttempts() int32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
 }
 
 type SubmitJobRequest struct {
@@ -380,11 +400,55 @@ func (x *CancelJobRequest) GetId() int64 {
 	return 0
 }
 
+type RerunJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RerunJobRequest) Reset() {
+	*x = RerunJobRequest{}
+	mi := &file_cdrom_scheduler_v1_scheduler_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RerunJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RerunJobRequest) ProtoMessage() {}
+
+func (x *RerunJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_scheduler_v1_scheduler_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RerunJobRequest.ProtoReflect.Descriptor instead.
+func (*RerunJobRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RerunJobRequest) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
 var File_cdrom_scheduler_v1_scheduler_proto protoreflect.FileDescriptor
 
 const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\n" +
-	"\"cdrom/scheduler/v1/scheduler.proto\x12\x12cdrom.scheduler.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14cdrom/db/v1/db.proto\"\xbf\x02\n" +
+	"\"cdrom/scheduler/v1/scheduler.proto\x12\x12cdrom.scheduler.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14cdrom/db/v1/db.proto\"\xfc\x02\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -396,7 +460,10 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"started_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
 	"\vfinished_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"finishedAt\x12(\n" +
-	"\x04spec\x18\b \x01(\v2\x14.cdrom.db.v1.JobSpecR\x04spec\"\x94\x01\n" +
+	"\x04spec\x18\b \x01(\v2\x14.cdrom.db.v1.JobSpecR\x04spec\x12\x18\n" +
+	"\aattempt\x18\t \x01(\x05R\aattempt\x12!\n" +
+	"\fmax_attempts\x18\n" +
+	" \x01(\x05R\vmaxAttempts\"\x94\x01\n" +
 	"\x10SubmitJobRequest\x12\x1f\n" +
 	"\vpipeline_id\x18\x01 \x01(\x03R\n" +
 	"pipelineId\x12\x12\n" +
@@ -412,12 +479,15 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x10ListJobsResponse\x12+\n" +
 	"\x04jobs\x18\x01 \x03(\v2\x17.cdrom.scheduler.v1.JobR\x04jobs\"\"\n" +
 	"\x10CancelJobRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x03R\x02id2\xc0\x02\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"!\n" +
+	"\x0fRerunJobRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id2\x8a\x03\n" +
 	"\tScheduler\x12J\n" +
 	"\tSubmitJob\x12$.cdrom.scheduler.v1.SubmitJobRequest\x1a\x17.cdrom.scheduler.v1.Job\x12D\n" +
 	"\x06GetJob\x12!.cdrom.scheduler.v1.GetJobRequest\x1a\x17.cdrom.scheduler.v1.Job\x12U\n" +
 	"\bListJobs\x12#.cdrom.scheduler.v1.ListJobsRequest\x1a$.cdrom.scheduler.v1.ListJobsResponse\x12J\n" +
-	"\tCancelJob\x12$.cdrom.scheduler.v1.CancelJobRequest\x1a\x17.cdrom.scheduler.v1.JobB3Z1cdrom/internal/gen/cdrom/scheduler/v1;schedulerv1b\x06proto3"
+	"\tCancelJob\x12$.cdrom.scheduler.v1.CancelJobRequest\x1a\x17.cdrom.scheduler.v1.Job\x12H\n" +
+	"\bRerunJob\x12#.cdrom.scheduler.v1.RerunJobRequest\x1a\x17.cdrom.scheduler.v1.JobB3Z1cdrom/internal/gen/cdrom/scheduler/v1;schedulerv1b\x06proto3"
 
 var (
 	file_cdrom_scheduler_v1_scheduler_proto_rawDescOnce sync.Once
@@ -431,7 +501,7 @@ func file_cdrom_scheduler_v1_scheduler_proto_rawDescGZIP() []byte {
 	return file_cdrom_scheduler_v1_scheduler_proto_rawDescData
 }
 
-var file_cdrom_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_cdrom_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_cdrom_scheduler_v1_scheduler_proto_goTypes = []any{
 	(*Job)(nil),                   // 0: cdrom.scheduler.v1.Job
 	(*SubmitJobRequest)(nil),      // 1: cdrom.scheduler.v1.SubmitJobRequest
@@ -439,28 +509,31 @@ var file_cdrom_scheduler_v1_scheduler_proto_goTypes = []any{
 	(*ListJobsRequest)(nil),       // 3: cdrom.scheduler.v1.ListJobsRequest
 	(*ListJobsResponse)(nil),      // 4: cdrom.scheduler.v1.ListJobsResponse
 	(*CancelJobRequest)(nil),      // 5: cdrom.scheduler.v1.CancelJobRequest
-	(v1.JobStatus)(0),             // 6: cdrom.db.v1.JobStatus
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
-	(*v1.JobSpec)(nil),            // 8: cdrom.db.v1.JobSpec
+	(*RerunJobRequest)(nil),       // 6: cdrom.scheduler.v1.RerunJobRequest
+	(v1.JobStatus)(0),             // 7: cdrom.db.v1.JobStatus
+	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*v1.JobSpec)(nil),            // 9: cdrom.db.v1.JobSpec
 }
 var file_cdrom_scheduler_v1_scheduler_proto_depIdxs = []int32{
-	6,  // 0: cdrom.scheduler.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
-	7,  // 1: cdrom.scheduler.v1.Job.started_at:type_name -> google.protobuf.Timestamp
-	7,  // 2: cdrom.scheduler.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
-	8,  // 3: cdrom.scheduler.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
-	8,  // 4: cdrom.scheduler.v1.SubmitJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
-	6,  // 5: cdrom.scheduler.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
+	7,  // 0: cdrom.scheduler.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
+	8,  // 1: cdrom.scheduler.v1.Job.started_at:type_name -> google.protobuf.Timestamp
+	8,  // 2: cdrom.scheduler.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
+	9,  // 3: cdrom.scheduler.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
+	9,  // 4: cdrom.scheduler.v1.SubmitJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
+	7,  // 5: cdrom.scheduler.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
 	0,  // 6: cdrom.scheduler.v1.ListJobsResponse.jobs:type_name -> cdrom.scheduler.v1.Job
 	1,  // 7: cdrom.scheduler.v1.Scheduler.SubmitJob:input_type -> cdrom.scheduler.v1.SubmitJobRequest
 	2,  // 8: cdrom.scheduler.v1.Scheduler.GetJob:input_type -> cdrom.scheduler.v1.GetJobRequest
 	3,  // 9: cdrom.scheduler.v1.Scheduler.ListJobs:input_type -> cdrom.scheduler.v1.ListJobsRequest
 	5,  // 10: cdrom.scheduler.v1.Scheduler.CancelJob:input_type -> cdrom.scheduler.v1.CancelJobRequest
-	0,  // 11: cdrom.scheduler.v1.Scheduler.SubmitJob:output_type -> cdrom.scheduler.v1.Job
-	0,  // 12: cdrom.scheduler.v1.Scheduler.GetJob:output_type -> cdrom.scheduler.v1.Job
-	4,  // 13: cdrom.scheduler.v1.Scheduler.ListJobs:output_type -> cdrom.scheduler.v1.ListJobsResponse
-	0,  // 14: cdrom.scheduler.v1.Scheduler.CancelJob:output_type -> cdrom.scheduler.v1.Job
-	11, // [11:15] is the sub-list for method output_type
-	7,  // [7:11] is the sub-list for method input_type
+	6,  // 11: cdrom.scheduler.v1.Scheduler.RerunJob:input_type -> cdrom.scheduler.v1.RerunJobRequest
+	0,  // 12: cdrom.scheduler.v1.Scheduler.SubmitJob:output_type -> cdrom.scheduler.v1.Job
+	0,  // 13: cdrom.scheduler.v1.Scheduler.GetJob:output_type -> cdrom.scheduler.v1.Job
+	4,  // 14: cdrom.scheduler.v1.Scheduler.ListJobs:output_type -> cdrom.scheduler.v1.ListJobsResponse
+	0,  // 15: cdrom.scheduler.v1.Scheduler.CancelJob:output_type -> cdrom.scheduler.v1.Job
+	0,  // 16: cdrom.scheduler.v1.Scheduler.RerunJob:output_type -> cdrom.scheduler.v1.Job
+	12, // [12:17] is the sub-list for method output_type
+	7,  // [7:12] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -477,7 +550,7 @@ func file_cdrom_scheduler_v1_scheduler_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_scheduler_v1_scheduler_proto_rawDesc), len(file_cdrom_scheduler_v1_scheduler_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

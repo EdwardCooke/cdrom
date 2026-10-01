@@ -74,6 +74,12 @@ func main() {
 	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
 	defer stopWatchdog()
 	sched.StartWatchdog(watchdogCtx)
+	// Start the job-retry loop (F-04): it re-dispatches failed jobs that
+	// still have retries remaining, after their policy's backoff. It runs
+	// until the process shuts down.
+	retryCtx, stopRetry := context.WithCancel(ctx)
+	defer stopRetry()
+	sched.StartRetryLoop(retryCtx)
 	srv := grpc.NewServer(grpc.Creds(creds))
 	schedpb.RegisterSchedulerServer(srv, sched)
 

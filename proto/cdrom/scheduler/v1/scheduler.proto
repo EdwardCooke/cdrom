@@ -26,6 +26,12 @@ service Scheduler {
   rpc GetJob(GetJobRequest) returns (Job);
   rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
   rpc CancelJob(CancelJobRequest) returns (Job);
+  // RerunJob re-runs a finished job (F-04): it resets the job to pending
+  // with a fresh attempt (attempt 1) and re-dispatches it, so the job runs
+  // again with the same spec. Only jobs in a terminal state (succeeded,
+  // failed, cancelled, or timed_out) can be re-run; a job that is still
+  // pending or running is rejected.
+  rpc RerunJob(RerunJobRequest) returns (Job);
 }
 
 message Job {
@@ -38,6 +44,12 @@ message Job {
   google.protobuf.Timestamp finished_at = 7;
   // spec is the execution spec snapshot taken when the job was created.
   cdrom.db.v1.JobSpec spec = 8;
+  // attempt is the 1-based number of the attempt currently in flight (or the
+  // last attempt, once the job is terminal); 0 means the field is unset.
+  int32 attempt = 9;
+  // max_attempts is the job's retry budget (0 means the job is never
+  // retried), so the UI can render "attempt N of M" (F-04).
+  int32 max_attempts = 10;
 }
 
 message SubmitJobRequest {
@@ -65,5 +77,9 @@ message ListJobsResponse {
 }
 
 message CancelJobRequest {
+  int64 id = 1;
+}
+
+message RerunJobRequest {
   int64 id = 1;
 }

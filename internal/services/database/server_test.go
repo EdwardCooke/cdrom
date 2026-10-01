@@ -258,6 +258,338 @@ func TestJobLevelTimeoutRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRetryPolicyRoundTrip verifies that a job's retry policy (spec.retry) is
+// persisted and returned intact through the storage backend (F-04), and that
+// the job's attempt counter and retry budget are initialized on creation.
+func TestRetryPolicyRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		Retry: &dbpb.RetryPolicy{MaxAttempts: 3, Backoff: durationpb.New(10 * time.Second)},
+		Steps: []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if got := created.GetAttempt(); got != 1 {
+		t.Errorf("new job attempt = %d, want 1", got)
+	}
+	if got := created.GetMaxAttempts(); got != 3 {
+		t.Errorf("new job max_attempts = %d, want 3", got)
+	}
+
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: created.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	retry := fetched.GetSpec().GetRetry()
+	if retry == nil {
+		t.Fatal("fetched spec has no retry policy, want the stored policy")
+	}
+	if retry.GetMaxAttempts() != 3 {
+		t.Errorf("retry max_attempts = %d, want 3", retry.GetMaxAttempts())
+	}
+	if retry.GetBackoff().AsDuration() != 10*time.Second {
+		t.Errorf("retry backoff = %s, want 10s", retry.GetBackoff().AsDuration())
+	}
+}
+
+// TestClaimJobRetry verifies the conditional retry claim used by the
+// scheduler's retry loop (F-04): a failed job with retries remaining is reset
+// to pending with an incremented attempt, a job that has exhausted its budget
+// is not claimed, and a job that already reached a non-retryable terminal
+// state (succeeded or cancelled) is left untouched.
+func TestClaimJobRetry(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		Retry: &dbpb.RetryPolicy{MaxAttempts: 2},
+		Steps: []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+
+	// A failed job with retries remaining is claimed: attempt 1 -> 2.
+	failed, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "retryable", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         failed.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	claimed, err := client.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: failed.GetId()})
+	if err != nil {
+		t.Fatalf("ClaimJobRetry: %v", err)
+	}
+	if !claimed.GetClaimed() {
+		t.Fatal("failed job with retries remaining was not claimed, want claimed=true")
+	}
+	if claimed.GetAttempt() != 2 {
+		t.Errorf("claimed attempt = %d, want 2", claimed.GetAttempt())
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: failed.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+		t.Errorf("status = %v, want PENDING (reset for retry)", fetched.GetStatus())
+	}
+	if fetched.GetAttempt() != 2 {
+		t.Errorf("attempt = %d, want 2", fetched.GetAttempt())
+	}
+	if fetched.GetFinishedAt() != nil {
+		t.Error("finished_at not cleared on retried job")
+	}
+
+	// The job has one retry left (attempt 2 of 1 + max 2); it is claimed again
+	// (attempt 2 -> 3).
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         failed.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	claimed, err = client.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: failed.GetId()})
+	if err != nil {
+		t.Fatalf("ClaimJobRetry: %v", err)
+	}
+	if !claimed.GetClaimed() {
+		t.Fatal("job with a retry remaining was not claimed, want claimed=true")
+	}
+	if claimed.GetAttempt() != 3 {
+		t.Errorf("claimed attempt = %d, want 3", claimed.GetAttempt())
+	}
+
+	// The job has now used both of its retries (attempt 3 of 1 + max 2); it
+	// is not claimed again.
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         failed.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	claimed, err = client.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: failed.GetId()})
+	if err != nil {
+		t.Fatalf("ClaimJobRetry: %v", err)
+	}
+	if claimed.GetClaimed() {
+		t.Fatal("job that exhausted its retries was claimed, want claimed=false")
+	}
+
+	// A job that succeeded is never retried.
+	succeeded, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "succeeded", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         succeeded.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	claimed, err = client.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: succeeded.GetId()})
+	if err != nil {
+		t.Fatalf("ClaimJobRetry: %v", err)
+	}
+	if claimed.GetClaimed() {
+		t.Fatal("succeeded job was claimed, want claimed=false")
+	}
+
+	// A job with no retry policy is never retried.
+	noRetry, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "no-retry"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         noRetry.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	claimed, err = client.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: noRetry.GetId()})
+	if err != nil {
+		t.Fatalf("ClaimJobRetry: %v", err)
+	}
+	if claimed.GetClaimed() {
+		t.Fatal("job with no retry policy was claimed, want claimed=false")
+	}
+}
+
+// TestListRetriableJobs verifies the database-side filter used by the
+// scheduler's retry loop (F-04): it returns only failed jobs that still have
+// retries remaining (a retry policy with max_attempts > 0 and an attempt
+// counter below the budget), and excludes jobs with no retry policy, jobs that
+// have exhausted their budget, and jobs that are not failed.
+func TestListRetriableJobs(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		Retry: &dbpb.RetryPolicy{MaxAttempts: 2},
+		Steps: []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+
+	// A failed job with retries remaining (attempt 1 of 1 + max 2) is retriable.
+	retriable, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "retriable", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         retriable.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+
+	// A failed job that has exhausted its retries (attempt 3 of 1 + max 2) is
+	// not retriable.
+	exhausted, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "exhausted", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         exhausted.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	// Drive the attempt counter to the exhausted value (1 -> 2 -> 3).
+	for i := 0; i < 2; i++ {
+		if _, err := client.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: exhausted.GetId()}); err != nil {
+			t.Fatalf("ClaimJobRetry: %v", err)
+		}
+		if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+			Id:         exhausted.GetId(),
+			Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+			StartedAt:  timestamppb.Now(),
+			FinishedAt: timestamppb.Now(),
+		}); err != nil {
+			t.Fatalf("UpdateJob: %v", err)
+		}
+	}
+
+	// A failed job with no retry policy is not retriable.
+	noRetry, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "no-retry"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         noRetry.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+
+	// A non-failed job with a retry policy is not retriable.
+	succeeded, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "succeeded", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         succeeded.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+
+	response, err := client.ListRetriableJobs(ctx, &dbpb.ListRetriableJobsRequest{})
+	if err != nil {
+		t.Fatalf("ListRetriableJobs: %v", err)
+	}
+	got := map[int64]bool{}
+	for _, job := range response.GetJobs() {
+		got[job.GetId()] = true
+	}
+	if !got[retriable.GetId()] {
+		t.Error("retriable job was not returned")
+	}
+	if got[exhausted.GetId()] {
+		t.Error("exhausted job was returned, want it excluded")
+	}
+	if got[noRetry.GetId()] {
+		t.Error("no-retry-policy job was returned, want it excluded")
+	}
+	if got[succeeded.GetId()] {
+		t.Error("succeeded job was returned, want it excluded")
+	}
+	if len(got) != 1 {
+		t.Errorf("ListRetriableJobs returned %d jobs, want exactly 1", len(got))
+	}
+}
+
+// TestRerunJob verifies the conditional re-run used by the scheduler's
+// RerunJob RPC (F-04): a finished job is reset to pending with a fresh
+// attempt (1), while a job that is still pending or running is rejected.
+func TestRerunJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// A finished job is re-run: reset to pending, attempt back to 1.
+	finished, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "finished"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         finished.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	rerun, err := client.RerunJob(ctx, &dbpb.RerunJobRequest{Id: finished.GetId()})
+	if err != nil {
+		t.Fatalf("RerunJob: %v", err)
+	}
+	if rerun.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+		t.Errorf("status = %v, want PENDING (reset for re-run)", rerun.GetStatus())
+	}
+	if rerun.GetAttempt() != 1 {
+		t.Errorf("attempt = %d, want 1 (fresh attempt)", rerun.GetAttempt())
+	}
+	if rerun.GetFinishedAt() != nil {
+		t.Error("finished_at not cleared on re-run job")
+	}
+
+	// A job that is still running cannot be re-run.
+	running, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "running"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:        running.GetId(),
+		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
+		StartedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	if _, err := client.RerunJob(ctx, &dbpb.RerunJobRequest{Id: running.GetId()}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("RerunJob on running job = %v, want FailedPrecondition", err)
+	}
+}
+
 // TestReapJob verifies the conditional reap used by the scheduler's watchdog
 // (F-03): a running job is marked timed_out, while a job that already reached
 // a terminal state is left untouched.

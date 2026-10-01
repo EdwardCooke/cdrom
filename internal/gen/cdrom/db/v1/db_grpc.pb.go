@@ -28,8 +28,11 @@ const (
 	Database_CreateJob_FullMethodName          = "/cdrom.db.v1.Database/CreateJob"
 	Database_GetJob_FullMethodName             = "/cdrom.db.v1.Database/GetJob"
 	Database_ListJobs_FullMethodName           = "/cdrom.db.v1.Database/ListJobs"
+	Database_ListRetriableJobs_FullMethodName  = "/cdrom.db.v1.Database/ListRetriableJobs"
 	Database_UpdateJob_FullMethodName          = "/cdrom.db.v1.Database/UpdateJob"
 	Database_DeleteJob_FullMethodName          = "/cdrom.db.v1.Database/DeleteJob"
+	Database_ClaimJobRetry_FullMethodName      = "/cdrom.db.v1.Database/ClaimJobRetry"
+	Database_RerunJob_FullMethodName           = "/cdrom.db.v1.Database/RerunJob"
 	Database_ReapJob_FullMethodName            = "/cdrom.db.v1.Database/ReapJob"
 	Database_RegisterWorker_FullMethodName     = "/cdrom.db.v1.Database/RegisterWorker"
 	Database_GetWorker_FullMethodName          = "/cdrom.db.v1.Database/GetWorker"
@@ -64,8 +67,29 @@ type DatabaseClient interface {
 	CreateJob(ctx context.Context, in *CreateJobRequest, opts ...grpc.CallOption) (*Job, error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
 	ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
+	// ListRetriableJobs returns the jobs the scheduler's retry loop should
+	// re-dispatch (F-04): jobs that are failed and still have retries remaining
+	// (a retry policy with max_attempts > 0 and an attempt counter below the
+	// budget). Filtering in the database keeps the retry loop from pulling every
+	// failed job over the wire as the system grows.
+	ListRetriableJobs(ctx context.Context, in *ListRetriableJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
 	UpdateJob(ctx context.Context, in *UpdateJobRequest, opts ...grpc.CallOption) (*Job, error)
 	DeleteJob(ctx context.Context, in *DeleteJobRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ClaimJobRetry atomically claims the next retry attempt for a job: it
+	// increments the job's attempt counter and resets it to pending only if the
+	// job is still in a non-terminal state (pending or running) and has not
+	// exhausted its retry budget. It returns the claimed attempt number (1-based)
+	// and whether the claim succeeded. This is how the scheduler re-dispatches a
+	// failed job (F-04): the conditional update is atomic, so a job that
+	// reported a terminal status between the check and the claim is left
+	// untouched, and a job that has used up its retries is never re-dispatched.
+	ClaimJobRetry(ctx context.Context, in *ClaimJobRetryRequest, opts ...grpc.CallOption) (*ClaimJobRetryResponse, error)
+	// RerunJob resets a finished job to pending with a fresh attempt (F-04): it
+	// sets the status to pending, the attempt to 1, and clears the finished
+	// timestamp. Only jobs in a terminal state (succeeded, failed, cancelled,
+	// or timed_out) can be re-run; a job that is still pending or running is
+	// rejected. This is how the scheduler's RerunJob RPC re-runs a finished job.
+	RerunJob(ctx context.Context, in *RerunJobRequest, opts ...grpc.CallOption) (*Job, error)
 	// ReapJob conditionally marks a job as timed_out: it sets the status to
 	// TIMED_OUT (and the finished timestamp) only if the job is still in a
 	// non-terminal state (pending or running). It returns whether the job was
@@ -180,6 +204,16 @@ func (c *databaseClient) ListJobs(ctx context.Context, in *ListJobsRequest, opts
 	return out, nil
 }
 
+func (c *databaseClient) ListRetriableJobs(ctx context.Context, in *ListRetriableJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListJobsResponse)
+	err := c.cc.Invoke(ctx, Database_ListRetriableJobs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) UpdateJob(ctx context.Context, in *UpdateJobRequest, opts ...grpc.CallOption) (*Job, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Job)
@@ -194,6 +228,26 @@ func (c *databaseClient) DeleteJob(ctx context.Context, in *DeleteJobRequest, op
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_DeleteJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ClaimJobRetry(ctx context.Context, in *ClaimJobRetryRequest, opts ...grpc.CallOption) (*ClaimJobRetryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimJobRetryResponse)
+	err := c.cc.Invoke(ctx, Database_ClaimJobRetry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RerunJob(ctx context.Context, in *RerunJobRequest, opts ...grpc.CallOption) (*Job, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Job)
+	err := c.cc.Invoke(ctx, Database_RerunJob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -331,8 +385,29 @@ type DatabaseServer interface {
 	CreateJob(context.Context, *CreateJobRequest) (*Job, error)
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
 	ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error)
+	// ListRetriableJobs returns the jobs the scheduler's retry loop should
+	// re-dispatch (F-04): jobs that are failed and still have retries remaining
+	// (a retry policy with max_attempts > 0 and an attempt counter below the
+	// budget). Filtering in the database keeps the retry loop from pulling every
+	// failed job over the wire as the system grows.
+	ListRetriableJobs(context.Context, *ListRetriableJobsRequest) (*ListJobsResponse, error)
 	UpdateJob(context.Context, *UpdateJobRequest) (*Job, error)
 	DeleteJob(context.Context, *DeleteJobRequest) (*emptypb.Empty, error)
+	// ClaimJobRetry atomically claims the next retry attempt for a job: it
+	// increments the job's attempt counter and resets it to pending only if the
+	// job is still in a non-terminal state (pending or running) and has not
+	// exhausted its retry budget. It returns the claimed attempt number (1-based)
+	// and whether the claim succeeded. This is how the scheduler re-dispatches a
+	// failed job (F-04): the conditional update is atomic, so a job that
+	// reported a terminal status between the check and the claim is left
+	// untouched, and a job that has used up its retries is never re-dispatched.
+	ClaimJobRetry(context.Context, *ClaimJobRetryRequest) (*ClaimJobRetryResponse, error)
+	// RerunJob resets a finished job to pending with a fresh attempt (F-04): it
+	// sets the status to pending, the attempt to 1, and clears the finished
+	// timestamp. Only jobs in a terminal state (succeeded, failed, cancelled,
+	// or timed_out) can be re-run; a job that is still pending or running is
+	// rejected. This is how the scheduler's RerunJob RPC re-runs a finished job.
+	RerunJob(context.Context, *RerunJobRequest) (*Job, error)
 	// ReapJob conditionally marks a job as timed_out: it sets the status to
 	// TIMED_OUT (and the finished timestamp) only if the job is still in a
 	// non-terminal state (pending or running). It returns whether the job was
@@ -391,11 +466,20 @@ func (UnimplementedDatabaseServer) GetJob(context.Context, *GetJobRequest) (*Job
 func (UnimplementedDatabaseServer) ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListJobs not implemented")
 }
+func (UnimplementedDatabaseServer) ListRetriableJobs(context.Context, *ListRetriableJobsRequest) (*ListJobsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRetriableJobs not implemented")
+}
 func (UnimplementedDatabaseServer) UpdateJob(context.Context, *UpdateJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateJob not implemented")
 }
 func (UnimplementedDatabaseServer) DeleteJob(context.Context, *DeleteJobRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteJob not implemented")
+}
+func (UnimplementedDatabaseServer) ClaimJobRetry(context.Context, *ClaimJobRetryRequest) (*ClaimJobRetryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimJobRetry not implemented")
+}
+func (UnimplementedDatabaseServer) RerunJob(context.Context, *RerunJobRequest) (*Job, error) {
+	return nil, status.Error(codes.Unimplemented, "method RerunJob not implemented")
 }
 func (UnimplementedDatabaseServer) ReapJob(context.Context, *ReapJobRequest) (*ReapJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReapJob not implemented")
@@ -595,6 +679,24 @@ func _Database_ListJobs_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ListRetriableJobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRetriableJobsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListRetriableJobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListRetriableJobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListRetriableJobs(ctx, req.(*ListRetriableJobsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_UpdateJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateJobRequest)
 	if err := dec(in); err != nil {
@@ -627,6 +729,42 @@ func _Database_DeleteJob_Handler(srv interface{}, ctx context.Context, dec func(
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).DeleteJob(ctx, req.(*DeleteJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ClaimJobRetry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimJobRetryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ClaimJobRetry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ClaimJobRetry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ClaimJobRetry(ctx, req.(*ClaimJobRetryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RerunJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RerunJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RerunJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RerunJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RerunJob(ctx, req.(*RerunJobRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -869,12 +1007,24 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_ListJobs_Handler,
 		},
 		{
+			MethodName: "ListRetriableJobs",
+			Handler:    _Database_ListRetriableJobs_Handler,
+		},
+		{
 			MethodName: "UpdateJob",
 			Handler:    _Database_UpdateJob_Handler,
 		},
 		{
 			MethodName: "DeleteJob",
 			Handler:    _Database_DeleteJob_Handler,
+		},
+		{
+			MethodName: "ClaimJobRetry",
+			Handler:    _Database_ClaimJobRetry_Handler,
+		},
+		{
+			MethodName: "RerunJob",
+			Handler:    _Database_RerunJob_Handler,
 		},
 		{
 			MethodName: "ReapJob",

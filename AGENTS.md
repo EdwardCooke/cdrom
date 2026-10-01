@@ -32,7 +32,8 @@ N-tier architecture with the following layers (top to bottom):
      which fans it out to the live workers. Persists state through the
      Database service. It also runs a background **watchdog** that reaps
      running jobs that have exceeded their declared timeout even if the
-     execution target goes silent (F-03).
+     execution target goes silent (F-03), and a background **retry loop**
+     that re-dispatches failed jobs per their retry policy (F-04).
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -156,6 +157,31 @@ timeout, else the longest per-step timeout) via the conditional
 `Database.ReapJob` RPC and tells the API (`NotifyJobStatus`) to fan the status
 change out to the UI.
 
+**Retry & re-run (F-04):** a job's `JobSpec` may carry a `retry` policy:
+`max_attempts` (the number of retries *after* the initial attempt — a job
+with `max_attempts: 2` runs at most 3 times; `0`/absent means never retried)
+and `backoff` (a duration to wait before each re-dispatch). A retry is a new
+attempt on the **same `Job` row** — the `Job` carries an `attempt` counter
+(starts at 1) and a denormalized `max_attempts` (copied from the spec at
+creation) so the pipeline run stays coherent and the UI can show "attempt N
+of M". The scheduler runs a background **retry loop**
+(`internal/services/scheduler/retry.go`, started from `cmd/scheduler`) that
+periodically asks the database for the jobs that still have retries remaining
+(`Database.ListRetriableJobs` — failed jobs with `max_attempts > 0` and
+`attempt < max_attempts + 1`, filtered in the database so the loop never pulls
+every failed job over the wire) and, for each, claims the next attempt through
+the conditional `Database.ClaimJobRetry` RPC (atomically resets the job to
+`pending` with `attempt + 1` and a cleared `finished_at`; rejects jobs that
+succeeded, were cancelled, or exhausted their budget) and re-dispatches it
+through the API — immediately, or after the policy's `backoff` delay.
+Separately, a user can **re-run** any finished job (succeeded, failed,
+cancelled, or timed out) via `POST /api/jobs/{id}/rerun` (API → scheduler
+`RerunJob` → `Database.RerunJob`): the job is reset to `pending` with
+`attempt` back to 1 and re-dispatched, producing a fresh execution.
+`attempt`/`max_attempts` are carried on the job protos (db, scheduler, api)
+and surfaced to the UI through the WebSocket snapshot and `job_status`
+events.
+
 **Shell override (shell handler):** a step may set the `shell` param to run
 through a user-chosen interpreter instead of executing `command` directly.
 When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -240,7 +266,9 @@ internal/
     artifacts/ general namespaced file store (artifacts + job logs; gRPC
               server; store interface with a filesystem implementation)
     scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
-              that reaps running jobs past their timeout (F-03)
+              that reaps running jobs past their timeout (F-03) + a background
+              retry loop that re-dispatches failed jobs per their retry policy
+              (F-04)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation

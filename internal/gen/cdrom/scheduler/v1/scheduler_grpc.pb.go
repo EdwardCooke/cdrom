@@ -23,6 +23,7 @@ const (
 	Scheduler_GetJob_FullMethodName    = "/cdrom.scheduler.v1.Scheduler/GetJob"
 	Scheduler_ListJobs_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/ListJobs"
 	Scheduler_CancelJob_FullMethodName = "/cdrom.scheduler.v1.Scheduler/CancelJob"
+	Scheduler_RerunJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/RerunJob"
 )
 
 // SchedulerClient is the client API for Scheduler service.
@@ -47,6 +48,12 @@ type SchedulerClient interface {
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
 	ListJobs(ctx context.Context, in *ListJobsRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
 	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*Job, error)
+	// RerunJob re-runs a finished job (F-04): it resets the job to pending
+	// with a fresh attempt (attempt 1) and re-dispatches it, so the job runs
+	// again with the same spec. Only jobs in a terminal state (succeeded,
+	// failed, cancelled, or timed_out) can be re-run; a job that is still
+	// pending or running is rejected.
+	RerunJob(ctx context.Context, in *RerunJobRequest, opts ...grpc.CallOption) (*Job, error)
 }
 
 type schedulerClient struct {
@@ -97,6 +104,16 @@ func (c *schedulerClient) CancelJob(ctx context.Context, in *CancelJobRequest, o
 	return out, nil
 }
 
+func (c *schedulerClient) RerunJob(ctx context.Context, in *RerunJobRequest, opts ...grpc.CallOption) (*Job, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Job)
+	err := c.cc.Invoke(ctx, Scheduler_RerunJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SchedulerServer is the server API for Scheduler service.
 // All implementations must embed UnimplementedSchedulerServer
 // for forward compatibility.
@@ -119,6 +136,12 @@ type SchedulerServer interface {
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
 	ListJobs(context.Context, *ListJobsRequest) (*ListJobsResponse, error)
 	CancelJob(context.Context, *CancelJobRequest) (*Job, error)
+	// RerunJob re-runs a finished job (F-04): it resets the job to pending
+	// with a fresh attempt (attempt 1) and re-dispatches it, so the job runs
+	// again with the same spec. Only jobs in a terminal state (succeeded,
+	// failed, cancelled, or timed_out) can be re-run; a job that is still
+	// pending or running is rejected.
+	RerunJob(context.Context, *RerunJobRequest) (*Job, error)
 	mustEmbedUnimplementedSchedulerServer()
 }
 
@@ -140,6 +163,9 @@ func (UnimplementedSchedulerServer) ListJobs(context.Context, *ListJobsRequest) 
 }
 func (UnimplementedSchedulerServer) CancelJob(context.Context, *CancelJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
+}
+func (UnimplementedSchedulerServer) RerunJob(context.Context, *RerunJobRequest) (*Job, error) {
+	return nil, status.Error(codes.Unimplemented, "method RerunJob not implemented")
 }
 func (UnimplementedSchedulerServer) mustEmbedUnimplementedSchedulerServer() {}
 func (UnimplementedSchedulerServer) testEmbeddedByValue()                   {}
@@ -234,6 +260,24 @@ func _Scheduler_CancelJob_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Scheduler_RerunJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RerunJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).RerunJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_RerunJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).RerunJob(ctx, req.(*RerunJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Scheduler_ServiceDesc is the grpc.ServiceDesc for Scheduler service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -256,6 +300,10 @@ var Scheduler_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelJob",
 			Handler:    _Scheduler_CancelJob_Handler,
+		},
+		{
+			MethodName: "RerunJob",
+			Handler:    _Scheduler_RerunJob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

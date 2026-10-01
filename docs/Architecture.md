@@ -322,6 +322,30 @@ reference it rather than redefining it.
   effective timeout (job-level timeout, else the longest per-step timeout) via
   the conditional `Database.ReapJob` RPC and tells the API (`NotifyJobStatus`)
   to fan the status change out to the UI.
+- **Retry & re-run (F-04).** A job's `JobSpec` may carry a `retry` policy:
+  `max_attempts` (the number of retries *after* the initial attempt — a job
+  with `max_attempts: 2` runs at most 3 times; `0`/absent means never
+  retried) and `backoff` (a duration to wait before each re-dispatch). A
+  retry is a new attempt on the **same `Job` row** — the `Job` carries an
+  `attempt` counter (starts at 1) and a denormalized `max_attempts` (copied
+  from the spec at creation) so the pipeline run stays coherent and the UI
+  can show "attempt N of M". The scheduler runs a background **retry loop**
+  that periodically asks the database for the jobs that still have retries
+  remaining (`Database.ListRetriableJobs` — failed jobs with `max_attempts >
+  0` and `attempt < max_attempts + 1`, filtered in the database so the loop
+  never pulls every failed job over the wire) and, for each, claims the next
+  attempt through the conditional `Database.ClaimJobRetry` RPC (atomically
+  resets the job to `pending` with `attempt + 1` and a cleared `finished_at`;
+  rejects jobs that succeeded, were cancelled, or exhausted their budget) and
+  re-dispatches it through the API — immediately, or after the policy's
+  `backoff` delay.
+  Separately, a user can **re-run** any finished job (succeeded, failed,
+  cancelled, or timed out) via `POST /api/jobs/{id}/rerun` (API → scheduler
+  `RerunJob` → `Database.RerunJob`): the job is reset to `pending` with
+  `attempt` back to 1 and re-dispatched, producing a fresh execution.
+  `attempt`/`max_attempts` are carried on the job protos (db, scheduler, api)
+  and surfaced to the UI through the WebSocket snapshot and `job_status`
+  events.
 - **Shell override (shell handler).** A step may set the `shell` param to run
   through a user-chosen interpreter instead of executing `command` directly.
   When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -369,6 +393,7 @@ sequenceDiagram
     API->>DB: UpdateJob (status)
     API-->>UI: /api/ws event: job_status
     Note over SCHED,DB: watchdog: if a job runs past its timeout and the target goes silent, SCHED reaps it (DB.ReapJob → timed_out) and tells the API (NotifyJobStatus) to fan it out to the UI
+    Note over SCHED,DB: retry loop (F-04): SCHED asks the DB for retriable jobs (DB.ListRetriableJobs — failed and within budget), claims each next attempt (DB.ClaimJobRetry → pending, attempt+1) and re-dispatches it via the API after the policy's backoff
 ```
 
 Job status transitions (see `proto/cdrom/db/v1/db.proto`):
@@ -383,8 +408,13 @@ stateDiagram-v2
     PENDING --> TIMED_OUT: watchdog reap
     PENDING --> CANCELLED: cancel requested
     RUNNING --> CANCELLED: cancel requested
+    FAILED --> PENDING: retry claimed (F-04, within budget)
+    SUCCEEDED --> PENDING: re-run (F-04)
+    FAILED --> PENDING: re-run (F-04)
+    TIMED_OUT --> PENDING: re-run (F-04)
+    CANCELLED --> PENDING: re-run (F-04)
     SUCCEEDED --> [*]
-    FAILED --> [*]
+    FAILED --> [*]: retries exhausted
     TIMED_OUT --> [*]
     CANCELLED --> [*]
 ```
@@ -393,11 +423,13 @@ stateDiagram-v2
 
 `GET /api/ws` is a WebSocket endpoint. On connect the client receives a state
 snapshot (jobs + workers); afterwards it receives one message per event. Event
-types are `job_status` (job id + status) and `worker` (name/group + action
-`registered` / `deregistered` / `watching`). Events are published from the
-gRPC server (worker lifecycle, job status reports) and the HTTP handlers (job
-submit / cancel) through a shared `EventHub`; slow subscribers have events
-dropped and resync from the snapshot on reconnect.
+types are `job_status` (job id + status, plus `attempt` / `max_attempts` for
+F-04), `worker` (name/group + action `registered` / `deregistered` /
+`watching`), and `job_log` (job id + step index + stream `stdout`/`stderr` +
+a chunk of output, F-02). Events are published from the gRPC server (worker
+lifecycle, job status reports, streamed job logs) and the HTTP handlers (job
+submit / cancel / re-run) through a shared `EventHub`; slow subscribers have
+events dropped and resync from the snapshot on reconnect.
 
 ---
 
@@ -612,7 +644,9 @@ internal/
     artifacts/ general namespaced file store (artifacts + job logs; gRPC server;
               store interface with a filesystem implementation)
     scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
-              that reaps running jobs past their timeout (F-03)
+              that reaps running jobs past their timeout (F-03) + a background
+              retry loop that re-dispatches failed jobs per their retry policy
+              (F-04)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation

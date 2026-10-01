@@ -81,10 +81,11 @@ type APIClient interface {
 	DispatchJob(ctx context.Context, in *DispatchJobRequest, opts ...grpc.CallOption) (*DispatchJobResponse, error)
 	// NotifyJobStatus (called by the scheduler). The scheduler's watchdog uses
 	// it to fan a job-status change (e.g. a job reaped as timed_out) out to the
-	// UI over the WebSocket event hub, mirroring the job_status events the API
-	// publishes when a target reports a status. It does not touch the database
-	// (the scheduler already persisted the change); it only publishes the
-	// event.
+	// UI over the WebSocket event hub, and the retry loop (F-04) uses it to fan
+	// out a retried job's reset to pending. It mirrors the job_status events
+	// the API publishes when a target reports a status. It does not touch the
+	// database (the scheduler already persisted the change); it only publishes
+	// the event.
 	NotifyJobStatus(ctx context.Context, in *NotifyJobStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Artifact proxy (called by workers and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
@@ -320,10 +321,11 @@ type APIServer interface {
 	DispatchJob(context.Context, *DispatchJobRequest) (*DispatchJobResponse, error)
 	// NotifyJobStatus (called by the scheduler). The scheduler's watchdog uses
 	// it to fan a job-status change (e.g. a job reaped as timed_out) out to the
-	// UI over the WebSocket event hub, mirroring the job_status events the API
-	// publishes when a target reports a status. It does not touch the database
-	// (the scheduler already persisted the change); it only publishes the
-	// event.
+	// UI over the WebSocket event hub, and the retry loop (F-04) uses it to fan
+	// out a retried job's reset to pending. It mirrors the job_status events
+	// the API publishes when a target reports a status. It does not touch the
+	// database (the scheduler already persisted the change); it only publishes
+	// the event.
 	NotifyJobStatus(context.Context, *NotifyJobStatusRequest) (*emptypb.Empty, error)
 	// Artifact proxy (called by workers and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.

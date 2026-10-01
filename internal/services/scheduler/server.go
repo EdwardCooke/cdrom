@@ -16,6 +16,7 @@ import (
 	"context"
 	"log/slog"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -110,7 +111,7 @@ func (s *Server) CancelJob(ctx context.Context, req *schedpb.CancelJobRequest) (
 		return nil, err
 	}
 	switch job.GetStatus() {
-	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED, dbpb.JobStatus_JOB_STATUS_FAILED, dbpb.JobStatus_JOB_STATUS_CANCELLED:
+	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED, dbpb.JobStatus_JOB_STATUS_FAILED, dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
 		return nil, status.Errorf(codes.FailedPrecondition, "job %d is already %v", job.GetId(), job.GetStatus())
 	}
 	now := timestamppb.Now()
@@ -123,6 +124,55 @@ func (s *Server) CancelJob(ctx context.Context, req *schedpb.CancelJobRequest) (
 		return nil, err
 	}
 	return toProtoJob(updated), nil
+}
+
+// jobRerunner is the subset of the Database client the RerunJob RPC uses to
+// reset a finished job to pending with a fresh attempt. The concrete
+// dbpb.DatabaseClient satisfies it; tests inject a fake.
+type jobRerunner interface {
+	RerunJob(ctx context.Context, in *dbpb.RerunJobRequest, opts ...grpc.CallOption) (*dbpb.Job, error)
+}
+
+// jobDispatcher is the subset of the API client the RerunJob RPC uses to
+// dispatch the re-run job to the live workers. The concrete apipb.APIClient
+// satisfies it; tests inject a fake.
+type jobDispatcher interface {
+	DispatchJob(ctx context.Context, in *apipb.DispatchJobRequest, opts ...grpc.CallOption) (*apipb.DispatchJobResponse, error)
+}
+
+// RerunJob re-runs a finished job (F-04): it resets the job to pending with a
+// fresh attempt (attempt 1) and re-dispatches it, so the job runs again with
+// the same spec. Only jobs in a terminal state (succeeded, failed, cancelled,
+// or timed_out) can be re-run; a job that is still pending or running is
+// rejected. db and api are the RPC's dependencies (the concrete clients in
+// production, fakes in tests); api may be nil to skip the dispatch.
+func (s *Server) rerunJob(ctx context.Context, db jobRerunner, api jobDispatcher, jobID int64) (*schedpb.Job, error) {
+	updated, err := db.RerunJob(ctx, &dbpb.RerunJobRequest{Id: jobID})
+	if err != nil {
+		return nil, err
+	}
+	job := toProtoJob(updated)
+	s.logger.Info("scheduler: job re-run", "job", updated.GetId())
+	if api == nil {
+		return job, nil
+	}
+	if updated.GetTargetGroup() != "" {
+		if _, err := api.DispatchJob(ctx, &apipb.DispatchJobRequest{Job: toAPIJob(job)}); err != nil {
+			s.logger.Warn("scheduler: dispatch re-run job failed; job left pending",
+				"job", updated.GetId(), "group", updated.GetTargetGroup(), "err", err)
+		}
+	} else {
+		s.logger.Info("scheduler: re-run job queued for ephemeral agent", "job", updated.GetId())
+	}
+	return job, nil
+}
+
+// RerunJob is the gRPC entrypoint for re-running a finished job (F-04).
+func (s *Server) RerunJob(ctx context.Context, req *schedpb.RerunJobRequest) (*schedpb.Job, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	return s.rerunJob(ctx, s.db, s.api, req.GetId())
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +189,8 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		StartedAt:   job.GetStartedAt(),
 		FinishedAt:  job.GetFinishedAt(),
 		Spec:        job.GetSpec(),
+		Attempt:     job.GetAttempt(),
+		MaxAttempts: job.GetMaxAttempts(),
 	}
 }
 
@@ -152,5 +204,7 @@ func toAPIJob(job *schedpb.Job) *apipb.Job {
 		StartedAt:   job.GetStartedAt(),
 		FinishedAt:  job.GetFinishedAt(),
 		Spec:        job.GetSpec(),
+		Attempt:     job.GetAttempt(),
+		MaxAttempts: job.GetMaxAttempts(),
 	}
 }

@@ -95,7 +95,7 @@ func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, api jobNoti
 		if now.Before(deadline) {
 			continue
 		}
-		if s.reap(ctx, db, api, job.GetId(), deadline) {
+		if s.reap(ctx, db, api, job, deadline) {
 			s.logger.Info("scheduler: reaped timed-out job", "job", job.GetId(), "deadline", deadline)
 		}
 	}
@@ -104,7 +104,8 @@ func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, api jobNoti
 // reap marks a job timed_out (conditionally) and, if it was reaped, tells the
 // API to fan the status change out to the UI. It returns whether the job was
 // reaped.
-func (s *Server) reap(ctx context.Context, db jobReaper, api jobNotifier, jobID int64, deadline time.Time) bool {
+func (s *Server) reap(ctx context.Context, db jobReaper, api jobNotifier, job *dbpb.Job, deadline time.Time) bool {
+	jobID := job.GetId()
 	resp, err := db.ReapJob(ctx, &dbpb.ReapJobRequest{Id: jobID})
 	if err != nil {
 		s.logger.Warn("scheduler: reap job", "job", jobID, "err", err)
@@ -119,8 +120,10 @@ func (s *Server) reap(ctx context.Context, db jobReaper, api jobNotifier, jobID 
 	// truth.
 	if api != nil {
 		if _, err := api.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{
-			JobId:  jobID,
-			Status: dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
+			JobId:       jobID,
+			Status:      dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
+			Attempt:     job.GetAttempt(),
+			MaxAttempts: job.GetMaxAttempts(),
 		}); err != nil {
 			s.logger.Warn("scheduler: notify api of reaped job", "job", jobID, "err", err)
 		}
