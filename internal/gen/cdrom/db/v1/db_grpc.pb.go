@@ -34,6 +34,7 @@ const (
 	Database_ClaimJobRetry_FullMethodName      = "/cdrom.db.v1.Database/ClaimJobRetry"
 	Database_RerunJob_FullMethodName           = "/cdrom.db.v1.Database/RerunJob"
 	Database_ReapJob_FullMethodName            = "/cdrom.db.v1.Database/ReapJob"
+	Database_CancelJob_FullMethodName          = "/cdrom.db.v1.Database/CancelJob"
 	Database_RegisterWorker_FullMethodName     = "/cdrom.db.v1.Database/RegisterWorker"
 	Database_GetWorker_FullMethodName          = "/cdrom.db.v1.Database/GetWorker"
 	Database_ListWorkers_FullMethodName        = "/cdrom.db.v1.Database/ListWorkers"
@@ -97,6 +98,13 @@ type DatabaseClient interface {
 	// went silent (F-03): a job that already reported a terminal status is
 	// left untouched.
 	ReapJob(ctx context.Context, in *ReapJobRequest, opts ...grpc.CallOption) (*ReapJobResponse, error)
+	// CancelJob conditionally marks a job as cancelled: it sets the status to
+	// CANCELLED (and the finished timestamp) only if the job is still in a
+	// non-terminal state (pending or running). It returns whether the job was
+	// cancelled. This is how the scheduler's CancelJob RPC (F-05) persists the
+	// cancellation: a job that already reported a terminal status is left
+	// untouched, so cancelling a finished job is a no-op.
+	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error)
 	// Workers
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
@@ -264,6 +272,16 @@ func (c *databaseClient) ReapJob(ctx context.Context, in *ReapJobRequest, opts .
 	return out, nil
 }
 
+func (c *databaseClient) CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelJobResponse)
+	err := c.cc.Invoke(ctx, Database_CancelJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Worker)
@@ -415,6 +433,13 @@ type DatabaseServer interface {
 	// went silent (F-03): a job that already reported a terminal status is
 	// left untouched.
 	ReapJob(context.Context, *ReapJobRequest) (*ReapJobResponse, error)
+	// CancelJob conditionally marks a job as cancelled: it sets the status to
+	// CANCELLED (and the finished timestamp) only if the job is still in a
+	// non-terminal state (pending or running). It returns whether the job was
+	// cancelled. This is how the scheduler's CancelJob RPC (F-05) persists the
+	// cancellation: a job that already reported a terminal status is left
+	// untouched, so cancelling a finished job is a no-op.
+	CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error)
 	// Workers
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
 	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
@@ -483,6 +508,9 @@ func (UnimplementedDatabaseServer) RerunJob(context.Context, *RerunJobRequest) (
 }
 func (UnimplementedDatabaseServer) ReapJob(context.Context, *ReapJobRequest) (*ReapJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReapJob not implemented")
+}
+func (UnimplementedDatabaseServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
 }
 func (UnimplementedDatabaseServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
@@ -787,6 +815,24 @@ func _Database_ReapJob_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CancelJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CancelJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CancelJob(ctx, req.(*CancelJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkerRequest)
 	if err := dec(in); err != nil {
@@ -1029,6 +1075,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReapJob",
 			Handler:    _Database_ReapJob_Handler,
+		},
+		{
+			MethodName: "CancelJob",
+			Handler:    _Database_CancelJob_Handler,
 		},
 		{
 			MethodName: "RegisterWorker",

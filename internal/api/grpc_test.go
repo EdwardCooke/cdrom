@@ -221,6 +221,69 @@ func TestNotifyJobStatusValidation(t *testing.T) {
 	}
 }
 
+// TestCancelJobDeliversToWorker verifies that the API's CancelJob RPC (F-05)
+// delivers a JobCancellation down a watching worker's WatchJobs stream, so the
+// worker can interrupt the running job.
+func TestCancelJobDeliversToWorker(t *testing.T) {
+	client := startAPIServer(t, startArtifactsServer(t), nil)
+	ctx := context.Background()
+
+	// A worker opens a WatchJobs stream.
+	stream, err := client.WatchJobs(ctx, &apipb.WatchJobsRequest{WorkerName: "w1", Group: "pool-a"})
+	if err != nil {
+		t.Fatalf("WatchJobs: %v", err)
+	}
+
+	// The server registers the worker's stream asynchronously as the
+	// WatchJobs RPC is established, so the first CancelJob may land before the
+	// worker is registered (and be dropped). Retry the cancel until the
+	// cancellation is delivered to the worker's stream.
+	type recvResult struct {
+		message *apipb.WatchMessage
+		err     error
+	}
+	resultCh := make(chan recvResult, 1)
+	go func() {
+		message, err := stream.Recv()
+		resultCh <- recvResult{message: message, err: err}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := client.CancelJob(ctx, &apipb.CancelJobRequest{JobId: 42}); err != nil {
+			t.Fatalf("CancelJob: %v", err)
+		}
+		select {
+		case result := <-resultCh:
+			if result.err != nil {
+				t.Fatalf("recv: %v", result.err)
+			}
+			cancellation := result.message.GetCancellation()
+			if cancellation == nil {
+				t.Fatalf("message = %+v, want a cancellation", result.message)
+			}
+			if cancellation.GetJobId() != 42 {
+				t.Errorf("cancellation job = %d, want 42", cancellation.GetJobId())
+			}
+			return
+		case <-time.After(50 * time.Millisecond):
+			// No cancellation yet (the worker may not be registered); retry.
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no cancellation delivered to the worker's stream")
+		}
+	}
+}
+
+// TestCancelJobValidation verifies that a CancelJob call with a missing job id
+// is rejected.
+func TestCancelJobValidation(t *testing.T) {
+	client := startAPIServer(t, startArtifactsServer(t), nil)
+	if _, err := client.CancelJob(context.Background(), &apipb.CancelJobRequest{}); err == nil {
+		t.Error("expected an error for a missing job id")
+	}
+}
+
 // fakeArtifacts wraps a real artifacts client and can make AppendLog fail (to
 // simulate an artifacts-service outage). All other methods delegate to the
 // embedded real client.

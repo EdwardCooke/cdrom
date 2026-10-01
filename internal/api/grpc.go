@@ -65,7 +65,7 @@ type GRPCServer struct {
 
 	mu       sync.Mutex
 	live     map[string]*liveWorker // worker name -> live worker
-	watchers map[string]chan *apipb.JobAssignment
+	watchers map[string]chan *apipb.WatchMessage
 }
 
 // liveWorker is a worker with an open WatchJobs stream.
@@ -93,7 +93,7 @@ func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient
 		jobAuth:   jobAuth,
 		logger:    logger,
 		live:      make(map[string]*liveWorker),
-		watchers:  make(map[string]chan *apipb.JobAssignment),
+		watchers:  make(map[string]chan *apipb.WatchMessage),
 	}
 }
 
@@ -169,14 +169,15 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *apipb.HeartbeatRequest)
 // ---------------------------------------------------------------------------
 
 // WatchJobs is a server stream: the worker identifies itself and receives a
-// JobAssignment for every job dispatched to its group until the stream
-// closes.
-func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerStreamingServer[apipb.JobAssignment]) error {
+// WatchMessage for every job dispatched to its group (a JobAssignment) and
+// for every cancellation of a job it is running (a JobCancellation, F-05)
+// until the stream closes.
+func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerStreamingServer[apipb.WatchMessage]) error {
 	if req.GetWorkerName() == "" {
 		return status.Error(codes.InvalidArgument, "worker_name is required")
 	}
 	name := req.GetWorkerName()
-	assignmentChannel := make(chan *apipb.JobAssignment, assignmentQueueSize)
+	assignmentChannel := make(chan *apipb.WatchMessage, assignmentQueueSize)
 
 	s.mu.Lock()
 	if existing, ok := s.watchers[name]; ok {
@@ -203,9 +204,9 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 		case <-stream.Context().Done():
 			s.logger.Info("api: worker stream closed", "worker", name)
 			return nil
-		case assignment := <-assignmentChannel:
-			if err := stream.Send(assignment); err != nil {
-				s.logger.Warn("api: failed to send assignment", "worker", name, "err", err)
+		case message := <-assignmentChannel:
+			if err := stream.Send(message); err != nil {
+				s.logger.Warn("api: failed to send watch message", "worker", name, "err", err)
 				return nil
 			}
 		}
@@ -249,11 +250,15 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	if err != nil {
 		return nil, err
 	}
-	s.logger.Info("api: job status reported", "job", req.GetJobId(), "status", req.GetStatus())
+	// Publish the job's actual (post-update) status, not the requested one: a
+	// late report from a target on a job that already reached a terminal state
+	// (e.g. cancelled, F-05) is a no-op, and the event should reflect the
+	// status the job is actually in.
+	s.logger.Info("api: job status reported", "job", req.GetJobId(), "status", updated.GetStatus())
 	s.publish(Event{
 		Type:        EventJobStatus,
 		JobID:       req.GetJobId(),
-		Status:      jobStatusName(req.GetStatus()),
+		Status:      jobStatusName(updated.GetStatus()),
 		Attempt:     updated.GetAttempt(),
 		MaxAttempts: updated.GetMaxAttempts(),
 	})
@@ -518,6 +523,39 @@ func (s *GRPCServer) NotifyJobStatus(ctx context.Context, req *apipb.NotifyJobSt
 	return &emptypb.Empty{}, nil
 }
 
+// CancelJob is called by the scheduler to signal the execution target running
+// a job to stop the work (F-05). For a long-lived worker it delivers a
+// JobCancellation down the worker's WatchJobs stream; the worker interrupts
+// the running step and reports the job as cancelled. For an ephemeral agent
+// (no live worker stream) there is nothing to signal — the agent observes the
+// cancellation on its next GetJob and stops on its own. It is a no-op when the
+// job is not running on a live target.
+func (s *GRPCServer) CancelJob(ctx context.Context, req *apipb.CancelJobRequest) (*emptypb.Empty, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	s.mu.Lock()
+	var delivered int
+	for name, channel := range s.watchers {
+		select {
+		case channel <- &apipb.WatchMessage{
+			Message: &apipb.WatchMessage_Cancellation{Cancellation: &apipb.JobCancellation{JobId: req.GetJobId()}},
+		}:
+			delivered++
+		default:
+			s.logger.Warn("api: cancel queue full; worker will observe the status on its next report",
+				"worker", name, "job", req.GetJobId())
+		}
+	}
+	s.mu.Unlock()
+	if delivered > 0 {
+		s.logger.Info("api: job cancellation delivered", "job", req.GetJobId(), "workers", delivered)
+	} else {
+		s.logger.Info("api: no live worker to signal for job cancellation", "job", req.GetJobId())
+	}
+	return &emptypb.Empty{}, nil
+}
+
 // dispatch pushes an assignment (with the job token) to every live worker in
 // the group and returns how many workers received it.
 func (s *GRPCServer) dispatch(group string, job *apipb.Job, token string) int {
@@ -532,7 +570,11 @@ func (s *GRPCServer) dispatch(group string, job *apipb.Job, token string) int {
 		if !ok {
 			continue
 		}
-		assignment := &apipb.JobAssignment{Job: job, WorkerName: name, Token: token}
+		assignment := &apipb.WatchMessage{
+			Message: &apipb.WatchMessage_Assignment{
+				Assignment: &apipb.JobAssignment{Job: job, WorkerName: name, Token: token},
+			},
+		}
 		select {
 		case assignmentChannel <- assignment:
 			dispatchedCount++

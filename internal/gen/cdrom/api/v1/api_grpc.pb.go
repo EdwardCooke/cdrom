@@ -27,6 +27,7 @@ const (
 	API_WatchJobs_FullMethodName        = "/cdrom.api.v1.API/WatchJobs"
 	API_GetJob_FullMethodName           = "/cdrom.api.v1.API/GetJob"
 	API_ReportJobStatus_FullMethodName  = "/cdrom.api.v1.API/ReportJobStatus"
+	API_CancelJob_FullMethodName        = "/cdrom.api.v1.API/CancelJob"
 	API_StreamJobLogs_FullMethodName    = "/cdrom.api.v1.API/StreamJobLogs"
 	API_ExchangeJobToken_FullMethodName = "/cdrom.api.v1.API/ExchangeJobToken"
 	API_DispatchJob_FullMethodName      = "/cdrom.api.v1.API/DispatchJob"
@@ -56,11 +57,18 @@ type APIClient interface {
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// Execution side (called by workers and agents).
 	//
-	// WatchJobs is a server stream: the worker identifies itself and receives
-	// a JobAssignment for every job dispatched to its group.
-	WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[JobAssignment], error)
+	// WatchJobs is a server stream: the worker identifies itself and receives a
+	// WatchMessage for every job dispatched to its group (a JobAssignment) and
+	// for every cancellation of a job it is running (a JobCancellation, F-05).
+	WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMessage], error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
 	ReportJobStatus(ctx context.Context, in *ReportJobStatusRequest, opts ...grpc.CallOption) (*Job, error)
+	// CancelJob is called by the scheduler to signal the execution target
+	// running a job to stop the work (F-05). The API delivers a JobCancellation
+	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
+	// ephemeral agent, records the cancellation so the agent's next GetJob
+	// reflects it. It is a no-op when the job is not running on a live target.
+	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// StreamJobLogs is a client stream: an execution target (worker or agent)
 	// opens it at the start of a job and sends a JobLogChunk for each chunk of
 	// step output (stdout/stderr). The first chunk of each step carries
@@ -134,13 +142,13 @@ func (c *aPIClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ..
 	return out, nil
 }
 
-func (c *aPIClient) WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[JobAssignment], error) {
+func (c *aPIClient) WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[0], API_WatchJobs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[WatchJobsRequest, JobAssignment]{ClientStream: stream}
+	x := &grpc.GenericClientStream[WatchJobsRequest, WatchMessage]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -151,7 +159,7 @@ func (c *aPIClient) WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ..
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type API_WatchJobsClient = grpc.ServerStreamingClient[JobAssignment]
+type API_WatchJobsClient = grpc.ServerStreamingClient[WatchMessage]
 
 func (c *aPIClient) GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -167,6 +175,16 @@ func (c *aPIClient) ReportJobStatus(ctx context.Context, in *ReportJobStatusRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Job)
 	err := c.cc.Invoke(ctx, API_ReportJobStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, API_CancelJob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -296,11 +314,18 @@ type APIServer interface {
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// Execution side (called by workers and agents).
 	//
-	// WatchJobs is a server stream: the worker identifies itself and receives
-	// a JobAssignment for every job dispatched to its group.
-	WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[JobAssignment]) error
+	// WatchJobs is a server stream: the worker identifies itself and receives a
+	// WatchMessage for every job dispatched to its group (a JobAssignment) and
+	// for every cancellation of a job it is running (a JobCancellation, F-05).
+	WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[WatchMessage]) error
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
 	ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error)
+	// CancelJob is called by the scheduler to signal the execution target
+	// running a job to stop the work (F-05). The API delivers a JobCancellation
+	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
+	// ephemeral agent, records the cancellation so the agent's next GetJob
+	// reflects it. It is a no-op when the job is not running on a live target.
+	CancelJob(context.Context, *CancelJobRequest) (*emptypb.Empty, error)
 	// StreamJobLogs is a client stream: an execution target (worker or agent)
 	// opens it at the start of a job and sends a JobLogChunk for each chunk of
 	// step output (stdout/stderr). The first chunk of each step carries
@@ -353,7 +378,7 @@ func (UnimplementedAPIServer) DeregisterWorker(context.Context, *DeregisterWorke
 func (UnimplementedAPIServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
 }
-func (UnimplementedAPIServer) WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[JobAssignment]) error {
+func (UnimplementedAPIServer) WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[WatchMessage]) error {
 	return status.Error(codes.Unimplemented, "method WatchJobs not implemented")
 }
 func (UnimplementedAPIServer) GetJob(context.Context, *GetJobRequest) (*Job, error) {
@@ -361,6 +386,9 @@ func (UnimplementedAPIServer) GetJob(context.Context, *GetJobRequest) (*Job, err
 }
 func (UnimplementedAPIServer) ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportJobStatus not implemented")
+}
+func (UnimplementedAPIServer) CancelJob(context.Context, *CancelJobRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
 }
 func (UnimplementedAPIServer) StreamJobLogs(grpc.ClientStreamingServer[JobLogChunk, StreamJobLogsResponse]) error {
 	return status.Error(codes.Unimplemented, "method StreamJobLogs not implemented")
@@ -469,11 +497,11 @@ func _API_WatchJobs_Handler(srv interface{}, stream grpc.ServerStream) error {
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(APIServer).WatchJobs(m, &grpc.GenericServerStream[WatchJobsRequest, JobAssignment]{ServerStream: stream})
+	return srv.(APIServer).WatchJobs(m, &grpc.GenericServerStream[WatchJobsRequest, WatchMessage]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type API_WatchJobsServer = grpc.ServerStreamingServer[JobAssignment]
+type API_WatchJobsServer = grpc.ServerStreamingServer[WatchMessage]
 
 func _API_GetJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetJobRequest)
@@ -507,6 +535,24 @@ func _API_ReportJobStatus_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(APIServer).ReportJobStatus(ctx, req.(*ReportJobStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).CancelJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_CancelJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).CancelJob(ctx, req.(*CancelJobRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -670,6 +716,10 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportJobStatus",
 			Handler:    _API_ReportJobStatus_Handler,
+		},
+		{
+			MethodName: "CancelJob",
+			Handler:    _API_CancelJob_Handler,
 		},
 		{
 			MethodName: "ExchangeJobToken",

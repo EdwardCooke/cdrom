@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -26,6 +27,13 @@ import (
 	// executor. A target or plugin adds more step types the same way.
 	_ "cdrom/internal/stephandlers"
 )
+
+// agentCancelPollInterval is how often an ephemeral agent polls the API for
+// its job's status to observe a cancellation (F-05). An agent holds no
+// WatchJobs stream, so it cannot be signalled directly; it observes the
+// cancellation on the API instead. It is a variable (not a constant) so tests
+// can shorten the interval.
+var agentCancelPollInterval = 2 * time.Second
 
 // Dependencies are the gRPC clients an agent needs. The agent talks only to
 // the API service.
@@ -71,7 +79,21 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	}
 
 	a.logger.Info("job started", "job", a.jobID)
-	if err := a.runJob(ctx, job); err != nil {
+	// The job runs under a cancellable context (F-05): a background poller
+	// watches the job's status and cancels the context if the job is
+	// cancelled, which interrupts the running step.
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go a.watchCancellation(jobCtx, cancel)
+
+	if err := a.runJob(jobCtx, job); err != nil {
+		// A user cancellation (F-05) interrupts the running step and is
+		// reported as cancelled, distinct from a failure.
+		if jobCtx.Err() == context.Canceled {
+			a.logger.Info("job cancelled", "job", a.jobID)
+			a.report(ctx, dbpb.JobStatus_JOB_STATUS_CANCELLED)
+			return dbpb.JobStatus_JOB_STATUS_CANCELLED, nil
+		}
 		// A timeout (the job-level or a step's per-step timeout, F-03) is
 		// reported as timed_out rather than failed, so the UI can tell a hung
 		// job apart from one that ran and errored.
@@ -87,6 +109,36 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	a.logger.Info("job succeeded", "job", a.jobID)
 	a.report(ctx, dbpb.JobStatus_JOB_STATUS_SUCCEEDED)
 	return dbpb.JobStatus_JOB_STATUS_SUCCEEDED, nil
+}
+
+// watchCancellation polls the job's status (F-05) and cancels the job's
+// context if the job is cancelled. An ephemeral agent holds no WatchJobs
+// stream, so it observes the cancellation on the API: the scheduler's
+// CancelJob marks the job cancelled in the database, and the agent's next
+// poll sees it and interrupts the running step (by cancelling the job's
+// context). Polling stops when the job's context is done (the job finished or
+// was cancelled).
+func (a *Agent) watchCancellation(ctx context.Context, cancel context.CancelFunc) {
+	ticker := time.NewTicker(agentCancelPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			job, err := a.deps.API.GetJob(ctx, &apipb.GetJobRequest{Id: a.jobID})
+			if err != nil {
+				// A transient failure to fetch the job is not a cancellation;
+				// keep polling.
+				continue
+			}
+			if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_CANCELLED {
+				a.logger.Info("agent: job cancelled", "job", a.jobID)
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 // runJob executes the job's execution spec: the steps run in order and the

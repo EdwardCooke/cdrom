@@ -656,6 +656,114 @@ func TestReapJob(t *testing.T) {
 	}
 }
 
+// TestCancelJob verifies the conditional cancel used by the scheduler's
+// CancelJob RPC (F-05): a running job is marked cancelled, while a job that
+// already reached a terminal state is left untouched (cancelling a finished
+// job is a no-op).
+func TestCancelJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// A running job is cancelled.
+	running, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "running"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:        running.GetId(),
+		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
+		StartedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	cancelled, err := client.CancelJob(ctx, &dbpb.CancelJobRequest{Id: running.GetId()})
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	if !cancelled.GetCancelled() {
+		t.Fatal("running job was not cancelled, want cancelled=true")
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: running.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_CANCELLED {
+		t.Errorf("status = %v, want CANCELLED", fetched.GetStatus())
+	}
+	if fetched.GetFinishedAt() == nil {
+		t.Error("finished_at not set on cancelled job")
+	}
+
+	// A job that already reached a terminal state is not cancelled.
+	finished, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "finished"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         finished.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	cancelled, err = client.CancelJob(ctx, &dbpb.CancelJobRequest{Id: finished.GetId()})
+	if err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	if cancelled.GetCancelled() {
+		t.Fatal("terminal job was cancelled, want cancelled=false")
+	}
+	fetched, err = client.GetJob(ctx, &dbpb.GetJobRequest{Id: finished.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Errorf("status = %v, want SUCCEEDED (unchanged)", fetched.GetStatus())
+	}
+}
+
+// TestUpdateJobIgnoresLateReportOnTerminalJob verifies that a status report
+// from a target on a job that already reached a terminal state is a no-op
+// (F-05): a late report (e.g. a target that finished just as it was
+// cancelled) cannot clobber the terminal status.
+func TestUpdateJobIgnoresLateReportOnTerminalJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "running"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:        job.GetId(),
+		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
+		StartedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	// The job is cancelled.
+	if _, err := client.CancelJob(ctx, &dbpb.CancelJobRequest{Id: job.GetId()}); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	// A late report from the target (it finished just as it was cancelled)
+	// must not clobber the cancelled status.
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         job.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_CANCELLED {
+		t.Errorf("status = %v, want CANCELLED (late report must not clobber)", fetched.GetStatus())
+	}
+}
+
 func TestIDPSigningKeys(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()

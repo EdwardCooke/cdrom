@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -40,6 +41,14 @@ type Worker struct {
 	group  string
 	deps   Dependencies
 	logger *slog.Logger
+
+	// sem bounds the worker to one job at a time (preserving the previous
+	// sequential behavior) while the watch loop stays free to receive
+	// cancellations for the running job (F-05).
+	sem chan struct{}
+
+	mu       sync.Mutex
+	inflight map[int64]*jobRun // jobID -> run state for a running job
 }
 
 // New creates a worker with the given identity and service dependencies.
@@ -47,7 +56,14 @@ func New(name, group string, deps Dependencies, logger *slog.Logger) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Worker{name: name, group: group, deps: deps, logger: logger}
+	return &Worker{
+		name:     name,
+		group:    group,
+		deps:     deps,
+		logger:   logger,
+		sem:      make(chan struct{}, 1),
+		inflight: make(map[int64]*jobRun),
+	}
 }
 
 // Run registers the worker, then serves jobs until ctx is cancelled. It
@@ -87,8 +103,16 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// watch opens a WatchJobs stream and processes assignments until the stream
-// closes or ctx is cancelled.
+// watch opens a WatchJobs stream and processes messages until the stream
+// closes or ctx is cancelled. Each message is either an assignment (a new job
+// to run) or a cancellation (stop a job the worker is running, F-05).
+//
+// Assignments are run in a goroutine (bounded by the worker's semaphore to
+// one job at a time) so the watch loop stays free to receive a cancellation
+// for the running job. A cancellation delivered while a job runs interrupts
+// that job's step (see cancelJob); one delivered for a job that is not
+// running on this worker is ignored (the job's status is already reconciled
+// by the database).
 func (w *Worker) watch(ctx context.Context) error {
 	stream, err := w.deps.API.WatchJobs(ctx, &apipb.WatchJobsRequest{
 		WorkerName: w.name,
@@ -98,7 +122,7 @@ func (w *Worker) watch(ctx context.Context) error {
 		return fmt.Errorf("worker: watch: %w", err)
 	}
 	for {
-		assignment, err := stream.Recv()
+		message, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {
 				return nil
@@ -108,8 +132,41 @@ func (w *Worker) watch(ctx context.Context) error {
 			}
 			return fmt.Errorf("worker: recv: %w", err)
 		}
-		w.execute(ctx, assignment.GetJob(), assignment.GetToken())
+		switch m := message.GetMessage().(type) {
+		case *apipb.WatchMessage_Assignment:
+			assignment := m.Assignment
+			// Run the job in a goroutine so the watch loop can keep receiving
+			// cancellations for it (F-05). The semaphore bounds the worker to
+			// one job at a time, preserving the previous sequential behavior.
+			w.sem <- struct{}{}
+			go func() {
+				defer func() { <-w.sem }()
+				w.execute(ctx, assignment.GetJob(), assignment.GetToken())
+			}()
+		case *apipb.WatchMessage_Cancellation:
+			w.cancelJob(m.Cancellation.GetJobId())
+		}
 	}
+}
+
+// cancelJob interrupts the job the worker is running (F-05): it marks the
+// job's run as user-cancelled and cancels its context, which terminates the
+// running step. A cancellation for a job that is not running on this worker
+// (already finished, or running on another target) is a no-op — the job's
+// status is reconciled by the database.
+func (w *Worker) cancelJob(jobID int64) {
+	w.mu.Lock()
+	run, running := w.inflight[jobID]
+	if running {
+		run.userCancel = true
+	}
+	w.mu.Unlock()
+	if !running {
+		w.logger.Info("worker: cancel for job not running on this worker", "job", jobID)
+		return
+	}
+	w.logger.Info("worker: cancelling job", "job", jobID)
+	run.cancel()
 }
 
 // heartbeat refreshes the worker's liveness on an interval.
@@ -128,14 +185,43 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	}
 }
 
+// jobRun is the per-job execution state the worker tracks so a cancellation
+// (F-05) can interrupt a running job: cancel terminates the job's context
+// (killing the running step), and userCancel records that the interruption
+// was a user cancellation (as opposed to a timeout or a worker shutdown).
+type jobRun struct {
+	cancel     context.CancelFunc
+	userCancel bool
+}
+
 // execute runs a single job assignment: mark running, execute, and report the
 // final status. All job logging is local. token is the job token the API
 // handed over with the assignment; it is presented on the status reports so
 // the API (and any outside resources) can authenticate the worker for this
 // job.
+//
+// The job runs under a cancellable context registered in the worker's
+// in-flight set (F-05): a cancellation delivered on the WatchJobs stream
+// cancels this context, which terminates the running step, and the job is
+// reported as cancelled.
 func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	jobID := fmt.Sprintf("%d", job.GetId())
 	w.logger.Info("worker: executing job", "job", job.GetId(), "name", job.GetName())
+
+	// A cancellable context bounds the job's execution; a cancellation (F-05)
+	// cancels it to interrupt the running step. It is also cancelled on
+	// worker shutdown (via the parent ctx).
+	jobCtx, cancel := context.WithCancel(ctx)
+	run := &jobRun{cancel: cancel}
+	w.mu.Lock()
+	w.inflight[job.GetId()] = run
+	w.mu.Unlock()
+	defer func() {
+		cancel()
+		w.mu.Lock()
+		delete(w.inflight, job.GetId())
+		w.mu.Unlock()
+	}()
 
 	if _, err := w.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, token), &apipb.ReportJobStatusRequest{
 		JobId:     job.GetId(),
@@ -146,8 +232,18 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	}
 
 	w.logger.Info("job started", "job", jobID)
-	err := w.runJob(ctx, job, token)
+	err := w.runJob(jobCtx, job, token)
+	w.mu.Lock()
+	userCancelled := run.userCancel
+	w.mu.Unlock()
 	if err != nil {
+		// A user cancellation (F-05) interrupts the running step and is
+		// reported as cancelled, distinct from a failure.
+		if userCancelled {
+			w.logger.Info("job cancelled", "job", jobID)
+			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED)
+			return
+		}
 		// A timeout (the job-level or a step's per-step timeout, F-03) is
 		// reported as timed_out rather than failed, so the UI can tell a hung
 		// job apart from one that ran and errored.

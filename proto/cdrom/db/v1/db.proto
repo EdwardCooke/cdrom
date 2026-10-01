@@ -56,6 +56,13 @@ service Database {
   // went silent (F-03): a job that already reported a terminal status is
   // left untouched.
   rpc ReapJob(ReapJobRequest) returns (ReapJobResponse);
+  // CancelJob conditionally marks a job as cancelled: it sets the status to
+  // CANCELLED (and the finished timestamp) only if the job is still in a
+  // non-terminal state (pending or running). It returns whether the job was
+  // cancelled. This is how the scheduler's CancelJob RPC (F-05) persists the
+  // cancellation: a job that already reported a terminal status is left
+  // untouched, so cancelling a finished job is a no-op.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
 
   // Workers
   rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
@@ -296,6 +303,19 @@ message ReapJobResponse {
   // reaped is true when the job was still in a non-terminal state and was
   // marked timed_out; false when it had already reached a terminal state.
   bool reaped = 1;
+}
+
+message CancelJobRequest {
+  int64 id = 1;
+  // finished_at is the timestamp to record when the job is cancelled; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp finished_at = 2;
+}
+
+message CancelJobResponse {
+  // cancelled is true when the job was still in a non-terminal state and was
+  // marked cancelled; false when it had already reached a terminal state.
+  bool cancelled = 1;
 }
 
 message ClaimJobRetryRequest {

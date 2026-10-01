@@ -32,8 +32,10 @@ N-tier architecture with the following layers (top to bottom):
      which fans it out to the live workers. Persists state through the
      Database service. It also runs a background **watchdog** that reaps
      running jobs that have exceeded their declared timeout even if the
-     execution target goes silent (F-03), and a background **retry loop**
-     that re-dispatches failed jobs per their retry policy (F-04).
+     execution target goes silent (F-03), a background **retry loop** that
+     re-dispatches failed jobs per their retry policy (F-04), and **cancels**
+     a job by persisting the cancellation and signalling the execution target
+     to stop the work (F-05).
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -181,6 +183,30 @@ cancelled, or timed out) via `POST /api/jobs/{id}/rerun` (API → scheduler
 `attempt`/`max_attempts` are carried on the job protos (db, scheduler, api)
 and surfaced to the UI through the WebSocket snapshot and `job_status`
 events.
+
+**Cancellation propagation (F-05):** cancelling a running job signals the
+execution target to stop the work (terminate the running command), not just
+flip the status in the database. `POST /api/jobs/{id}/cancel` (API → scheduler
+`CancelJob`) persists the cancellation with the conditional
+`Database.CancelJob` RPC (marks the job `cancelled` only if it is still
+`pending` or `running`, so cancelling a finished job is a no-op) and then
+signals the target through the API's `CancelJob` RPC. The API's `WatchJobs`
+server stream carries a `WatchMessage` (a oneof of `JobAssignment` and
+`JobCancellation`): the API pushes a `JobCancellation` down every live
+worker's stream, and a worker that is running the job interrupts the running
+step (cancelling the job's context, which terminates the command) and reports
+`cancelled`; a cancellation for a job that is not running on that worker is
+ignored. An ephemeral agent holds no `WatchJobs` stream, so it observes the
+cancellation on the API instead: it polls `GetJob` on a short interval while
+the job runs and, when it sees the job is `cancelled`, interrupts the running
+step and reports `cancelled`. Signalling the target is best-effort: if it
+cannot be reached (no live worker, or the API is down) the job is still marked
+`cancelled` in the database, and the target's next status report (or the
+scheduler's watchdog) reconciles it. A late target report cannot clobber a
+terminal status: `Database.UpdateJob` applies a target's status report only if
+the job is still `pending` or `running`, so once a job is `succeeded`,
+`failed`, `cancelled`, or `timed_out` a late report (e.g. a target that
+finished just as it was cancelled) is ignored.
 
 **Shell override (shell handler):** a step may set the `shell` param to run
 through a user-chosen interpreter instead of executing `command` directly.

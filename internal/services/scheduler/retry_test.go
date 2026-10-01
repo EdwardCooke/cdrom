@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +63,9 @@ func (f *fakeRetryDB) ClaimJobRetry(ctx context.Context, in *dbpb.ClaimJobRetryR
 // fakeRelayer is a stub APIClient that records NotifyJobStatus and
 // DispatchJob calls.
 type fakeRelayer struct {
+	// mu guards dispatched: a retry's backoff dispatch runs in a detached
+	// goroutine that appends to it while the test's goroutine reads it.
+	mu         sync.Mutex
 	notified   map[int64]dbpb.JobStatus
 	dispatched []int64
 }
@@ -75,8 +79,21 @@ func (f *fakeRelayer) NotifyJobStatus(ctx context.Context, in *apipb.NotifyJobSt
 }
 
 func (f *fakeRelayer) DispatchJob(ctx context.Context, in *apipb.DispatchJobRequest, opts ...grpc.CallOption) (*apipb.DispatchJobResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.dispatched = append(f.dispatched, in.GetJob().GetId())
 	return &apipb.DispatchJobResponse{Dispatched: 1}, nil
+}
+
+// dispatchedIDs returns a copy of the recorded dispatches, safe to call from
+// the test's goroutine while a retry's backoff goroutine may still be
+// dispatching (F-04).
+func (f *fakeRelayer) dispatchedIDs() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]int64, len(f.dispatched))
+	copy(out, f.dispatched)
+	return out
 }
 
 // TestRetryFailedJobs verifies the retry loop (F-04): the loop asks the
@@ -111,8 +128,8 @@ func TestRetryFailedJobs(t *testing.T) {
 	if status, ok := api.notified[1]; !ok || status != dbpb.JobStatus_JOB_STATUS_PENDING {
 		t.Errorf("job 1 notified = %v, want PENDING", api.notified[1])
 	}
-	if len(api.dispatched) != 1 || api.dispatched[0] != 1 {
-		t.Errorf("dispatched = %v, want [1]", api.dispatched)
+	if ids := api.dispatchedIDs(); len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("dispatched = %v, want [1]", ids)
 	}
 	// Jobs 2 and 3 were not claimed, notified, or dispatched.
 	if _, ok := api.notified[2]; ok {
@@ -149,19 +166,19 @@ func TestRetryFailedJobsBackoff(t *testing.T) {
 		t.Error("job 1 was not notified as pending")
 	}
 	// The dispatch is delayed by the backoff: it has not happened yet.
-	if len(api.dispatched) != 0 {
-		t.Errorf("dispatched = %v immediately, want none (backoff pending)", api.dispatched)
+	if len(api.dispatchedIDs()) != 0 {
+		t.Errorf("dispatched = %v immediately, want none (backoff pending)", api.dispatchedIDs())
 	}
 	// Wait past the backoff; the dispatch happens.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(api.dispatched) == 1 && api.dispatched[0] == 1 {
+		if ids := api.dispatchedIDs(); len(ids) == 1 && ids[0] == 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if len(api.dispatched) != 1 || api.dispatched[0] != 1 {
-		t.Errorf("dispatched = %v after backoff, want [1]", api.dispatched)
+	if ids := api.dispatchedIDs(); len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("dispatched = %v after backoff, want [1]", ids)
 	}
 }
 
@@ -207,8 +224,8 @@ func TestRerunJob(t *testing.T) {
 	if job.GetAttempt() != 1 {
 		t.Errorf("attempt = %d, want 1 (fresh attempt)", job.GetAttempt())
 	}
-	if len(api.dispatched) != 1 || api.dispatched[0] != 1 {
-		t.Errorf("dispatched = %v, want [1]", api.dispatched)
+	if ids := api.dispatchedIDs(); len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("dispatched = %v, want [1]", ids)
 	}
 }
 
@@ -226,8 +243,8 @@ func TestRerunJobRunning(t *testing.T) {
 	if _, err := s.rerunJob(context.Background(), db, api, 1); err == nil {
 		t.Error("rerunJob on a running job succeeded, want an error")
 	}
-	if len(api.dispatched) != 0 {
-		t.Errorf("dispatched = %v, want none", api.dispatched)
+	if len(api.dispatchedIDs()) != 0 {
+		t.Errorf("dispatched = %v, want none", api.dispatchedIDs())
 	}
 }
 

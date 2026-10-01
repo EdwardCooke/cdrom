@@ -536,6 +536,139 @@ func (x *JobAssignment) GetToken() string {
 	return ""
 }
 
+// JobCancellation is a signal to stop the work of a job that is running on
+// the target (F-05). The target interrupts the running step (terminating the
+// command) and reports the job as cancelled.
+type JobCancellation struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// job_id is the job to cancel.
+	JobId         int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobCancellation) Reset() {
+	*x = JobCancellation{}
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobCancellation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobCancellation) ProtoMessage() {}
+
+func (x *JobCancellation) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobCancellation.ProtoReflect.Descriptor instead.
+func (*JobCancellation) Descriptor() ([]byte, []int) {
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *JobCancellation) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+// WatchMessage is a single message on a worker's WatchJobs stream. Exactly
+// one of its fields is set: an assignment (a new job to run) or a
+// cancellation (stop a job the worker is running, F-05).
+type WatchMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Message:
+	//
+	//	*WatchMessage_Assignment
+	//	*WatchMessage_Cancellation
+	Message       isWatchMessage_Message `protobuf_oneof:"message"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchMessage) Reset() {
+	*x = WatchMessage{}
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchMessage) ProtoMessage() {}
+
+func (x *WatchMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchMessage.ProtoReflect.Descriptor instead.
+func (*WatchMessage) Descriptor() ([]byte, []int) {
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *WatchMessage) GetMessage() isWatchMessage_Message {
+	if x != nil {
+		return x.Message
+	}
+	return nil
+}
+
+func (x *WatchMessage) GetAssignment() *JobAssignment {
+	if x != nil {
+		if x, ok := x.Message.(*WatchMessage_Assignment); ok {
+			return x.Assignment
+		}
+	}
+	return nil
+}
+
+func (x *WatchMessage) GetCancellation() *JobCancellation {
+	if x != nil {
+		if x, ok := x.Message.(*WatchMessage_Cancellation); ok {
+			return x.Cancellation
+		}
+	}
+	return nil
+}
+
+type isWatchMessage_Message interface {
+	isWatchMessage_Message()
+}
+
+type WatchMessage_Assignment struct {
+	Assignment *JobAssignment `protobuf:"bytes,1,opt,name=assignment,proto3,oneof"`
+}
+
+type WatchMessage_Cancellation struct {
+	Cancellation *JobCancellation `protobuf:"bytes,2,opt,name=cancellation,proto3,oneof"`
+}
+
+func (*WatchMessage_Assignment) isWatchMessage_Message() {}
+
+func (*WatchMessage_Cancellation) isWatchMessage_Message() {}
+
 type WatchJobsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkerName    string                 `protobuf:"bytes,1,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
@@ -546,7 +679,7 @@ type WatchJobsRequest struct {
 
 func (x *WatchJobsRequest) Reset() {
 	*x = WatchJobsRequest{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[7]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -558,7 +691,7 @@ func (x *WatchJobsRequest) String() string {
 func (*WatchJobsRequest) ProtoMessage() {}
 
 func (x *WatchJobsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[7]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -571,7 +704,7 @@ func (x *WatchJobsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchJobsRequest.ProtoReflect.Descriptor instead.
 func (*WatchJobsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{7}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *WatchJobsRequest) GetWorkerName() string {
@@ -588,6 +721,52 @@ func (x *WatchJobsRequest) GetGroup() string {
 	return ""
 }
 
+// CancelJobRequest asks the API to signal the execution target running the
+// job to stop the work (F-05).
+type CancelJobRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelJobRequest) Reset() {
+	*x = CancelJobRequest{}
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelJobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelJobRequest) ProtoMessage() {}
+
+func (x *CancelJobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelJobRequest.ProtoReflect.Descriptor instead.
+func (*CancelJobRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *CancelJobRequest) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
 type GetJobRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -597,7 +776,7 @@ type GetJobRequest struct {
 
 func (x *GetJobRequest) Reset() {
 	*x = GetJobRequest{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[8]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -609,7 +788,7 @@ func (x *GetJobRequest) String() string {
 func (*GetJobRequest) ProtoMessage() {}
 
 func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[8]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -622,7 +801,7 @@ func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetJobRequest.ProtoReflect.Descriptor instead.
 func (*GetJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{8}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetJobRequest) GetId() int64 {
@@ -644,7 +823,7 @@ type ReportJobStatusRequest struct {
 
 func (x *ReportJobStatusRequest) Reset() {
 	*x = ReportJobStatusRequest{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[9]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -656,7 +835,7 @@ func (x *ReportJobStatusRequest) String() string {
 func (*ReportJobStatusRequest) ProtoMessage() {}
 
 func (x *ReportJobStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[9]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -669,7 +848,7 @@ func (x *ReportJobStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportJobStatusRequest.ProtoReflect.Descriptor instead.
 func (*ReportJobStatusRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{9}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ReportJobStatusRequest) GetJobId() int64 {
@@ -717,7 +896,7 @@ type JobLogMetadata struct {
 
 func (x *JobLogMetadata) Reset() {
 	*x = JobLogMetadata{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[10]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -729,7 +908,7 @@ func (x *JobLogMetadata) String() string {
 func (*JobLogMetadata) ProtoMessage() {}
 
 func (x *JobLogMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[10]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -742,7 +921,7 @@ func (x *JobLogMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobLogMetadata.ProtoReflect.Descriptor instead.
 func (*JobLogMetadata) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{10}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *JobLogMetadata) GetJobId() int64 {
@@ -778,7 +957,7 @@ type JobLogChunk struct {
 
 func (x *JobLogChunk) Reset() {
 	*x = JobLogChunk{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[11]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +969,7 @@ func (x *JobLogChunk) String() string {
 func (*JobLogChunk) ProtoMessage() {}
 
 func (x *JobLogChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[11]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +982,7 @@ func (x *JobLogChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobLogChunk.ProtoReflect.Descriptor instead.
 func (*JobLogChunk) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{11}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *JobLogChunk) GetMetadata() *JobLogMetadata {
@@ -831,7 +1010,7 @@ type StreamJobLogsResponse struct {
 
 func (x *StreamJobLogsResponse) Reset() {
 	*x = StreamJobLogsResponse{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[12]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -843,7 +1022,7 @@ func (x *StreamJobLogsResponse) String() string {
 func (*StreamJobLogsResponse) ProtoMessage() {}
 
 func (x *StreamJobLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[12]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -856,7 +1035,7 @@ func (x *StreamJobLogsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamJobLogsResponse.ProtoReflect.Descriptor instead.
 func (*StreamJobLogsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{12}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *StreamJobLogsResponse) GetReceived() int64 {
@@ -875,7 +1054,7 @@ type DispatchJobRequest struct {
 
 func (x *DispatchJobRequest) Reset() {
 	*x = DispatchJobRequest{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[13]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -887,7 +1066,7 @@ func (x *DispatchJobRequest) String() string {
 func (*DispatchJobRequest) ProtoMessage() {}
 
 func (x *DispatchJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[13]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -900,7 +1079,7 @@ func (x *DispatchJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchJobRequest.ProtoReflect.Descriptor instead.
 func (*DispatchJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{13}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *DispatchJobRequest) GetJob() *Job {
@@ -920,7 +1099,7 @@ type DispatchJobResponse struct {
 
 func (x *DispatchJobResponse) Reset() {
 	*x = DispatchJobResponse{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[14]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -932,7 +1111,7 @@ func (x *DispatchJobResponse) String() string {
 func (*DispatchJobResponse) ProtoMessage() {}
 
 func (x *DispatchJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[14]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -945,7 +1124,7 @@ func (x *DispatchJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchJobResponse.ProtoReflect.Descriptor instead.
 func (*DispatchJobResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{14}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *DispatchJobResponse) GetDispatched() int32 {
@@ -972,7 +1151,7 @@ type NotifyJobStatusRequest struct {
 
 func (x *NotifyJobStatusRequest) Reset() {
 	*x = NotifyJobStatusRequest{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[15]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -984,7 +1163,7 @@ func (x *NotifyJobStatusRequest) String() string {
 func (*NotifyJobStatusRequest) ProtoMessage() {}
 
 func (x *NotifyJobStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[15]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -997,7 +1176,7 @@ func (x *NotifyJobStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotifyJobStatusRequest.ProtoReflect.Descriptor instead.
 func (*NotifyJobStatusRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{15}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *NotifyJobStatusRequest) GetJobId() int64 {
@@ -1041,7 +1220,7 @@ type ExchangeJobTokenRequest struct {
 
 func (x *ExchangeJobTokenRequest) Reset() {
 	*x = ExchangeJobTokenRequest{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[16]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1053,7 +1232,7 @@ func (x *ExchangeJobTokenRequest) String() string {
 func (*ExchangeJobTokenRequest) ProtoMessage() {}
 
 func (x *ExchangeJobTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[16]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1066,7 +1245,7 @@ func (x *ExchangeJobTokenRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExchangeJobTokenRequest.ProtoReflect.Descriptor instead.
 func (*ExchangeJobTokenRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{16}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ExchangeJobTokenRequest) GetJobId() int64 {
@@ -1094,7 +1273,7 @@ type ExchangeJobTokenResponse struct {
 
 func (x *ExchangeJobTokenResponse) Reset() {
 	*x = ExchangeJobTokenResponse{}
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[17]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1106,7 +1285,7 @@ func (x *ExchangeJobTokenResponse) String() string {
 func (*ExchangeJobTokenResponse) ProtoMessage() {}
 
 func (x *ExchangeJobTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_api_v1_api_proto_msgTypes[17]
+	mi := &file_cdrom_api_v1_api_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1119,7 +1298,7 @@ func (x *ExchangeJobTokenResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExchangeJobTokenResponse.ProtoReflect.Descriptor instead.
 func (*ExchangeJobTokenResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{17}
+	return file_cdrom_api_v1_api_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ExchangeJobTokenResponse) GetToken() string {
@@ -1170,11 +1349,21 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x03job\x18\x01 \x01(\v2\x11.cdrom.api.v1.JobR\x03job\x12\x1f\n" +
 	"\vworker_name\x18\x02 \x01(\tR\n" +
 	"workerName\x12\x14\n" +
-	"\x05token\x18\x03 \x01(\tR\x05token\"I\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\"(\n" +
+	"\x0fJobCancellation\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\x9d\x01\n" +
+	"\fWatchMessage\x12=\n" +
+	"\n" +
+	"assignment\x18\x01 \x01(\v2\x1b.cdrom.api.v1.JobAssignmentH\x00R\n" +
+	"assignment\x12C\n" +
+	"\fcancellation\x18\x02 \x01(\v2\x1d.cdrom.api.v1.JobCancellationH\x00R\fcancellationB\t\n" +
+	"\amessage\"I\n" +
 	"\x10WatchJobsRequest\x12\x1f\n" +
 	"\vworker_name\x18\x01 \x01(\tR\n" +
 	"workerName\x12\x14\n" +
-	"\x05group\x18\x02 \x01(\tR\x05group\"\x1f\n" +
+	"\x05group\x18\x02 \x01(\tR\x05group\")\n" +
+	"\x10CancelJobRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\x1f\n" +
 	"\rGetJobRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"\xd7\x01\n" +
 	"\x16ReportJobStatusRequest\x12\x15\n" +
@@ -1213,14 +1402,16 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\fJobLogStream\x12\x1e\n" +
 	"\x1aJOB_LOG_STREAM_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15JOB_LOG_STREAM_STDOUT\x10\x01\x12\x19\n" +
-	"\x15JOB_LOG_STREAM_STDERR\x10\x022\xf9\t\n" +
+	"\x15JOB_LOG_STREAM_STDERR\x10\x022\xbd\n" +
+	"\n" +
 	"\x03API\x12K\n" +
 	"\x0eRegisterWorker\x12#.cdrom.api.v1.RegisterWorkerRequest\x1a\x14.cdrom.api.v1.Worker\x12Q\n" +
 	"\x10DeregisterWorker\x12%.cdrom.api.v1.DeregisterWorkerRequest\x1a\x16.google.protobuf.Empty\x12L\n" +
-	"\tHeartbeat\x12\x1e.cdrom.api.v1.HeartbeatRequest\x1a\x1f.cdrom.api.v1.HeartbeatResponse\x12J\n" +
-	"\tWatchJobs\x12\x1e.cdrom.api.v1.WatchJobsRequest\x1a\x1b.cdrom.api.v1.JobAssignment0\x01\x128\n" +
+	"\tHeartbeat\x12\x1e.cdrom.api.v1.HeartbeatRequest\x1a\x1f.cdrom.api.v1.HeartbeatResponse\x12I\n" +
+	"\tWatchJobs\x12\x1e.cdrom.api.v1.WatchJobsRequest\x1a\x1a.cdrom.api.v1.WatchMessage0\x01\x128\n" +
 	"\x06GetJob\x12\x1b.cdrom.api.v1.GetJobRequest\x1a\x11.cdrom.api.v1.Job\x12J\n" +
-	"\x0fReportJobStatus\x12$.cdrom.api.v1.ReportJobStatusRequest\x1a\x11.cdrom.api.v1.Job\x12Q\n" +
+	"\x0fReportJobStatus\x12$.cdrom.api.v1.ReportJobStatusRequest\x1a\x11.cdrom.api.v1.Job\x12C\n" +
+	"\tCancelJob\x12\x1e.cdrom.api.v1.CancelJobRequest\x1a\x16.google.protobuf.Empty\x12Q\n" +
 	"\rStreamJobLogs\x12\x19.cdrom.api.v1.JobLogChunk\x1a#.cdrom.api.v1.StreamJobLogsResponse(\x01\x12a\n" +
 	"\x10ExchangeJobToken\x12%.cdrom.api.v1.ExchangeJobTokenRequest\x1a&.cdrom.api.v1.ExchangeJobTokenResponse\x12R\n" +
 	"\vDispatchJob\x12 .cdrom.api.v1.DispatchJobRequest\x1a!.cdrom.api.v1.DispatchJobResponse\x12O\n" +
@@ -1244,7 +1435,7 @@ func file_cdrom_api_v1_api_proto_rawDescGZIP() []byte {
 }
 
 var file_cdrom_api_v1_api_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cdrom_api_v1_api_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_cdrom_api_v1_api_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_cdrom_api_v1_api_proto_goTypes = []any{
 	(JobLogStream)(0),                   // 0: cdrom.api.v1.JobLogStream
 	(*Worker)(nil),                      // 1: cdrom.api.v1.Worker
@@ -1254,79 +1445,86 @@ var file_cdrom_api_v1_api_proto_goTypes = []any{
 	(*HeartbeatResponse)(nil),           // 5: cdrom.api.v1.HeartbeatResponse
 	(*Job)(nil),                         // 6: cdrom.api.v1.Job
 	(*JobAssignment)(nil),               // 7: cdrom.api.v1.JobAssignment
-	(*WatchJobsRequest)(nil),            // 8: cdrom.api.v1.WatchJobsRequest
-	(*GetJobRequest)(nil),               // 9: cdrom.api.v1.GetJobRequest
-	(*ReportJobStatusRequest)(nil),      // 10: cdrom.api.v1.ReportJobStatusRequest
-	(*JobLogMetadata)(nil),              // 11: cdrom.api.v1.JobLogMetadata
-	(*JobLogChunk)(nil),                 // 12: cdrom.api.v1.JobLogChunk
-	(*StreamJobLogsResponse)(nil),       // 13: cdrom.api.v1.StreamJobLogsResponse
-	(*DispatchJobRequest)(nil),          // 14: cdrom.api.v1.DispatchJobRequest
-	(*DispatchJobResponse)(nil),         // 15: cdrom.api.v1.DispatchJobResponse
-	(*NotifyJobStatusRequest)(nil),      // 16: cdrom.api.v1.NotifyJobStatusRequest
-	(*ExchangeJobTokenRequest)(nil),     // 17: cdrom.api.v1.ExchangeJobTokenRequest
-	(*ExchangeJobTokenResponse)(nil),    // 18: cdrom.api.v1.ExchangeJobTokenResponse
-	(*timestamppb.Timestamp)(nil),       // 19: google.protobuf.Timestamp
-	(v1.JobStatus)(0),                   // 20: cdrom.db.v1.JobStatus
-	(*v1.JobSpec)(nil),                  // 21: cdrom.db.v1.JobSpec
-	(*v11.ArtifactChunk)(nil),           // 22: cdrom.artifacts.v1.ArtifactChunk
-	(*v11.DownloadArtifactRequest)(nil), // 23: cdrom.artifacts.v1.DownloadArtifactRequest
-	(*v11.GetArtifactRequest)(nil),      // 24: cdrom.artifacts.v1.GetArtifactRequest
-	(*v11.ListArtifactsRequest)(nil),    // 25: cdrom.artifacts.v1.ListArtifactsRequest
-	(*v11.DeleteArtifactRequest)(nil),   // 26: cdrom.artifacts.v1.DeleteArtifactRequest
-	(*emptypb.Empty)(nil),               // 27: google.protobuf.Empty
-	(*v11.UploadArtifactResponse)(nil),  // 28: cdrom.artifacts.v1.UploadArtifactResponse
-	(*v11.Artifact)(nil),                // 29: cdrom.artifacts.v1.Artifact
-	(*v11.ListArtifactsResponse)(nil),   // 30: cdrom.artifacts.v1.ListArtifactsResponse
+	(*JobCancellation)(nil),             // 8: cdrom.api.v1.JobCancellation
+	(*WatchMessage)(nil),                // 9: cdrom.api.v1.WatchMessage
+	(*WatchJobsRequest)(nil),            // 10: cdrom.api.v1.WatchJobsRequest
+	(*CancelJobRequest)(nil),            // 11: cdrom.api.v1.CancelJobRequest
+	(*GetJobRequest)(nil),               // 12: cdrom.api.v1.GetJobRequest
+	(*ReportJobStatusRequest)(nil),      // 13: cdrom.api.v1.ReportJobStatusRequest
+	(*JobLogMetadata)(nil),              // 14: cdrom.api.v1.JobLogMetadata
+	(*JobLogChunk)(nil),                 // 15: cdrom.api.v1.JobLogChunk
+	(*StreamJobLogsResponse)(nil),       // 16: cdrom.api.v1.StreamJobLogsResponse
+	(*DispatchJobRequest)(nil),          // 17: cdrom.api.v1.DispatchJobRequest
+	(*DispatchJobResponse)(nil),         // 18: cdrom.api.v1.DispatchJobResponse
+	(*NotifyJobStatusRequest)(nil),      // 19: cdrom.api.v1.NotifyJobStatusRequest
+	(*ExchangeJobTokenRequest)(nil),     // 20: cdrom.api.v1.ExchangeJobTokenRequest
+	(*ExchangeJobTokenResponse)(nil),    // 21: cdrom.api.v1.ExchangeJobTokenResponse
+	(*timestamppb.Timestamp)(nil),       // 22: google.protobuf.Timestamp
+	(v1.JobStatus)(0),                   // 23: cdrom.db.v1.JobStatus
+	(*v1.JobSpec)(nil),                  // 24: cdrom.db.v1.JobSpec
+	(*v11.ArtifactChunk)(nil),           // 25: cdrom.artifacts.v1.ArtifactChunk
+	(*v11.DownloadArtifactRequest)(nil), // 26: cdrom.artifacts.v1.DownloadArtifactRequest
+	(*v11.GetArtifactRequest)(nil),      // 27: cdrom.artifacts.v1.GetArtifactRequest
+	(*v11.ListArtifactsRequest)(nil),    // 28: cdrom.artifacts.v1.ListArtifactsRequest
+	(*v11.DeleteArtifactRequest)(nil),   // 29: cdrom.artifacts.v1.DeleteArtifactRequest
+	(*emptypb.Empty)(nil),               // 30: google.protobuf.Empty
+	(*v11.UploadArtifactResponse)(nil),  // 31: cdrom.artifacts.v1.UploadArtifactResponse
+	(*v11.Artifact)(nil),                // 32: cdrom.artifacts.v1.Artifact
+	(*v11.ListArtifactsResponse)(nil),   // 33: cdrom.artifacts.v1.ListArtifactsResponse
 }
 var file_cdrom_api_v1_api_proto_depIdxs = []int32{
-	19, // 0: cdrom.api.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
-	20, // 1: cdrom.api.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
-	19, // 2: cdrom.api.v1.Job.started_at:type_name -> google.protobuf.Timestamp
-	19, // 3: cdrom.api.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
-	21, // 4: cdrom.api.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
+	22, // 0: cdrom.api.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
+	23, // 1: cdrom.api.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
+	22, // 2: cdrom.api.v1.Job.started_at:type_name -> google.protobuf.Timestamp
+	22, // 3: cdrom.api.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
+	24, // 4: cdrom.api.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
 	6,  // 5: cdrom.api.v1.JobAssignment.job:type_name -> cdrom.api.v1.Job
-	20, // 6: cdrom.api.v1.ReportJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
-	19, // 7: cdrom.api.v1.ReportJobStatusRequest.started_at:type_name -> google.protobuf.Timestamp
-	19, // 8: cdrom.api.v1.ReportJobStatusRequest.finished_at:type_name -> google.protobuf.Timestamp
-	0,  // 9: cdrom.api.v1.JobLogMetadata.stream:type_name -> cdrom.api.v1.JobLogStream
-	11, // 10: cdrom.api.v1.JobLogChunk.metadata:type_name -> cdrom.api.v1.JobLogMetadata
-	6,  // 11: cdrom.api.v1.DispatchJobRequest.job:type_name -> cdrom.api.v1.Job
-	20, // 12: cdrom.api.v1.NotifyJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
-	2,  // 13: cdrom.api.v1.API.RegisterWorker:input_type -> cdrom.api.v1.RegisterWorkerRequest
-	3,  // 14: cdrom.api.v1.API.DeregisterWorker:input_type -> cdrom.api.v1.DeregisterWorkerRequest
-	4,  // 15: cdrom.api.v1.API.Heartbeat:input_type -> cdrom.api.v1.HeartbeatRequest
-	8,  // 16: cdrom.api.v1.API.WatchJobs:input_type -> cdrom.api.v1.WatchJobsRequest
-	9,  // 17: cdrom.api.v1.API.GetJob:input_type -> cdrom.api.v1.GetJobRequest
-	10, // 18: cdrom.api.v1.API.ReportJobStatus:input_type -> cdrom.api.v1.ReportJobStatusRequest
-	12, // 19: cdrom.api.v1.API.StreamJobLogs:input_type -> cdrom.api.v1.JobLogChunk
-	17, // 20: cdrom.api.v1.API.ExchangeJobToken:input_type -> cdrom.api.v1.ExchangeJobTokenRequest
-	14, // 21: cdrom.api.v1.API.DispatchJob:input_type -> cdrom.api.v1.DispatchJobRequest
-	16, // 22: cdrom.api.v1.API.NotifyJobStatus:input_type -> cdrom.api.v1.NotifyJobStatusRequest
-	22, // 23: cdrom.api.v1.API.UploadArtifact:input_type -> cdrom.artifacts.v1.ArtifactChunk
-	23, // 24: cdrom.api.v1.API.DownloadArtifact:input_type -> cdrom.artifacts.v1.DownloadArtifactRequest
-	24, // 25: cdrom.api.v1.API.GetArtifact:input_type -> cdrom.artifacts.v1.GetArtifactRequest
-	25, // 26: cdrom.api.v1.API.ListArtifacts:input_type -> cdrom.artifacts.v1.ListArtifactsRequest
-	26, // 27: cdrom.api.v1.API.DeleteArtifact:input_type -> cdrom.artifacts.v1.DeleteArtifactRequest
-	1,  // 28: cdrom.api.v1.API.RegisterWorker:output_type -> cdrom.api.v1.Worker
-	27, // 29: cdrom.api.v1.API.DeregisterWorker:output_type -> google.protobuf.Empty
-	5,  // 30: cdrom.api.v1.API.Heartbeat:output_type -> cdrom.api.v1.HeartbeatResponse
-	7,  // 31: cdrom.api.v1.API.WatchJobs:output_type -> cdrom.api.v1.JobAssignment
-	6,  // 32: cdrom.api.v1.API.GetJob:output_type -> cdrom.api.v1.Job
-	6,  // 33: cdrom.api.v1.API.ReportJobStatus:output_type -> cdrom.api.v1.Job
-	13, // 34: cdrom.api.v1.API.StreamJobLogs:output_type -> cdrom.api.v1.StreamJobLogsResponse
-	18, // 35: cdrom.api.v1.API.ExchangeJobToken:output_type -> cdrom.api.v1.ExchangeJobTokenResponse
-	15, // 36: cdrom.api.v1.API.DispatchJob:output_type -> cdrom.api.v1.DispatchJobResponse
-	27, // 37: cdrom.api.v1.API.NotifyJobStatus:output_type -> google.protobuf.Empty
-	28, // 38: cdrom.api.v1.API.UploadArtifact:output_type -> cdrom.artifacts.v1.UploadArtifactResponse
-	22, // 39: cdrom.api.v1.API.DownloadArtifact:output_type -> cdrom.artifacts.v1.ArtifactChunk
-	29, // 40: cdrom.api.v1.API.GetArtifact:output_type -> cdrom.artifacts.v1.Artifact
-	30, // 41: cdrom.api.v1.API.ListArtifacts:output_type -> cdrom.artifacts.v1.ListArtifactsResponse
-	27, // 42: cdrom.api.v1.API.DeleteArtifact:output_type -> google.protobuf.Empty
-	28, // [28:43] is the sub-list for method output_type
-	13, // [13:28] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	7,  // 6: cdrom.api.v1.WatchMessage.assignment:type_name -> cdrom.api.v1.JobAssignment
+	8,  // 7: cdrom.api.v1.WatchMessage.cancellation:type_name -> cdrom.api.v1.JobCancellation
+	23, // 8: cdrom.api.v1.ReportJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
+	22, // 9: cdrom.api.v1.ReportJobStatusRequest.started_at:type_name -> google.protobuf.Timestamp
+	22, // 10: cdrom.api.v1.ReportJobStatusRequest.finished_at:type_name -> google.protobuf.Timestamp
+	0,  // 11: cdrom.api.v1.JobLogMetadata.stream:type_name -> cdrom.api.v1.JobLogStream
+	14, // 12: cdrom.api.v1.JobLogChunk.metadata:type_name -> cdrom.api.v1.JobLogMetadata
+	6,  // 13: cdrom.api.v1.DispatchJobRequest.job:type_name -> cdrom.api.v1.Job
+	23, // 14: cdrom.api.v1.NotifyJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
+	2,  // 15: cdrom.api.v1.API.RegisterWorker:input_type -> cdrom.api.v1.RegisterWorkerRequest
+	3,  // 16: cdrom.api.v1.API.DeregisterWorker:input_type -> cdrom.api.v1.DeregisterWorkerRequest
+	4,  // 17: cdrom.api.v1.API.Heartbeat:input_type -> cdrom.api.v1.HeartbeatRequest
+	10, // 18: cdrom.api.v1.API.WatchJobs:input_type -> cdrom.api.v1.WatchJobsRequest
+	12, // 19: cdrom.api.v1.API.GetJob:input_type -> cdrom.api.v1.GetJobRequest
+	13, // 20: cdrom.api.v1.API.ReportJobStatus:input_type -> cdrom.api.v1.ReportJobStatusRequest
+	11, // 21: cdrom.api.v1.API.CancelJob:input_type -> cdrom.api.v1.CancelJobRequest
+	15, // 22: cdrom.api.v1.API.StreamJobLogs:input_type -> cdrom.api.v1.JobLogChunk
+	20, // 23: cdrom.api.v1.API.ExchangeJobToken:input_type -> cdrom.api.v1.ExchangeJobTokenRequest
+	17, // 24: cdrom.api.v1.API.DispatchJob:input_type -> cdrom.api.v1.DispatchJobRequest
+	19, // 25: cdrom.api.v1.API.NotifyJobStatus:input_type -> cdrom.api.v1.NotifyJobStatusRequest
+	25, // 26: cdrom.api.v1.API.UploadArtifact:input_type -> cdrom.artifacts.v1.ArtifactChunk
+	26, // 27: cdrom.api.v1.API.DownloadArtifact:input_type -> cdrom.artifacts.v1.DownloadArtifactRequest
+	27, // 28: cdrom.api.v1.API.GetArtifact:input_type -> cdrom.artifacts.v1.GetArtifactRequest
+	28, // 29: cdrom.api.v1.API.ListArtifacts:input_type -> cdrom.artifacts.v1.ListArtifactsRequest
+	29, // 30: cdrom.api.v1.API.DeleteArtifact:input_type -> cdrom.artifacts.v1.DeleteArtifactRequest
+	1,  // 31: cdrom.api.v1.API.RegisterWorker:output_type -> cdrom.api.v1.Worker
+	30, // 32: cdrom.api.v1.API.DeregisterWorker:output_type -> google.protobuf.Empty
+	5,  // 33: cdrom.api.v1.API.Heartbeat:output_type -> cdrom.api.v1.HeartbeatResponse
+	9,  // 34: cdrom.api.v1.API.WatchJobs:output_type -> cdrom.api.v1.WatchMessage
+	6,  // 35: cdrom.api.v1.API.GetJob:output_type -> cdrom.api.v1.Job
+	6,  // 36: cdrom.api.v1.API.ReportJobStatus:output_type -> cdrom.api.v1.Job
+	30, // 37: cdrom.api.v1.API.CancelJob:output_type -> google.protobuf.Empty
+	16, // 38: cdrom.api.v1.API.StreamJobLogs:output_type -> cdrom.api.v1.StreamJobLogsResponse
+	21, // 39: cdrom.api.v1.API.ExchangeJobToken:output_type -> cdrom.api.v1.ExchangeJobTokenResponse
+	18, // 40: cdrom.api.v1.API.DispatchJob:output_type -> cdrom.api.v1.DispatchJobResponse
+	30, // 41: cdrom.api.v1.API.NotifyJobStatus:output_type -> google.protobuf.Empty
+	31, // 42: cdrom.api.v1.API.UploadArtifact:output_type -> cdrom.artifacts.v1.UploadArtifactResponse
+	25, // 43: cdrom.api.v1.API.DownloadArtifact:output_type -> cdrom.artifacts.v1.ArtifactChunk
+	32, // 44: cdrom.api.v1.API.GetArtifact:output_type -> cdrom.artifacts.v1.Artifact
+	33, // 45: cdrom.api.v1.API.ListArtifacts:output_type -> cdrom.artifacts.v1.ListArtifactsResponse
+	30, // 46: cdrom.api.v1.API.DeleteArtifact:output_type -> google.protobuf.Empty
+	31, // [31:47] is the sub-list for method output_type
+	15, // [15:31] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_api_v1_api_proto_init() }
@@ -1334,13 +1532,17 @@ func file_cdrom_api_v1_api_proto_init() {
 	if File_cdrom_api_v1_api_proto != nil {
 		return
 	}
+	file_cdrom_api_v1_api_proto_msgTypes[8].OneofWrappers = []any{
+		(*WatchMessage_Assignment)(nil),
+		(*WatchMessage_Cancellation)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_api_v1_api_proto_rawDesc), len(file_cdrom_api_v1_api_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   18,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

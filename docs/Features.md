@@ -27,6 +27,7 @@ Before adding features, note the baseline that is already built and working:
 | Execution targets | Long-lived **workers** (register, `WatchJobs` stream, heartbeat) and ephemeral **agents** (`GetJob` → run → report) |
 | Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors. A job-level `timeout` bounds the whole job and a per-step `timeout` bounds a step; exceeding either terminates the job as `timed_out` (F-03), and a scheduler watchdog reaps jobs whose target goes silent |
 | Retry & re-run | A job's `JobSpec` may carry a `retry` policy (`max_attempts` retries after the initial attempt, `backoff` delay); a scheduler retry loop re-dispatches a failed job up to the limit (a new attempt on the same `Job` row, `attempt` counter, F-04). A user can re-run any finished job (`POST /api/jobs/{id}/rerun`) for a fresh attempt; attempts are visible to the UI ("attempt N of M") |
+| Cancellation | Cancelling a running job (`POST /api/jobs/{id}/cancel`) signals the execution target to stop the work (F-05): the API delivers a `JobCancellation` down the worker's `WatchJobs` stream (or an agent observes it on its next `GetJob`), the target interrupts the running step and reports `cancelled`; cancelling a finished job is a no-op |
 | Job tokens | Minted per job by the API (via IdP), audience exchange, verified on status/artifact RPCs |
 | UI auth | OIDC authorization-code + PKCE, signed session cookie |
 | Artifacts | General-purpose, namespaced file store (streamed upload/download); jobs scope files by job id, other callers (e.g. deployed releases) use their own namespaces; proxied through the API |
@@ -359,15 +360,53 @@ the command. A real cancel must reach the target.
 - `internal/services/scheduler` — `CancelJob` now also notifies the target.
 
 **Acceptance criteria.**
-- [ ] Cancelling a running job stops the command on the target within a bounded
+- [x] Cancelling a running job stops the command on the target within a bounded
       time.
-- [ ] The job's final status is `cancelled` and the target stops work.
-- [ ] Cancelling an already-finished job is a no-op (idempotent).
+- [x] The job's final status is `cancelled` and the target stops work.
+- [x] Cancelling an already-finished job is a no-op (idempotent).
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **The cancel signal rides the existing `WatchJobs` stream.** The API's
+  `WatchJobs` server stream now carries a `WatchMessage` (a oneof of
+  `JobAssignment` and `JobCancellation`) instead of a bare `JobAssignment`.
+  When the scheduler cancels a job it calls the API's `CancelJob` RPC, which
+  pushes a `JobCancellation` down every live worker's stream. A worker that is
+  running the job interrupts the running step (cancelling the job's context,
+  which terminates the command) and reports `cancelled`; a cancellation for a
+  job that is not running on that worker is ignored (the job's status is
+  reconciled by the database).
+- **Ephemeral agents observe the cancellation on the API.** An agent holds no
+  `WatchJobs` stream, so it cannot be signalled directly. Instead it polls the
+  API's `GetJob` on a short interval while the job runs; when it sees the job
+  is `cancelled` it interrupts the running step and reports `cancelled`. The
+  scheduler's `CancelJob` marks the job `cancelled` in the database, which the
+  agent's next poll observes.
+- **Persistence is conditional and idempotent.** The scheduler's `CancelJob`
+  persists the cancellation with a conditional `Database.CancelJob` update
+  (marks the job `cancelled` only if it is still `pending` or `running`), so
+  cancelling an already-finished job is a no-op. The target is then signalled
+  best-effort: if it cannot be reached (no live worker, or the API is down)
+  the job is still marked `cancelled` in the database, and the target's next
+  status report (or the scheduler's watchdog) reconciles it.
+- **A late target report cannot clobber a terminal status.** `Database.UpdateJob`
+  is now conditional: a status report from a target is applied only if the job
+  is still `pending` or `running`. Once a job is `succeeded`, `failed`,
+  `cancelled`, or `timed_out`, a late report (e.g. a target that finished just
+  as it was cancelled) is ignored, so the terminal status is authoritative.
+  The API's `ReportJobStatus` publishes the job's actual (post-update) status,
+  not the requested one, so a no-op report emits no spurious event.
+- **New RPCs.** `API.CancelJob` (signal the execution target to stop the work;
+  delivers a `JobCancellation` down the worker's `WatchJobs` stream) and
+  `Database.CancelJob` (conditional `cancelled` update, returns whether the job
+  was cancelled). The scheduler's `CancelJob` RPC calls `Database.CancelJob`
+  and then `API.CancelJob`.
 
 ### F-06 · `skipped` job status
 
-**What.** Add a `skipped` status for jobs that never run because a dependency
-failed or a condition was not met (pairs with F-08 dependencies).
+**What.** Add a `skipped` status for jobs and steps that never run because a dependency
+failed or a condition was not met (pairs with F-08 dependencies). Conditions
+should be implemented using go templates that must render to a value converted to a
+boolean.
 
 **Why.** In a DAG, a downstream job of a failed job is "skipped", not
 "failed" — the distinction matters for reporting and for `on_failure` logic.
@@ -382,6 +421,7 @@ failed or a condition was not met (pairs with F-08 dependencies).
 - [ ] A job whose dependency failed is marked `skipped`, not `failed`.
 - [ ] `skipped` is a terminal state.
 - [ ] The status is surfaced in the UI and in `job_status` events.
+- [ ] A steps condition is not met is marked `skipped`.
 
 ---
 
@@ -794,7 +834,7 @@ Tick each feature off as it lands.
 - [x] F-02 Job log streaming
 - [x] F-03 Job timeouts
 - [x] F-04 Retry & re-run
-- [ ] F-05 Cancellation propagation
+- [x] F-05 Cancellation propagation
 - [ ] F-06 `skipped` job status
 - [ ] F-07 Pipeline runs
 - [ ] F-08 Job dependencies (DAG)

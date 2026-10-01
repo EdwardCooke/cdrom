@@ -191,26 +191,56 @@ func (s *Server) ListRetriableJobs(ctx context.Context, req *dbpb.ListRetriableJ
 // leaves the status unchanged, and nil timestamps leave the corresponding
 // field unchanged.
 func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*dbpb.Job, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	// The job must exist.
 	var job models.Job
 	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Build the set of fields to update.
+	updates := map[string]any{}
 	if jobStatus := req.GetStatus(); jobStatus != dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
 		modelStatus, err := jobStatusFromProto(jobStatus)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
-		job.Status = modelStatus
+		updates["status"] = modelStatus
 	}
 	if timestamp := req.GetStartedAt(); timestamp != nil {
 		instant := timestamp.AsTime()
-		job.StartedAt = &instant
+		updates["started_at"] = &instant
 	}
 	if timestamp := req.GetFinishedAt(); timestamp != nil {
 		instant := timestamp.AsTime()
-		job.FinishedAt = &instant
+		updates["finished_at"] = &instant
 	}
-	if err := s.db.WithContext(ctx).Save(&job).Error; err != nil {
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now()
+		// A status report from a target must not clobber a job that has
+		// already reached a terminal state (F-05): once a job is succeeded,
+		// failed, cancelled, or timed_out, a late report (e.g. a target that
+		// finished just as it was cancelled) is ignored. The conditional
+		// update is atomic, so a concurrent cancellation (Database.CancelJob)
+		// or reap (Database.ReapJob) wins over a late target report.
+		result := s.db.WithContext(ctx).
+			Model(&models.Job{}).
+			Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning}).
+			Updates(updates)
+		if result.Error != nil {
+			return nil, grpcErr(result.Error)
+		}
+		if result.RowsAffected == 0 {
+			// The job already reached a terminal state; the update was a
+			// no-op. Return its current state.
+			if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
+				return nil, grpcErr(err)
+			}
+			return toProtoJob(&job), nil
+		}
+	}
+	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	return toProtoJob(&job), nil
@@ -244,6 +274,37 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 		return nil, grpcErr(result.Error)
 	}
 	return &dbpb.ReapJobResponse{Reaped: result.RowsAffected > 0}, nil
+}
+
+// CancelJob conditionally marks a job as cancelled: it sets the status to
+// cancelled (and the finished timestamp) only if the job is still in a
+// non-terminal state (pending or running). It returns whether the job was
+// cancelled. This is how the scheduler's CancelJob RPC persists a cancellation
+// (F-05): a job that already reported a terminal status (succeeded, failed,
+// cancelled, or timed_out) is left untouched, so cancelling a finished job is
+// a no-op. The conditional update is done atomically with a WHERE clause on
+// the status so a concurrent status report from the target cannot be
+// clobbered.
+func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*dbpb.CancelJobResponse, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	finishedAt := time.Now()
+	if timestamp := req.GetFinishedAt(); timestamp != nil {
+		finishedAt = timestamp.AsTime()
+	}
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning}).
+		Updates(map[string]any{
+			"status":      models.JobStatusCancelled,
+			"finished_at": &finishedAt,
+			"updated_at":  time.Now(),
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.CancelJobResponse{Cancelled: result.RowsAffected > 0}, nil
 }
 
 // ClaimJobRetry atomically claims the next retry attempt for a job (F-04):

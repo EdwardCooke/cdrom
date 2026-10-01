@@ -103,23 +103,46 @@ func (s *Server) ListJobs(ctx context.Context, req *schedpb.ListJobsRequest) (*s
 	return result, nil
 }
 
-// CancelJob marks a job cancelled. Only pending or running jobs can be
-// cancelled.
+// CancelJob cancels a job (F-05): it marks the job cancelled (persisted via
+// the Database service) and signals the execution target running it to stop
+// the work. Only pending or running jobs can be cancelled; cancelling an
+// already-finished job is a no-op (idempotent).
+//
+// The cancellation is persisted with a conditional update (Database.CancelJob)
+// so a job that already reported a terminal status is left untouched. The
+// target is then signalled through the API (API.CancelJob), which delivers a
+// JobCancellation down the worker's WatchJobs stream (for a long-lived worker)
+// or, for an ephemeral agent, is observed on the agent's next GetJob. Signalling
+// the target is best-effort: if it cannot be reached (no live worker, or the
+// API is down) the job is still marked cancelled in the database, and the
+// target's next status report (or the scheduler's watchdog) reconciles it.
 func (s *Server) CancelJob(ctx context.Context, req *schedpb.CancelJobRequest) (*schedpb.Job, error) {
-	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	now := timestamppb.Now()
+	resp, err := s.db.CancelJob(ctx, &dbpb.CancelJobRequest{Id: req.GetId(), FinishedAt: now})
 	if err != nil {
 		return nil, err
 	}
-	switch job.GetStatus() {
-	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED, dbpb.JobStatus_JOB_STATUS_FAILED, dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
-		return nil, status.Errorf(codes.FailedPrecondition, "job %d is already %v", job.GetId(), job.GetStatus())
+	if !resp.GetCancelled() {
+		// The job already reached a terminal state; cancelling it is a no-op.
+		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+		if err != nil {
+			return nil, err
+		}
+		return toProtoJob(job), nil
 	}
-	now := timestamppb.Now()
-	updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
-		Id:         req.GetId(),
-		Status:     dbpb.JobStatus_JOB_STATUS_CANCELLED,
-		FinishedAt: now,
-	})
+	// Signal the execution target to stop the work. Best-effort: a failure to
+	// reach the API (or a job with no live target) does not undo the
+	// cancellation already persisted above.
+	if s.api != nil {
+		if _, err := s.api.CancelJob(ctx, &apipb.CancelJobRequest{JobId: req.GetId()}); err != nil {
+			s.logger.Warn("scheduler: signal target to cancel failed; job already marked cancelled",
+				"job", req.GetId(), "err", err)
+		}
+	}
+	updated, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
 	if err != nil {
 		return nil, err
 	}

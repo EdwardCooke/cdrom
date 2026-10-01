@@ -25,11 +25,18 @@ service API {
 
   // Execution side (called by workers and agents).
   //
-  // WatchJobs is a server stream: the worker identifies itself and receives
-  // a JobAssignment for every job dispatched to its group.
-  rpc WatchJobs(WatchJobsRequest) returns (stream JobAssignment);
+  // WatchJobs is a server stream: the worker identifies itself and receives a
+  // WatchMessage for every job dispatched to its group (a JobAssignment) and
+  // for every cancellation of a job it is running (a JobCancellation, F-05).
+  rpc WatchJobs(WatchJobsRequest) returns (stream WatchMessage);
   rpc GetJob(GetJobRequest) returns (Job);
   rpc ReportJobStatus(ReportJobStatusRequest) returns (Job);
+  // CancelJob is called by the scheduler to signal the execution target
+  // running a job to stop the work (F-05). The API delivers a JobCancellation
+  // down the worker's WatchJobs stream (for a long-lived worker) or, for an
+  // ephemeral agent, records the cancellation so the agent's next GetJob
+  // reflects it. It is a no-op when the job is not running on a live target.
+  rpc CancelJob(CancelJobRequest) returns (google.protobuf.Empty);
 
   // StreamJobLogs is a client stream: an execution target (worker or agent)
   // opens it at the start of a job and sends a JobLogChunk for each chunk of
@@ -135,9 +142,33 @@ message JobAssignment {
   string token = 3;
 }
 
+// JobCancellation is a signal to stop the work of a job that is running on
+// the target (F-05). The target interrupts the running step (terminating the
+// command) and reports the job as cancelled.
+message JobCancellation {
+  // job_id is the job to cancel.
+  int64 job_id = 1;
+}
+
+// WatchMessage is a single message on a worker's WatchJobs stream. Exactly
+// one of its fields is set: an assignment (a new job to run) or a
+// cancellation (stop a job the worker is running, F-05).
+message WatchMessage {
+  oneof message {
+    JobAssignment assignment = 1;
+    JobCancellation cancellation = 2;
+  }
+}
+
 message WatchJobsRequest {
   string worker_name = 1;
   string group = 2;
+}
+
+// CancelJobRequest asks the API to signal the execution target running the
+// job to stop the work (F-05).
+message CancelJobRequest {
+  int64 job_id = 1;
 }
 
 message GetJobRequest {
