@@ -169,6 +169,23 @@ message StepResult {
   // error is a descriptive error message; empty when status is SUCCEEDED or
   // SKIPPED.
   string error = 3;
+  // outputs are the named values the step produced (F-06): each key is a name
+  // declared in the step's `outputs` list, and each value is the content of
+  // the file the step wrote for that name (trimmed). Empty when the step
+  // declared no outputs or did not run.
+  map<string, string> outputs = 4;
+}
+
+// UpstreamJob is the status and outputs of a job higher up in the pipeline
+// chain (F-06), handed to an execution target so a step's condition can
+// reference an upstream job's status and outputs. The API populates it from
+// the job's depends_on list when it hands the job to a target.
+message UpstreamJob {
+  int64 id = 1;
+  string name = 2;
+  JobStatus status = 3;
+  // outputs are the named values the upstream job produced (F-06).
+  map<string, string> outputs = 4;
 }
 
 // ParamValue is a single value in a step's params map. A value is either a
@@ -248,6 +265,18 @@ message JobStep {
   // condition is a Go template rendered against `env`; the step is skipped
   // when it renders to false (F-06). Empty always runs the step.
   string condition = 9;
+  // ignore_failed, when true, means a failure (or timeout) of this step does
+  // not fail the job (F-06): the step is recorded as failed/timed_out and the
+  // job continues to the next step. A step that fails without ignore_failed
+  // stops the job.
+  bool ignore_failed = 10;
+  // outputs are the names of the values this step produces (F-06). For each
+  // name the step writes a file named after it into its per-step output
+  // directory (exposed to the step as the CDROM_STEP_OUTPUT_DIR environment
+  // variable); after the step runs the executor reads those files and records
+  // their (trimmed) contents as the step's outputs. A declared name the step
+  // did not write is recorded as an empty value.
+  repeated string outputs = 11;
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -277,6 +306,13 @@ message JobSpec {
   // retry is the job's retry policy (F-04); when absent the job is never
   // retried.
   RetryPolicy retry = 3;
+  // ignore_failed, when true, means a failure of the job does not propagate
+  // to its dependents (F-06): the job is still reported failed (or
+  // timed_out), but the scheduler's dependency resolver treats it as
+  // satisfied, so downstream jobs are dispatched rather than skipped. It does
+  // not change the job's own status or stop a failed step from failing the
+  // job (that is a step's ignore_failed).
+  bool ignore_failed = 4;
 }
 
 message Job {
@@ -318,6 +354,21 @@ message Job {
   // skipped by its condition) during the job's current attempt (F-06). It is
   // reported by the execution target alongside the job's final status.
   repeated StepResult step_results = 14;
+  // outputs are the named values the job produced (F-06): the union of its
+  // steps' outputs (a later step overrides an earlier one on a name
+  // collision). They are reported by the execution target and persisted so
+  // downstream jobs on other targets can read them in their conditions.
+  map<string, string> outputs = 15;
+  // upstream_jobs are the status and outputs of the jobs this job depends on
+  // (F-06), populated by the API when it hands the job to an execution target
+  // so a step's condition can reference them. It is empty on the persisted
+  // job (it is derived from depends_on at dispatch time).
+  repeated UpstreamJob upstream_jobs = 16;
+  // ignore_failed is the job's ignore-failed flag (F-06), denormalized from
+  // the spec when the job was created. When true, a failed (or timed_out)
+  // job is treated as satisfied by the scheduler's dependency resolver, so
+  // its dependents are dispatched rather than skipped.
+  bool ignore_failed = 17;
 }
 
 message CreateJobRequest {
@@ -366,6 +417,10 @@ message UpdateJobRequest {
   // job has been dispatched, so it is not reconsidered (and re-dispatched) on
   // the resolver's next tick.
   bool clear_depends_on = 6;
+  // outputs replaces the job's recorded outputs (F-06); absent/empty leaves
+  // the previously recorded outputs unchanged (e.g. the initial "running"
+  // report carries no outputs yet).
+  map<string, string> outputs = 7;
 }
 
 message ReapJobRequest {

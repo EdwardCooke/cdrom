@@ -21,10 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"text/template"
+
+	"google.golang.org/protobuf/proto"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
@@ -37,10 +41,28 @@ import (
 // executor's per-step error wrapping.
 var ErrTimeout = errors.New("executor: timed out")
 
-// Execute runs the steps of spec in order. It returns nil when every step
-// succeeds, or the error from the first step that fails — subsequent steps
-// are not run. A nil or empty spec succeeds without doing any work (a job
-// with no execution spec is a no-op).
+// StepOutputDirEnv is the environment variable the executor sets on a step
+// that declares outputs (F-06): it names the per-step directory the step
+// writes its output files into (one file per declared output name). After the
+// step runs the executor reads those files and records their (trimmed)
+// contents as the step's outputs. A step that declares no outputs does not
+// get the variable set.
+const StepOutputDirEnv = "CDROM_STEP_OUTPUT_DIR"
+
+// Execute runs the steps of spec in order. A nil or empty spec succeeds
+// without doing any work (a job with no execution spec is a no-op).
+//
+// For each step, in order:
+//   - its condition (F-06) is evaluated against the condition context (the
+//     step's own env, the prior steps' status/outputs, the upstream jobs'
+//     status/outputs, and the job's identity); when it renders to false the
+//     step is skipped (it does not run and does not fail the job), and when
+//     it fails to parse or render that is a spec error that fails the job;
+//   - the step runs (through the handler registered for its type);
+//   - a step that fails or times out stops the job — its error is returned
+//     (wrapping ErrTimeout on a timeout) — unless the step's IgnoreFailed is
+//     set, in which case the failure is recorded and the job continues to the
+//     next step (F-06).
 //
 // The provided ctx bounds the whole job. Two further deadlines may apply:
 //   - a job-level timeout (spec.Timeout, when set) bounds the sum of all
@@ -66,31 +88,76 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		jobCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// The condition context is built up as the job runs: priorSteps accumulates
+	// each step's status/outputs, while the upstream jobs and the job's
+	// identity come from the context (set by the execution target, F-06).
+	upstreamJobs := UpstreamJobsFromContext(ctx)
+	identity := JobIdentityFromContext(ctx)
+	priorSteps := make([]StepConditionInfo, 0, len(spec.GetSteps()))
 	for i, step := range spec.GetSteps() {
 		// A step's condition (F-06) is evaluated before the step runs: when it
 		// renders to false the step is skipped (it does not run and does not
 		// fail the job); when it fails to parse or render, that is a spec
 		// error and fails the job.
-		skip, condErr := evaluateCondition(step)
+		condCtx := conditionContext(step, priorSteps, upstreamJobs, identity)
+		skip, condErr := evaluateCondition(step, condCtx)
 		if condErr != nil {
 			err := fmt.Errorf("executor: step %d: condition: %w", i, condErr)
-			reportStepStatus(ctx, i, StepStatusFailed, err.Error())
+			reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
 			return err
 		}
 		if skip {
 			logger.Info("executor: step skipped (condition not met)", "step", i)
-			reportStepStatus(ctx, i, StepStatusSkipped, "")
+			reportStepStatus(ctx, i, StepStatusSkipped, "", nil)
+			priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(StepStatusSkipped)})
 			continue
 		}
-		if err := runStep(jobCtx, i, step, logger); err != nil {
-			stepStatus := StepStatusFailed
-			if errors.Is(err, ErrTimeout) {
+		// A step that declares outputs (F-06) gets a per-step output directory,
+		// exposed to it via StepOutputDirEnv; the step writes one file per
+		// declared output name into it, and the executor reads them back after
+		// the step runs.
+		stepToRun := step
+		var outDir string
+		if len(step.GetOutputs()) > 0 {
+			dir, err := os.MkdirTemp("", "cdrom-step-outputs-")
+			if err != nil {
+				err := fmt.Errorf("executor: step %d: create output dir: %w", i, err)
+				reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
+				return err
+			}
+			outDir = dir
+			stepToRun = withEnv(step, map[string]string{StepOutputDirEnv: dir})
+		}
+		stepErr := runStep(jobCtx, i, stepToRun, logger)
+		stepStatus := StepStatusSucceeded
+		if stepErr != nil {
+			stepStatus = StepStatusFailed
+			if errors.Is(stepErr, ErrTimeout) {
 				stepStatus = StepStatusTimedOut
 			}
-			reportStepStatus(ctx, i, stepStatus, err.Error())
-			return err
 		}
-		reportStepStatus(ctx, i, StepStatusSucceeded, "")
+		// Read the step's declared outputs from its output directory (a declared
+		// name the step did not write is recorded as an empty value).
+		var outputs map[string]string
+		if outDir != "" {
+			outputs = readStepOutputs(outDir, step.GetOutputs())
+			_ = os.RemoveAll(outDir)
+		}
+		errMsg := ""
+		if stepErr != nil {
+			errMsg = stepErr.Error()
+		}
+		reportStepStatus(ctx, i, stepStatus, errMsg, outputs)
+		priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(stepStatus), Outputs: outputs})
+		if stepErr != nil {
+			// A failed/timed-out step stops the job unless it is ignore_failed
+			// (F-06): the failure is recorded and the job continues.
+			if step.GetIgnoreFailed() {
+				logger.Info("executor: step failed but ignore_failed is set; continuing", "step", i)
+				continue
+			}
+			return stepErr
+		}
 	}
 	return nil
 }
@@ -164,6 +231,204 @@ func StepIndexFromContext(ctx context.Context) int {
 }
 
 // ---------------------------------------------------------------------------
+// Condition context (F-06)
+// ---------------------------------------------------------------------------
+
+// StepConditionInfo is the condition-relevant view of a prior step of the
+// same job: its index, terminal status, and the outputs it produced. A step's
+// condition template can reference the prior steps via the "steps" key.
+type StepConditionInfo struct {
+	// Index is the 0-based index of the step in the job's spec.
+	Index int
+	// Status is the step's terminal status (succeeded, failed, skipped, or
+	// timed_out).
+	Status string
+	// Outputs are the named values the step produced; empty when the step
+	// declared no outputs or did not run.
+	Outputs map[string]string
+}
+
+// UpstreamJobInfo is the condition-relevant view of an upstream job higher in
+// the pipeline chain: its id, name, status, and outputs. A step's condition
+// template can reference the upstream jobs via the "jobs" key.
+type UpstreamJobInfo struct {
+	ID      int64
+	Name    string
+	Status  string
+	Outputs map[string]string
+}
+
+// JobIdentity is the condition-relevant view of the job whose steps are
+// running: its id, name, and status. A step's condition template can
+// reference it via the "job" key.
+type JobIdentity struct {
+	ID     int64
+	Name   string
+	Status string
+}
+
+type upstreamJobsKey struct{}
+
+type jobIdentityKey struct{}
+
+// ContextWithUpstreamJobs returns a context that carries the upstream jobs
+// (the status and outputs of the jobs this job depends on, F-06), so a step's
+// condition can reference them. An empty list returns ctx unchanged.
+func ContextWithUpstreamJobs(ctx context.Context, jobs []*dbpb.UpstreamJob) context.Context {
+	if len(jobs) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, upstreamJobsKey{}, jobs)
+}
+
+// UpstreamJobsFromContext returns the upstream jobs carried by ctx, or nil
+// when none are set.
+func UpstreamJobsFromContext(ctx context.Context) []*dbpb.UpstreamJob {
+	jobs, _ := ctx.Value(upstreamJobsKey{}).([]*dbpb.UpstreamJob)
+	return jobs
+}
+
+// ContextWithJobIdentity returns a context that carries the job's identity, so
+// a step's condition can reference the job's id/name/status.
+func ContextWithJobIdentity(ctx context.Context, identity JobIdentity) context.Context {
+	return context.WithValue(ctx, jobIdentityKey{}, identity)
+}
+
+// JobIdentityFromContext returns the job identity carried by ctx, or the zero
+// value when none is set.
+func JobIdentityFromContext(ctx context.Context) JobIdentity {
+	identity, _ := ctx.Value(jobIdentityKey{}).(JobIdentity)
+	return identity
+}
+
+// conditionContext builds the data a step's condition template is rendered
+// against (F-06): the step's own env (so `{{ .NAME }}` still works as before),
+// plus the structured keys "steps" (the prior steps' status/outputs), "jobs"
+// (the upstream jobs' status/outputs), and "job" (the current job's
+// identity). The structured keys are set after the env so they win over any
+// same-named env var.
+func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity) map[string]any {
+	data := make(map[string]any, len(step.GetEnv())+3)
+	for k, v := range step.GetEnv() {
+		data[k] = v
+	}
+	data["steps"] = priorSteps
+	data["jobs"] = toUpstreamJobInfos(upstreamJobs)
+	data["job"] = identity
+	return data
+}
+
+// toUpstreamJobInfos converts the proto upstream jobs into their
+// condition-relevant view (string status, so a condition can compare it
+// directly). An empty list yields nil.
+func toUpstreamJobInfos(jobs []*dbpb.UpstreamJob) []UpstreamJobInfo {
+	if len(jobs) == 0 {
+		return nil
+	}
+	out := make([]UpstreamJobInfo, len(jobs))
+	for i, job := range jobs {
+		out[i] = UpstreamJobInfo{
+			ID:      job.GetId(),
+			Name:    job.GetName(),
+			Status:  jobStatusName(job.GetStatus()),
+			Outputs: job.GetOutputs(),
+		}
+	}
+	return out
+}
+
+// jobStatusName maps a job status enum to the short name a condition template
+// compares against (e.g. "succeeded", "failed").
+func jobStatusName(status dbpb.JobStatus) string {
+	switch status {
+	case dbpb.JobStatus_JOB_STATUS_PENDING:
+		return "pending"
+	case dbpb.JobStatus_JOB_STATUS_RUNNING:
+		return "running"
+	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
+		return "succeeded"
+	case dbpb.JobStatus_JOB_STATUS_FAILED:
+		return "failed"
+	case dbpb.JobStatus_JOB_STATUS_CANCELLED:
+		return "cancelled"
+	case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+		return "timed_out"
+	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
+		return "skipped"
+	default:
+		return "unknown"
+	}
+}
+
+// evaluateCondition renders step's Condition (a Go template, F-06) against
+// data and parses the result as a boolean. It returns skip=true when the
+// condition rendered to false (the step should be skipped); an empty Condition
+// never skips. A condition that fails to parse as a template, fails to render,
+// or whose rendered output does not parse as a boolean is a spec error (the
+// job fails, the step is not skipped).
+func evaluateCondition(step *dbpb.JobStep, data map[string]any) (skip bool, err error) {
+	condition := step.GetCondition()
+	if condition == "" {
+		return false, nil
+	}
+	tmpl, err := template.New("condition").Parse(condition)
+	if err != nil {
+		return false, fmt.Errorf("parse template %q: %w", condition, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return false, fmt.Errorf("render template %q: %w", condition, err)
+	}
+	rendered := strings.TrimSpace(buf.String())
+	value, err := strconv.ParseBool(rendered)
+	if err != nil {
+		return false, fmt.Errorf("condition %q rendered %q, which is not a boolean: %w", condition, rendered, err)
+	}
+	return !value, nil
+}
+
+// withEnv returns a copy of step with extra merged into its env (extra wins on
+// a key collision). It is used to hand a step its per-step output directory
+// (F-06) without mutating the caller's spec. A nil/empty extra returns step
+// unchanged.
+func withEnv(step *dbpb.JobStep, extra map[string]string) *dbpb.JobStep {
+	if len(extra) == 0 {
+		return step
+	}
+	clone := proto.Clone(step).(*dbpb.JobStep)
+	env := make(map[string]string, len(step.GetEnv())+len(extra))
+	for k, v := range step.GetEnv() {
+		env[k] = v
+	}
+	for k, v := range extra {
+		env[k] = v
+	}
+	clone.Env = env
+	return clone
+}
+
+// readStepOutputs reads each of the step's declared output names from dir
+// (the step's output directory, F-06), trimming each file's contents. A
+// declared name whose file is missing (the step did not write it) is recorded
+// as an empty value. It returns nil when dir is empty or the step declared no
+// outputs.
+func readStepOutputs(dir string, names []string) map[string]string {
+	if dir == "" || len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(names))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			out[name] = ""
+			continue
+		}
+		out[name] = strings.TrimSpace(string(data))
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
 // Step results (F-06)
 // ---------------------------------------------------------------------------
 
@@ -190,21 +455,25 @@ type StepResult struct {
 	// Error is a descriptive error message; empty when Status is Succeeded or
 	// Skipped.
 	Error string
+	// Outputs are the named values the step produced (F-06); empty when the
+	// step declared no outputs or did not run.
+	Outputs map[string]string
 }
 
-// StepStatusReporter receives each step's terminal status as Execute runs the
-// spec (F-06), so a caller can persist per-step outcomes — including a step
-// skipped by its condition — alongside the job's own final status. Set one in
-// the context via ContextWithStepStatusReporter; when absent, step outcomes
-// are simply not collected (Execute's returned error remains the
-// authoritative job outcome).
+// StepStatusReporter receives each step's terminal status (and outputs) as
+// Execute runs the spec (F-06), so a caller can persist per-step outcomes —
+// including a step skipped by its condition — alongside the job's own final
+// status. Set one in the context via ContextWithStepStatusReporter; when
+// absent, step outcomes are simply not collected (Execute's returned error
+// remains the authoritative job outcome).
 //
 // Implementations must be safe for concurrent use.
 type StepStatusReporter interface {
 	// ReportStepStatus records stepIndex's terminal status. errMsg is a
 	// descriptive error message, empty when status is StepStatusSucceeded or
-	// StepStatusSkipped.
-	ReportStepStatus(stepIndex int, status StepStatus, errMsg string)
+	// StepStatusSkipped; outputs are the named values the step produced
+	// (nil/empty when it declared none or did not run).
+	ReportStepStatus(stepIndex int, status StepStatus, errMsg string, outputs map[string]string)
 }
 
 type stepStatusReporterKey struct{}
@@ -228,25 +497,34 @@ func StepStatusReporterFromContext(ctx context.Context) StepStatusReporter {
 
 // reportStepStatus reports a step's terminal status to the context's
 // StepStatusReporter, when one is set.
-func reportStepStatus(ctx context.Context, index int, status StepStatus, errMsg string) {
+func reportStepStatus(ctx context.Context, index int, status StepStatus, errMsg string, outputs map[string]string) {
 	if reporter := StepStatusReporterFromContext(ctx); reporter != nil {
-		reporter.ReportStepStatus(index, status, errMsg)
+		reporter.ReportStepStatus(index, status, errMsg, outputs)
 	}
 }
 
 // StepResultCollector is a StepStatusReporter that accumulates each step's
-// terminal status in the order Execute reports it, for a caller (the worker
-// or agent) to attach to its final job status report (F-06).
+// terminal status (and outputs) in the order Execute reports it, for a caller
+// (the worker or agent) to attach to its final job status report (F-06). It
+// also aggregates the job's outputs: the union of its steps' outputs, with a
+// later step overriding an earlier one on a name collision.
 type StepResultCollector struct {
-	mu      sync.Mutex
-	Results []StepResult
+	mu         sync.Mutex
+	Results    []StepResult
+	jobOutputs map[string]string
 }
 
 // ReportStepStatus implements StepStatusReporter.
-func (c *StepResultCollector) ReportStepStatus(index int, status StepStatus, errMsg string) {
+func (c *StepResultCollector) ReportStepStatus(index int, status StepStatus, errMsg string, outputs map[string]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Results = append(c.Results, StepResult{Index: index, Status: status, Error: errMsg})
+	c.Results = append(c.Results, StepResult{Index: index, Status: status, Error: errMsg, Outputs: outputs})
+	for k, v := range outputs {
+		if c.jobOutputs == nil {
+			c.jobOutputs = make(map[string]string)
+		}
+		c.jobOutputs[k] = v
+	}
 }
 
 // All returns a snapshot of the collected step results, in the order they
@@ -257,6 +535,22 @@ func (c *StepResultCollector) All() []StepResult {
 	results := make([]StepResult, len(c.Results))
 	copy(results, c.Results)
 	return results
+}
+
+// JobOutputs returns the job's aggregated outputs (the union of its steps'
+// outputs, a later step overriding an earlier one on a name collision), or
+// nil when no step produced any.
+func (c *StepResultCollector) JobOutputs() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.jobOutputs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(c.jobOutputs))
+	for k, v := range c.jobOutputs {
+		out[k] = v
+	}
+	return out
 }
 
 // stepStatusToProto converts a StepStatus to its proto enum value.
@@ -285,39 +579,13 @@ func (c *StepResultCollector) ToProto() []*dbpb.StepResult {
 	proto := make([]*dbpb.StepResult, len(results))
 	for i, result := range results {
 		proto[i] = &dbpb.StepResult{
-			Index:  int32(result.Index),
-			Status: stepStatusToProto(result.Status),
-			Error:  result.Error,
+			Index:   int32(result.Index),
+			Status:  stepStatusToProto(result.Status),
+			Error:   result.Error,
+			Outputs: result.Outputs,
 		}
 	}
 	return proto
-}
-
-// evaluateCondition renders step's Condition (a Go template, F-06) against
-// the step's own Env and parses the result as a boolean. It returns
-// skip=true when the condition rendered to false (the step should be
-// skipped); an empty Condition never skips. A condition that fails to parse
-// as a template, fails to render, or whose rendered output does not parse as
-// a boolean is a spec error (the job fails, the step is not skipped).
-func evaluateCondition(step *dbpb.JobStep) (skip bool, err error) {
-	condition := step.GetCondition()
-	if condition == "" {
-		return false, nil
-	}
-	tmpl, err := template.New("condition").Parse(condition)
-	if err != nil {
-		return false, fmt.Errorf("parse template %q: %w", condition, err)
-	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, step.GetEnv()); err != nil {
-		return false, fmt.Errorf("render template %q: %w", condition, err)
-	}
-	rendered := strings.TrimSpace(buf.String())
-	value, err := strconv.ParseBool(rendered)
-	if err != nil {
-		return false, fmt.Errorf("condition %q rendered %q, which is not a boolean: %w", condition, rendered, err)
-	}
-	return !value, nil
 }
 
 // stepTypes maps a step type to its handler. Handlers register themselves via

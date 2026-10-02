@@ -55,6 +55,14 @@ message Job {
   // step_results is the terminal outcome of each step that ran (or was
   // skipped by its condition) during the job's current attempt (F-06).
   repeated cdrom.db.v1.StepResult step_results = 12;
+  // outputs are the named values the job produced (F-06).
+  map<string, string> outputs = 13;
+  // upstream_jobs are the status and outputs of the jobs this job depends on
+  // (F-06), populated by the API when it hands the job to a target.
+  repeated cdrom.db.v1.UpstreamJob upstream_jobs = 14;
+  // ignore_failed is the job's ignore-failed flag (F-06), denormalized from
+  // the spec when the job was created.
+  bool ignore_failed = 15;
 }
 
 message SubmitJobRequest {

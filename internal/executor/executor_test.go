@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -251,9 +252,9 @@ func TestExecuteConditionEmptyNeverSkips(t *testing.T) {
 // attach collected step results to a ReportJobStatusRequest (F-06).
 func TestStepResultCollectorToProto(t *testing.T) {
 	collector := &StepResultCollector{}
-	collector.ReportStepStatus(0, StepStatusSucceeded, "")
-	collector.ReportStepStatus(1, StepStatusSkipped, "")
-	collector.ReportStepStatus(2, StepStatusFailed, "boom")
+	collector.ReportStepStatus(0, StepStatusSucceeded, "", nil)
+	collector.ReportStepStatus(1, StepStatusSkipped, "", nil)
+	collector.ReportStepStatus(2, StepStatusFailed, "boom", nil)
 
 	proto := collector.ToProto()
 	if len(proto) != 3 {
@@ -272,5 +273,195 @@ func TestStepResultCollectorToProto(t *testing.T) {
 	empty := &StepResultCollector{}
 	if got := empty.ToProto(); got != nil {
 		t.Errorf("ToProto() with no results = %v, want nil", got)
+	}
+}
+
+// TestExecuteIgnoreFailedContinues verifies that a step that fails (or times
+// out) with IgnoreFailed set does not stop the job: the failure is recorded
+// and the next step still runs (F-06).
+func TestExecuteIgnoreFailedContinues(t *testing.T) {
+	var laterRan bool
+	RegisterStepType("boom", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		return errors.New("boom")
+	})
+	RegisterStepType("after", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		laterRan = true
+		return nil
+	})
+
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "boom", IgnoreFailed: true},
+		{Type: "after"},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v (an ignore_failed step must not fail the job)", err)
+	}
+	if !laterRan {
+		t.Error("a later step did not run after an ignore_failed step failed")
+	}
+	results := collector.All()
+	if len(results) != 2 {
+		t.Fatalf("results = %+v, want two results", results)
+	}
+	if results[0].Status != StepStatusFailed {
+		t.Errorf("results[0].Status = %v, want failed", results[0].Status)
+	}
+	if results[1].Status != StepStatusSucceeded {
+		t.Errorf("results[1].Status = %v, want succeeded", results[1].Status)
+	}
+}
+
+// TestExecuteFailedWithoutIgnoreFailedStopsJob verifies that a step that fails
+// without IgnoreFailed stops the job (the default, unchanged behavior).
+func TestExecuteFailedWithoutIgnoreFailedStopsJob(t *testing.T) {
+	var laterRan bool
+	RegisterStepType("boom2", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		return errors.New("boom")
+	})
+	RegisterStepType("after2", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		laterRan = true
+		return nil
+	})
+
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "boom2"},
+		{Type: "after2"},
+	}}
+	if err := Execute(context.Background(), spec, testLogger()); err == nil {
+		t.Fatal("expected an error when a non-ignore_failed step fails, got nil")
+	}
+	if laterRan {
+		t.Error("a later step ran after a failing (non-ignore_failed) step")
+	}
+}
+
+// TestExecuteStepOutputs verifies that a step that declares outputs writes its
+// output files into the per-step output directory (exposed via
+// StepOutputDirEnv) and that the executor reads them back into the step's
+// results and the job's aggregated outputs (F-06).
+func TestExecuteStepOutputs(t *testing.T) {
+	RegisterStepType("producer", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		dir := step.GetEnv()[StepOutputDirEnv]
+		if dir == "" {
+			return errors.New("StepOutputDirEnv not set")
+		}
+		if err := os.WriteFile(filepath.Join(dir, "version"), []byte("1.2.3\n"), 0o644); err != nil {
+			return err
+		}
+		// "missing" is declared but never written: it must be recorded as "".
+		return nil
+	})
+
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	step := &dbpb.JobStep{Type: "producer", Outputs: []string{"version", "missing"}}
+	if err := Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	results := collector.All()
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want one result", results)
+	}
+	outputs := results[0].Outputs
+	if outputs["version"] != "1.2.3" {
+		t.Errorf("outputs[version] = %q, want %q (trimmed)", outputs["version"], "1.2.3")
+	}
+	if outputs["missing"] != "" {
+		t.Errorf("outputs[missing] = %q, want empty (declared but not written)", outputs["missing"])
+	}
+	jobOutputs := collector.JobOutputs()
+	if jobOutputs["version"] != "1.2.3" {
+		t.Errorf("jobOutputs[version] = %q, want %q", jobOutputs["version"], "1.2.3")
+	}
+}
+
+// TestExecuteConditionReferencesPriorStep verifies that a step's condition can
+// reference the status and outputs of a prior step in the same job (F-06).
+func TestExecuteConditionReferencesPriorStep(t *testing.T) {
+	RegisterStepType("emit", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		dir := step.GetEnv()[StepOutputDirEnv]
+		if dir == "" {
+			return errors.New("StepOutputDirEnv not set")
+		}
+		return os.WriteFile(filepath.Join(dir, "ready"), []byte("true"), 0o644)
+	})
+	var gatedRan bool
+	RegisterStepType("gated", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gatedRan = true
+		return nil
+	})
+
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "emit", Outputs: []string{"ready"}},
+		// Runs only if the prior step succeeded and produced ready == "true".
+		{Type: "gated", Condition: `{{ if and (eq (index .steps 0).Status "succeeded") (eq (index .steps 0).Outputs.ready "true") }}true{{ else }}false{{ end }}`},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !gatedRan {
+		t.Error("gated step did not run although the prior step succeeded with ready=true")
+	}
+}
+
+// TestExecuteConditionReferencesUpstreamJob verifies that a step's condition
+// can reference the status and outputs of an upstream job higher in the
+// pipeline chain (F-06).
+func TestExecuteConditionReferencesUpstreamJob(t *testing.T) {
+	var gatedRan bool
+	RegisterStepType("gated2", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gatedRan = true
+		return nil
+	})
+
+	upstream := []*dbpb.UpstreamJob{
+		{Id: 1, Name: "build", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED, Outputs: map[string]string{"artifact": "v9"}},
+	}
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	ctx = ContextWithUpstreamJobs(ctx, upstream)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		// Runs only if the upstream "build" job succeeded.
+		{Type: "gated2", Condition: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else }}false{{ end }}`},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !gatedRan {
+		t.Error("gated step did not run although the upstream job succeeded")
+	}
+}
+
+// TestExecuteConditionUpstreamJobFailedSkips verifies that a step whose
+// condition references a failed upstream job is skipped (F-06).
+func TestExecuteConditionUpstreamJobFailedSkips(t *testing.T) {
+	var gatedRan bool
+	RegisterStepType("gated3", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gatedRan = true
+		return nil
+	})
+
+	upstream := []*dbpb.UpstreamJob{
+		{Id: 1, Name: "build", Status: dbpb.JobStatus_JOB_STATUS_FAILED},
+	}
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	ctx = ContextWithUpstreamJobs(ctx, upstream)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "gated3", Condition: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else }}false{{ end }}`},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gatedRan {
+		t.Error("gated step ran although the upstream job failed")
+	}
+	results := collector.All()
+	if len(results) != 1 || results[0].Status != StepStatusSkipped {
+		t.Fatalf("results = %+v, want one skipped result", results)
 	}
 }

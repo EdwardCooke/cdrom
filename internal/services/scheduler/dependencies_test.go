@@ -216,3 +216,67 @@ func TestResolveJobDependenciesSkipAlreadyStartedIsNoop(t *testing.T) {
 		t.Error("UI was notified for a job that was not actually skipped")
 	}
 }
+
+// TestResolveJobDependenciesFailedDependencyWithIgnoreFailedDispatches
+// verifies that a dependency that failed (or timed out) but has ignore_failed
+// set counts as satisfied (F-06): the dependent job is released and
+// dispatched rather than skipped.
+func TestResolveJobDependenciesFailedDependencyWithIgnoreFailedDispatches(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_FAILED, IgnoreFailed: true},
+		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 0 {
+		t.Errorf("skipCalls = %v, want none (ignore_failed dependency is satisfied)", db.skipCalls)
+	}
+	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
+		t.Errorf("clearedDeps = %v, want [2]", db.clearedDeps)
+	}
+	if got := api.dispatchedIDs(); len(got) != 1 || got[0] != 2 {
+		t.Errorf("dispatched = %v, want [2]", got)
+	}
+}
+
+// TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedDispatches
+// verifies that a timed_out dependency with ignore_failed set is likewise
+// treated as satisfied (F-06).
+func TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedDispatches(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_TIMED_OUT, IgnoreFailed: true},
+		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 0 {
+		t.Errorf("skipCalls = %v, want none", db.skipCalls)
+	}
+	if got := api.dispatchedIDs(); len(got) != 1 || got[0] != 2 {
+		t.Errorf("dispatched = %v, want [2]", got)
+	}
+}
+
+// TestResolveJobDependenciesCancelledDependencyWithIgnoreFailedSkips verifies
+// that a cancelled dependency is NOT overridden by ignore_failed (F-06): a
+// cancellation always blocks the dependent job, so it is skipped.
+func TestResolveJobDependenciesCancelledDependencyWithIgnoreFailedSkips(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_CANCELLED, IgnoreFailed: true},
+		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 1 || db.skipCalls[0] != 2 {
+		t.Fatalf("skipCalls = %v, want [2] (a cancelled dependency always blocks)", db.skipCalls)
+	}
+	if got := api.dispatchedIDs(); len(got) != 0 {
+		t.Errorf("dispatched = %v, want none", got)
+	}
+}

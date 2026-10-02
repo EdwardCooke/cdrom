@@ -220,6 +220,9 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 		return nil, err
 	}
 	apiJob := toAPIJob(job)
+	// Hand the agent the status/outputs of the jobs this job depends on (F-06)
+	// so a step's condition can reference them.
+	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
 	// Hand the agent a job token so it can authenticate its status reports and
 	// any outside-resource calls for this job.
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
@@ -247,6 +250,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		StartedAt:   req.GetStartedAt(),
 		FinishedAt:  req.GetFinishedAt(),
 		StepResults: req.GetStepResults(),
+		Outputs:     req.GetOutputs(),
 	})
 	if err != nil {
 		return nil, err
@@ -487,6 +491,9 @@ func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequ
 	if group == "" {
 		return &apipb.DispatchJobResponse{Dispatched: 0}, nil
 	}
+	// Hand the workers the status/outputs of the jobs this job depends on
+	// (F-06) so a step's condition can reference them.
+	job.UpstreamJobs = s.upstreamJobsFor(ctx, job)
 	// Mint a job token so the workers can authenticate their status reports
 	// and any outside-resource calls for this job.
 	token := s.mintJobToken(ctx, job)
@@ -768,17 +775,47 @@ func bearerToken(ctx context.Context) string {
 
 func toAPIJob(job *dbpb.Job) *apipb.Job {
 	return &apipb.Job{
-		Id:          job.GetId(),
-		PipelineId:  job.GetPipelineId(),
-		Name:        job.GetName(),
-		Status:      job.GetStatus(),
-		TargetGroup: job.GetTargetGroup(),
-		StartedAt:   job.GetStartedAt(),
-		FinishedAt:  job.GetFinishedAt(),
-		Spec:        job.GetSpec(),
-		Attempt:     job.GetAttempt(),
-		MaxAttempts: job.GetMaxAttempts(),
+		Id:           job.GetId(),
+		PipelineId:   job.GetPipelineId(),
+		Name:         job.GetName(),
+		Status:       job.GetStatus(),
+		TargetGroup:  job.GetTargetGroup(),
+		StartedAt:    job.GetStartedAt(),
+		FinishedAt:   job.GetFinishedAt(),
+		Spec:         job.GetSpec(),
+		Attempt:      job.GetAttempt(),
+		MaxAttempts:  job.GetMaxAttempts(),
+		DependsOn:    job.GetDependsOn(),
+		StepResults:  job.GetStepResults(),
+		Outputs:      job.GetOutputs(),
+		IgnoreFailed: job.GetIgnoreFailed(),
 	}
+}
+
+// upstreamJobsFor fetches the status and outputs of the jobs job depends on
+// (F-06) so a step's condition can reference them. It is best-effort: a
+// dependency that cannot be read (e.g. it does not exist) is omitted rather
+// than failing the dispatch, and a job with no dependencies yields nil.
+func (s *GRPCServer) upstreamJobsFor(ctx context.Context, job *apipb.Job) []*dbpb.UpstreamJob {
+	ids := job.GetDependsOn()
+	if len(ids) == 0 {
+		return nil
+	}
+	upstream := make([]*dbpb.UpstreamJob, 0, len(ids))
+	for _, id := range ids {
+		dep, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: id})
+		if err != nil {
+			s.logger.Warn("api: read upstream job for condition context", "job", job.GetId(), "depends_on", id, "err", err)
+			continue
+		}
+		upstream = append(upstream, &dbpb.UpstreamJob{
+			Id:      dep.GetId(),
+			Name:    dep.GetName(),
+			Status:  dep.GetStatus(),
+			Outputs: dep.GetOutputs(),
+		})
+	}
+	return upstream
 }
 
 // publish sends an event to the hub, if one is configured.

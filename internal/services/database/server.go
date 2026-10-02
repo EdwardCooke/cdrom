@@ -119,6 +119,10 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	if spec.Retry != nil {
 		job.MaxAttempts = spec.Retry.MaxAttempts
 	}
+	// The job's ignore-failed flag is denormalized from the spec so the
+	// scheduler's dependency resolver can treat a failed job with the flag set
+	// as satisfied without re-reading the spec (F-06).
+	job.IgnoreFailed = spec.IgnoreFailed
 	if req.GetPipelineId() > 0 {
 		pipelineID := uint(req.GetPipelineId())
 		job.PipelineID = &pipelineID
@@ -232,6 +236,19 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 			Where("id = ?", req.GetId()).
 			Select("StepResults").
 			Updates(&models.Job{StepResults: stepResultsFromProto(results)}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	// outputs (F-06) are the named values the job produced, reported by the
+	// execution target alongside its final status. Like step_results above,
+	// they are persisted whenever the target reports them (even on the job's
+	// final report) and are not part of the terminal-status guard below.
+	if outputs := req.GetOutputs(); len(outputs) > 0 {
+		if err := s.db.WithContext(ctx).
+			Model(&models.Job{}).
+			Where("id = ?", req.GetId()).
+			Select("Outputs").
+			Updates(&models.Job{Outputs: outputs}).Error; err != nil {
 			return nil, grpcErr(err)
 		}
 	}
@@ -680,17 +697,19 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 
 func toProtoJob(job *models.Job) *dbpb.Job {
 	proto := &dbpb.Job{
-		Id:          int64(job.ID),
-		Name:        job.Name,
-		Status:      jobStatusToProto(job.Status),
-		TargetGroup: job.TargetGroup,
-		CreatedAt:   timestamppb.New(job.CreatedAt),
-		UpdatedAt:   timestamppb.New(job.UpdatedAt),
-		Spec:        specToProto(job.Spec),
-		Attempt:     int32(job.Attempt),
-		MaxAttempts: int32(job.MaxAttempts),
-		DependsOn:   dependsOnToProto(job.DependsOn),
-		StepResults: stepResultsToProto(job.StepResults),
+		Id:           int64(job.ID),
+		Name:         job.Name,
+		Status:       jobStatusToProto(job.Status),
+		TargetGroup:  job.TargetGroup,
+		CreatedAt:    timestamppb.New(job.CreatedAt),
+		UpdatedAt:    timestamppb.New(job.UpdatedAt),
+		Spec:         specToProto(job.Spec),
+		Attempt:      int32(job.Attempt),
+		MaxAttempts:  int32(job.MaxAttempts),
+		DependsOn:    dependsOnToProto(job.DependsOn),
+		StepResults:  stepResultsToProto(job.StepResults),
+		Outputs:      job.Outputs,
+		IgnoreFailed: job.IgnoreFailed,
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
@@ -739,9 +758,10 @@ func stepResultsFromProto(results []*dbpb.StepResult) []models.StepResult {
 	out := make([]models.StepResult, len(results))
 	for i, r := range results {
 		out[i] = models.StepResult{
-			Index:  int(r.GetIndex()),
-			Status: stepStatusFromProto(r.GetStatus()),
-			Error:  r.GetError(),
+			Index:   int(r.GetIndex()),
+			Status:  stepStatusFromProto(r.GetStatus()),
+			Error:   r.GetError(),
+			Outputs: r.GetOutputs(),
 		}
 	}
 	return out
@@ -756,9 +776,10 @@ func stepResultsToProto(results []models.StepResult) []*dbpb.StepResult {
 	out := make([]*dbpb.StepResult, len(results))
 	for i, r := range results {
 		out[i] = &dbpb.StepResult{
-			Index:  int32(r.Index),
-			Status: stepStatusToProto(r.Status),
-			Error:  r.Error,
+			Index:   int32(r.Index),
+			Status:  stepStatusToProto(r.Status),
+			Error:   r.Error,
+			Outputs: r.Outputs,
 		}
 	}
 	return out
@@ -799,18 +820,21 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 	steps := make([]models.JobStep, 0, len(spec.GetSteps()))
 	for _, step := range spec.GetSteps() {
 		steps = append(steps, models.JobStep{
-			Type:      step.GetType(),
-			Workdir:   step.GetWorkdir(),
-			Env:       step.GetEnv(),
-			Timeout:   step.GetTimeout().AsDuration(),
-			Params:    paramsFromProto(step.GetParams()),
-			Condition: step.GetCondition(),
+			Type:         step.GetType(),
+			Workdir:      step.GetWorkdir(),
+			Env:          step.GetEnv(),
+			Timeout:      step.GetTimeout().AsDuration(),
+			Params:       paramsFromProto(step.GetParams()),
+			Condition:    step.GetCondition(),
+			IgnoreFailed: step.GetIgnoreFailed(),
+			Outputs:      step.GetOutputs(),
 		})
 	}
 	return models.JobSpec{
-		Steps:   steps,
-		Timeout: spec.GetTimeout().AsDuration(),
-		Retry:   retryPolicyFromProto(spec.GetRetry()),
+		Steps:        steps,
+		Timeout:      spec.GetTimeout().AsDuration(),
+		Retry:        retryPolicyFromProto(spec.GetRetry()),
+		IgnoreFailed: spec.GetIgnoreFailed(),
 	}
 }
 
@@ -824,18 +848,21 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
 	for _, step := range spec.Steps {
 		steps = append(steps, &dbpb.JobStep{
-			Type:      step.Type,
-			Workdir:   step.Workdir,
-			Env:       step.Env,
-			Timeout:   durationpb.New(step.Timeout),
-			Params:    paramsToProto(step.Params),
-			Condition: step.Condition,
+			Type:         step.Type,
+			Workdir:      step.Workdir,
+			Env:          step.Env,
+			Timeout:      durationpb.New(step.Timeout),
+			Params:       paramsToProto(step.Params),
+			Condition:    step.Condition,
+			IgnoreFailed: step.IgnoreFailed,
+			Outputs:      step.Outputs,
 		})
 	}
 	return &dbpb.JobSpec{
-		Steps:   steps,
-		Timeout: durationpb.New(spec.Timeout),
-		Retry:   retryPolicyToProto(spec.Retry),
+		Steps:        steps,
+		Timeout:      durationpb.New(spec.Timeout),
+		Retry:        retryPolicyToProto(spec.Retry),
+		IgnoreFailed: spec.IgnoreFailed,
 	}
 }
 

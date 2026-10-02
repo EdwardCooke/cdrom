@@ -64,6 +64,11 @@ type StepResult struct {
 	// Error is a descriptive error message; empty when Status is Succeeded or
 	// Skipped.
 	Error string `json:"error,omitempty"`
+	// Outputs are the named values the step produced (F-06): each key is a
+	// name declared in the step's Outputs list, and each value is the content
+	// of the file the step wrote for that name (trimmed). Empty when the step
+	// declared no outputs or did not run.
+	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
 // ParamValue is a single value in a step's Params map. A value is either a
@@ -126,14 +131,27 @@ type JobStep struct {
 	// shell handler reads command (string), args (list of strings), and shell
 	// (string) from here; a new step type reads the keys it understands.
 	Params map[string]*ParamValue `json:"params,omitempty"`
-	// Condition is a Go template (text/template) rendered against Env; the
-	// rendered output must parse as a boolean (strconv.ParseBool). An empty
-	// Condition always runs the step. When the rendered value is false the
-	// step is skipped (StepStatusSkipped, F-06) — it does not run and does
-	// not fail the job. A condition that fails to parse or render is a
-	// job-failing error (a bad condition is a spec error, not a reason to
-	// skip).
+	// Condition is a Go template (text/template) rendered against the step's
+	// condition context (its own Env, plus the prior steps' and upstream
+	// jobs' status/outputs, and the job's identity); the rendered output must
+	// parse as a boolean (strconv.ParseBool). An empty Condition always runs
+	// the step. When the rendered value is false the step is skipped
+	// (StepStatusSkipped, F-06) — it does not run and does not fail the job.
+	// A condition that fails to parse or render is a job-failing error (a bad
+	// condition is a spec error, not a reason to skip).
 	Condition string `json:"condition,omitempty"`
+	// IgnoreFailed, when true, means a failure (or timeout) of this step does
+	// not fail the job (F-06): the step is recorded as failed/timed_out and
+	// the job continues to the next step. A step that fails without
+	// IgnoreFailed stops the job.
+	IgnoreFailed bool `json:"ignore_failed,omitempty"`
+	// Outputs are the names of the values this step produces (F-06). For each
+	// name the step writes a file named after it into its per-step output
+	// directory (exposed to the step as the CDROM_STEP_OUTPUT_DIR environment
+	// variable); after the step runs the executor reads those files and records
+	// their (trimmed) contents as the step's outputs. A declared name the step
+	// did not write is recorded as an empty value.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -163,6 +181,13 @@ type JobSpec struct {
 	// Retry is the job's retry policy (F-04); a nil policy means the job is
 	// never retried.
 	Retry *RetryPolicy `json:"retry,omitempty"`
+	// IgnoreFailed, when true, means a failure of the job does not propagate
+	// to its dependents (F-06): the job is still reported failed (or
+	// timed_out), but the scheduler's dependency resolver treats it as
+	// satisfied, so downstream jobs are dispatched rather than skipped. It
+	// does not change the job's own status or stop a failed step from failing
+	// the job (that is a step's IgnoreFailed).
+	IgnoreFailed bool `json:"ignore_failed,omitempty"`
 }
 
 // Job is a single unit of work belonging to a pipeline.
@@ -212,6 +237,16 @@ type Job struct {
 	// skipped by its condition) during the job's current attempt (F-06),
 	// reported by the execution target alongside the job's final status.
 	StepResults []StepResult `gorm:"type:text;serializer:json" json:"step_results,omitempty"`
+	// Outputs are the named values the job produced (F-06): the union of its
+	// steps' outputs (a later step overrides an earlier one on a name
+	// collision). They are reported by the execution target and persisted so
+	// downstream jobs on other targets can read them in their conditions.
+	Outputs map[string]string `gorm:"type:text;serializer:json" json:"outputs,omitempty"`
+	// IgnoreFailed is the job's ignore-failed flag copied from the spec's
+	// IgnoreFailed when the job was created (F-06). It is denormalized onto
+	// the job so the scheduler's dependency resolver can treat a failed job
+	// with the flag set as satisfied without re-reading the spec.
+	IgnoreFailed bool `json:"ignore_failed"`
 }
 
 // Worker is a long-lived worker process registered on a deployment target.

@@ -103,11 +103,22 @@ func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, api jo
 		switch dep.GetStatus() {
 		case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
 			continue
-		case dbpb.JobStatus_JOB_STATUS_FAILED, dbpb.JobStatus_JOB_STATUS_CANCELLED,
-			dbpb.JobStatus_JOB_STATUS_TIMED_OUT, dbpb.JobStatus_JOB_STATUS_SKIPPED:
+		case dbpb.JobStatus_JOB_STATUS_FAILED, dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+			// A dependency that failed (or timed out) blocks the job — unless it
+			// has ignore_failed set (F-06), in which case its failure does not
+			// propagate and the dependency counts as satisfied.
+			if dep.GetIgnoreFailed() {
+				continue
+			}
 			// A dependency reached a terminal state other than succeeded: the
 			// job never runs (F-06). This short-circuits the remaining
 			// dependencies — any one of them failing is enough to skip.
+			s.skipJob(ctx, db, api, job)
+			return
+		case dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_SKIPPED:
+			// A cancelled or skipped dependency always blocks the job (skip
+			// propagates; a cancellation is not something ignore_failed can
+			// override): the job never runs (F-06).
 			s.skipJob(ctx, db, api, job)
 			return
 		default:

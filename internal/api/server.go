@@ -132,12 +132,14 @@ type paramValueRequest struct {
 //     (e.g. shell "pwsh", args ["-NoProfile", "-Command"], command
 //     "Get-ChildItem"). Empty means run command directly (no shell).
 type jobStepRequest struct {
-	Type      string                        `json:"type,omitempty"`
-	Workdir   string                        `json:"workdir,omitempty"`
-	Env       map[string]string             `json:"env,omitempty"`
-	Timeout   string                        `json:"timeout,omitempty"`
-	Condition string                        `json:"condition,omitempty"`
-	Params    map[string]*paramValueRequest `json:"params,omitempty"`
+	Type         string                        `json:"type,omitempty"`
+	Workdir      string                        `json:"workdir,omitempty"`
+	Env          map[string]string             `json:"env,omitempty"`
+	Timeout      string                        `json:"timeout,omitempty"`
+	Condition    string                        `json:"condition,omitempty"`
+	IgnoreFailed bool                          `json:"ignore_failed,omitempty"`
+	Outputs      []string                      `json:"outputs,omitempty"`
+	Params       map[string]*paramValueRequest `json:"params,omitempty"`
 }
 
 // jobRequest is the body of POST /api/jobs. Spec is the execution spec to
@@ -159,9 +161,10 @@ type jobRequest struct {
 // combined); empty means no job-level timeout. Retry is the job's retry
 // policy (F-04); when omitted the job is never retried.
 type jobSpecRequest struct {
-	Steps   []jobStepRequest    `json:"steps,omitempty"`
-	Timeout string              `json:"timeout,omitempty"`
-	Retry   *retryPolicyRequest `json:"retry,omitempty"`
+	Steps        []jobStepRequest    `json:"steps,omitempty"`
+	Timeout      string              `json:"timeout,omitempty"`
+	Retry        *retryPolicyRequest `json:"retry,omitempty"`
+	IgnoreFailed bool                `json:"ignore_failed,omitempty"`
 }
 
 // retryPolicyRequest is the JSON form of a job's retry policy (F-04).
@@ -199,6 +202,7 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 		}
 		spec.Retry = retry
 	}
+	spec.IgnoreFailed = r.IgnoreFailed
 	for i, step := range r.Steps {
 		// A command is required for the built-in shell handler (the default
 		// when type is empty); other step types may carry their work in
@@ -207,11 +211,13 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 			return nil, fmt.Errorf("spec: step %d: command is required", i)
 		}
 		protoStep := &dbpb.JobStep{
-			Type:      step.Type,
-			Workdir:   step.Workdir,
-			Env:       step.Env,
-			Condition: step.Condition,
-			Params:    paramsToProto(step.Params),
+			Type:         step.Type,
+			Workdir:      step.Workdir,
+			Env:          step.Env,
+			Condition:    step.Condition,
+			IgnoreFailed: step.IgnoreFailed,
+			Outputs:      step.Outputs,
+			Params:       paramsToProto(step.Params),
 		}
 		if step.Timeout != "" {
 			duration, err := time.ParseDuration(step.Timeout)

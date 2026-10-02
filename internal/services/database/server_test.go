@@ -1037,3 +1037,121 @@ func TestUpdateJobStepResultsRoundTrip(t *testing.T) {
 		t.Errorf("step_results[2] = %+v, want FAILED with error %q", got[2], "boom")
 	}
 }
+
+// TestJobSpecIgnoreFailedAndOutputsRoundTrip verifies that a job's
+// ignore_failed (job-level and per-step) and per-step output names are
+// persisted and returned intact through the storage backend (F-06).
+func TestJobSpecIgnoreFailedAndOutputsRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		IgnoreFailed: true,
+		Steps: []*dbpb.JobStep{
+			{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}, IgnoreFailed: true, Outputs: []string{"version", "commit"}},
+			{Params: map[string]*dbpb.ParamValue{"command": {String_: "make"}}},
+		},
+	}
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: created.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	got := fetched.GetSpec()
+	if !got.GetIgnoreFailed() {
+		t.Error("job-level ignore_failed = false, want true")
+	}
+	if len(got.GetSteps()) != 2 {
+		t.Fatalf("steps = %d, want 2", len(got.GetSteps()))
+	}
+	step0 := got.GetSteps()[0]
+	if !step0.GetIgnoreFailed() {
+		t.Error("step 0 ignore_failed = false, want true")
+	}
+	if len(step0.GetOutputs()) != 2 || step0.GetOutputs()[0] != "version" || step0.GetOutputs()[1] != "commit" {
+		t.Errorf("step 0 outputs = %v, want [version commit]", step0.GetOutputs())
+	}
+	if got.GetSteps()[1].GetIgnoreFailed() {
+		t.Error("step 1 ignore_failed = true, want false")
+	}
+}
+
+// TestCreateJobDenormalizesIgnoreFailed verifies that a job's ignore_failed
+// flag is denormalized from its spec onto the Job row at creation time (F-06),
+// so the dependency resolver can read it without decoding the spec.
+func TestCreateJobDenormalizesIgnoreFailed(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		IgnoreFailed: true,
+		Steps:        []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if !created.GetIgnoreFailed() {
+		t.Error("created job ignore_failed = false, want true (denormalized from spec)")
+	}
+
+	// A job whose spec does not set ignore_failed must not be denormalized.
+	plain, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "plain"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if plain.GetIgnoreFailed() {
+		t.Error("plain job ignore_failed = true, want false")
+	}
+}
+
+// TestUpdateJobOutputsRoundTrip verifies that a job's outputs (F-06) are
+// persisted through UpdateJob and survive a fetch round trip, and that a later
+// UpdateJob carrying no outputs does not clobber the stored outputs.
+func TestUpdateJobOutputsRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "job"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	updated, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         job.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		FinishedAt: timestamppb.Now(),
+		Outputs:    map[string]string{"version": "1.2.3", "commit": "abc123"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	if got := updated.GetOutputs(); got["version"] != "1.2.3" || got["commit"] != "abc123" {
+		t.Errorf("outputs on update response = %v, want version/commit", got)
+	}
+
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := fetched.GetOutputs(); got["version"] != "1.2.3" || got["commit"] != "abc123" {
+		t.Errorf("outputs on fetch = %v, want version/commit", got)
+	}
+
+	// A later status update with no outputs must not clear the stored outputs.
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:     job.GetId(),
+		Status: dbpb.JobStatus_JOB_STATUS_RUNNING,
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	refetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := refetched.GetOutputs(); got["version"] != "1.2.3" {
+		t.Errorf("outputs after a no-outputs update = %v, want preserved", got)
+	}
+}

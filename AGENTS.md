@@ -214,7 +214,12 @@ finished just as it was cancelled) is ignored.
 never run — instead of failing, in two ways:
 
 - **Step `condition`:** a step's `condition` param is a Go template
-  (`text/template`) rendered against the step's own `Env` map; the rendered
+  (`text/template`) rendered against a **condition context** that carries, in
+  addition to the step's own `Env` vars (top-level, so `{{ .NAME }}` still
+  works), three keys: `steps` (a slice of the job's prior steps, each exposing
+  `.Index`, `.Status`, and `.Outputs`), `jobs` (a slice of the job's upstream
+  dependencies, each exposing `.ID`, `.Name`, `.Status`, and `.Outputs`), and
+  `job` (the job's own identity: `.ID`, `.Name`, `.Status`). The rendered
   output is parsed as a boolean (`strconv.ParseBool`). An empty `condition`
   never skips (the default, unchanged behavior). A `condition` that renders to
   `false` marks the step `skipped` (`executor.StepStatusSkipped`) and the
@@ -222,15 +227,42 @@ never run — instead of failing, in two ways:
   `condition` that fails to render or whose output does not parse as a
   boolean is treated as a spec error: it fails the job (the step is not
   skipped), since this is a configuration mistake rather than a legitimate
-  "don't run this" signal. Each step's terminal outcome (`succeeded`,
-  `failed`, `skipped`, or `timed_out`, with an error message when
-  applicable) is collected by the execution target via an
-  `executor.StepStatusReporter` set in the executor's context
-  (`executor.StepResultCollector`, mirroring the `LogSink` context pattern)
-  and attached to the job's final `ReportJobStatus` call as `step_results`;
-  the API passes them through to `Database.UpdateJob`, which persists them
-  unconditionally (they are informational, not part of the terminal-status
-  guard) so the UI can show each step's outcome.
+  "don't run this" signal. The upstream jobs and the job identity are supplied
+  by the execution target via the executor's context
+  (`executor.ContextWithUpstreamJobs` / `executor.ContextWithJobIdentity`);
+  the API populates a job's `upstream_jobs` (fetched best-effort from the
+  database for each `depends_on` id) before handing the job to the target.
+  Example: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else
+  }}false{{ end }}`. Each step's terminal outcome (`succeeded`, `failed`,
+  `skipped`, or `timed_out`, with an error message when applicable) is
+  collected by the execution target via an `executor.StepStatusReporter` set
+  in the executor's context (`executor.StepResultCollector`, mirroring the
+  `LogSink` context pattern) and attached to the job's final
+  `ReportJobStatus` call as `step_results`; the API passes them through to
+  `Database.UpdateJob`, which persists them unconditionally (they are
+  informational, not part of the terminal-status guard) so the UI can show
+  each step's outcome.
+- **Step & job `ignore_failed`:** a step may set `ignore_failed` so that a
+  failure or timeout is recorded (in `step_results`) but does **not** stop the
+  job — the executor moves on to the next step. A job may set `ignore_failed`
+  (denormalized from its spec onto the `Job` row at creation) so that, in the
+  dependency resolver, a `failed` or `timed_out` dependency counts as
+  satisfied: dependents are dispatched rather than skipped. A `cancelled` or
+  `skipped` dependency is **never** overridden by `ignore_failed` (a
+  cancellation is not a failure a job can opt out of) — it always blocks.
+- **Step & job `outputs`:** a step may declare `outputs` — a list of names.
+  The executor gives such a step a fresh per-step directory, exposed to it via
+  the `CDROM_STEP_OUTPUT_DIR` env var; the step's command writes one file per
+  declared name into it, and the executor reads them back (trimmed) after the
+  step runs. A declared name that was never written is recorded as an empty
+  string. The job's `outputs` are the union of its steps' outputs (a later
+  step overrides an earlier one on a name collision), aggregated by the
+  `StepResultCollector` and reported on the job's final `ReportJobStatus`
+  call, where `Database.UpdateJob` persists them (via the same
+  `Select`/`Updates` serializer pattern as `step_results`). Downstream steps
+  and jobs read these through the condition context (`.steps`/`.jobs`
+  `.Outputs`) — this is how a step hands a value (a version string, a build
+  id, an artifact path) to later steps and jobs.
 - **Job `depends_on` (dependency skip propagation):** a job may declare
   `depends_on` — a list of other job ids it depends on. `SubmitJob` persists
   it on the `Job` row and, unlike a job with no dependencies, does **not**
@@ -239,13 +271,16 @@ never run — instead of failing, in two ways:
   (`internal/services/scheduler/dependencies.go`, started from
   `cmd/scheduler/main.go`) that periodically lists pending jobs with a
   non-empty `depends_on` and, for each, checks every dependency's status
-  (`Database.GetJob`): if any dependency reached a terminal state other than
-  `succeeded` (`failed`, `cancelled`, `timed_out`, or itself `skipped`), the
-  job is marked `skipped` (`Database.SkipJob`, conditional: only from
-  `pending`, mirroring `CancelJob`'s conditional pattern) and the scheduler
-  fans the status out to the UI (`API.NotifyJobStatus`) — this is what makes
-  skip **propagate** transitively through a chain of dependent jobs, one
-  resolver tick at a time. If every dependency `succeeded`, the job is
+  (`Database.GetJob`): a `succeeded` dependency is satisfied; a `failed` or
+  `timed_out` dependency is satisfied **only if it has `ignore_failed` set**
+  (otherwise it blocks); a `cancelled` or `skipped` dependency always blocks
+  (skip propagates; a cancellation is not something `ignore_failed` can
+  override). If any dependency blocks, the job is marked `skipped`
+  (`Database.SkipJob`, conditional: only from `pending`, mirroring
+  `CancelJob`'s conditional pattern) and the scheduler fans the status out to
+  the UI (`API.NotifyJobStatus`) — this is what makes skip **propagate**
+  transitively through a chain of dependent jobs, one resolver tick at a time.
+  If every dependency is satisfied, the job is
   released: its `depends_on` is cleared (`Database.UpdateJob` with
   `clear_depends_on`, so the resolver does not reconsider — and re-dispatch —
   it on the next tick) and it is dispatched exactly as `SubmitJob` would have

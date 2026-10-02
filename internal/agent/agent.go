@@ -161,6 +161,14 @@ func (a *Agent) runJob(ctx context.Context, job *apipb.Job, collector *executor.
 	defer sink.Close()
 	ctx = executor.ContextWithLogSink(ctx, sink)
 	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
+	// A step's condition (F-06) can reference the status/outputs of the jobs
+	// this job depends on (carried by the API) and the job's own identity.
+	ctx = executor.ContextWithUpstreamJobs(ctx, job.GetUpstreamJobs())
+	ctx = executor.ContextWithJobIdentity(ctx, executor.JobIdentity{
+		ID:     job.GetId(),
+		Name:   job.GetName(),
+		Status: "running",
+	})
 	return executor.Execute(ctx, job.GetSpec(), a.logger)
 }
 
@@ -170,6 +178,7 @@ func (a *Agent) report(ctx context.Context, status dbpb.JobStatus, collector *ex
 		Status:      status,
 		FinishedAt:  timestamppb.Now(),
 		StepResults: collector.ToProto(),
+		Outputs:     collector.JobOutputs(),
 	}); err != nil {
 		a.logger.Error("agent: report status", "job", a.jobID, "status", status, "err", err)
 	}

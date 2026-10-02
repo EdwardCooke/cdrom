@@ -280,6 +280,14 @@ func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string, colle
 	defer sink.Close()
 	ctx = executor.ContextWithLogSink(ctx, sink)
 	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
+	// A step's condition (F-06) can reference the status/outputs of the jobs
+	// this job depends on (carried by the API) and the job's own identity.
+	ctx = executor.ContextWithUpstreamJobs(ctx, job.GetUpstreamJobs())
+	ctx = executor.ContextWithJobIdentity(ctx, executor.JobIdentity{
+		ID:     job.GetId(),
+		Name:   job.GetName(),
+		Status: "running",
+	})
 	return executor.Execute(ctx, job.GetSpec(), w.logger)
 }
 
@@ -291,6 +299,7 @@ func (w *Worker) report(ctx context.Context, jobID int64, token string, status d
 		Status:      status,
 		FinishedAt:  timestamppb.Now(),
 		StepResults: collector.ToProto(),
+		Outputs:     collector.JobOutputs(),
 	}); err != nil {
 		w.logger.Error("worker: report status", "job", jobID, "status", status, "err", err)
 	}

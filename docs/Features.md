@@ -406,10 +406,26 @@ the command. A real cancel must reach the target.
 **What.** Add a `skipped` status for jobs and steps that never run because a dependency
 failed or a condition was not met (pairs with F-08 dependencies). Conditions
 should be implemented using go templates that must render to a value converted to a
-boolean.
+boolean. F-06 also lands three supporting mechanisms that make conditions and
+dependencies genuinely useful:
+
+- **`ignore_failed`** — a step (or a job) may declare that its failure should
+  not stop the job / should not block its dependents.
+- **Step & job `outputs`** — a step may produce named values (written to a
+  per-step output directory) that are recorded on the step and aggregated onto
+  the job, so downstream steps and jobs can read them.
+- **Richer condition context** — a step's condition can reference not just its
+  own env, but the status/outputs of prior steps in the same job, the
+  status/outputs of upstream jobs higher in the pipeline chain, and the job's
+  own identity.
 
 **Why.** In a DAG, a downstream job of a failed job is "skipped", not
 "failed" — the distinction matters for reporting and for `on_failure` logic.
+`ignore_failed` lets a non-critical step (or a best-effort upstream job) fail
+without derailing the pipeline; `outputs` let a step hand a value (a version
+string, a build id, an artifact path) to later steps and jobs; and the richer
+condition context is what lets a step say "only run if the build step produced
+`ready == true`" or "only run if the upstream `build` job succeeded".
 
 **Scope.**
 - `internal/models` + `proto/cdrom/db/v1/db.proto` — new `JobStatusSkipped` and `StepStatusSkipped`.
@@ -423,6 +439,21 @@ boolean.
 - [x] The status is surfaced in `job_status` events (the UI itself has no
       source yet — see the design decisions below).
 - [x] A steps condition is not met is marked `skipped`.
+- [x] A step with `ignore_failed` that fails (or times out) is recorded as
+      failed but does not stop the job — the next step still runs.
+- [x] A step that declares `outputs` writes one file per name into a per-step
+      output directory (exposed via `CDROM_STEP_OUTPUT_DIR`); the executor
+      reads them back (trimmed) and a declared-but-unwritten name is recorded
+      as an empty string.
+- [x] A job's `outputs` are the union of its steps' outputs (a later step
+      overrides an earlier one on a name collision) and are persisted on the
+      job row.
+- [x] A step's condition can reference prior steps' status/outputs
+      (`.steps`), upstream jobs' status/outputs (`.jobs`), and the job's
+      identity (`.job`).
+- [x] A dependency that failed or timed out but has `ignore_failed` set counts
+      as satisfied (the dependent job is dispatched, not skipped); a cancelled
+      or skipped dependency always blocks (skip propagates).
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
 - **`depends_on` is a minimal stand-in for F-08's `needs`/DAG, not F-08
@@ -458,6 +489,37 @@ boolean.
   (not skipped) — treated as a spec/configuration error, since the
   acceptance criteria's "must render to a value converted to a boolean"
   implies a malformed condition is a mistake, not a legitimate skip signal.
+- **The condition context is richer than the step's own env.** A step's
+  condition is rendered against a map that carries, in addition to the step's
+  env vars (top-level, so `{{ .NAME }}` still works), three keys: `steps`
+  (a slice of prior steps, each exposing `.Index`, `.Status`, and `.Outputs`),
+  `jobs` (a slice of the job's upstream dependencies, each exposing `.ID`,
+  `.Name`, `.Status`, and `.Outputs`), and `job` (the job's own identity:
+  `.ID`, `.Name`, `.Status`). The upstream jobs and the job identity are
+  supplied by the execution target via the executor's context
+  (`executor.ContextWithUpstreamJobs` / `executor.ContextWithJobIdentity`);
+  the API populates a job's `upstream_jobs` (fetched best-effort from the
+  database for each `depends_on` id) before handing the job to the target.
+  Example: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else
+  }}false{{ end }}`.
+- **`ignore_failed` is a per-step and per-job flag.** A step with
+  `ignore_failed` that fails or times out is recorded (in `step_results`) but
+  does not stop the job — the executor moves on to the next step. A job with
+  `ignore_failed` (denormalized from its spec onto the `Job` row at creation)
+  tells the dependency resolver that a `failed`/`timed_out` dependency counts
+  as satisfied, so dependents are dispatched rather than skipped. A
+  `cancelled` or `skipped` dependency is never overridden by `ignore_failed`
+  (a cancellation is not a failure a job can opt out of).
+- **Step outputs use a per-step temp directory.** A step that declares
+  `outputs` (a list of names) is given a fresh per-step directory, exposed to
+  it via the `CDROM_STEP_OUTPUT_DIR` env var; the step's command writes one
+  file per declared name into it, and the executor reads them back (trimmed)
+  after the step runs. A declared name that was never written is recorded as
+  an empty string. The job's `outputs` are the union of its steps' outputs
+  (a later step overrides an earlier one on a name collision), aggregated by
+  the `StepResultCollector` and reported on the job's final `ReportJobStatus`
+  call, where `Database.UpdateJob` persists them (via the same
+  `Select`/`Updates` serializer pattern as `step_results`).
 - **Per-step outcomes are collected and persisted.** The executor gained a
   `StepStatusReporter` interface (set in its context, mirroring the existing
   `LogSink` pattern) and a `StepResultCollector` helper; the worker and agent
