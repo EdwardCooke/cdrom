@@ -93,25 +93,25 @@ func main() {
 	}
 
 	// Authentication for the UI-facing HTTP surface. Disabled by default; when
-	// enabled it performs OIDC discovery (a network call) here.
+	// enabled it performs OIDC discovery (a network call) here. The API is a
+	// pure token verifier: clients present the OAuth token they obtained from
+	// the IdP as `Authorization: Bearer <token>`.
 	authBundle, err := auth.NewWithClient(ctx, cfg.Auth, idpClient)
 	if err != nil {
 		logger.Error("auth: init", "err", err)
 		os.Exit(1)
 	}
-	// Mark the session cookie Secure when the API is served over TLS.
-	authBundle.Handler.SetSecure(cfg.TLS.Enabled())
 
-	// The API's HTTP handler, wrapped by the auth middleware. The auth
-	// endpoints themselves are registered on a parent mux so they are reachable
-	// without a session cookie; Go's ServeMux prefers the more specific
-	// /api/auth/* patterns over the /api/ subtree handler.
+	// The API's HTTP handler, wrapped by the auth middleware (which verifies
+	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
+	// endpoint is registered on a parent mux so it is reachable without a
+	// token — a client needs it to start the sign-in flow. Go's ServeMux
+	// prefers the more specific /api/auth/oidc pattern over the /api/ subtree
+	// handler.
 	apiHandler := authBundle.Middleware(api.New(clients, hub).Handler())
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
-	mux.HandleFunc("GET /api/auth/login", authBundle.Handler.Login)
-	mux.HandleFunc("GET /api/auth/callback", authBundle.Handler.Callback)
-	mux.HandleFunc("GET /api/auth/logout", authBundle.Handler.Logout)
+	mux.HandleFunc("GET /api/auth/oidc", authBundle.ServeDiscovery)
 
 	// HTTP server (UI).
 	httpSrv := &http.Server{Addr: httpAddr, Handler: mux}

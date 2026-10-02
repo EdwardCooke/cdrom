@@ -17,13 +17,19 @@ import (
 )
 
 // Provider wraps an OIDC identity provider: it performs discovery, builds the
-// authorization redirect (with PKCE), and exchanges the callback code for a
-// validated ID token.
+// authorization redirect (with PKCE), exchanges the callback code for a
+// validated ID token, and verifies the OAuth token a client presents to the
+// API.
 type Provider struct {
 	oidcProvider *oidc.Provider
 	verifier     *oidc.IDTokenVerifier
 	cfg          config.AuthConfig
 	httpClient   *http.Client
+	// audiences are the audience values accepted on a presented token. When
+	// empty the verifier's built-in client_id check is used (the token's aud
+	// must contain the client_id); when set, the token's aud must contain one
+	// of these.
+	audiences []string
 }
 
 // NewProvider performs OIDC discovery against cfg.Issuer and returns a ready
@@ -45,13 +51,89 @@ func NewProviderWithClient(ctx context.Context, cfg config.AuthConfig, httpClien
 	if err != nil {
 		return nil, fmt.Errorf("auth: oidc discovery %q: %w", cfg.Issuer, err)
 	}
-	verifier := provider.Verifier(&oidc.Config{ClientID: cfg.ClientID})
-	return &Provider{oidcProvider: provider, verifier: verifier, cfg: cfg, httpClient: httpClient}, nil
+	// When a token audience is configured, the verifier skips the built-in
+	// client_id check and the provider enforces the audience explicitly (see
+	// UserFromRequest); otherwise the verifier checks the token's aud against
+	// the client_id.
+	verifierCfg := &oidc.Config{ClientID: cfg.ClientID}
+	if cfg.TokenAudience != "" {
+		verifierCfg.SkipClientIDCheck = true
+	}
+	verifier := provider.Verifier(verifierCfg)
+	return &Provider{
+		oidcProvider: provider,
+		verifier:     verifier,
+		cfg:          cfg,
+		httpClient:   httpClient,
+		audiences:    audiencesFromConfig(cfg),
+	}, nil
+}
+
+// audiencesFromConfig returns the audience values accepted on a presented
+// token: the configured TokenAudience when set, otherwise the client_id.
+func audiencesFromConfig(cfg config.AuthConfig) []string {
+	if cfg.TokenAudience != "" {
+		return []string{cfg.TokenAudience}
+	}
+	if cfg.ClientID != "" {
+		return []string{cfg.ClientID}
+	}
+	return nil
 }
 
 // Enabled reports whether the provider is active.
 func (p *Provider) Enabled() bool {
 	return p != nil && p.oidcProvider != nil
+}
+
+// UserFromRequest extracts the OAuth token from the request's
+// `Authorization: Bearer <token>` header, verifies it against the identity
+// provider (signature, issuer, audience, and expiry), and returns the
+// authenticated user. It returns an error when the header is missing or
+// malformed, or the token fails verification.
+func (p *Provider) UserFromRequest(r *http.Request) (User, error) {
+	token, ok := bearerToken(r)
+	if !ok {
+		return User{}, fmt.Errorf("auth: missing or malformed Authorization header")
+	}
+	idToken, err := p.verifier.Verify(r.Context(), token)
+	if err != nil {
+		return User{}, fmt.Errorf("auth: verify token: %w", err)
+	}
+	// When a token audience is configured the verifier skipped the client_id
+	// check, so enforce the audience here.
+	if p.cfg.TokenAudience != "" && !p.audienceOK(idToken.Audience) {
+		return User{}, fmt.Errorf("auth: token audience %v not accepted", idToken.Audience)
+	}
+	return userFromIDToken(idToken), nil
+}
+
+// audienceOK reports whether the token's audience contains any of the
+// provider's accepted audiences.
+func (p *Provider) audienceOK(aud []string) bool {
+	for _, want := range p.audiences {
+		for _, got := range aud {
+			if got == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bearerToken returns the token from the request's Authorization header. It
+// reports false when the header is absent or is not a Bearer token.
+func bearerToken(r *http.Request) (string, bool) {
+	header := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
+		return "", false
+	}
+	token := strings.TrimSpace(header[len(prefix):])
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }
 
 // NewPKCEState generates a random state value and a matching PKCE code

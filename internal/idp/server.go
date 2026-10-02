@@ -18,8 +18,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/config"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
 // codeTTL is how long an issued authorization code stays valid.
@@ -323,8 +323,16 @@ func (s *Server) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) err
 	if err != nil {
 		return fmt.Errorf("sign id token: %w", err)
 	}
+	// The access token is a real signed JWT carrying the same claims as the
+	// id token, so clients can present it as `Authorization: Bearer <token>`
+	// to the API, which verifies it against the IdP's JWKS. This is what lets
+	// clients (curl, the UI) authenticate without a session cookie.
+	accessToken, err := s.km.Sign(claims)
+	if err != nil {
+		return fmt.Errorf("sign access token: %w", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": "idp-access-token",
+		"access_token": accessToken,
 		"token_type":   "Bearer",
 		"expires_in":   int(s.cfg.TokenLifetime.Seconds()),
 		"id_token":     idToken,

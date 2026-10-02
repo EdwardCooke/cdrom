@@ -13,7 +13,7 @@ import (
 
 // wsUpgrader upgrades HTTP requests to WebSocket connections. CheckOrigin
 // accepts same-origin and cross-origin requests; the API relies on the
-// session cookie (set by the auth middleware) for authorization, so origin
+// Bearer token (verified by the auth middleware) for authorization, so origin
 // checking is intentionally permissive for the UI.
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,

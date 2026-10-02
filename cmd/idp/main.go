@@ -14,7 +14,9 @@
 //	  issuer: http://127.0.0.1:7104
 //	  client_id: cdrom-ui
 //	  redirect_url: http://127.0.0.1:8080/api/auth/callback
-//	  cookie_secret: "a long random string"
+//
+// Clients sign in against the IdP (authorization-code + PKCE) and then call
+// the API with `Authorization: Bearer <access_token>`.
 package main
 
 import (
@@ -27,8 +29,8 @@ import (
 	"syscall"
 	"time"
 
-	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/config"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/idp"
 	"cdrom/internal/logging"

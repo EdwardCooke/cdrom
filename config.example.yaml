@@ -53,17 +53,22 @@ db:
 
 # OIDC authentication for the API's UI-facing HTTP surface and its WebSocket
 # endpoint. Disabled by default: when enabled is false (or unset) the API is
-# open and no identity provider is required. When enabled, the UI signs in
-# via the authorization-code + PKCE flow (issuer/client_id/redirect_url) and
-# subsequent requests present a signed session cookie.
+# open and no identity provider is required. When enabled, the API is a pure
+# token verifier: a client signs in against the identity provider via the
+# authorization-code + PKCE flow (issuer/client_id/redirect_url) and then
+# presents the resulting OAuth token on every request as
+# `Authorization: Bearer <token>`. The API verifies the token against the
+# IdP's JWKS — there is no session cookie. GET /api/auth/oidc advertises the
+# IdP's discovery document so a client can start the flow.
 #auth:
 #  enabled: true
 #  issuer: https://accounts.example.com/realms/cdrom
 #  client_id: cdrom-ui
 #  redirect_url: http://localhost:8080/api/auth/callback
 #  # scopes: [openid, profile, email]   # defaults to these when omitted
-#  cookie_secret: "a long random string"
-#  # cookie_domain: example.com
+#  # Audience accepted on verified tokens. When set, the verifier checks the
+#  # token's aud against this value; when empty it checks against client_id.
+#  # token_audience: cdrom-api
 
 # Local OIDC identity provider (used by the idp binary, cmd/idp). It acts as a
 # JWT issuer for the API's OIDC authentication: it serves the discovery doc, a

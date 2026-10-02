@@ -120,15 +120,18 @@ type AuthConfig struct {
 	// Required when Enabled is true.
 	ClientID string
 	// RedirectURL is the absolute URL the identity provider redirects back to
-	// after authentication (the API's /api/auth/callback). Required when
+	// after the client completes the authorization flow. It is advertised in
+	// the API's /api/auth/oidc discovery document so a client (the UI or the
+	// OpenAPI viewer) knows where to send the IdP's redirect. Required when
 	// Enabled is true.
 	RedirectURL string
 	// Scopes are the OIDC scopes to request. Defaults to openid profile email.
 	Scopes []string
-	// CookieSecret signs the session cookie. Required when Enabled is true.
-	CookieSecret string
-	// CookieDomain optionally scopes the session cookie to a domain.
-	CookieDomain string
+	// TokenAudience is the audience the API accepts on the OAuth tokens it
+	// verifies (the IdP stamps this on the tokens it issues for the UI). When
+	// empty the API accepts the token's audience as-is (the verifier checks
+	// it against ClientID). Optional.
+	TokenAudience string
 }
 
 // GRPCAuthConfig configures job-token authentication on the API's gRPC
@@ -252,9 +255,6 @@ func (a AuthConfig) Validate() error {
 	if a.RedirectURL == "" {
 		return fmt.Errorf("auth: redirect_url is required when auth is enabled")
 	}
-	if a.CookieSecret == "" {
-		return fmt.Errorf("auth: cookie_secret is required when auth is enabled")
-	}
 	return nil
 }
 
@@ -366,13 +366,12 @@ type fileConfig struct {
 		KeyFile  *string `yaml:"key_file"`
 	} `yaml:"tls"`
 	Auth *struct {
-		Enabled      *bool    `yaml:"enabled"`
-		Issuer       *string  `yaml:"issuer"`
-		ClientID     *string  `yaml:"client_id"`
-		RedirectURL  *string  `yaml:"redirect_url"`
-		Scopes       []string `yaml:"scopes"`
-		CookieSecret *string  `yaml:"cookie_secret"`
-		CookieDomain *string  `yaml:"cookie_domain"`
+		Enabled       *bool    `yaml:"enabled"`
+		Issuer        *string  `yaml:"issuer"`
+		ClientID      *string  `yaml:"client_id"`
+		RedirectURL   *string  `yaml:"redirect_url"`
+		Scopes        []string `yaml:"scopes"`
+		TokenAudience *string  `yaml:"token_audience"`
 	} `yaml:"auth"`
 	IdP *struct {
 		Issuer        *string   `yaml:"issuer"`
@@ -470,11 +469,8 @@ func applyFile(cfg *Config, path string) error {
 		if f.Auth.Scopes != nil {
 			cfg.Auth.Scopes = f.Auth.Scopes
 		}
-		if f.Auth.CookieSecret != nil {
-			cfg.Auth.CookieSecret = *f.Auth.CookieSecret
-		}
-		if f.Auth.CookieDomain != nil {
-			cfg.Auth.CookieDomain = *f.Auth.CookieDomain
+		if f.Auth.TokenAudience != nil {
+			cfg.Auth.TokenAudience = *f.Auth.TokenAudience
 		}
 	}
 	if f.IdP != nil {
@@ -552,8 +548,7 @@ func applyEnv(cfg *Config) {
 	cfg.Auth.Issuer = envOr("CDROM_AUTH_ISSUER", cfg.Auth.Issuer)
 	cfg.Auth.ClientID = envOr("CDROM_AUTH_CLIENT_ID", cfg.Auth.ClientID)
 	cfg.Auth.RedirectURL = envOr("CDROM_AUTH_REDIRECT_URL", cfg.Auth.RedirectURL)
-	cfg.Auth.CookieSecret = envOr("CDROM_AUTH_COOKIE_SECRET", cfg.Auth.CookieSecret)
-	cfg.Auth.CookieDomain = envOr("CDROM_AUTH_COOKIE_DOMAIN", cfg.Auth.CookieDomain)
+	cfg.Auth.TokenAudience = envOr("CDROM_AUTH_TOKEN_AUDIENCE", cfg.Auth.TokenAudience)
 	cfg.IdP.Issuer = envOr("CDROM_IDP_ISSUER", cfg.IdP.Issuer)
 	if v := envOr("CDROM_IDP_KEY_LIFETIME", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

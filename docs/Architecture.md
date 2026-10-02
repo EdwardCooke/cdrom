@@ -515,13 +515,14 @@ There are two independent authentication mechanisms, one per surface:
 ```mermaid
 flowchart TB
     subgraph UIAUTH["UI surface (HTTP) — OIDC"]
-        BROWSER["Browser"]
-        BROWSER -->|1. /api/auth/login| APIH["API HTTP"]
-        APIH -->|2. redirect (PKCE)| IDP["IdP"]
-        IDP -->|3. code| APIH
-        APIH -->|4. exchange + verify ID token| IDP
-        APIH -->|5. signed session cookie| BROWSER
-        BROWSER -->|6. cookie on /api/*| APIH
+        CLIENT["Client (UI / curl)"]
+        CLIENT -->|1. /api/auth/oidc (discovery)| APIH["API HTTP"]
+        CLIENT -->|2. /auth (PKCE)| IDP["IdP"]
+        IDP -->|3. code| CLIENT
+        CLIENT -->|4. /token (exchange)| IDP
+        IDP -->|5. access token (JWT)| CLIENT
+        CLIENT -->|6. Bearer token on /api/*| APIH
+        APIH -->|7. verify vs JWKS| IDP
     end
 
     subgraph GRPCAUTH["gRPC surface — job tokens"]
@@ -536,22 +537,26 @@ flowchart TB
 ### OIDC (UI)
 
 - **Disabled by default.** With no `auth` config the API is open. Enable it
-  with `auth.enabled: true`; `issuer`, `client_id`, `redirect_url`, and
-  `cookie_secret` are then required and validated at startup.
-- **Flow:** OIDC authorization-code grant with PKCE. `GET /api/auth/login`
-  bounces the browser to the identity provider (the PKCE verifier is packed
-  into the OIDC `state` value, so no server-side pre-auth store is needed);
-  `GET /api/auth/callback` exchanges the code, validates the ID token, and
-  sets a signed session cookie (`cdrom_session`, HMAC-SHA256, HttpOnly, 12h);
-  `GET /api/auth/logout` clears it.
+  with `auth.enabled: true`; `issuer`, `client_id`, and `redirect_url` are
+  then required and validated at startup.
+- **Flow:** the API is a pure token verifier — it does not run the OIDC
+  sign-in itself. A client (the UI, curl, an OpenAPI reference) performs the
+  OIDC authorization-code + PKCE flow against the identity provider and then
+  presents the resulting OAuth token on every request as
+  `Authorization: Bearer <token>`. `GET /api/auth/oidc` advertises the IdP's
+  discovery document (issuer, authorization/token endpoints, JWKS URI,
+  client_id, redirect_uri) so a client can start the flow; a 404 means auth
+  is disabled. The API verifies each token against the IdP's JWKS (via
+  `github.com/coreos/go-oidc/v3`) and, when `token_audience` is set, checks
+  the token's `aud` against it (otherwise against `client_id`).
 - **Middleware:** when enabled, every `/api/*` request (including the
-  WebSocket upgrade) must carry a valid session cookie or it gets a 401 JSON
-  response; the authenticated user is available to handlers via
-  `auth.UserFromContext`. When disabled the middleware is a passthrough.
+  WebSocket upgrade) must carry a valid `Authorization: Bearer <token>` or it
+  gets a 401 JSON response; the authenticated user is available to handlers
+  via `auth.UserFromContext`. When disabled the middleware is a passthrough.
 
 ### Job tokens (gRPC surface)
 
-Separate from the UI's OIDC session, the API's **gRPC surface** (workers and
+Separate from the UI's OIDC token, the API's **gRPC surface** (workers and
 agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
 
 - **Disabled by default.** Enable it with `grpc_auth.enabled: true`;
@@ -699,7 +704,7 @@ internal/
   api/        API/controller layer: HTTP routing + gRPC control-plane server
               (worker hub, artifact proxy, StreamJobLogs persistence + job_log
               fan-out, event hub + /api/ws WebSocket, job-token auth)
-  auth/       OIDC authentication (provider, PKCE, signed session cookie, middleware)
+  auth/       OIDC authentication (provider, PKCE, Bearer-token verification, discovery, middleware)
   config/     shared configuration loading for all binaries
   models/     GORM entities (single source of truth for the schema)
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)
@@ -813,8 +818,9 @@ provider and point the API at it:
                   # signing keys and auth codes there)
 # in the API's config: auth.enabled: true, auth.issuer: http://127.0.0.1:7104,
 #   auth.client_id: cdrom-ui,
-#   auth.redirect_url: http://127.0.0.1:8080/api/auth/callback,
-#   auth.cookie_secret: <random>
+#   auth.redirect_url: http://127.0.0.1:8080/api/auth/callback
+# Clients sign in against the IdP (authorization-code + PKCE) and then call
+# the API with `Authorization: Bearer <access_token>`.
 ```
 
 To run with mTLS, generate a local certificate set and point every binary at

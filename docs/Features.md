@@ -29,7 +29,7 @@ Before adding features, note the baseline that is already built and working:
 | Retry & re-run | A job's `JobSpec` may carry a `retry` policy (`max_attempts` retries after the initial attempt, `backoff` delay); a scheduler retry loop re-dispatches a failed job up to the limit (a new attempt on the same `Job` row, `attempt` counter, F-04). A user can re-run any finished job (`POST /api/jobs/{id}/rerun`) for a fresh attempt; attempts are visible to the UI ("attempt N of M") |
 | Cancellation | Cancelling a running job (`POST /api/jobs/{id}/cancel`) signals the execution target to stop the work (F-05): the API delivers a `JobCancellation` down the worker's `WatchJobs` stream (or an agent observes it on its next `GetJob`), the target interrupts the running step and reports `cancelled`; cancelling a finished job is a no-op |
 | Job tokens | Minted per job by the API (via IdP), audience exchange, verified on status/artifact RPCs |
-| UI auth | OIDC authorization-code + PKCE, signed session cookie |
+| UI auth | OIDC authorization-code + PKCE; the API verifies the OAuth token as a Bearer token (no session cookie) |
 | Artifacts | General-purpose, namespaced file store (streamed upload/download); jobs scope files by job id, other callers (e.g. deployed releases) use their own namespaces; proxied through the API |
 | Live events | WebSocket `/api/ws` — `job_status`, `worker`, and `job_log` events |
 | Job logs | Streamed from the target to the API (`StreamJobLogs`), persisted to the artifacts service (one file per step + `job.log`), fanned out to the UI as `job_log` events, and retrievable via `GET /api/jobs/{id}/logs[/{name}]` |

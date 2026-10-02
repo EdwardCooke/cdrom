@@ -363,7 +363,7 @@ cmd/
   agent/      ephemeral Kubernetes agent entrypoint
 internal/
   api/        API/controller layer: HTTP routing + gRPC control-plane server (worker hub, artifact proxy, StreamJobLogs persistence + job_log fan-out, event hub + /api/ws WebSocket)
-  auth/       OIDC authentication (provider, PKCE, signed session cookie, endpoints, middleware)
+  auth/       OIDC authentication (provider, PKCE, Bearer-token verification, discovery, middleware)
   config/     shared configuration loading for all binaries
   models/     GORM entities (single source of truth for the schema)
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)
@@ -449,7 +449,7 @@ mTLS certificate paths `CDROM_TLS_CA_FILE`, `CDROM_TLS_CERT_FILE`,
 `CDROM_TLS_KEY_FILE` (equivalents of the `tls` section in the config file),
 and the auth variables `CDROM_AUTH_ENABLED` (`true`/`1`),
 `CDROM_AUTH_ISSUER`, `CDROM_AUTH_CLIENT_ID`, `CDROM_AUTH_REDIRECT_URL`,
-`CDROM_AUTH_COOKIE_SECRET`, `CDROM_AUTH_COOKIE_DOMAIN` (equivalents of the
+`CDROM_AUTH_TOKEN_AUDIENCE` (equivalents of the
 `auth` section in the config file), and the IdP variables `CDROM_IDP_ISSUER`,
 `CDROM_IDP_KEY_LIFETIME`, `CDROM_IDP_ROTATE_BEFORE`,
 `CDROM_IDP_TOKEN_LIFETIME`, `CDROM_IDP_CHECK_INTERVAL` (equivalents of the
@@ -484,8 +484,9 @@ provider and point the API at it:
 ./bin/idp         # OIDC IdP / JWT issuer on :7104 (auto key rotation)
 # in the API's config: auth.enabled: true, auth.issuer: http://127.0.0.1:7104,
 #   auth.client_id: cdrom-ui,
-#   auth.redirect_url: http://127.0.0.1:8080/api/auth/callback,
-#   auth.cookie_secret: <random>
+#   auth.redirect_url: http://127.0.0.1:8080/api/auth/callback
+# Clients sign in against the IdP (authorization-code + PKCE) and then call
+# the API with `Authorization: Bearer <access_token>`.
 ```
 
 To run with mTLS, generate a local certificate set and point every binary at
@@ -510,19 +511,21 @@ authentication, implemented in `internal/auth`.
 - **Disabled by default.** With no `auth` config the API is open — no identity
   provider is required and a local run just works. Enable it with
   `auth.enabled: true` (or `CDROM_AUTH_ENABLED=true`); `issuer`,
-  `client_id`, `redirect_url`, and `cookie_secret` are then required and
-  validated at startup.
-- **Flow:** OIDC authorization-code grant with PKCE (via
-  `github.com/coreos/go-oidc/v3`). `GET /api/auth/login` bounces the browser to
-  the identity provider (the PKCE verifier is packed into the OIDC `state`
-  value, so no server-side pre-auth store is needed); `GET /api/auth/callback`
-  exchanges the code, validates the ID token, and sets a signed session cookie
-  (`cdrom_session`, HMAC-SHA256, HttpOnly, 12h); `GET /api/auth/logout`
-  clears it. The session cookie is marked Secure when TLS is configured.
+  `client_id`, and `redirect_url` are then required and validated at startup.
+- **Flow:** the API is a pure token verifier — it does not run the OIDC
+  sign-in itself. A client (the UI, curl, an OpenAPI reference) performs the
+  OIDC authorization-code + PKCE flow against the identity provider and then
+  presents the resulting OAuth token on every request as
+  `Authorization: Bearer <token>`. `GET /api/auth/oidc` advertises the IdP's
+  discovery document (issuer, authorization/token endpoints, JWKS URI,
+  client_id, redirect_uri) so a client can start the flow; a 404 means auth
+  is disabled. The API verifies each token against the IdP's JWKS (via
+  `github.com/coreos/go-oidc/v3`) and, when `token_audience` is set, checks
+  the token's `aud` against it (otherwise against `client_id`).
 - **Middleware:** when auth is enabled, every `/api/*` request (including the
-  WebSocket upgrade) must carry a valid session cookie or it gets a 401 JSON
-  response; the authenticated user is available to handlers via
-  `auth.UserFromContext`. When disabled the middleware is a passthrough.
+  WebSocket upgrade) must carry a valid `Authorization: Bearer <token>` or it
+  gets a 401 JSON response; the authenticated user is available to handlers
+  via `auth.UserFromContext`. When disabled the middleware is a passthrough.
 - **Live events:** `GET /api/ws` is a WebSocket endpoint (gorilla/websocket).
   On connect the client receives a state snapshot (jobs + workers); afterwards
   it receives one message per event. Event types: `job_status` (job id +
@@ -536,8 +539,10 @@ authentication, implemented in `internal/auth`.
 - **Local OIDC IdP (`cmd/idp`):** a standalone HTTP service that acts as a
   JWT issuer so a local run can exercise the full OIDC flow without an
   external identity provider. It serves `/.well-known/openid-configuration`,
-  `/jwks`, `/auth` (authorization-code + PKCE), and `/token` (mints RS256 ID
-  tokens). It signs with an RSA key and **rotates it automatically** when the
+  `/jwks`, `/auth` (authorization-code + PKCE), and `/token` (mints RS256
+  tokens: a signed access token — the same claims as the ID token, so clients
+  present it as `Authorization: Bearer <token>` — plus the ID token). It
+  signs with an RSA key and **rotates it automatically** when the
   key is within `idp.rotate_before` of its expiry (checked every
   `idp.check_interval`); the JWKS keeps serving predecessor keys until they
   expire, so clients keep verifying tokens signed with an older key during the
@@ -553,7 +558,7 @@ authentication, implemented in `internal/auth`.
 
 ### Job Tokens (gRPC surface)
 
-Separate from the UI's OIDC session, the API's **gRPC surface** (workers and
+Separate from the UI's OIDC token, the API's **gRPC surface** (workers and
 agents) supports **job-token authentication**, implemented in
 `internal/api/jobsauth.go`.
 
