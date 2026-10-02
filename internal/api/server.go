@@ -132,20 +132,25 @@ type paramValueRequest struct {
 //     (e.g. shell "pwsh", args ["-NoProfile", "-Command"], command
 //     "Get-ChildItem"). Empty means run command directly (no shell).
 type jobStepRequest struct {
-	Type    string                        `json:"type,omitempty"`
-	Workdir string                        `json:"workdir,omitempty"`
-	Env     map[string]string             `json:"env,omitempty"`
-	Timeout string                        `json:"timeout,omitempty"`
-	Params  map[string]*paramValueRequest `json:"params,omitempty"`
+	Type      string                        `json:"type,omitempty"`
+	Workdir   string                        `json:"workdir,omitempty"`
+	Env       map[string]string             `json:"env,omitempty"`
+	Timeout   string                        `json:"timeout,omitempty"`
+	Condition string                        `json:"condition,omitempty"`
+	Params    map[string]*paramValueRequest `json:"params,omitempty"`
 }
 
 // jobRequest is the body of POST /api/jobs. Spec is the execution spec to
 // snapshot onto the job; when omitted the job has no steps and succeeds
-// without doing any work.
+// without doing any work. DependsOn (F-06) is a minimal, single-level
+// dependency mechanism ahead of F-08's full DAG/`needs`: when non-empty the
+// job is held pending until every dependency succeeds — see
+// docs/Architecture.md.
 type jobRequest struct {
 	PipelineID  int64           `json:"pipeline_id"`
 	Name        string          `json:"name"`
 	TargetGroup string          `json:"target_group"`
+	DependsOn   []int64         `json:"depends_on,omitempty"`
 	Spec        *jobSpecRequest `json:"spec,omitempty"`
 }
 
@@ -202,10 +207,11 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 			return nil, fmt.Errorf("spec: step %d: command is required", i)
 		}
 		protoStep := &dbpb.JobStep{
-			Type:    step.Type,
-			Workdir: step.Workdir,
-			Env:     step.Env,
-			Params:  paramsToProto(step.Params),
+			Type:      step.Type,
+			Workdir:   step.Workdir,
+			Env:       step.Env,
+			Condition: step.Condition,
+			Params:    paramsToProto(step.Params),
 		}
 		if step.Timeout != "" {
 			duration, err := time.ParseDuration(step.Timeout)
@@ -258,6 +264,7 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 		PipelineId:  req.PipelineID,
 		Name:        req.Name,
 		TargetGroup: req.TargetGroup,
+		DependsOn:   req.DependsOn,
 		Spec:        spec,
 	})
 	if err != nil {
@@ -472,6 +479,8 @@ func jobStatusFromName(name string) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_CANCELLED
 	case "timed_out":
 		return dbpb.JobStatus_JOB_STATUS_TIMED_OUT
+	case "skipped":
+		return dbpb.JobStatus_JOB_STATUS_SKIPPED
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}

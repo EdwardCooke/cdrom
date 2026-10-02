@@ -35,6 +35,7 @@ const (
 	Database_RerunJob_FullMethodName           = "/cdrom.db.v1.Database/RerunJob"
 	Database_ReapJob_FullMethodName            = "/cdrom.db.v1.Database/ReapJob"
 	Database_CancelJob_FullMethodName          = "/cdrom.db.v1.Database/CancelJob"
+	Database_SkipJob_FullMethodName            = "/cdrom.db.v1.Database/SkipJob"
 	Database_RegisterWorker_FullMethodName     = "/cdrom.db.v1.Database/RegisterWorker"
 	Database_GetWorker_FullMethodName          = "/cdrom.db.v1.Database/GetWorker"
 	Database_ListWorkers_FullMethodName        = "/cdrom.db.v1.Database/ListWorkers"
@@ -105,6 +106,14 @@ type DatabaseClient interface {
 	// cancellation: a job that already reported a terminal status is left
 	// untouched, so cancelling a finished job is a no-op.
 	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*CancelJobResponse, error)
+	// SkipJob conditionally marks a job as skipped: it sets the status to
+	// SKIPPED (and the finished timestamp) only if the job is still pending
+	// (has not started). It returns whether the job was skipped. This is how
+	// the scheduler's dependency resolver marks a job skipped when one of its
+	// dependencies did not succeed (F-06): a job that already started (or
+	// finished) is left untouched, so a job can never be skipped out from
+	// under a target that is already running it.
+	SkipJob(ctx context.Context, in *SkipJobRequest, opts ...grpc.CallOption) (*SkipJobResponse, error)
 	// Workers
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
@@ -282,6 +291,16 @@ func (c *databaseClient) CancelJob(ctx context.Context, in *CancelJobRequest, op
 	return out, nil
 }
 
+func (c *databaseClient) SkipJob(ctx context.Context, in *SkipJobRequest, opts ...grpc.CallOption) (*SkipJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SkipJobResponse)
+	err := c.cc.Invoke(ctx, Database_SkipJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Worker)
@@ -440,6 +459,14 @@ type DatabaseServer interface {
 	// cancellation: a job that already reported a terminal status is left
 	// untouched, so cancelling a finished job is a no-op.
 	CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error)
+	// SkipJob conditionally marks a job as skipped: it sets the status to
+	// SKIPPED (and the finished timestamp) only if the job is still pending
+	// (has not started). It returns whether the job was skipped. This is how
+	// the scheduler's dependency resolver marks a job skipped when one of its
+	// dependencies did not succeed (F-06): a job that already started (or
+	// finished) is left untouched, so a job can never be skipped out from
+	// under a target that is already running it.
+	SkipJob(context.Context, *SkipJobRequest) (*SkipJobResponse, error)
 	// Workers
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
 	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
@@ -511,6 +538,9 @@ func (UnimplementedDatabaseServer) ReapJob(context.Context, *ReapJobRequest) (*R
 }
 func (UnimplementedDatabaseServer) CancelJob(context.Context, *CancelJobRequest) (*CancelJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
+}
+func (UnimplementedDatabaseServer) SkipJob(context.Context, *SkipJobRequest) (*SkipJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SkipJob not implemented")
 }
 func (UnimplementedDatabaseServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
@@ -833,6 +863,24 @@ func _Database_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_SkipJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SkipJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).SkipJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_SkipJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).SkipJob(ctx, req.(*SkipJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkerRequest)
 	if err := dec(in); err != nil {
@@ -1079,6 +1127,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelJob",
 			Handler:    _Database_CancelJob_Handler,
+		},
+		{
+			MethodName: "SkipJob",
+			Handler:    _Database_SkipJob_Handler,
 		},
 		{
 			MethodName: "RegisterWorker",

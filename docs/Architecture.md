@@ -371,6 +371,48 @@ reference it rather than redefining it.
   target's status report only if the job is still `pending` or `running`, so
   once a job is `succeeded`, `failed`, `cancelled`, or `timed_out` a late
   report (e.g. a target that finished just as it was cancelled) is ignored.
+- **Skip propagation & step conditions (F-06).** A job or step can be
+  skipped — never run — instead of failing, in two ways:
+  - *Step `condition`.* A step's `condition` param is a Go template
+    (`text/template`) rendered against the step's own `Env`; the rendered
+    output is parsed as a boolean (`strconv.ParseBool`). An empty `condition`
+    never skips (unchanged default behavior). A `condition` that renders to
+    `false` marks the step `skipped` and the executor moves on without
+    running it or failing the job. A `condition` that fails to render or
+    parse as a boolean is a spec error: it fails the job (the step is not
+    skipped). Each step's terminal outcome (`succeeded`/`failed`/`skipped`/
+    `timed_out`, plus an error message when applicable) is collected by the
+    execution target through an `executor.StepStatusReporter` set in the
+    executor's context (`executor.StepResultCollector`, mirroring the
+    `LogSink` context pattern) and attached to the job's final
+    `ReportJobStatus` call as `step_results`; the API forwards them to
+    `Database.UpdateJob`, which persists them unconditionally (informational,
+    not part of the terminal-status guard).
+  - *Job `depends_on` (dependency skip propagation).* A job may declare
+    `depends_on` — a list of other job ids. `SubmitJob` persists it and, for
+    a job with any dependency, does **not** dispatch it immediately; the job
+    is left `pending`. The scheduler runs a background **dependency
+    resolver** that periodically lists pending jobs with a non-empty
+    `depends_on` and, for each, checks every dependency's status
+    (`Database.GetJob`): if any dependency reached a terminal state other
+    than `succeeded` (`failed`, `cancelled`, `timed_out`, or itself
+    `skipped`), the job is marked `skipped` (`Database.SkipJob`, conditional:
+    only from `pending`) and the scheduler fans it out to the UI
+    (`API.NotifyJobStatus`) — this is what makes skip **propagate**
+    transitively through a dependency chain, one resolver tick at a time. If
+    every dependency `succeeded`, the job is released: its `depends_on` is
+    cleared (`Database.UpdateJob` with `clear_depends_on`, so the resolver
+    does not reconsider — and re-dispatch — it next tick) and it is
+    dispatched exactly as `SubmitJob` would have for a job with no
+    dependencies. A dependency still `pending`/`running` leaves the job
+    untouched for the next tick.
+
+    **This is a deliberately minimal, single-level, polling-based stand-in
+    for F-08's full DAG/`needs` resolver**, since F-06 lands ahead of F-08 in
+    the roadmap. `depends_on` is a flat list of raw job ids with no cycle
+    validation; F-08 is expected to replace it with a named `needs` (job keys
+    within a pipeline run), full parallel DAG resolution, and cycle
+    validation at save time.
 - **Shell override (shell handler).** A step may set the `shell` param to run
   through a user-chosen interpreter instead of executing `command` directly.
   When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -397,11 +439,13 @@ sequenceDiagram
     participant DB as Database
     participant W as Worker (group)
 
-    UI->>API: POST /api/jobs (name, target_group, spec)
-    API->>SCHED: SubmitJob (spec)
-    SCHED->>DB: CreateJob (persist spec snapshot)
+    UI->>API: POST /api/jobs (name, target_group, depends_on, spec)
+    API->>SCHED: SubmitJob (spec, depends_on)
+    SCHED->>DB: CreateJob (persist spec snapshot + depends_on)
     DB-->>SCHED: job (pending)
-    alt target group set
+    alt depends_on set
+        Note over SCHED: job left pending; dependency resolver (F-06) handles it
+    else target group set
         SCHED->>API: DispatchJob (job + spec)
         API->>API: mint job token (via IdP)
         API-->>W: WatchJobs stream: JobAssignment (job + spec, + token)
@@ -411,15 +455,16 @@ sequenceDiagram
     SCHED-->>API: job
     API-->>UI: job
 
-    W->>W: run spec steps in order (internal/executor)
+    W->>W: run spec steps in order (internal/executor), evaluating each step's condition (F-06)
     W->>API: ReportJobStatus (running) [Bearer token]
     W->>API: UploadArtifact (streamed, proxied)
     W->>API: ReportJobStatus (succeeded/failed/timed_out) [Bearer token]
-    API->>DB: UpdateJob (status)
+    API->>DB: UpdateJob (status, step_results)
     API-->>UI: /api/ws event: job_status
     Note over SCHED,DB: watchdog: if a job runs past its timeout and the target goes silent, SCHED reaps it (DB.ReapJob → timed_out) and tells the API (NotifyJobStatus) to fan it out to the UI
     Note over SCHED,DB: retry loop (F-04): SCHED asks the DB for retriable jobs (DB.ListRetriableJobs — failed and within budget), claims each next attempt (DB.ClaimJobRetry → pending, attempt+1) and re-dispatches it via the API after the policy's backoff
     Note over UI,W: cancel (F-05): UI → API POST /api/jobs/{id}/cancel → SCHED CancelJob → DB.CancelJob (cancelled, if pending/running) → API.CancelJob → WatchJobs stream: JobCancellation → W interrupts the running step and reports cancelled
+    Note over SCHED,DB: dependency resolver (F-06): SCHED lists pending jobs with depends_on, checks each dependency's status (DB.GetJob); skips the job (DB.SkipJob) if a dependency failed/cancelled/timed_out/skipped, or clears depends_on and dispatches it once every dependency succeeded
 ```
 
 Job status transitions (see `proto/cdrom/db/v1/db.proto`):
@@ -434,27 +479,31 @@ stateDiagram-v2
     PENDING --> TIMED_OUT: watchdog reap
     PENDING --> CANCELLED: cancel requested
     RUNNING --> CANCELLED: cancel requested
+    PENDING --> SKIPPED: dependency resolver (F-06, a depends_on dependency did not succeed)
     FAILED --> PENDING: retry claimed (F-04, within budget)
     SUCCEEDED --> PENDING: re-run (F-04)
     FAILED --> PENDING: re-run (F-04)
     TIMED_OUT --> PENDING: re-run (F-04)
     CANCELLED --> PENDING: re-run (F-04)
+    SKIPPED --> PENDING: re-run (F-06)
     SUCCEEDED --> [*]
     FAILED --> [*]: retries exhausted
     TIMED_OUT --> [*]
     CANCELLED --> [*]
+    SKIPPED --> [*]
 ```
 
 ### Live events
 
 `GET /api/ws` is a WebSocket endpoint. On connect the client receives a state
 snapshot (jobs + workers); afterwards it receives one message per event. Event
-types are `job_status` (job id + status, plus `attempt` / `max_attempts` for
-F-04), `worker` (name/group + action `registered` / `deregistered` /
-`watching`), and `job_log` (job id + step index + stream `stdout`/`stderr` +
-a chunk of output, F-02). Events are published from the gRPC server (worker
-lifecycle, job status reports, streamed job logs) and the HTTP handlers (job
-submit / cancel / re-run) through a shared `EventHub`; slow subscribers have
+types are `job_status` (job id + status — including `skipped`, F-06 — plus
+`attempt` / `max_attempts` for F-04), `worker` (name/group + action
+`registered` / `deregistered` / `watching`), and `job_log` (job id + step
+index + stream `stdout`/`stderr` + a chunk of output, F-02). Events are
+published from the gRPC server (worker lifecycle, job status reports,
+streamed job logs) and the HTTP handlers (job submit / cancel / re-run)
+through a shared `EventHub`; slow subscribers have
 events dropped and resync from the snapshot on reconnect.
 
 ---
@@ -661,7 +710,11 @@ internal/
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
-              LogSink in the context; used by worker + agent)
+              LogSink and an optional StepStatusReporter in the context —
+              evaluating each step's `condition` (F-06) to skip it when
+              false, and reporting each step's terminal status for a
+              caller's StepResultCollector to attach to its final status
+              report; used by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
               executor.DefaultType, tees step output to a LogSink when present);
               a target or plugin adds more via executor.RegisterStepType
@@ -672,7 +725,8 @@ internal/
     scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
               that reaps running jobs past their timeout (F-03) + a background
               retry loop that re-dispatches failed jobs per their retry policy
-              (F-04)
+              (F-04) + a background dependency resolver that skips/dispatches
+              a pending job once its depends_on dependencies resolve (F-06)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation

@@ -63,6 +63,14 @@ service Database {
   // cancellation: a job that already reported a terminal status is left
   // untouched, so cancelling a finished job is a no-op.
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  // SkipJob conditionally marks a job as skipped: it sets the status to
+  // SKIPPED (and the finished timestamp) only if the job is still pending
+  // (has not started). It returns whether the job was skipped. This is how
+  // the scheduler's dependency resolver marks a job skipped when one of its
+  // dependencies did not succeed (F-06): a job that already started (or
+  // finished) is left untouched, so a job can never be skipped out from
+  // under a target that is already running it.
+  rpc SkipJob(SkipJobRequest) returns (SkipJobResponse);
 
   // Workers
   rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
@@ -130,6 +138,37 @@ enum JobStatus {
   // FAILED so the UI and operators can tell a hung job apart from a job that
   // ran to completion and reported an error.
   JOB_STATUS_TIMED_OUT = 6;
+  // JOB_STATUS_SKIPPED is a terminal state: the job never ran because one of
+  // its dependencies (depends_on) did not succeed (F-06). It is distinct
+  // from FAILED so reporting and on_failure logic can tell "didn't run" apart
+  // from "ran and errored".
+  JOB_STATUS_SKIPPED = 7;
+}
+
+// StepStatus is the terminal outcome of a single step within a job's
+// execution spec (F-06). It mirrors a subset of JobStatus but only the
+// states a step can actually reach: a step does not have its own pending or
+// cancelled state (those belong to the job as a whole).
+enum StepStatus {
+  STEP_STATUS_UNSPECIFIED = 0;
+  STEP_STATUS_SUCCEEDED = 1;
+  STEP_STATUS_FAILED = 2;
+  // STEP_STATUS_SKIPPED means the step's `condition` rendered to false, so
+  // the step never ran; it does not fail the job.
+  STEP_STATUS_SKIPPED = 3;
+  STEP_STATUS_TIMED_OUT = 4;
+}
+
+// StepResult is the terminal outcome of one step of a job's execution spec,
+// reported by the execution target alongside the job's own final status
+// (F-06).
+message StepResult {
+  // index is the 0-based index of the step in the job's spec.
+  int32 index = 1;
+  StepStatus status = 2;
+  // error is a descriptive error message; empty when status is SUCCEEDED or
+  // SKIPPED.
+  string error = 3;
 }
 
 // ParamValue is a single value in a step's params map. A value is either a
@@ -175,6 +214,14 @@ message ParamValue {
 // register more, e.g. "ansible", "terraform", "argo", or a user plugin). A
 // step whose `type` is not registered on the target fails the job with a
 // clear error.
+//
+// Condition (F-06): `condition` is a Go template (text/template) rendered
+// against the step's own `env`; the rendered output must parse as a boolean
+// (strconv.ParseBool: "1"/"t"/"true"/... or "0"/"f"/"false"/...). An empty
+// `condition` always runs the step. When the rendered value is false the step
+// is skipped (STEP_STATUS_SKIPPED) — it does not run and does not fail the
+// job. A condition that fails to parse or render is a job-failing error (a
+// bad condition is a spec error, not a reason to skip).
 message JobStep {
   // Field numbers 1 (command), 2 (args), and 6 (shell) were retired when the
   // shell handler's settings moved into params; they are reserved so they are
@@ -198,6 +245,9 @@ message JobStep {
   // `shell` (string) from here; a new step type reads the keys it
   // understands.
   map<string, ParamValue> params = 8;
+  // condition is a Go template rendered against `env`; the step is skipped
+  // when it renders to false (F-06). Empty always runs the step.
+  string condition = 9;
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -255,6 +305,19 @@ message Job {
   // the job was created (0 means the job is never retried). It is denormalized
   // onto the job so the UI can render "attempt N of M" without the spec.
   int32 max_attempts = 12;
+  // depends_on lists the ids of jobs this job depends on (F-06). A job with
+  // a non-empty depends_on is held pending (not dispatched) until every
+  // dependency reaches a terminal state: if all of them succeed the job is
+  // dispatched, but if any of them does not succeed (failed, cancelled,
+  // timed_out, or itself skipped) the job is marked SKIPPED instead of
+  // running. This is a minimal, single-level dependency check; F-08 replaces
+  // it with a full parallel DAG resolver (named `needs`, cycle validation at
+  // save time).
+  repeated int64 depends_on = 13;
+  // step_results is the terminal outcome of each step that ran (or was
+  // skipped by its condition) during the job's current attempt (F-06). It is
+  // reported by the execution target alongside the job's final status.
+  repeated StepResult step_results = 14;
 }
 
 message CreateJobRequest {
@@ -264,6 +327,9 @@ message CreateJobRequest {
   // spec is the execution spec to snapshot onto the job; when absent the job
   // has no steps and succeeds without doing any work.
   JobSpec spec = 4;
+  // depends_on lists the ids of jobs this job depends on (F-06); see Job's
+  // depends_on field for the gating/skip semantics.
+  repeated int64 depends_on = 5;
 }
 
 message GetJobRequest {
@@ -290,6 +356,16 @@ message UpdateJobRequest {
   JobStatus status = 2;
   google.protobuf.Timestamp started_at = 3;
   google.protobuf.Timestamp finished_at = 4;
+  // step_results replaces the job's recorded per-step outcomes for this
+  // attempt (F-06); absent/empty leaves the previously recorded results
+  // unchanged (e.g. the initial "running" report carries no step results
+  // yet).
+  repeated StepResult step_results = 5;
+  // clear_depends_on clears the job's depends_on list (F-06). The scheduler's
+  // dependency resolver sets this once every dependency has succeeded and the
+  // job has been dispatched, so it is not reconsidered (and re-dispatched) on
+  // the resolver's next tick.
+  bool clear_depends_on = 6;
 }
 
 message ReapJobRequest {
@@ -316,6 +392,19 @@ message CancelJobResponse {
   // cancelled is true when the job was still in a non-terminal state and was
   // marked cancelled; false when it had already reached a terminal state.
   bool cancelled = 1;
+}
+
+message SkipJobRequest {
+  int64 id = 1;
+  // finished_at is the timestamp to record when the job is skipped; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp finished_at = 2;
+}
+
+message SkipJobResponse {
+  // skipped is true when the job was still pending and was marked skipped;
+  // false when it had already started (or finished).
+  bool skipped = 1;
 }
 
 message ClaimJobRetryRequest {

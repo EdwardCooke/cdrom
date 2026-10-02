@@ -113,7 +113,8 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 		// A new job starts on its first attempt (F-04). The retry budget is
 		// denormalized from the spec's retry policy so the UI can render
 		// "attempt N of M" without the spec.
-		Attempt: 1,
+		Attempt:   1,
+		DependsOn: dependsOnFromProto(req.GetDependsOn()),
 	}
 	if spec.Retry != nil {
 		job.MaxAttempts = spec.Retry.MaxAttempts
@@ -216,6 +217,41 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 		instant := timestamp.AsTime()
 		updates["finished_at"] = &instant
 	}
+	// step_results (F-06) are informational per-step outcomes, not part of
+	// the terminal-status guard below: they are persisted whenever the
+	// execution target reports them, even on the job's final report.
+	//
+	// This uses Updates with an explicit Select (not the map-based Update)
+	// because GORM only runs a field's serializer (here, JSON) when the
+	// update value flows through the model's reflected field — a raw
+	// map-based Update hands the driver the unserialized Go value directly,
+	// which SQLite's driver cannot bind.
+	if results := req.GetStepResults(); len(results) > 0 {
+		if err := s.db.WithContext(ctx).
+			Model(&models.Job{}).
+			Where("id = ?", req.GetId()).
+			Select("StepResults").
+			Updates(&models.Job{StepResults: stepResultsFromProto(results)}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	// clear_depends_on (F-06) is set by the scheduler's dependency resolver
+	// once a job's dependencies are satisfied and it has been dispatched, so
+	// the resolver does not reconsider it on its next tick. It is independent
+	// of the terminal-status guard below (clearing it does not change
+	// status). Like step_results above, this uses Updates with an explicit
+	// Select rather than the map-based Update: the value is nil either way,
+	// but a map-based Update would not run the field's serializer for a
+	// non-nil DependsOn if this were ever reused for that.
+	if req.GetClearDependsOn() {
+		if err := s.db.WithContext(ctx).
+			Model(&models.Job{}).
+			Where("id = ?", req.GetId()).
+			Select("DependsOn").
+			Updates(&models.Job{DependsOn: nil}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
 	if len(updates) > 0 {
 		updates["updated_at"] = time.Now()
 		// A status report from a target must not clobber a job that has
@@ -307,6 +343,36 @@ func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*db
 	return &dbpb.CancelJobResponse{Cancelled: result.RowsAffected > 0}, nil
 }
 
+// SkipJob conditionally marks a job as skipped: it sets the status to
+// skipped (and the finished timestamp) only if the job is still pending (has
+// not started). It returns whether the job was skipped. This is how the
+// scheduler's dependency resolver marks a job skipped when one of its
+// dependencies did not succeed (F-06): a job that already started (or
+// finished) is left untouched. The conditional update is done atomically
+// with a WHERE clause on the status so a concurrent dispatch/status report
+// cannot be clobbered.
+func (s *Server) SkipJob(ctx context.Context, req *dbpb.SkipJobRequest) (*dbpb.SkipJobResponse, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	finishedAt := time.Now()
+	if timestamp := req.GetFinishedAt(); timestamp != nil {
+		finishedAt = timestamp.AsTime()
+	}
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status = ?", req.GetId(), models.JobStatusPending).
+		Updates(map[string]any{
+			"status":      models.JobStatusSkipped,
+			"finished_at": &finishedAt,
+			"updated_at":  time.Now(),
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.SkipJobResponse{Skipped: result.RowsAffected > 0}, nil
+}
+
 // ClaimJobRetry atomically claims the next retry attempt for a job (F-04):
 // it increments the job's attempt counter and resets it to pending (clearing
 // the finished timestamp) only if the job is in a retryable state (pending,
@@ -364,10 +430,10 @@ func (s *Server) ClaimJobRetry(ctx context.Context, req *dbpb.ClaimJobRetryReque
 
 // RerunJob resets a finished job to pending with a fresh attempt (F-04): it
 // sets the status to pending, the attempt to 1, and clears the finished
-// timestamp. Only jobs in a terminal state (succeeded, failed, cancelled, or
-// timed_out) can be re-run; a job that is still pending or running is
-// rejected. The conditional update is atomic, so a job that is re-run
-// concurrently is not clobbered.
+// timestamp. Only jobs in a terminal state (succeeded, failed, cancelled,
+// timed_out, or skipped) can be re-run; a job that is still pending or
+// running is rejected. The conditional update is atomic, so a job that is
+// re-run concurrently is not clobbered.
 func (s *Server) RerunJob(ctx context.Context, req *dbpb.RerunJobRequest) (*dbpb.Job, error) {
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
@@ -384,7 +450,7 @@ func (s *Server) RerunJob(ctx context.Context, req *dbpb.RerunJobRequest) (*dbpb
 	result := s.db.WithContext(ctx).
 		Model(&models.Job{}).
 		Where("id = ? AND status IN ?", req.GetId(),
-			[]models.JobStatus{models.JobStatusSucceeded, models.JobStatusFailed, models.JobStatusCancelled, models.JobStatusTimedOut}).
+			[]models.JobStatus{models.JobStatusSucceeded, models.JobStatusFailed, models.JobStatusCancelled, models.JobStatusTimedOut, models.JobStatusSkipped}).
 		Updates(map[string]any{
 			"status":      models.JobStatusPending,
 			"attempt":     1,
@@ -623,6 +689,8 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		Spec:        specToProto(job.Spec),
 		Attempt:     int32(job.Attempt),
 		MaxAttempts: int32(job.MaxAttempts),
+		DependsOn:   dependsOnToProto(job.DependsOn),
+		StepResults: stepResultsToProto(job.StepResults),
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
@@ -636,6 +704,92 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 	return proto
 }
 
+// dependsOnFromProto converts a list of proto job ids into the model's
+// []uint. An empty list yields nil.
+func dependsOnFromProto(ids []int64) []uint {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]uint, len(ids))
+	for i, id := range ids {
+		out[i] = uint(id)
+	}
+	return out
+}
+
+// dependsOnToProto converts the model's []uint into a list of proto job ids.
+// An empty list yields nil.
+func dependsOnToProto(ids []uint) []int64 {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]int64, len(ids))
+	for i, id := range ids {
+		out[i] = int64(id)
+	}
+	return out
+}
+
+// stepResultsFromProto converts a list of proto StepResults into the model's
+// []StepResult. An empty list yields nil.
+func stepResultsFromProto(results []*dbpb.StepResult) []models.StepResult {
+	if len(results) == 0 {
+		return nil
+	}
+	out := make([]models.StepResult, len(results))
+	for i, r := range results {
+		out[i] = models.StepResult{
+			Index:  int(r.GetIndex()),
+			Status: stepStatusFromProto(r.GetStatus()),
+			Error:  r.GetError(),
+		}
+	}
+	return out
+}
+
+// stepResultsToProto converts the model's []StepResult into a list of proto
+// StepResults. An empty list yields nil.
+func stepResultsToProto(results []models.StepResult) []*dbpb.StepResult {
+	if len(results) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.StepResult, len(results))
+	for i, r := range results {
+		out[i] = &dbpb.StepResult{
+			Index:  int32(r.Index),
+			Status: stepStatusToProto(r.Status),
+			Error:  r.Error,
+		}
+	}
+	return out
+}
+
+func stepStatusFromProto(status dbpb.StepStatus) models.StepStatus {
+	switch status {
+	case dbpb.StepStatus_STEP_STATUS_SUCCEEDED:
+		return models.StepStatusSucceeded
+	case dbpb.StepStatus_STEP_STATUS_SKIPPED:
+		return models.StepStatusSkipped
+	case dbpb.StepStatus_STEP_STATUS_TIMED_OUT:
+		return models.StepStatusTimedOut
+	default:
+		return models.StepStatusFailed
+	}
+}
+
+func stepStatusToProto(status models.StepStatus) dbpb.StepStatus {
+	switch status {
+	case models.StepStatusSucceeded:
+		return dbpb.StepStatus_STEP_STATUS_SUCCEEDED
+	case models.StepStatusSkipped:
+		return dbpb.StepStatus_STEP_STATUS_SKIPPED
+	case models.StepStatusTimedOut:
+		return dbpb.StepStatus_STEP_STATUS_TIMED_OUT
+	default:
+		return dbpb.StepStatus_STEP_STATUS_FAILED
+	}
+}
+
 // specFromProto converts a proto JobSpec into the model's JobSpec. A nil
 // proto yields a zero-value spec (no steps).
 func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
@@ -645,11 +799,12 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 	steps := make([]models.JobStep, 0, len(spec.GetSteps()))
 	for _, step := range spec.GetSteps() {
 		steps = append(steps, models.JobStep{
-			Type:    step.GetType(),
-			Workdir: step.GetWorkdir(),
-			Env:     step.GetEnv(),
-			Timeout: step.GetTimeout().AsDuration(),
-			Params:  paramsFromProto(step.GetParams()),
+			Type:      step.GetType(),
+			Workdir:   step.GetWorkdir(),
+			Env:       step.GetEnv(),
+			Timeout:   step.GetTimeout().AsDuration(),
+			Params:    paramsFromProto(step.GetParams()),
+			Condition: step.GetCondition(),
 		})
 	}
 	return models.JobSpec{
@@ -669,11 +824,12 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
 	for _, step := range spec.Steps {
 		steps = append(steps, &dbpb.JobStep{
-			Type:    step.Type,
-			Workdir: step.Workdir,
-			Env:     step.Env,
-			Timeout: durationpb.New(step.Timeout),
-			Params:  paramsToProto(step.Params),
+			Type:      step.Type,
+			Workdir:   step.Workdir,
+			Env:       step.Env,
+			Timeout:   durationpb.New(step.Timeout),
+			Params:    paramsToProto(step.Params),
+			Condition: step.Condition,
 		})
 	}
 	return &dbpb.JobSpec{
@@ -805,6 +961,8 @@ func jobStatusToProto(status models.JobStatus) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_CANCELLED
 	case models.JobStatusTimedOut:
 		return dbpb.JobStatus_JOB_STATUS_TIMED_OUT
+	case models.JobStatusSkipped:
+		return dbpb.JobStatus_JOB_STATUS_SKIPPED
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}
@@ -824,6 +982,8 @@ func jobStatusFromProto(status dbpb.JobStatus) (models.JobStatus, error) {
 		return models.JobStatusCancelled, nil
 	case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
 		return models.JobStatusTimedOut, nil
+	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
+		return models.JobStatusSkipped, nil
 	default:
 		return "", fmt.Errorf("unknown job status %v", status)
 	}

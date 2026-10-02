@@ -33,9 +33,11 @@ N-tier architecture with the following layers (top to bottom):
      Database service. It also runs a background **watchdog** that reaps
      running jobs that have exceeded their declared timeout even if the
      execution target goes silent (F-03), a background **retry loop** that
-     re-dispatches failed jobs per their retry policy (F-04), and **cancels**
+     re-dispatches failed jobs per their retry policy (F-04), **cancels**
      a job by persisting the cancellation and signalling the execution target
-     to stop the work (F-05).
+     to stop the work (F-05), and a background **dependency resolver** that
+     skips a pending job whose dependency failed (or dispatches it once every
+     dependency succeeded, F-06).
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -208,6 +210,60 @@ the job is still `pending` or `running`, so once a job is `succeeded`,
 `failed`, `cancelled`, or `timed_out` a late report (e.g. a target that
 finished just as it was cancelled) is ignored.
 
+**Skip propagation & step conditions (F-06):** a job or step can be skipped —
+never run — instead of failing, in two ways:
+
+- **Step `condition`:** a step's `condition` param is a Go template
+  (`text/template`) rendered against the step's own `Env` map; the rendered
+  output is parsed as a boolean (`strconv.ParseBool`). An empty `condition`
+  never skips (the default, unchanged behavior). A `condition` that renders to
+  `false` marks the step `skipped` (`executor.StepStatusSkipped`) and the
+  executor moves on to the next step without running it or failing the job. A
+  `condition` that fails to render or whose output does not parse as a
+  boolean is treated as a spec error: it fails the job (the step is not
+  skipped), since this is a configuration mistake rather than a legitimate
+  "don't run this" signal. Each step's terminal outcome (`succeeded`,
+  `failed`, `skipped`, or `timed_out`, with an error message when
+  applicable) is collected by the execution target via an
+  `executor.StepStatusReporter` set in the executor's context
+  (`executor.StepResultCollector`, mirroring the `LogSink` context pattern)
+  and attached to the job's final `ReportJobStatus` call as `step_results`;
+  the API passes them through to `Database.UpdateJob`, which persists them
+  unconditionally (they are informational, not part of the terminal-status
+  guard) so the UI can show each step's outcome.
+- **Job `depends_on` (dependency skip propagation):** a job may declare
+  `depends_on` — a list of other job ids it depends on. `SubmitJob` persists
+  it on the `Job` row and, unlike a job with no dependencies, does **not**
+  dispatch it immediately; it is left `pending`. The scheduler runs a
+  background **dependency resolver**
+  (`internal/services/scheduler/dependencies.go`, started from
+  `cmd/scheduler/main.go`) that periodically lists pending jobs with a
+  non-empty `depends_on` and, for each, checks every dependency's status
+  (`Database.GetJob`): if any dependency reached a terminal state other than
+  `succeeded` (`failed`, `cancelled`, `timed_out`, or itself `skipped`), the
+  job is marked `skipped` (`Database.SkipJob`, conditional: only from
+  `pending`, mirroring `CancelJob`'s conditional pattern) and the scheduler
+  fans the status out to the UI (`API.NotifyJobStatus`) — this is what makes
+  skip **propagate** transitively through a chain of dependent jobs, one
+  resolver tick at a time. If every dependency `succeeded`, the job is
+  released: its `depends_on` is cleared (`Database.UpdateJob` with
+  `clear_depends_on`, so the resolver does not reconsider — and re-dispatch —
+  it on the next tick) and it is dispatched exactly as `SubmitJob` would have
+  dispatched a job with no dependencies (`API.DispatchJob` for a job with a
+  `target_group`; a job with an empty `target_group` is simply left `pending`
+  for an ephemeral agent, same as today). A dependency still `pending` or
+  `running` leaves the job untouched, to be reconsidered on the resolver's
+  next tick.
+
+  **This is a deliberately minimal, single-level, polling-based stand-in for
+  F-08's full DAG/`needs` resolver**, introduced because F-06 is built ahead
+  of F-08 in the roadmap. `depends_on` is a flat list of raw job ids with no
+  cycle validation; F-08 is expected to replace it with a named `needs` (job
+  keys within a pipeline run), full parallel DAG resolution, and cycle
+  validation at save time — at which point this resolver's job-skip logic
+  should be folded into (or re-derived from) that larger DAG engine rather
+  than kept as a separate parallel mechanism.
+
 **Shell override (shell handler):** a step may set the `shell` param to run
 through a user-chosen interpreter instead of executing `command` directly.
 When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -283,7 +339,11 @@ internal/
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
-              LogSink in the context; used by worker + agent)
+              LogSink and an optional StepStatusReporter in the context —
+              evaluating each step's `condition` (F-06) to skip it when false,
+              and reporting each step's terminal status for a caller's
+              StepResultCollector to attach to its final status report; used
+              by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
               executor.DefaultType, tees step output to a LogSink when present);
               a target or plugin adds more via executor.RegisterStepType
@@ -294,7 +354,8 @@ internal/
     scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
               that reaps running jobs past their timeout (F-03) + a background
               retry loop that re-dispatches failed jobs per their retry policy
-              (F-04)
+              (F-04) + a background dependency resolver that skips/dispatches
+              a pending job once its depends_on dependencies resolve (F-06)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation

@@ -52,6 +52,11 @@ func NewServer(db dbpb.DatabaseClient, api apipb.APIClient, logger *slog.Logger)
 // target group is set, dispatches it to the API, which fans it out to the
 // live workers in that group. Jobs with an empty target group are left
 // pending for an ephemeral agent.
+//
+// A job with dependencies (DependsOn, F-06) is never dispatched here: it is
+// left pending and the background dependency resolver (dependencies.go)
+// dispatches it once every dependency has succeeded, or marks it skipped if
+// any of them does not.
 func (s *Server) SubmitJob(ctx context.Context, req *schedpb.SubmitJobRequest) (*schedpb.Job, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "job name is required")
@@ -61,12 +66,17 @@ func (s *Server) SubmitJob(ctx context.Context, req *schedpb.SubmitJobRequest) (
 		Name:        req.GetName(),
 		TargetGroup: req.GetTargetGroup(),
 		Spec:        req.GetSpec(),
+		DependsOn:   req.GetDependsOn(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	job := toProtoJob(created)
 
+	if len(req.GetDependsOn()) > 0 {
+		s.logger.Info("scheduler: job held pending dependencies", "job", created.GetId(), "depends_on", req.GetDependsOn())
+		return job, nil
+	}
 	if req.GetTargetGroup() != "" {
 		if _, err := s.api.DispatchJob(ctx, &apipb.DispatchJobRequest{Job: toAPIJob(job)}); err != nil {
 			s.logger.Warn("scheduler: dispatch to api failed; job left pending",
@@ -214,6 +224,8 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		Spec:        job.GetSpec(),
 		Attempt:     job.GetAttempt(),
 		MaxAttempts: job.GetMaxAttempts(),
+		DependsOn:   job.GetDependsOn(),
+		StepResults: job.GetStepResults(),
 	}
 }
 
@@ -229,5 +241,7 @@ func toAPIJob(job *schedpb.Job) *apipb.Job {
 		Spec:        job.GetSpec(),
 		Attempt:     job.GetAttempt(),
 		MaxAttempts: job.GetMaxAttempts(),
+		DependsOn:   job.GetDependsOn(),
+		StepResults: job.GetStepResults(),
 	}
 }

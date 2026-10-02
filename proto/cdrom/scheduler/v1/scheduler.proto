@@ -50,6 +50,11 @@ message Job {
   // max_attempts is the job's retry budget (0 means the job is never
   // retried), so the UI can render "attempt N of M" (F-04).
   int32 max_attempts = 10;
+  // depends_on lists the ids of jobs this job depends on (F-06).
+  repeated int64 depends_on = 11;
+  // step_results is the terminal outcome of each step that ran (or was
+  // skipped by its condition) during the job's current attempt (F-06).
+  repeated cdrom.db.v1.StepResult step_results = 12;
 }
 
 message SubmitJobRequest {
@@ -61,6 +66,10 @@ message SubmitJobRequest {
   // spec is the execution spec to snapshot onto the job; when absent the job
   // has no steps and succeeds without doing any work.
   cdrom.db.v1.JobSpec spec = 4;
+  // depends_on lists the ids of jobs this job depends on (F-06): the job is
+  // held pending until every dependency succeeds (then it is dispatched) or
+  // any of them does not (then it is marked skipped instead of running).
+  repeated int64 depends_on = 5;
 }
 
 message GetJobRequest {

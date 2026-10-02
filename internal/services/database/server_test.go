@@ -871,3 +871,169 @@ func TestIDPAuthCodes(t *testing.T) {
 		t.Fatalf("consume after prune = %v, want NotFound", err)
 	}
 }
+
+// TestSkipJob verifies SkipJob's conditional semantics (F-06): a pending job
+// transitions to skipped, but a job that already started (or finished) is
+// left untouched.
+func TestSkipJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pending, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "pending"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	resp, err := client.SkipJob(ctx, &dbpb.SkipJobRequest{Id: pending.GetId()})
+	if err != nil {
+		t.Fatalf("SkipJob: %v", err)
+	}
+	if !resp.GetSkipped() {
+		t.Fatal("pending job was not skipped, want skipped=true")
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: pending.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_SKIPPED {
+		t.Errorf("status = %v, want SKIPPED", fetched.GetStatus())
+	}
+	if fetched.GetFinishedAt() == nil {
+		t.Error("finished_at not set on skipped job")
+	}
+
+	// A running job is not skipped.
+	running, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "running"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:        running.GetId(),
+		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
+		StartedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	resp, err = client.SkipJob(ctx, &dbpb.SkipJobRequest{Id: running.GetId()})
+	if err != nil {
+		t.Fatalf("SkipJob: %v", err)
+	}
+	if resp.GetSkipped() {
+		t.Fatal("running job was skipped, want skipped=false")
+	}
+	fetched, err = client.GetJob(ctx, &dbpb.GetJobRequest{Id: running.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_RUNNING {
+		t.Errorf("status = %v, want RUNNING (unchanged)", fetched.GetStatus())
+	}
+}
+
+// TestRerunSkippedJob verifies that RerunJob accepts a previously skipped job
+// (skipped is a terminal state, F-06), resetting it to pending for a fresh
+// run.
+func TestRerunSkippedJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "skipped"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.SkipJob(ctx, &dbpb.SkipJobRequest{Id: job.GetId()}); err != nil {
+		t.Fatalf("SkipJob: %v", err)
+	}
+	rerun, err := client.RerunJob(ctx, &dbpb.RerunJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("RerunJob: %v", err)
+	}
+	if rerun.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+		t.Errorf("status = %v, want PENDING (reset for re-run)", rerun.GetStatus())
+	}
+}
+
+// TestDependsOnRoundTrip verifies that a job's DependsOn (F-06) survives a
+// create/fetch round trip, and that UpdateJob's ClearDependsOn clears it (used
+// by the scheduler's dependency resolver once a job's dependencies are
+// satisfied, so it is not reconsidered on the resolver's next tick).
+func TestDependsOnRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	upstream, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "upstream"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "downstream", DependsOn: []int64{upstream.GetId()}})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if got := job.GetDependsOn(); len(got) != 1 || got[0] != upstream.GetId() {
+		t.Fatalf("depends_on on create = %v, want [%d]", got, upstream.GetId())
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := fetched.GetDependsOn(); len(got) != 1 || got[0] != upstream.GetId() {
+		t.Fatalf("depends_on on fetch = %v, want [%d]", got, upstream.GetId())
+	}
+
+	updated, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: job.GetId(), ClearDependsOn: true})
+	if err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	if got := updated.GetDependsOn(); len(got) != 0 {
+		t.Errorf("depends_on after ClearDependsOn = %v, want empty", got)
+	}
+	fetched, err = client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := fetched.GetDependsOn(); len(got) != 0 {
+		t.Errorf("depends_on after ClearDependsOn (fetch) = %v, want empty", got)
+	}
+}
+
+// TestUpdateJobStepResultsRoundTrip verifies that step_results (F-06) are
+// persisted and survive a fetch round trip, and that they are not clobbered
+// by a later UpdateJob call that carries no step_results (e.g. a "running"
+// status update with no results yet).
+func TestUpdateJobStepResultsRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "job"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	results := []*dbpb.StepResult{
+		{Index: 0, Status: dbpb.StepStatus_STEP_STATUS_SUCCEEDED},
+		{Index: 1, Status: dbpb.StepStatus_STEP_STATUS_SKIPPED},
+		{Index: 2, Status: dbpb.StepStatus_STEP_STATUS_FAILED, Error: "boom"},
+	}
+	updated, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:          job.GetId(),
+		Status:      dbpb.JobStatus_JOB_STATUS_FAILED,
+		FinishedAt:  timestamppb.Now(),
+		StepResults: results,
+	})
+	if err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	if got := updated.GetStepResults(); len(got) != 3 {
+		t.Fatalf("step_results on update response = %v, want 3 entries", got)
+	}
+
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	got := fetched.GetStepResults()
+	if len(got) != 3 {
+		t.Fatalf("step_results on fetch = %v, want 3 entries", got)
+	}
+	if got[2].GetStatus() != dbpb.StepStatus_STEP_STATUS_FAILED || got[2].GetError() != "boom" {
+		t.Errorf("step_results[2] = %+v, want FAILED with error %q", got[2], "boom")
+	}
+}

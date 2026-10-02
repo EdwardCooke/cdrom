@@ -232,7 +232,8 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	}
 
 	w.logger.Info("job started", "job", jobID)
-	err := w.runJob(jobCtx, job, token)
+	collector := &executor.StepResultCollector{}
+	err := w.runJob(jobCtx, job, token, collector)
 	w.mu.Lock()
 	userCancelled := run.userCancel
 	w.mu.Unlock()
@@ -241,7 +242,7 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 		// reported as cancelled, distinct from a failure.
 		if userCancelled {
 			w.logger.Info("job cancelled", "job", jobID)
-			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED)
+			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
 			return
 		}
 		// A timeout (the job-level or a step's per-step timeout, F-03) is
@@ -249,15 +250,15 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 		// job apart from one that ran and errored.
 		if errors.Is(err, executor.ErrTimeout) {
 			w.logger.Error("job timed out", "job", jobID, "err", err.Error())
-			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_TIMED_OUT)
+			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_TIMED_OUT, collector)
 			return
 		}
 		w.logger.Error("job failed", "job", jobID, "err", err.Error())
-		w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_FAILED)
+		w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_FAILED, collector)
 		return
 	}
 	w.logger.Info("job succeeded", "job", jobID)
-	w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_SUCCEEDED)
+	w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
 }
 
 // runJob executes the job's execution spec: the steps run in order and the
@@ -268,23 +269,28 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 // to the API in near-real-time (F-02); the API persists it and fans it out to
 // the UI. Streaming is best-effort and resilient: if the API goes away mid-job
 // the sink reopens its stream and resumes, and if it cannot be opened at all
-// the job still runs (its output is only logged locally).
-func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string) error {
+// the job still runs (its output is only logged locally). collector gathers
+// each step's terminal status (F-06) for report to attach to the final
+// status report.
+func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string, collector *executor.StepResultCollector) error {
 	sink, err := logstream.NewSink(w.deps.API, ctx, job.GetId(), token, w.logger)
 	if err != nil {
 		w.logger.Warn("worker: open log stream; continuing without streaming", "job", job.GetId(), "err", err)
 	}
 	defer sink.Close()
-	return executor.Execute(executor.ContextWithLogSink(ctx, sink), job.GetSpec(), w.logger)
+	ctx = executor.ContextWithLogSink(ctx, sink)
+	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
+	return executor.Execute(ctx, job.GetSpec(), w.logger)
 }
 
 // report sets the finished timestamp and final status, presenting the job
-// token.
-func (w *Worker) report(ctx context.Context, jobID int64, token string, status dbpb.JobStatus) {
+// token, and attaches the job's collected per-step outcomes (F-06).
+func (w *Worker) report(ctx context.Context, jobID int64, token string, status dbpb.JobStatus, collector *executor.StepResultCollector) {
 	if _, err := w.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, token), &apipb.ReportJobStatusRequest{
-		JobId:      jobID,
-		Status:     status,
-		FinishedAt: timestamppb.Now(),
+		JobId:       jobID,
+		Status:      status,
+		FinishedAt:  timestamppb.Now(),
+		StepResults: collector.ToProto(),
 	}); err != nil {
 		w.logger.Error("worker: report status", "job", jobID, "status", status, "err", err)
 	}

@@ -33,7 +33,38 @@ const (
 	// failed so the UI and operators can tell a hung job apart from a job that
 	// ran to completion and reported an error.
 	JobStatusTimedOut JobStatus = "timed_out"
+	// JobStatusSkipped is a terminal state: the job never ran because one of
+	// its dependencies (DependsOn) did not succeed (F-06). It is distinct
+	// from failed so reporting and on_failure logic can tell "didn't run"
+	// apart from "ran and errored".
+	JobStatusSkipped JobStatus = "skipped"
 )
+
+// StepStatus is the terminal outcome of a single step within a job's
+// execution spec (F-06). A step does not have its own pending or cancelled
+// state (those belong to the job as a whole) — only the states a step can
+// actually reach once the executor has decided its fate.
+type StepStatus string
+
+const (
+	StepStatusSucceeded StepStatus = "succeeded"
+	StepStatusFailed    StepStatus = "failed"
+	// StepStatusSkipped means the step's Condition rendered to false, so the
+	// step never ran; it does not fail the job.
+	StepStatusSkipped  StepStatus = "skipped"
+	StepStatusTimedOut StepStatus = "timed_out"
+)
+
+// StepResult is the terminal outcome of one step of a job's execution spec,
+// recorded alongside the job's own final status (F-06).
+type StepResult struct {
+	// Index is the 0-based index of the step in the job's spec.
+	Index  int        `json:"index"`
+	Status StepStatus `json:"status"`
+	// Error is a descriptive error message; empty when Status is Succeeded or
+	// Skipped.
+	Error string `json:"error,omitempty"`
+}
 
 // ParamValue is a single value in a step's Params map. A value is either a
 // scalar String or a list of Strings (by convention, only one is set), so a
@@ -95,6 +126,14 @@ type JobStep struct {
 	// shell handler reads command (string), args (list of strings), and shell
 	// (string) from here; a new step type reads the keys it understands.
 	Params map[string]*ParamValue `json:"params,omitempty"`
+	// Condition is a Go template (text/template) rendered against Env; the
+	// rendered output must parse as a boolean (strconv.ParseBool). An empty
+	// Condition always runs the step. When the rendered value is false the
+	// step is skipped (StepStatusSkipped, F-06) — it does not run and does
+	// not fail the job. A condition that fails to parse or render is a
+	// job-failing error (a bad condition is a spec error, not a reason to
+	// skip).
+	Condition string `json:"condition,omitempty"`
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -161,6 +200,18 @@ type Job struct {
 	// denormalized onto the job so the UI can render "attempt N of M" without
 	// the spec.
 	MaxAttempts int `json:"max_attempts"`
+	// DependsOn lists the ids of jobs this job depends on (F-06). A job with
+	// a non-empty DependsOn is held pending (not dispatched) until every
+	// dependency reaches a terminal state: if all of them succeed the job is
+	// dispatched, but if any of them does not succeed (failed, cancelled,
+	// timed_out, or itself skipped) the job is marked Skipped instead of
+	// running. This is a minimal, single-level dependency check; F-08
+	// replaces it with a full parallel DAG resolver.
+	DependsOn []uint `gorm:"type:text;serializer:json" json:"depends_on,omitempty"`
+	// StepResults is the terminal outcome of each step that ran (or was
+	// skipped by its condition) during the job's current attempt (F-06),
+	// reported by the execution target alongside the job's final status.
+	StepResults []StepResult `gorm:"type:text;serializer:json" json:"step_results,omitempty"`
 }
 
 // Worker is a long-lived worker process registered on a deployment target.

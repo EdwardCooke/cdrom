@@ -242,10 +242,11 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		return nil, err
 	}
 	updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
-		Id:         req.GetJobId(),
-		Status:     req.GetStatus(),
-		StartedAt:  req.GetStartedAt(),
-		FinishedAt: req.GetFinishedAt(),
+		Id:          req.GetJobId(),
+		Status:      req.GetStatus(),
+		StartedAt:   req.GetStartedAt(),
+		FinishedAt:  req.GetFinishedAt(),
+		StepResults: req.GetStepResults(),
 	})
 	if err != nil {
 		return nil, err

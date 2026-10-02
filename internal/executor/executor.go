@@ -16,11 +16,15 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
+	"text/template"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
@@ -63,9 +67,30 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		defer cancel()
 	}
 	for i, step := range spec.GetSteps() {
-		if err := runStep(jobCtx, i, step, logger); err != nil {
+		// A step's condition (F-06) is evaluated before the step runs: when it
+		// renders to false the step is skipped (it does not run and does not
+		// fail the job); when it fails to parse or render, that is a spec
+		// error and fails the job.
+		skip, condErr := evaluateCondition(step)
+		if condErr != nil {
+			err := fmt.Errorf("executor: step %d: condition: %w", i, condErr)
+			reportStepStatus(ctx, i, StepStatusFailed, err.Error())
 			return err
 		}
+		if skip {
+			logger.Info("executor: step skipped (condition not met)", "step", i)
+			reportStepStatus(ctx, i, StepStatusSkipped, "")
+			continue
+		}
+		if err := runStep(jobCtx, i, step, logger); err != nil {
+			stepStatus := StepStatusFailed
+			if errors.Is(err, ErrTimeout) {
+				stepStatus = StepStatusTimedOut
+			}
+			reportStepStatus(ctx, i, stepStatus, err.Error())
+			return err
+		}
+		reportStepStatus(ctx, i, StepStatusSucceeded, "")
 	}
 	return nil
 }
@@ -136,6 +161,163 @@ func LogSinkFromContext(ctx context.Context) LogSink {
 func StepIndexFromContext(ctx context.Context) int {
 	index, _ := ctx.Value(stepIndexKey{}).(int)
 	return index
+}
+
+// ---------------------------------------------------------------------------
+// Step results (F-06)
+// ---------------------------------------------------------------------------
+
+// StepStatus is the terminal outcome of a single step within a job's
+// execution spec. A step does not have its own pending or cancelled state
+// (those belong to the job as a whole) — only the states a step can actually
+// reach once Execute has decided its fate.
+type StepStatus string
+
+const (
+	StepStatusSucceeded StepStatus = "succeeded"
+	StepStatusFailed    StepStatus = "failed"
+	// StepStatusSkipped means the step's Condition rendered to false, so the
+	// step never ran; it does not fail the job.
+	StepStatusSkipped  StepStatus = "skipped"
+	StepStatusTimedOut StepStatus = "timed_out"
+)
+
+// StepResult is one step's terminal outcome, as collected by
+// StepResultCollector.
+type StepResult struct {
+	Index  int
+	Status StepStatus
+	// Error is a descriptive error message; empty when Status is Succeeded or
+	// Skipped.
+	Error string
+}
+
+// StepStatusReporter receives each step's terminal status as Execute runs the
+// spec (F-06), so a caller can persist per-step outcomes — including a step
+// skipped by its condition — alongside the job's own final status. Set one in
+// the context via ContextWithStepStatusReporter; when absent, step outcomes
+// are simply not collected (Execute's returned error remains the
+// authoritative job outcome).
+//
+// Implementations must be safe for concurrent use.
+type StepStatusReporter interface {
+	// ReportStepStatus records stepIndex's terminal status. errMsg is a
+	// descriptive error message, empty when status is StepStatusSucceeded or
+	// StepStatusSkipped.
+	ReportStepStatus(stepIndex int, status StepStatus, errMsg string)
+}
+
+type stepStatusReporterKey struct{}
+
+// ContextWithStepStatusReporter returns a context that carries reporter, so
+// Execute reports each step's terminal status to it. A nil reporter returns
+// ctx unchanged.
+func ContextWithStepStatusReporter(ctx context.Context, reporter StepStatusReporter) context.Context {
+	if reporter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, stepStatusReporterKey{}, reporter)
+}
+
+// StepStatusReporterFromContext returns the StepStatusReporter carried by
+// ctx, or nil when none is set.
+func StepStatusReporterFromContext(ctx context.Context) StepStatusReporter {
+	reporter, _ := ctx.Value(stepStatusReporterKey{}).(StepStatusReporter)
+	return reporter
+}
+
+// reportStepStatus reports a step's terminal status to the context's
+// StepStatusReporter, when one is set.
+func reportStepStatus(ctx context.Context, index int, status StepStatus, errMsg string) {
+	if reporter := StepStatusReporterFromContext(ctx); reporter != nil {
+		reporter.ReportStepStatus(index, status, errMsg)
+	}
+}
+
+// StepResultCollector is a StepStatusReporter that accumulates each step's
+// terminal status in the order Execute reports it, for a caller (the worker
+// or agent) to attach to its final job status report (F-06).
+type StepResultCollector struct {
+	mu      sync.Mutex
+	Results []StepResult
+}
+
+// ReportStepStatus implements StepStatusReporter.
+func (c *StepResultCollector) ReportStepStatus(index int, status StepStatus, errMsg string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Results = append(c.Results, StepResult{Index: index, Status: status, Error: errMsg})
+}
+
+// All returns a snapshot of the collected step results, in the order they
+// were reported.
+func (c *StepResultCollector) All() []StepResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	results := make([]StepResult, len(c.Results))
+	copy(results, c.Results)
+	return results
+}
+
+// stepStatusToProto converts a StepStatus to its proto enum value.
+func stepStatusToProto(status StepStatus) dbpb.StepStatus {
+	switch status {
+	case StepStatusSucceeded:
+		return dbpb.StepStatus_STEP_STATUS_SUCCEEDED
+	case StepStatusFailed:
+		return dbpb.StepStatus_STEP_STATUS_FAILED
+	case StepStatusSkipped:
+		return dbpb.StepStatus_STEP_STATUS_SKIPPED
+	case StepStatusTimedOut:
+		return dbpb.StepStatus_STEP_STATUS_TIMED_OUT
+	default:
+		return dbpb.StepStatus_STEP_STATUS_UNSPECIFIED
+	}
+}
+
+// ToProto returns the collected step results as their proto representation,
+// ready to attach to a ReportJobStatusRequest (F-06).
+func (c *StepResultCollector) ToProto() []*dbpb.StepResult {
+	results := c.All()
+	if len(results) == 0 {
+		return nil
+	}
+	proto := make([]*dbpb.StepResult, len(results))
+	for i, result := range results {
+		proto[i] = &dbpb.StepResult{
+			Index:  int32(result.Index),
+			Status: stepStatusToProto(result.Status),
+			Error:  result.Error,
+		}
+	}
+	return proto
+}
+
+// evaluateCondition renders step's Condition (a Go template, F-06) against
+// the step's own Env and parses the result as a boolean. It returns
+// skip=true when the condition rendered to false (the step should be
+// skipped); an empty Condition never skips. A condition that fails to parse
+// as a template, fails to render, or whose rendered output does not parse as
+// a boolean is a spec error (the job fails, the step is not skipped).
+func evaluateCondition(step *dbpb.JobStep) (skip bool, err error) {
+	condition := step.GetCondition()
+	if condition == "" {
+		return false, nil
+	}
+	tmpl, err := template.New("condition").Parse(condition)
+	if err != nil {
+		return false, fmt.Errorf("parse template %q: %w", condition, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, step.GetEnv()); err != nil {
+		return false, fmt.Errorf("render template %q: %w", condition, err)
+	}
+	rendered := strings.TrimSpace(buf.String())
+	value, err := strconv.ParseBool(rendered)
+	if err != nil {
+		return false, fmt.Errorf("condition %q rendered %q, which is not a boolean: %w", condition, rendered, err)
+	}
+	return !value, nil
 }
 
 // stepTypes maps a step type to its handler. Handlers register themselves via

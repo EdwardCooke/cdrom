@@ -158,3 +158,119 @@ func TestExecuteNoTimeoutUnbounded(t *testing.T) {
 		t.Errorf("error = %q, want a cancellation (not a timeout) for a job with no timeout", err)
 	}
 }
+
+// TestExecuteConditionTrueRunsStep verifies that a step whose Condition
+// renders to true runs normally and is reported as succeeded.
+func TestExecuteConditionTrueRunsStep(t *testing.T) {
+	var ran bool
+	RegisterStepType("condition-marker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		ran = true
+		return nil
+	})
+
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	step := &dbpb.JobStep{Type: "condition-marker", Condition: "{{ eq 1 1 }}"}
+	if err := Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !ran {
+		t.Error("step with a true condition did not run")
+	}
+	results := collector.All()
+	if len(results) != 1 || results[0].Status != StepStatusSucceeded {
+		t.Fatalf("results = %+v, want one succeeded result", results)
+	}
+}
+
+// TestExecuteConditionFalseSkipsStep verifies that a step whose Condition
+// renders to false is skipped (does not run, does not fail the job) and is
+// reported as skipped (F-06).
+func TestExecuteConditionFalseSkipsStep(t *testing.T) {
+	var ran bool
+	RegisterStepType("condition-marker-2", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		ran = true
+		return nil
+	})
+
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	step := &dbpb.JobStep{Type: "condition-marker-2", Condition: "{{ eq 1 2 }}"}
+	if err := Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if ran {
+		t.Error("step with a false condition ran, want it skipped")
+	}
+	results := collector.All()
+	if len(results) != 1 || results[0].Status != StepStatusSkipped {
+		t.Fatalf("results = %+v, want one skipped result", results)
+	}
+}
+
+// TestExecuteConditionMalformedFailsJob verifies that a Condition that fails
+// to render or does not parse as a boolean is treated as a spec error: the
+// job fails (the step is not skipped, and later steps do not run).
+func TestExecuteConditionMalformedFailsJob(t *testing.T) {
+	var laterRan bool
+	RegisterStepType("condition-marker-3", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		laterRan = true
+		return nil
+	})
+
+	step := &dbpb.JobStep{Type: "condition-marker-3", Condition: "not-a-boolean"}
+	later := &dbpb.JobStep{Type: "condition-marker-3"}
+	err := Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step, later}}, testLogger())
+	if err == nil {
+		t.Fatal("expected an error for a malformed condition, got nil")
+	}
+	if laterRan {
+		t.Error("a later step ran after a malformed condition failed the job")
+	}
+}
+
+// TestExecuteConditionEmptyNeverSkips verifies that a step with no Condition
+// always runs (the common case, with no behavior change from before F-06).
+func TestExecuteConditionEmptyNeverSkips(t *testing.T) {
+	var ran bool
+	RegisterStepType("condition-marker-4", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		ran = true
+		return nil
+	})
+
+	step := &dbpb.JobStep{Type: "condition-marker-4"}
+	if err := Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !ran {
+		t.Error("step with no condition did not run")
+	}
+}
+
+// TestStepResultCollectorToProto verifies the proto conversion used to
+// attach collected step results to a ReportJobStatusRequest (F-06).
+func TestStepResultCollectorToProto(t *testing.T) {
+	collector := &StepResultCollector{}
+	collector.ReportStepStatus(0, StepStatusSucceeded, "")
+	collector.ReportStepStatus(1, StepStatusSkipped, "")
+	collector.ReportStepStatus(2, StepStatusFailed, "boom")
+
+	proto := collector.ToProto()
+	if len(proto) != 3 {
+		t.Fatalf("len(proto) = %d, want 3", len(proto))
+	}
+	if proto[0].GetStatus() != dbpb.StepStatus_STEP_STATUS_SUCCEEDED {
+		t.Errorf("proto[0].Status = %v, want SUCCEEDED", proto[0].GetStatus())
+	}
+	if proto[1].GetStatus() != dbpb.StepStatus_STEP_STATUS_SKIPPED {
+		t.Errorf("proto[1].Status = %v, want SKIPPED", proto[1].GetStatus())
+	}
+	if proto[2].GetStatus() != dbpb.StepStatus_STEP_STATUS_FAILED || proto[2].GetError() != "boom" {
+		t.Errorf("proto[2] = %+v, want FAILED with error %q", proto[2], "boom")
+	}
+
+	empty := &StepResultCollector{}
+	if got := empty.ToProto(); got != nil {
+		t.Errorf("ToProto() with no results = %v, want nil", got)
+	}
+}

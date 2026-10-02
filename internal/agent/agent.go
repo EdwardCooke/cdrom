@@ -86,12 +86,13 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	defer cancel()
 	go a.watchCancellation(jobCtx, cancel)
 
-	if err := a.runJob(jobCtx, job); err != nil {
+	collector := &executor.StepResultCollector{}
+	if err := a.runJob(jobCtx, job, collector); err != nil {
 		// A user cancellation (F-05) interrupts the running step and is
 		// reported as cancelled, distinct from a failure.
 		if jobCtx.Err() == context.Canceled {
 			a.logger.Info("job cancelled", "job", a.jobID)
-			a.report(ctx, dbpb.JobStatus_JOB_STATUS_CANCELLED)
+			a.report(ctx, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
 			return dbpb.JobStatus_JOB_STATUS_CANCELLED, nil
 		}
 		// A timeout (the job-level or a step's per-step timeout, F-03) is
@@ -99,15 +100,15 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 		// job apart from one that ran and errored.
 		if errors.Is(err, executor.ErrTimeout) {
 			a.logger.Error("job timed out", "job", a.jobID, "err", err.Error())
-			a.report(ctx, dbpb.JobStatus_JOB_STATUS_TIMED_OUT)
+			a.report(ctx, dbpb.JobStatus_JOB_STATUS_TIMED_OUT, collector)
 			return dbpb.JobStatus_JOB_STATUS_TIMED_OUT, nil
 		}
 		a.logger.Error("job failed", "job", a.jobID, "err", err.Error())
-		a.report(ctx, dbpb.JobStatus_JOB_STATUS_FAILED)
+		a.report(ctx, dbpb.JobStatus_JOB_STATUS_FAILED, collector)
 		return dbpb.JobStatus_JOB_STATUS_FAILED, nil
 	}
 	a.logger.Info("job succeeded", "job", a.jobID)
-	a.report(ctx, dbpb.JobStatus_JOB_STATUS_SUCCEEDED)
+	a.report(ctx, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
 	return dbpb.JobStatus_JOB_STATUS_SUCCEEDED, nil
 }
 
@@ -149,21 +150,26 @@ func (a *Agent) watchCancellation(ctx context.Context, cancel context.CancelFunc
 // to the API in near-real-time (F-02); the API persists it and fans it out to
 // the UI. Streaming is best-effort and resilient: if the API goes away mid-job
 // the sink reopens its stream and resumes, and if it cannot be opened at all
-// the job still runs (its output is only logged locally).
-func (a *Agent) runJob(ctx context.Context, job *apipb.Job) error {
+// the job still runs (its output is only logged locally). collector gathers
+// each step's terminal status (F-06) for report to attach to the final
+// status report.
+func (a *Agent) runJob(ctx context.Context, job *apipb.Job, collector *executor.StepResultCollector) error {
 	sink, err := logstream.NewSink(a.deps.API, ctx, a.jobID, a.token, a.logger)
 	if err != nil {
 		a.logger.Warn("agent: open log stream; continuing without streaming", "job", a.jobID, "err", err)
 	}
 	defer sink.Close()
-	return executor.Execute(executor.ContextWithLogSink(ctx, sink), job.GetSpec(), a.logger)
+	ctx = executor.ContextWithLogSink(ctx, sink)
+	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
+	return executor.Execute(ctx, job.GetSpec(), a.logger)
 }
 
-func (a *Agent) report(ctx context.Context, status dbpb.JobStatus) {
+func (a *Agent) report(ctx context.Context, status dbpb.JobStatus, collector *executor.StepResultCollector) {
 	if _, err := a.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, a.token), &apipb.ReportJobStatusRequest{
-		JobId:      a.jobID,
-		Status:     status,
-		FinishedAt: timestamppb.Now(),
+		JobId:       a.jobID,
+		Status:      status,
+		FinishedAt:  timestamppb.Now(),
+		StepResults: collector.ToProto(),
 	}); err != nil {
 		a.logger.Error("agent: report status", "job", a.jobID, "status", status, "err", err)
 	}

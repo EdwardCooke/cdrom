@@ -361,7 +361,12 @@ type Job struct {
 	Attempt int32 `protobuf:"varint,10,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	// max_attempts is the job's retry budget (0 means the job is never
 	// retried), so the UI can render "attempt N of M".
-	MaxAttempts   int32 `protobuf:"varint,11,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
+	MaxAttempts int32 `protobuf:"varint,11,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
+	// depends_on lists the ids of jobs this job depends on (F-06).
+	DependsOn []int64 `protobuf:"varint,12,rep,packed,name=depends_on,json=dependsOn,proto3" json:"depends_on,omitempty"`
+	// step_results is the terminal outcome of each step that ran (or was
+	// skipped by its condition) during the job's current attempt (F-06).
+	StepResults   []*v1.StepResult `protobuf:"bytes,13,rep,name=step_results,json=stepResults,proto3" json:"step_results,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -471,6 +476,20 @@ func (x *Job) GetMaxAttempts() int32 {
 		return x.MaxAttempts
 	}
 	return 0
+}
+
+func (x *Job) GetDependsOn() []int64 {
+	if x != nil {
+		return x.DependsOn
+	}
+	return nil
+}
+
+func (x *Job) GetStepResults() []*v1.StepResult {
+	if x != nil {
+		return x.StepResults
+	}
+	return nil
 }
 
 type JobAssignment struct {
@@ -812,11 +831,15 @@ func (x *GetJobRequest) GetId() int64 {
 }
 
 type ReportJobStatusRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	JobId         int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	Status        v1.JobStatus           `protobuf:"varint,2,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
-	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	FinishedAt    *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	JobId      int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Status     v1.JobStatus           `protobuf:"varint,2,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
+	StartedAt  *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	FinishedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
+	// step_results is the terminal outcome of each step that ran (or was
+	// skipped by its condition) so far in this attempt (F-06); absent/empty
+	// leaves the previously recorded results unchanged.
+	StepResults   []*v1.StepResult `protobuf:"bytes,5,rep,name=step_results,json=stepResults,proto3" json:"step_results,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -875,6 +898,13 @@ func (x *ReportJobStatusRequest) GetStartedAt() *timestamppb.Timestamp {
 func (x *ReportJobStatusRequest) GetFinishedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.FinishedAt
+	}
+	return nil
+}
+
+func (x *ReportJobStatusRequest) GetStepResults() []*v1.StepResult {
+	if x != nil {
+		return x.StepResults
 	}
 	return nil
 }
@@ -1328,7 +1358,7 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x10HeartbeatRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"G\n" +
 	"\x11HeartbeatResponse\x122\n" +
-	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\x92\x03\n" +
+	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\xed\x03\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -1344,7 +1374,10 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x04spec\x18\t \x01(\v2\x14.cdrom.db.v1.JobSpecR\x04spec\x12\x18\n" +
 	"\aattempt\x18\n" +
 	" \x01(\x05R\aattempt\x12!\n" +
-	"\fmax_attempts\x18\v \x01(\x05R\vmaxAttempts\"k\n" +
+	"\fmax_attempts\x18\v \x01(\x05R\vmaxAttempts\x12\x1d\n" +
+	"\n" +
+	"depends_on\x18\f \x03(\x03R\tdependsOn\x12:\n" +
+	"\fstep_results\x18\r \x03(\v2\x17.cdrom.db.v1.StepResultR\vstepResults\"k\n" +
 	"\rJobAssignment\x12#\n" +
 	"\x03job\x18\x01 \x01(\v2\x11.cdrom.api.v1.JobR\x03job\x12\x1f\n" +
 	"\vworker_name\x18\x02 \x01(\tR\n" +
@@ -1365,14 +1398,15 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x10CancelJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\x1f\n" +
 	"\rGetJobRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x03R\x02id\"\xd7\x01\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"\x93\x02\n" +
 	"\x16ReportJobStatusRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12.\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x129\n" +
 	"\n" +
 	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12;\n" +
 	"\vfinished_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"finishedAt\"z\n" +
+	"finishedAt\x12:\n" +
+	"\fstep_results\x18\x05 \x03(\v2\x17.cdrom.db.v1.StepResultR\vstepResults\"z\n" +
 	"\x0eJobLogMetadata\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
 	"\n" +
@@ -1462,15 +1496,16 @@ var file_cdrom_api_v1_api_proto_goTypes = []any{
 	(*timestamppb.Timestamp)(nil),       // 22: google.protobuf.Timestamp
 	(v1.JobStatus)(0),                   // 23: cdrom.db.v1.JobStatus
 	(*v1.JobSpec)(nil),                  // 24: cdrom.db.v1.JobSpec
-	(*v11.ArtifactChunk)(nil),           // 25: cdrom.artifacts.v1.ArtifactChunk
-	(*v11.DownloadArtifactRequest)(nil), // 26: cdrom.artifacts.v1.DownloadArtifactRequest
-	(*v11.GetArtifactRequest)(nil),      // 27: cdrom.artifacts.v1.GetArtifactRequest
-	(*v11.ListArtifactsRequest)(nil),    // 28: cdrom.artifacts.v1.ListArtifactsRequest
-	(*v11.DeleteArtifactRequest)(nil),   // 29: cdrom.artifacts.v1.DeleteArtifactRequest
-	(*emptypb.Empty)(nil),               // 30: google.protobuf.Empty
-	(*v11.UploadArtifactResponse)(nil),  // 31: cdrom.artifacts.v1.UploadArtifactResponse
-	(*v11.Artifact)(nil),                // 32: cdrom.artifacts.v1.Artifact
-	(*v11.ListArtifactsResponse)(nil),   // 33: cdrom.artifacts.v1.ListArtifactsResponse
+	(*v1.StepResult)(nil),               // 25: cdrom.db.v1.StepResult
+	(*v11.ArtifactChunk)(nil),           // 26: cdrom.artifacts.v1.ArtifactChunk
+	(*v11.DownloadArtifactRequest)(nil), // 27: cdrom.artifacts.v1.DownloadArtifactRequest
+	(*v11.GetArtifactRequest)(nil),      // 28: cdrom.artifacts.v1.GetArtifactRequest
+	(*v11.ListArtifactsRequest)(nil),    // 29: cdrom.artifacts.v1.ListArtifactsRequest
+	(*v11.DeleteArtifactRequest)(nil),   // 30: cdrom.artifacts.v1.DeleteArtifactRequest
+	(*emptypb.Empty)(nil),               // 31: google.protobuf.Empty
+	(*v11.UploadArtifactResponse)(nil),  // 32: cdrom.artifacts.v1.UploadArtifactResponse
+	(*v11.Artifact)(nil),                // 33: cdrom.artifacts.v1.Artifact
+	(*v11.ListArtifactsResponse)(nil),   // 34: cdrom.artifacts.v1.ListArtifactsResponse
 }
 var file_cdrom_api_v1_api_proto_depIdxs = []int32{
 	22, // 0: cdrom.api.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
@@ -1478,53 +1513,55 @@ var file_cdrom_api_v1_api_proto_depIdxs = []int32{
 	22, // 2: cdrom.api.v1.Job.started_at:type_name -> google.protobuf.Timestamp
 	22, // 3: cdrom.api.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
 	24, // 4: cdrom.api.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
-	6,  // 5: cdrom.api.v1.JobAssignment.job:type_name -> cdrom.api.v1.Job
-	7,  // 6: cdrom.api.v1.WatchMessage.assignment:type_name -> cdrom.api.v1.JobAssignment
-	8,  // 7: cdrom.api.v1.WatchMessage.cancellation:type_name -> cdrom.api.v1.JobCancellation
-	23, // 8: cdrom.api.v1.ReportJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
-	22, // 9: cdrom.api.v1.ReportJobStatusRequest.started_at:type_name -> google.protobuf.Timestamp
-	22, // 10: cdrom.api.v1.ReportJobStatusRequest.finished_at:type_name -> google.protobuf.Timestamp
-	0,  // 11: cdrom.api.v1.JobLogMetadata.stream:type_name -> cdrom.api.v1.JobLogStream
-	14, // 12: cdrom.api.v1.JobLogChunk.metadata:type_name -> cdrom.api.v1.JobLogMetadata
-	6,  // 13: cdrom.api.v1.DispatchJobRequest.job:type_name -> cdrom.api.v1.Job
-	23, // 14: cdrom.api.v1.NotifyJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
-	2,  // 15: cdrom.api.v1.API.RegisterWorker:input_type -> cdrom.api.v1.RegisterWorkerRequest
-	3,  // 16: cdrom.api.v1.API.DeregisterWorker:input_type -> cdrom.api.v1.DeregisterWorkerRequest
-	4,  // 17: cdrom.api.v1.API.Heartbeat:input_type -> cdrom.api.v1.HeartbeatRequest
-	10, // 18: cdrom.api.v1.API.WatchJobs:input_type -> cdrom.api.v1.WatchJobsRequest
-	12, // 19: cdrom.api.v1.API.GetJob:input_type -> cdrom.api.v1.GetJobRequest
-	13, // 20: cdrom.api.v1.API.ReportJobStatus:input_type -> cdrom.api.v1.ReportJobStatusRequest
-	11, // 21: cdrom.api.v1.API.CancelJob:input_type -> cdrom.api.v1.CancelJobRequest
-	15, // 22: cdrom.api.v1.API.StreamJobLogs:input_type -> cdrom.api.v1.JobLogChunk
-	20, // 23: cdrom.api.v1.API.ExchangeJobToken:input_type -> cdrom.api.v1.ExchangeJobTokenRequest
-	17, // 24: cdrom.api.v1.API.DispatchJob:input_type -> cdrom.api.v1.DispatchJobRequest
-	19, // 25: cdrom.api.v1.API.NotifyJobStatus:input_type -> cdrom.api.v1.NotifyJobStatusRequest
-	25, // 26: cdrom.api.v1.API.UploadArtifact:input_type -> cdrom.artifacts.v1.ArtifactChunk
-	26, // 27: cdrom.api.v1.API.DownloadArtifact:input_type -> cdrom.artifacts.v1.DownloadArtifactRequest
-	27, // 28: cdrom.api.v1.API.GetArtifact:input_type -> cdrom.artifacts.v1.GetArtifactRequest
-	28, // 29: cdrom.api.v1.API.ListArtifacts:input_type -> cdrom.artifacts.v1.ListArtifactsRequest
-	29, // 30: cdrom.api.v1.API.DeleteArtifact:input_type -> cdrom.artifacts.v1.DeleteArtifactRequest
-	1,  // 31: cdrom.api.v1.API.RegisterWorker:output_type -> cdrom.api.v1.Worker
-	30, // 32: cdrom.api.v1.API.DeregisterWorker:output_type -> google.protobuf.Empty
-	5,  // 33: cdrom.api.v1.API.Heartbeat:output_type -> cdrom.api.v1.HeartbeatResponse
-	9,  // 34: cdrom.api.v1.API.WatchJobs:output_type -> cdrom.api.v1.WatchMessage
-	6,  // 35: cdrom.api.v1.API.GetJob:output_type -> cdrom.api.v1.Job
-	6,  // 36: cdrom.api.v1.API.ReportJobStatus:output_type -> cdrom.api.v1.Job
-	30, // 37: cdrom.api.v1.API.CancelJob:output_type -> google.protobuf.Empty
-	16, // 38: cdrom.api.v1.API.StreamJobLogs:output_type -> cdrom.api.v1.StreamJobLogsResponse
-	21, // 39: cdrom.api.v1.API.ExchangeJobToken:output_type -> cdrom.api.v1.ExchangeJobTokenResponse
-	18, // 40: cdrom.api.v1.API.DispatchJob:output_type -> cdrom.api.v1.DispatchJobResponse
-	30, // 41: cdrom.api.v1.API.NotifyJobStatus:output_type -> google.protobuf.Empty
-	31, // 42: cdrom.api.v1.API.UploadArtifact:output_type -> cdrom.artifacts.v1.UploadArtifactResponse
-	25, // 43: cdrom.api.v1.API.DownloadArtifact:output_type -> cdrom.artifacts.v1.ArtifactChunk
-	32, // 44: cdrom.api.v1.API.GetArtifact:output_type -> cdrom.artifacts.v1.Artifact
-	33, // 45: cdrom.api.v1.API.ListArtifacts:output_type -> cdrom.artifacts.v1.ListArtifactsResponse
-	30, // 46: cdrom.api.v1.API.DeleteArtifact:output_type -> google.protobuf.Empty
-	31, // [31:47] is the sub-list for method output_type
-	15, // [15:31] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	25, // 5: cdrom.api.v1.Job.step_results:type_name -> cdrom.db.v1.StepResult
+	6,  // 6: cdrom.api.v1.JobAssignment.job:type_name -> cdrom.api.v1.Job
+	7,  // 7: cdrom.api.v1.WatchMessage.assignment:type_name -> cdrom.api.v1.JobAssignment
+	8,  // 8: cdrom.api.v1.WatchMessage.cancellation:type_name -> cdrom.api.v1.JobCancellation
+	23, // 9: cdrom.api.v1.ReportJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
+	22, // 10: cdrom.api.v1.ReportJobStatusRequest.started_at:type_name -> google.protobuf.Timestamp
+	22, // 11: cdrom.api.v1.ReportJobStatusRequest.finished_at:type_name -> google.protobuf.Timestamp
+	25, // 12: cdrom.api.v1.ReportJobStatusRequest.step_results:type_name -> cdrom.db.v1.StepResult
+	0,  // 13: cdrom.api.v1.JobLogMetadata.stream:type_name -> cdrom.api.v1.JobLogStream
+	14, // 14: cdrom.api.v1.JobLogChunk.metadata:type_name -> cdrom.api.v1.JobLogMetadata
+	6,  // 15: cdrom.api.v1.DispatchJobRequest.job:type_name -> cdrom.api.v1.Job
+	23, // 16: cdrom.api.v1.NotifyJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
+	2,  // 17: cdrom.api.v1.API.RegisterWorker:input_type -> cdrom.api.v1.RegisterWorkerRequest
+	3,  // 18: cdrom.api.v1.API.DeregisterWorker:input_type -> cdrom.api.v1.DeregisterWorkerRequest
+	4,  // 19: cdrom.api.v1.API.Heartbeat:input_type -> cdrom.api.v1.HeartbeatRequest
+	10, // 20: cdrom.api.v1.API.WatchJobs:input_type -> cdrom.api.v1.WatchJobsRequest
+	12, // 21: cdrom.api.v1.API.GetJob:input_type -> cdrom.api.v1.GetJobRequest
+	13, // 22: cdrom.api.v1.API.ReportJobStatus:input_type -> cdrom.api.v1.ReportJobStatusRequest
+	11, // 23: cdrom.api.v1.API.CancelJob:input_type -> cdrom.api.v1.CancelJobRequest
+	15, // 24: cdrom.api.v1.API.StreamJobLogs:input_type -> cdrom.api.v1.JobLogChunk
+	20, // 25: cdrom.api.v1.API.ExchangeJobToken:input_type -> cdrom.api.v1.ExchangeJobTokenRequest
+	17, // 26: cdrom.api.v1.API.DispatchJob:input_type -> cdrom.api.v1.DispatchJobRequest
+	19, // 27: cdrom.api.v1.API.NotifyJobStatus:input_type -> cdrom.api.v1.NotifyJobStatusRequest
+	26, // 28: cdrom.api.v1.API.UploadArtifact:input_type -> cdrom.artifacts.v1.ArtifactChunk
+	27, // 29: cdrom.api.v1.API.DownloadArtifact:input_type -> cdrom.artifacts.v1.DownloadArtifactRequest
+	28, // 30: cdrom.api.v1.API.GetArtifact:input_type -> cdrom.artifacts.v1.GetArtifactRequest
+	29, // 31: cdrom.api.v1.API.ListArtifacts:input_type -> cdrom.artifacts.v1.ListArtifactsRequest
+	30, // 32: cdrom.api.v1.API.DeleteArtifact:input_type -> cdrom.artifacts.v1.DeleteArtifactRequest
+	1,  // 33: cdrom.api.v1.API.RegisterWorker:output_type -> cdrom.api.v1.Worker
+	31, // 34: cdrom.api.v1.API.DeregisterWorker:output_type -> google.protobuf.Empty
+	5,  // 35: cdrom.api.v1.API.Heartbeat:output_type -> cdrom.api.v1.HeartbeatResponse
+	9,  // 36: cdrom.api.v1.API.WatchJobs:output_type -> cdrom.api.v1.WatchMessage
+	6,  // 37: cdrom.api.v1.API.GetJob:output_type -> cdrom.api.v1.Job
+	6,  // 38: cdrom.api.v1.API.ReportJobStatus:output_type -> cdrom.api.v1.Job
+	31, // 39: cdrom.api.v1.API.CancelJob:output_type -> google.protobuf.Empty
+	16, // 40: cdrom.api.v1.API.StreamJobLogs:output_type -> cdrom.api.v1.StreamJobLogsResponse
+	21, // 41: cdrom.api.v1.API.ExchangeJobToken:output_type -> cdrom.api.v1.ExchangeJobTokenResponse
+	18, // 42: cdrom.api.v1.API.DispatchJob:output_type -> cdrom.api.v1.DispatchJobResponse
+	31, // 43: cdrom.api.v1.API.NotifyJobStatus:output_type -> google.protobuf.Empty
+	32, // 44: cdrom.api.v1.API.UploadArtifact:output_type -> cdrom.artifacts.v1.UploadArtifactResponse
+	26, // 45: cdrom.api.v1.API.DownloadArtifact:output_type -> cdrom.artifacts.v1.ArtifactChunk
+	33, // 46: cdrom.api.v1.API.GetArtifact:output_type -> cdrom.artifacts.v1.Artifact
+	34, // 47: cdrom.api.v1.API.ListArtifacts:output_type -> cdrom.artifacts.v1.ListArtifactsResponse
+	31, // 48: cdrom.api.v1.API.DeleteArtifact:output_type -> google.protobuf.Empty
+	33, // [33:49] is the sub-list for method output_type
+	17, // [17:33] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_api_v1_api_proto_init() }

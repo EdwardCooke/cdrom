@@ -80,6 +80,12 @@ func main() {
 	retryCtx, stopRetry := context.WithCancel(ctx)
 	defer stopRetry()
 	sched.StartRetryLoop(retryCtx)
+	// Start the job-dependency resolver (F-06): it skips a pending job whose
+	// dependency did not succeed, and dispatches a pending job once every
+	// dependency has succeeded. It runs until the process shuts down.
+	dependencyCtx, stopDependencyResolver := context.WithCancel(ctx)
+	defer stopDependencyResolver()
+	sched.StartDependencyResolver(dependencyCtx)
 	srv := grpc.NewServer(grpc.Creds(creds))
 	schedpb.RegisterSchedulerServer(srv, sched)
 

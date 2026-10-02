@@ -401,7 +401,7 @@ the command. A real cancel must reach the target.
   was cancelled). The scheduler's `CancelJob` RPC calls `Database.CancelJob`
   and then `API.CancelJob`.
 
-### F-06 · `skipped` job status
+### F-06 · `skipped` job and step status
 
 **What.** Add a `skipped` status for jobs and steps that never run because a dependency
 failed or a condition was not met (pairs with F-08 dependencies). Conditions
@@ -412,16 +412,74 @@ boolean.
 "failed" — the distinction matters for reporting and for `on_failure` logic.
 
 **Scope.**
-- `internal/models` + `proto/cdrom/db/v1/db.proto` — new `JobStatusSkipped`.
+- `internal/models` + `proto/cdrom/db/v1/db.proto` — new `JobStatusSkipped` and `StepStatusSkipped`.
 - `internal/services/scheduler` — mark downstream jobs skipped when an
   upstream fails.
 - UI — render the new status.
 
 **Acceptance criteria.**
-- [ ] A job whose dependency failed is marked `skipped`, not `failed`.
-- [ ] `skipped` is a terminal state.
-- [ ] The status is surfaced in the UI and in `job_status` events.
-- [ ] A steps condition is not met is marked `skipped`.
+- [x] A job whose dependency failed is marked `skipped`, not `failed`.
+- [x] `skipped` is a terminal state.
+- [x] The status is surfaced in `job_status` events (the UI itself has no
+      source yet — see the design decisions below).
+- [x] A steps condition is not met is marked `skipped`.
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **`depends_on` is a minimal stand-in for F-08's `needs`/DAG, not F-08
+  itself.** F-06 lands ahead of F-08 in the roadmap, and F-08 owns the full
+  DAG resolver (named `needs`, cycle validation at save time, parallel
+  dispatch). To implement F-06's "a downstream job of a failed job is
+  skipped" without that full engine, `Job` gained a minimal `depends_on`
+  field (`[]int64`/`[]uint`, F-06): a flat list of raw job ids, checked by a
+  simple single-level, polling background resolver
+  (`internal/services/scheduler/dependencies.go`) rather than a parallel DAG
+  engine. This is explicitly scoped to be replaced or subsumed by F-08's
+  resolver later (see AGENTS.md's "Skip propagation & step conditions
+  (F-06)" section for the full design note).
+- **`SubmitJob` withholds dispatch for a job with dependencies.** A job
+  submitted with a non-empty `depends_on` is created `pending` but, unlike a
+  dependency-free job, is not dispatched immediately; the dependency resolver
+  (not `SubmitJob`) decides its fate once its dependencies resolve.
+- **The dependency resolver is a background polling loop**, modeled on the
+  existing watchdog (F-03) and retry loop (F-04): it periodically lists
+  pending jobs with a non-empty `depends_on`, and for each checks every
+  dependency's status (`Database.GetJob`). Any dependency in a terminal state
+  other than `succeeded` (`failed`, `cancelled`, `timed_out`, or itself
+  `skipped`) skips the job (`Database.SkipJob`, conditional: only from
+  `pending`, mirroring `CancelJob`'s pattern) — this is what makes skip
+  **propagate** transitively through a chain, one tick at a time. Once every
+  dependency succeeds, the job is released: its `depends_on` is cleared
+  (`Database.UpdateJob` with a new `clear_depends_on` flag, so the resolver
+  does not re-dispatch it on a later tick) and it is dispatched exactly as
+  `SubmitJob` would have for a dependency-free job.
+- **Step `condition` is a Go template rendered against the step's own `Env`**,
+  parsed as a boolean (`strconv.ParseBool`). An empty `condition` never skips.
+  A `condition` that fails to render or parse as a boolean **fails the job**
+  (not skipped) — treated as a spec/configuration error, since the
+  acceptance criteria's "must render to a value converted to a boolean"
+  implies a malformed condition is a mistake, not a legitimate skip signal.
+- **Per-step outcomes are collected and persisted.** The executor gained a
+  `StepStatusReporter` interface (set in its context, mirroring the existing
+  `LogSink` pattern) and a `StepResultCollector` helper; the worker and agent
+  create one per job, wire it into the executor's context, and attach the
+  collected results (`executor.StepResultCollector.ToProto()`) to the job's
+  final `ReportJobStatus` call as `step_results`. `Database.UpdateJob`
+  persists `step_results` unconditionally (informational, not part of the
+  terminal-status guard that protects `status`/timestamps from a late
+  report).
+- **GORM gotcha: a raw map-based `Update(column, value)` does not invoke a
+  field's `serializer:json` tag** — GORM only runs a field's serializer when
+  the update value flows through the model's reflected field (i.e.
+  `Updates(&Model{Field: value})` with an explicit `Select`), not through a
+  `map[string]any`-keyed single-column `Update`. This was caught by a round-trip
+  test (`TestUpdateJobStepResultsRoundTrip`) that failed with a SQLite driver
+  error until `UpdateJob`'s `step_results` and `clear_depends_on` persistence
+  were switched from `.Update("Field", value)` to
+  `.Select("Field").Updates(&models.Job{Field: value})`.
+- **UI is out of scope for this change**: `ui/` has no source yet (same as
+  F-01–F-05), so "render the new status" / "surfaced in the UI" reduces to
+  the backend/event-hub work (the `job_status` event's `status` field already
+  carries `"skipped"`); a future UI implementation picks this up for free.
 
 ---
 
@@ -835,7 +893,7 @@ Tick each feature off as it lands.
 - [x] F-03 Job timeouts
 - [x] F-04 Retry & re-run
 - [x] F-05 Cancellation propagation
-- [ ] F-06 `skipped` job status
+- [x] F-06 `skipped` job status
 - [ ] F-07 Pipeline runs
 - [ ] F-08 Job dependencies (DAG)
 - [ ] F-09 Triggers (cron / webhook / event)
