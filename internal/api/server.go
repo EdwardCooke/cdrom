@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,6 +46,13 @@ func (s *Server) Handler() http.Handler {
 	// Pipelines (via the database service).
 	mux.HandleFunc("POST /api/pipelines", s.createPipeline)
 	mux.HandleFunc("GET /api/pipelines", s.listPipelines)
+
+	// Pipeline runs (F-07): triggering a pipeline creates a run and its job
+	// instances (via the scheduler); runs are listed and fetched via the
+	// database service.
+	mux.HandleFunc("POST /api/pipelines/{id}/runs", s.createRun)
+	mux.HandleFunc("GET /api/pipelines/{id}/runs", s.listRuns)
+	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 
 	// Jobs (via the scheduler service).
 	mux.HandleFunc("POST /api/jobs", s.submitJob)
@@ -105,6 +113,74 @@ func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, nonNil(response.GetPipelines()))
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline runs (F-07)
+// ---------------------------------------------------------------------------
+
+// runRequest is the body of POST /api/pipelines/{id}/runs. Trigger is how the
+// run was started (e.g. "manual"); Params are the run's parameters (F-10).
+type runRequest struct {
+	Trigger string            `json:"trigger,omitempty"`
+	Params  map[string]string `json:"params,omitempty"`
+}
+
+// createRun triggers a new execution of a pipeline (F-07): it asks the
+// scheduler to create a PipelineRun and one job instance per job definition in
+// the pipeline, then drive them. The run's overall status is derived from its
+// job instances by the scheduler's run-status loop.
+func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req runRequest
+	// An empty body is allowed (a run with the default trigger and no params);
+	// json.Decoder reports io.EOF for one, which we treat as "no body".
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	run, err := s.clients.Scheduler.CreateRun(r.Context(), &schedpb.CreateRunRequest{
+		PipelineId: pipelineID,
+		Trigger:    req.Trigger,
+		Params:     req.Params,
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	s.publish(Event{Type: EventRunStatus, RunID: run.GetId(), Status: runStatusName(run.GetStatus())})
+	writeJSON(w, http.StatusCreated, run)
+}
+
+// listRuns lists a pipeline's runs (F-07), most recent first.
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.clients.Database.ListRuns(r.Context(), &dbpb.ListRunsRequest{PipelineId: pipelineID})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(response.GetRuns()))
+}
+
+// getRun fetches a single run (F-07).
+func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
+	runID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	run, err := s.clients.Database.GetRun(r.Context(), &dbpb.GetRunRequest{Id: runID})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +565,24 @@ func jobStatusFromName(name string) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_SKIPPED
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
+	}
+}
+
+// runStatusName maps a run status enum to the short name the UI uses.
+func runStatusName(status dbpb.RunStatus) string {
+	switch status {
+	case dbpb.RunStatus_RUN_STATUS_PENDING:
+		return "pending"
+	case dbpb.RunStatus_RUN_STATUS_RUNNING:
+		return "running"
+	case dbpb.RunStatus_RUN_STATUS_SUCCEEDED:
+		return "succeeded"
+	case dbpb.RunStatus_RUN_STATUS_FAILED:
+		return "failed"
+	case dbpb.RunStatus_RUN_STATUS_CANCELLED:
+		return "cancelled"
+	default:
+		return "unknown"
 	}
 }
 

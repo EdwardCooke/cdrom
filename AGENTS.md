@@ -30,14 +30,18 @@ N-tier architecture with the following layers (top to bottom):
    - **Scheduler** (`cmd/scheduler`) — manages job lifecycle and dispatch.
      When a job targets a worker group it pushes it to the API (DispatchJob),
      which fans it out to the live workers. Persists state through the
-     Database service. It also runs a background **watchdog** that reaps
-     running jobs that have exceeded their declared timeout even if the
-     execution target goes silent (F-03), a background **retry loop** that
-     re-dispatches failed jobs per their retry policy (F-04), **cancels**
-     a job by persisting the cancellation and signalling the execution target
-     to stop the work (F-05), and a background **dependency resolver** that
-     skips a pending job whose dependency failed (or dispatches it once every
-     dependency succeeded, F-06).
+     Database service. It also **creates pipeline runs** (F-07): `CreateRun`
+     asks the Database service to create a `PipelineRun` plus one job instance
+     per job definition and then drives the instances, and a background
+     **run-status loop** re-derives each in-flight run's overall status from
+     its job instances and persists + fans it out to the UI. It also runs a
+     background **watchdog** that reaps running jobs that have exceeded their
+     declared timeout even if the execution target goes silent (F-03), a
+     background **retry loop** that re-dispatches failed jobs per their retry
+     policy (F-04), **cancels** a job by persisting the cancellation and
+     signalling the execution target to stop the work (F-05), and a background
+     **dependency resolver** that skips a pending job whose dependency failed
+     (or dispatches it once every dependency succeeded, F-06).
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -299,6 +303,49 @@ never run — instead of failing, in two ways:
   should be folded into (or re-derived from) that larger DAG engine rather
   than kept as a separate parallel mechanism.
 
+**Pipeline runs (F-07):** a **`PipelineRun`** is a first-class entity — one
+execution of a pipeline, owning a set of job instances. It carries
+`pipeline_id`, an overall `status` (`pending`, `running`, `succeeded`,
+`failed`, `cancelled`), a `trigger` (how it was started, e.g. `manual`),
+`params` (run parameters, F-10), and `started_at`/`finished_at`. A `Job`
+gains a `run_id` and becomes a per-run *instance* of the pipeline's job
+definitions, so the pipeline *definition* is separated from each *run* of it.
+
+- **`CreateRun` is atomic in the database service.** `Database.CreateRun`
+  creates the run row and, in a single transaction, one job instance per job
+  definition in the pipeline. Each instance copies the definition's spec,
+  `target_group`, retry policy, and `ignore_failed`, and is bound to the new
+  run. Each instance's `depends_on` is **remapped from the definition job ids
+  to the new instance ids**, so two runs of the same pipeline are fully
+  independent (a dependency in run A never points at a job in run B).
+- **The scheduler drives the instances.** `Scheduler.CreateRun` calls
+  `Database.CreateRun` and then drives each instance: a job with a
+  `target_group` is dispatched to the API (which fans it out to the live
+  workers); a job with `depends_on` is left `pending` for the dependency
+  resolver (F-06); a job with an empty `target_group` and no dependencies is
+  left `pending` for an ephemeral agent.
+- **Run status is derived, not reported.** A run has no target of its own, so
+  its status is *derived* from its job instances by a background **run-status
+  loop** (`internal/services/scheduler/runstatus.go`, started from
+  `cmd/scheduler`). It periodically re-derives each in-flight run's status:
+  `failed` if any job failed or timed out; `cancelled` if any job was
+  cancelled (and none failed); `running` if any job is still pending or
+  running; `succeeded` if every job succeeded or was skipped (a run with no
+  jobs succeeds). When the derived status changes, the loop persists it
+  (`Database.UpdateRun`, stamping `started_at` when the run leaves `pending`
+  and `finished_at` when it reaches a terminal status) and fans the change out
+  to the UI (`API.NotifyRunStatus`).
+- **New RPCs.** `Database.CreateRun` / `GetRun` / `ListRuns` / `UpdateRun`;
+  `Scheduler.CreateRun`; `API.NotifyRunStatus`. `Job` (db, scheduler, api) and
+  `CreateJobRequest` / `ListJobsRequest` (db) gain a `run_id` so a run's
+  instances can be listed and a job can be created directly under a run.
+- **New HTTP endpoints.** `POST /api/pipelines/{id}/runs` (trigger a run),
+  `GET /api/pipelines/{id}/runs` (list a pipeline's runs, most recent first),
+  and `GET /api/runs/{id}` (fetch a single run).
+- **New WebSocket event + snapshot entry.** A `run_status` event (run id +
+  status) is published when a run is created and whenever its derived status
+  changes; the connect snapshot now also carries the current runs.
+
 **Shell override (shell handler):** a step may set the `shell` param to run
 through a user-chosen interpreter instead of executing `command` directly.
 When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -386,7 +433,9 @@ internal/
     data/     pipeline/job data service
     artifacts/ general namespaced file store (artifacts + job logs; gRPC
               server; store interface with a filesystem implementation)
-    scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
+    scheduler/ job lifecycle + dispatch (gRPC server) + CreateRun (F-07) + a
+              background run-status loop that re-derives each in-flight run's
+              status from its job instances (F-07) + a background watchdog
               that reaps running jobs past their timeout (F-03) + a background
               retry loop that re-dispatches failed jobs per their retry policy
               (F-04) + a background dependency resolver that skips/dispatches
@@ -527,13 +576,14 @@ authentication, implemented in `internal/auth`.
   gets a 401 JSON response; the authenticated user is available to handlers
   via `auth.UserFromContext`. When disabled the middleware is a passthrough.
 - **Live events:** `GET /api/ws` is a WebSocket endpoint (gorilla/websocket).
-  On connect the client receives a state snapshot (jobs + workers); afterwards
-  it receives one message per event. Event types: `job_status` (job id +
-  status), `worker` (worker name/group + action `registered` /
-  `deregistered` / `watching`), and `job_log` (job id + step index + stream
-  `stdout`/`stderr` + a chunk of output, F-02). Events are published from the
-  gRPC server (worker lifecycle, job status reports, streamed job logs) and
-  the HTTP handlers (job submit / cancel) through a shared `EventHub`
+  On connect the client receives a state snapshot (jobs + workers + runs);
+  afterwards it receives one message per event. Event types: `job_status`
+  (job id + status), `worker` (worker name/group + action `registered` /
+  `deregistered` / `watching`), `job_log` (job id + step index + stream
+  `stdout`/`stderr` + a chunk of output, F-02), and `run_status` (run id +
+  status, F-07). Events are published from the gRPC server (worker lifecycle,
+  job status reports, streamed job logs, run status notifications) and the
+  HTTP handlers (job submit / cancel, run trigger) through a shared `EventHub`
   (`internal/api/events.go`); slow subscribers have events dropped and resync
   from the snapshot on reconnect.
 - **Local OIDC IdP (`cmd/idp`):** a standalone HTTP service that acts as a

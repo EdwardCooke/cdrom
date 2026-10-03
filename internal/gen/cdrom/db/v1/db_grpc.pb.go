@@ -25,6 +25,10 @@ const (
 	Database_ListPipelines_FullMethodName      = "/cdrom.db.v1.Database/ListPipelines"
 	Database_UpdatePipeline_FullMethodName     = "/cdrom.db.v1.Database/UpdatePipeline"
 	Database_DeletePipeline_FullMethodName     = "/cdrom.db.v1.Database/DeletePipeline"
+	Database_CreateRun_FullMethodName          = "/cdrom.db.v1.Database/CreateRun"
+	Database_GetRun_FullMethodName             = "/cdrom.db.v1.Database/GetRun"
+	Database_ListRuns_FullMethodName           = "/cdrom.db.v1.Database/ListRuns"
+	Database_UpdateRun_FullMethodName          = "/cdrom.db.v1.Database/UpdateRun"
 	Database_CreateJob_FullMethodName          = "/cdrom.db.v1.Database/CreateJob"
 	Database_GetJob_FullMethodName             = "/cdrom.db.v1.Database/GetJob"
 	Database_ListJobs_FullMethodName           = "/cdrom.db.v1.Database/ListJobs"
@@ -65,6 +69,20 @@ type DatabaseClient interface {
 	ListPipelines(ctx context.Context, in *ListPipelinesRequest, opts ...grpc.CallOption) (*ListPipelinesResponse, error)
 	UpdatePipeline(ctx context.Context, in *UpdatePipelineRequest, opts ...grpc.CallOption) (*Pipeline, error)
 	DeletePipeline(ctx context.Context, in *DeletePipelineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Pipeline runs (F-07). A run is one execution of a pipeline, owning a set
+	// of job instances. CreateRun atomically creates the run row and one job
+	// instance per job definition in the pipeline (remapping each instance's
+	// depends_on from the definition ids to the new instance ids); the
+	// scheduler then drives the instances. The other RPCs let the API (and the
+	// UI) list and fetch runs.
+	CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*CreateRunResponse, error)
+	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*PipelineRun, error)
+	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
+	// UpdateRun applies a partial update to a run: a status of
+	// RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps
+	// leave the corresponding field unchanged. The scheduler's run-status loop
+	// uses it to persist a run's derived status and start/finish timestamps.
+	UpdateRun(ctx context.Context, in *UpdateRunRequest, opts ...grpc.CallOption) (*PipelineRun, error)
 	// Jobs
 	CreateJob(ctx context.Context, in *CreateJobRequest, opts ...grpc.CallOption) (*Job, error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
@@ -185,6 +203,46 @@ func (c *databaseClient) DeletePipeline(ctx context.Context, in *DeletePipelineR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_DeletePipeline_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*CreateRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateRunResponse)
+	err := c.cc.Invoke(ctx, Database_CreateRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*PipelineRun, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineRun)
+	err := c.cc.Invoke(ctx, Database_GetRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRunsResponse)
+	err := c.cc.Invoke(ctx, Database_ListRuns_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateRun(ctx context.Context, in *UpdateRunRequest, opts ...grpc.CallOption) (*PipelineRun, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineRun)
+	err := c.cc.Invoke(ctx, Database_UpdateRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +476,20 @@ type DatabaseServer interface {
 	ListPipelines(context.Context, *ListPipelinesRequest) (*ListPipelinesResponse, error)
 	UpdatePipeline(context.Context, *UpdatePipelineRequest) (*Pipeline, error)
 	DeletePipeline(context.Context, *DeletePipelineRequest) (*emptypb.Empty, error)
+	// Pipeline runs (F-07). A run is one execution of a pipeline, owning a set
+	// of job instances. CreateRun atomically creates the run row and one job
+	// instance per job definition in the pipeline (remapping each instance's
+	// depends_on from the definition ids to the new instance ids); the
+	// scheduler then drives the instances. The other RPCs let the API (and the
+	// UI) list and fetch runs.
+	CreateRun(context.Context, *CreateRunRequest) (*CreateRunResponse, error)
+	GetRun(context.Context, *GetRunRequest) (*PipelineRun, error)
+	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
+	// UpdateRun applies a partial update to a run: a status of
+	// RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps
+	// leave the corresponding field unchanged. The scheduler's run-status loop
+	// uses it to persist a run's derived status and start/finish timestamps.
+	UpdateRun(context.Context, *UpdateRunRequest) (*PipelineRun, error)
 	// Jobs
 	CreateJob(context.Context, *CreateJobRequest) (*Job, error)
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
@@ -508,6 +580,18 @@ func (UnimplementedDatabaseServer) UpdatePipeline(context.Context, *UpdatePipeli
 }
 func (UnimplementedDatabaseServer) DeletePipeline(context.Context, *DeletePipelineRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeletePipeline not implemented")
+}
+func (UnimplementedDatabaseServer) CreateRun(context.Context, *CreateRunRequest) (*CreateRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRun not implemented")
+}
+func (UnimplementedDatabaseServer) GetRun(context.Context, *GetRunRequest) (*PipelineRun, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRun not implemented")
+}
+func (UnimplementedDatabaseServer) ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRuns not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateRun(context.Context, *UpdateRunRequest) (*PipelineRun, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateRun not implemented")
 }
 func (UnimplementedDatabaseServer) CreateJob(context.Context, *CreateJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateJob not implemented")
@@ -679,6 +763,78 @@ func _Database_DeletePipeline_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).DeletePipeline(ctx, req.(*DeletePipelineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CreateRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateRun(ctx, req.(*CreateRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetRun(ctx, req.(*GetRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListRuns_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRunsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListRuns(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListRuns_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListRuns(ctx, req.(*ListRunsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateRun(ctx, req.(*UpdateRunRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1087,6 +1243,22 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeletePipeline",
 			Handler:    _Database_DeletePipeline_Handler,
+		},
+		{
+			MethodName: "CreateRun",
+			Handler:    _Database_CreateRun_Handler,
+		},
+		{
+			MethodName: "GetRun",
+			Handler:    _Database_GetRun_Handler,
+		},
+		{
+			MethodName: "ListRuns",
+			Handler:    _Database_ListRuns_Handler,
+		},
+		{
+			MethodName: "UpdateRun",
+			Handler:    _Database_UpdateRun_Handler,
 		},
 		{
 			MethodName: "CreateJob",

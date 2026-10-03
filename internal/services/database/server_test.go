@@ -1155,3 +1155,278 @@ func TestUpdateJobOutputsRoundTrip(t *testing.T) {
 		t.Errorf("outputs after a no-outputs update = %v, want preserved", got)
 	}
 }
+
+// createPipelineWithJobs creates a pipeline and a set of job definitions on
+// it, returning the pipeline and the created definition jobs (in order).
+func createPipelineWithJobs(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string, defs ...*dbpb.CreateJobRequest) (*dbpb.Pipeline, []*dbpb.Job) {
+	t.Helper()
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	jobs := make([]*dbpb.Job, 0, len(defs))
+	for _, def := range defs {
+		def.PipelineId = pipeline.GetId()
+		job, err := client.CreateJob(ctx, def)
+		if err != nil {
+			t.Fatalf("CreateJob(%s): %v", def.GetName(), err)
+		}
+		jobs = append(jobs, job)
+	}
+	return pipeline, jobs
+}
+
+// TestCreateRunCreatesRunAndInstances verifies that CreateRun (F-07) creates a
+// PipelineRun and one job instance per job definition in the pipeline, each
+// bound to the run and the pipeline.
+func TestCreateRunCreatesRunAndInstances(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, defs := createPipelineWithJobs(t, client, ctx, "build",
+		&dbpb.CreateJobRequest{Name: "compile", TargetGroup: "linux-pool"},
+		&dbpb.CreateJobRequest{Name: "test"},
+	)
+
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{
+		PipelineId: pipeline.GetId(),
+		Trigger:    "manual",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	run := resp.GetRun()
+	if run.GetId() == 0 {
+		t.Fatal("run id = 0, want non-zero")
+	}
+	if run.GetPipelineId() != pipeline.GetId() {
+		t.Errorf("run pipeline = %d, want %d", run.GetPipelineId(), pipeline.GetId())
+	}
+	if run.GetStatus() != dbpb.RunStatus_RUN_STATUS_PENDING {
+		t.Errorf("run status = %v, want PENDING", run.GetStatus())
+	}
+	if run.GetTrigger() != "manual" {
+		t.Errorf("run trigger = %q, want manual", run.GetTrigger())
+	}
+	if got := len(resp.GetJobs()); got != len(defs) {
+		t.Fatalf("run created %d job instances, want %d", got, len(defs))
+	}
+	for i, instance := range resp.GetJobs() {
+		if instance.GetRunId() != run.GetId() {
+			t.Errorf("instance %d run_id = %d, want %d", i, instance.GetRunId(), run.GetId())
+		}
+		if instance.GetPipelineId() != pipeline.GetId() {
+			t.Errorf("instance %d pipeline_id = %d, want %d", i, instance.GetPipelineId(), pipeline.GetId())
+		}
+		if instance.GetName() != defs[i].GetName() {
+			t.Errorf("instance %d name = %q, want %q", i, instance.GetName(), defs[i].GetName())
+		}
+		if instance.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+			t.Errorf("instance %d status = %v, want PENDING", i, instance.GetStatus())
+		}
+	}
+}
+
+// createDagPipeline creates a pipeline with a "build" job and a "test" job
+// that depends on "build", returning the pipeline and the two definition jobs
+// (build first, test second).
+func createDagPipeline(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string) (*dbpb.Pipeline, *dbpb.Job, *dbpb.Job) {
+	t.Helper()
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	build, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "build"})
+	if err != nil {
+		t.Fatalf("CreateJob(build): %v", err)
+	}
+	test, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "test", DependsOn: []int64{build.GetId()}})
+	if err != nil {
+		t.Fatalf("CreateJob(test): %v", err)
+	}
+	return pipeline, build, test
+}
+
+// TestCreateRunRemapsDependencies verifies that a run's job instances carry
+// their dependencies remapped from the pipeline's definition job ids to the
+// run's own instance ids (F-07), so the run's internal dependencies reference
+// the run's instances rather than the definitions.
+func TestCreateRunRemapsDependencies(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, _, _ := createDagPipeline(t, client, ctx, "dag")
+
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	jobs := resp.GetJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("run created %d instances, want 2", len(jobs))
+	}
+	buildID := jobs[0].GetId()
+	testID := jobs[1].GetId()
+	// The build instance has no dependencies.
+	if got := jobs[0].GetDependsOn(); len(got) != 0 {
+		t.Errorf("build instance depends_on = %v, want none", got)
+	}
+	// The test instance depends on the build *instance* (not the definition).
+	if got := jobs[1].GetDependsOn(); len(got) != 1 || got[0] != buildID {
+		t.Errorf("test instance depends_on = %v, want [%d]", got, buildID)
+	}
+	// The remapping is persisted: fetching the instance shows the instance id.
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: testID})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := fetched.GetDependsOn(); len(got) != 1 || got[0] != buildID {
+		t.Errorf("persisted test instance depends_on = %v, want [%d]", got, buildID)
+	}
+}
+
+// TestTwoRunsAreIndependent verifies that two runs of the same pipeline are
+// independent: each creates its own set of job instances, and the instances
+// of one run do not depend on the instances of the other (F-07).
+func TestTwoRunsAreIndependent(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, _, _ := createDagPipeline(t, client, ctx, "twice")
+
+	first, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("CreateRun (1st): %v", err)
+	}
+	second, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("CreateRun (2nd): %v", err)
+	}
+	if first.GetRun().GetId() == second.GetRun().GetId() {
+		t.Fatal("two runs share an id; they must be distinct")
+	}
+	firstIDs := map[int64]bool{}
+	for _, job := range first.GetJobs() {
+		firstIDs[job.GetId()] = true
+	}
+	// Every instance of the second run is a distinct row not in the first run.
+	for _, job := range second.GetJobs() {
+		if firstIDs[job.GetId()] {
+			t.Fatalf("second run instance %d is also in the first run", job.GetId())
+		}
+		if job.GetRunId() != second.GetRun().GetId() {
+			t.Errorf("second run instance %d run_id = %d, want %d", job.GetId(), job.GetRunId(), second.GetRun().GetId())
+		}
+	}
+	// The second run's "test" instance depends on the second run's "build"
+	// instance, not the first run's.
+	secondBuild := second.GetJobs()[0].GetId()
+	if got := second.GetJobs()[1].GetDependsOn(); len(got) != 1 || got[0] != secondBuild {
+		t.Errorf("second run test depends_on = %v, want [%d]", got, secondBuild)
+	}
+}
+
+// TestListAndGetRun verifies that runs are queryable: ListRuns filters by
+// pipeline, and GetRun returns a stored run (F-07).
+func TestListAndGetRun(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipelineA, _ := createPipelineWithJobs(t, client, ctx, "a", &dbpb.CreateJobRequest{Name: "a1"})
+	pipelineB, _ := createPipelineWithJobs(t, client, ctx, "b", &dbpb.CreateJobRequest{Name: "b1"})
+
+	runA, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipelineA.GetId()})
+	if err != nil {
+		t.Fatalf("CreateRun A: %v", err)
+	}
+	if _, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipelineB.GetId()}); err != nil {
+		t.Fatalf("CreateRun B: %v", err)
+	}
+
+	// Listing all runs returns both.
+	all, err := client.ListRuns(ctx, &dbpb.ListRunsRequest{})
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if got := len(all.GetRuns()); got != 2 {
+		t.Errorf("ListRuns (all) = %d, want 2", got)
+	}
+	// Listing by pipeline returns only that pipeline's run.
+	byPipeline, err := client.ListRuns(ctx, &dbpb.ListRunsRequest{PipelineId: pipelineA.GetId()})
+	if err != nil {
+		t.Fatalf("ListRuns (pipeline): %v", err)
+	}
+	if got := len(byPipeline.GetRuns()); got != 1 {
+		t.Fatalf("ListRuns (pipeline A) = %d, want 1", got)
+	}
+	if byPipeline.GetRuns()[0].GetId() != runA.GetRun().GetId() {
+		t.Errorf("ListRuns (pipeline A) returned run %d, want %d", byPipeline.GetRuns()[0].GetId(), runA.GetRun().GetId())
+	}
+	// GetRun returns the stored run.
+	fetched, err := client.GetRun(ctx, &dbpb.GetRunRequest{Id: runA.GetRun().GetId()})
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if fetched.GetPipelineId() != pipelineA.GetId() {
+		t.Errorf("GetRun pipeline = %d, want %d", fetched.GetPipelineId(), pipelineA.GetId())
+	}
+}
+
+// TestUpdateRun verifies that UpdateRun persists a run's derived status and
+// start/finish timestamps (F-07), and that a status of UNSPECIFIED leaves the
+// status unchanged.
+func TestUpdateRun(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, _ := createPipelineWithJobs(t, client, ctx, "upd", &dbpb.CreateJobRequest{Name: "j"})
+	created, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	runID := created.GetRun().GetId()
+
+	// Record the start time.
+	updated, err := client.UpdateRun(ctx, &dbpb.UpdateRunRequest{
+		Id:        runID,
+		Status:    dbpb.RunStatus_RUN_STATUS_RUNNING,
+		StartedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpdateRun (running): %v", err)
+	}
+	if updated.GetStatus() != dbpb.RunStatus_RUN_STATUS_RUNNING {
+		t.Errorf("status = %v, want RUNNING", updated.GetStatus())
+	}
+	if updated.GetStartedAt() == nil {
+		t.Error("started_at = nil, want set")
+	}
+
+	// A status of UNSPECIFIED leaves the status unchanged but still records
+	// the finish time.
+	finished, err := client.UpdateRun(ctx, &dbpb.UpdateRunRequest{
+		Id:         runID,
+		FinishedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpdateRun (finish): %v", err)
+	}
+	if finished.GetStatus() != dbpb.RunStatus_RUN_STATUS_RUNNING {
+		t.Errorf("status after no-status update = %v, want RUNNING (unchanged)", finished.GetStatus())
+	}
+	if finished.GetFinishedAt() == nil {
+		t.Error("finished_at = nil, want set")
+	}
+
+	// The terminal status is persisted.
+	if _, err := client.UpdateRun(ctx, &dbpb.UpdateRunRequest{Id: runID, Status: dbpb.RunStatus_RUN_STATUS_SUCCEEDED}); err != nil {
+		t.Fatalf("UpdateRun (succeeded): %v", err)
+	}
+	fetched, err := client.GetRun(ctx, &dbpb.GetRunRequest{Id: runID})
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.RunStatus_RUN_STATUS_SUCCEEDED {
+		t.Errorf("persisted status = %v, want SUCCEEDED", fetched.GetStatus())
+	}
+}

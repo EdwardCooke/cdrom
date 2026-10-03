@@ -24,6 +24,7 @@ const (
 	Scheduler_ListJobs_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/ListJobs"
 	Scheduler_CancelJob_FullMethodName = "/cdrom.scheduler.v1.Scheduler/CancelJob"
 	Scheduler_RerunJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/RerunJob"
+	Scheduler_CreateRun_FullMethodName = "/cdrom.scheduler.v1.Scheduler/CreateRun"
 )
 
 // SchedulerClient is the client API for Scheduler service.
@@ -54,6 +55,13 @@ type SchedulerClient interface {
 	// failed, cancelled, or timed_out) can be re-run; a job that is still
 	// pending or running is rejected.
 	RerunJob(ctx context.Context, in *RerunJobRequest, opts ...grpc.CallOption) (*Job, error)
+	// CreateRun starts a new execution of a pipeline (F-07): it creates a
+	// PipelineRun and one job instance per job definition in the pipeline,
+	// then drives them (dispatching the dependency-free instances to the API,
+	// which fans them out to the live workers; instances with dependencies are
+	// left pending for the dependency resolver). The run's overall status is
+	// derived from its job instances by the scheduler's run-status loop.
+	CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*Run, error)
 }
 
 type schedulerClient struct {
@@ -114,6 +122,16 @@ func (c *schedulerClient) RerunJob(ctx context.Context, in *RerunJobRequest, opt
 	return out, nil
 }
 
+func (c *schedulerClient) CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*Run, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Run)
+	err := c.cc.Invoke(ctx, Scheduler_CreateRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SchedulerServer is the server API for Scheduler service.
 // All implementations must embed UnimplementedSchedulerServer
 // for forward compatibility.
@@ -142,6 +160,13 @@ type SchedulerServer interface {
 	// failed, cancelled, or timed_out) can be re-run; a job that is still
 	// pending or running is rejected.
 	RerunJob(context.Context, *RerunJobRequest) (*Job, error)
+	// CreateRun starts a new execution of a pipeline (F-07): it creates a
+	// PipelineRun and one job instance per job definition in the pipeline,
+	// then drives them (dispatching the dependency-free instances to the API,
+	// which fans them out to the live workers; instances with dependencies are
+	// left pending for the dependency resolver). The run's overall status is
+	// derived from its job instances by the scheduler's run-status loop.
+	CreateRun(context.Context, *CreateRunRequest) (*Run, error)
 	mustEmbedUnimplementedSchedulerServer()
 }
 
@@ -166,6 +191,9 @@ func (UnimplementedSchedulerServer) CancelJob(context.Context, *CancelJobRequest
 }
 func (UnimplementedSchedulerServer) RerunJob(context.Context, *RerunJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method RerunJob not implemented")
+}
+func (UnimplementedSchedulerServer) CreateRun(context.Context, *CreateRunRequest) (*Run, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRun not implemented")
 }
 func (UnimplementedSchedulerServer) mustEmbedUnimplementedSchedulerServer() {}
 func (UnimplementedSchedulerServer) testEmbeddedByValue()                   {}
@@ -278,6 +306,24 @@ func _Scheduler_RerunJob_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Scheduler_CreateRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).CreateRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_CreateRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).CreateRun(ctx, req.(*CreateRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Scheduler_ServiceDesc is the grpc.ServiceDesc for Scheduler service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -304,6 +350,10 @@ var Scheduler_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RerunJob",
 			Handler:    _Scheduler_RerunJob_Handler,
+		},
+		{
+			MethodName: "CreateRun",
+			Handler:    _Scheduler_CreateRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

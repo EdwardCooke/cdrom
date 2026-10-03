@@ -86,6 +86,12 @@ func main() {
 	dependencyCtx, stopDependencyResolver := context.WithCancel(ctx)
 	defer stopDependencyResolver()
 	sched.StartDependencyResolver(dependencyCtx)
+	// Start the pipeline-run status loop (F-07): it re-derives each in-flight
+	// run's overall status from its job instances and persists it, fanning the
+	// change out to the UI. It runs until the process shuts down.
+	runStatusCtx, stopRunStatusLoop := context.WithCancel(ctx)
+	defer stopRunStatusLoop()
+	sched.StartRunStatusLoop(runStatusCtx)
 	srv := grpc.NewServer(grpc.Creds(creds))
 	schedpb.RegisterSchedulerServer(srv, sched)
 

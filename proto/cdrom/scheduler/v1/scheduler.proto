@@ -32,6 +32,13 @@ service Scheduler {
   // failed, cancelled, or timed_out) can be re-run; a job that is still
   // pending or running is rejected.
   rpc RerunJob(RerunJobRequest) returns (Job);
+  // CreateRun starts a new execution of a pipeline (F-07): it creates a
+  // PipelineRun and one job instance per job definition in the pipeline,
+  // then drives them (dispatching the dependency-free instances to the API,
+  // which fans them out to the live workers; instances with dependencies are
+  // left pending for the dependency resolver). The run's overall status is
+  // derived from its job instances by the scheduler's run-status loop.
+  rpc CreateRun(CreateRunRequest) returns (Run);
 }
 
 message Job {
@@ -63,6 +70,9 @@ message Job {
   // ignore_failed is the job's ignore-failed flag (F-06), denormalized from
   // the spec when the job was created.
   bool ignore_failed = 15;
+  // run_id is the pipeline run this job is an instance of (F-07); 0 when the
+  // job is not part of a run.
+  int64 run_id = 16;
 }
 
 message SubmitJobRequest {
@@ -99,4 +109,36 @@ message CancelJobRequest {
 
 message RerunJobRequest {
   int64 id = 1;
+}
+
+// Run is a pipeline run (F-07): one execution of a pipeline, owning a set of
+// job instances. The scheduler's CreateRun RPC returns the created run; the
+// run's job instances are the jobs that carry the run's id in run_id.
+message Run {
+  int64 id = 1;
+  // pipeline_id is the pipeline this run executed.
+  int64 pipeline_id = 2;
+  // status is the run's overall state, derived from its job instances.
+  cdrom.db.v1.RunStatus status = 3;
+  // trigger is how the run was started (e.g. "manual").
+  string trigger = 4;
+  // params are the run's parameters (F-10); empty until parameters land.
+  map<string, string> params = 5;
+  // started_at is when the run started (its first job began); unset until
+  // then.
+  google.protobuf.Timestamp started_at = 6;
+  // finished_at is when the run reached a terminal status; unset while the
+  // run is still in flight.
+  google.protobuf.Timestamp finished_at = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message CreateRunRequest {
+  // pipeline_id is the pipeline to execute.
+  int64 pipeline_id = 1;
+  // trigger is how the run was started (e.g. "manual").
+  string trigger = 2;
+  // params are the run's parameters (F-10); empty until parameters land.
+  map<string, string> params = 3;
 }

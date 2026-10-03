@@ -32,6 +32,7 @@ const (
 	API_ExchangeJobToken_FullMethodName = "/cdrom.api.v1.API/ExchangeJobToken"
 	API_DispatchJob_FullMethodName      = "/cdrom.api.v1.API/DispatchJob"
 	API_NotifyJobStatus_FullMethodName  = "/cdrom.api.v1.API/NotifyJobStatus"
+	API_NotifyRunStatus_FullMethodName  = "/cdrom.api.v1.API/NotifyRunStatus"
 	API_UploadArtifact_FullMethodName   = "/cdrom.api.v1.API/UploadArtifact"
 	API_DownloadArtifact_FullMethodName = "/cdrom.api.v1.API/DownloadArtifact"
 	API_GetArtifact_FullMethodName      = "/cdrom.api.v1.API/GetArtifact"
@@ -95,6 +96,13 @@ type APIClient interface {
 	// database (the scheduler already persisted the change); it only publishes
 	// the event.
 	NotifyJobStatus(ctx context.Context, in *NotifyJobStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// NotifyRunStatus (called by the scheduler). The scheduler's run-status
+	// loop (F-07) uses it to fan a pipeline-run status change (e.g. a run that
+	// just succeeded or failed) out to the UI over the WebSocket event hub. It
+	// mirrors the run_status events the API publishes when a run's derived
+	// status changes. It does not touch the database (the scheduler already
+	// persisted the change); it only publishes the event.
+	NotifyRunStatus(ctx context.Context, in *NotifyRunStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Artifact proxy (called by workers and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
 	UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.ArtifactChunk, v1.UploadArtifactResponse], error)
@@ -234,6 +242,16 @@ func (c *aPIClient) NotifyJobStatus(ctx context.Context, in *NotifyJobStatusRequ
 	return out, nil
 }
 
+func (c *aPIClient) NotifyRunStatus(ctx context.Context, in *NotifyRunStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, API_NotifyRunStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *aPIClient) UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.ArtifactChunk, v1.UploadArtifactResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[2], API_UploadArtifact_FullMethodName, cOpts...)
@@ -352,6 +370,13 @@ type APIServer interface {
 	// database (the scheduler already persisted the change); it only publishes
 	// the event.
 	NotifyJobStatus(context.Context, *NotifyJobStatusRequest) (*emptypb.Empty, error)
+	// NotifyRunStatus (called by the scheduler). The scheduler's run-status
+	// loop (F-07) uses it to fan a pipeline-run status change (e.g. a run that
+	// just succeeded or failed) out to the UI over the WebSocket event hub. It
+	// mirrors the run_status events the API publishes when a run's derived
+	// status changes. It does not touch the database (the scheduler already
+	// persisted the change); it only publishes the event.
+	NotifyRunStatus(context.Context, *NotifyRunStatusRequest) (*emptypb.Empty, error)
 	// Artifact proxy (called by workers and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
 	UploadArtifact(grpc.ClientStreamingServer[v1.ArtifactChunk, v1.UploadArtifactResponse]) error
@@ -401,6 +426,9 @@ func (UnimplementedAPIServer) DispatchJob(context.Context, *DispatchJobRequest) 
 }
 func (UnimplementedAPIServer) NotifyJobStatus(context.Context, *NotifyJobStatusRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method NotifyJobStatus not implemented")
+}
+func (UnimplementedAPIServer) NotifyRunStatus(context.Context, *NotifyRunStatusRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method NotifyRunStatus not implemented")
 }
 func (UnimplementedAPIServer) UploadArtifact(grpc.ClientStreamingServer[v1.ArtifactChunk, v1.UploadArtifactResponse]) error {
 	return status.Error(codes.Unimplemented, "method UploadArtifact not implemented")
@@ -618,6 +646,24 @@ func _API_NotifyJobStatus_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _API_NotifyRunStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NotifyRunStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).NotifyRunStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_NotifyRunStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).NotifyRunStatus(ctx, req.(*NotifyRunStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _API_UploadArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(APIServer).UploadArtifact(&grpc.GenericServerStream[v1.ArtifactChunk, v1.UploadArtifactResponse]{ServerStream: stream})
 }
@@ -732,6 +778,10 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "NotifyJobStatus",
 			Handler:    _API_NotifyJobStatus_Handler,
+		},
+		{
+			MethodName: "NotifyRunStatus",
+			Handler:    _API_NotifyRunStatus_Handler,
 		},
 		{
 			MethodName: "GetArtifact",

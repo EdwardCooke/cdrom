@@ -208,6 +208,62 @@ func (s *Server) RerunJob(ctx context.Context, req *schedpb.RerunJobRequest) (*s
 	return s.rerunJob(ctx, s.db, s.api, req.GetId())
 }
 
+// CreateRun starts a new execution of a pipeline (F-07): it asks the Database
+// service to create the PipelineRun and one job instance per job definition in
+// the pipeline (the database remaps each instance's depends_on from the
+// definition ids to the new instance ids, atomically, in a single
+// transaction), and then drives the instances:
+//
+//   - an instance with dependencies is left pending; the background dependency
+//     resolver (dependencies.go) dispatches it once its dependencies succeed,
+//     or marks it skipped if any of them does not;
+//   - an instance with a target group is dispatched to the API, which fans it
+//     out to the live workers in that group;
+//   - an instance with an empty target group is left pending for an ephemeral
+//     Kubernetes agent.
+//
+// The run's overall status is derived from its job instances by the
+// scheduler's run-status loop (runstatus.go), not here.
+func (s *Server) CreateRun(ctx context.Context, req *schedpb.CreateRunRequest) (*schedpb.Run, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	created, err := s.db.CreateRun(ctx, &dbpb.CreateRunRequest{
+		PipelineId: req.GetPipelineId(),
+		Trigger:    req.GetTrigger(),
+		Params:     req.GetParams(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	run := toProtoRun(created.GetRun())
+	for _, job := range created.GetJobs() {
+		s.dispatchRunInstance(ctx, job)
+	}
+	s.logger.Info("scheduler: run created", "run", run.GetId(), "pipeline", req.GetPipelineId(), "jobs", len(created.GetJobs()))
+	return run, nil
+}
+
+// dispatchRunInstance drives a single job instance of a run (F-07), mirroring
+// SubmitJob's dispatch logic: an instance with dependencies is left pending
+// for the dependency resolver; an instance with a target group is dispatched
+// to the API (which fans it out to the live workers); an instance with an
+// empty target group is left pending for an ephemeral agent.
+func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
+	if len(job.GetDependsOn()) > 0 {
+		s.logger.Info("scheduler: run instance held pending dependencies", "job", job.GetId(), "run", job.GetRunId(), "depends_on", job.GetDependsOn())
+		return
+	}
+	if job.GetTargetGroup() != "" {
+		if _, err := s.api.DispatchJob(ctx, &apipb.DispatchJobRequest{Job: toAPIJob(toProtoJob(job))}); err != nil {
+			s.logger.Warn("scheduler: dispatch run instance to api failed; job left pending",
+				"job", job.GetId(), "run", job.GetRunId(), "group", job.GetTargetGroup(), "err", err)
+		}
+	} else {
+		s.logger.Info("scheduler: run instance queued for ephemeral agent", "job", job.GetId(), "run", job.GetRunId())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
@@ -216,6 +272,7 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 	return &schedpb.Job{
 		Id:           job.GetId(),
 		PipelineId:   job.GetPipelineId(),
+		RunId:        job.GetRunId(),
 		Name:         job.GetName(),
 		Status:       job.GetStatus(),
 		TargetGroup:  job.GetTargetGroup(),
@@ -236,6 +293,7 @@ func toAPIJob(job *schedpb.Job) *apipb.Job {
 	return &apipb.Job{
 		Id:           job.GetId(),
 		PipelineId:   job.GetPipelineId(),
+		RunId:        job.GetRunId(),
 		Name:         job.GetName(),
 		Status:       job.GetStatus(),
 		TargetGroup:  job.GetTargetGroup(),
@@ -249,5 +307,20 @@ func toAPIJob(job *schedpb.Job) *apipb.Job {
 		Outputs:      job.GetOutputs(),
 		UpstreamJobs: job.GetUpstreamJobs(),
 		IgnoreFailed: job.GetIgnoreFailed(),
+	}
+}
+
+// toProtoRun converts a db proto PipelineRun into the scheduler's Run message.
+func toProtoRun(run *dbpb.PipelineRun) *schedpb.Run {
+	return &schedpb.Run{
+		Id:         run.GetId(),
+		PipelineId: run.GetPipelineId(),
+		Status:     run.GetStatus(),
+		Trigger:    run.GetTrigger(),
+		Params:     run.GetParams(),
+		StartedAt:  run.GetStartedAt(),
+		FinishedAt: run.GetFinishedAt(),
+		CreatedAt:  run.GetCreatedAt(),
+		UpdatedAt:  run.GetUpdatedAt(),
 	}
 }

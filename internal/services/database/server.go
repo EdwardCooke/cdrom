@@ -82,8 +82,11 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 }
 
 func (s *Server) DeletePipeline(ctx context.Context, req *dbpb.DeletePipelineRequest) (*emptypb.Empty, error) {
-	// Remove child jobs first, then the pipeline itself.
+	// Remove child jobs and runs first, then the pipeline itself.
 	if err := s.db.WithContext(ctx).Where("pipeline_id = ?", req.GetId()).Delete(&models.Job{}).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if err := s.db.WithContext(ctx).Where("pipeline_id = ?", req.GetId()).Delete(&models.PipelineRun{}).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	result := s.db.WithContext(ctx).Delete(&models.Pipeline{}, req.GetId())
@@ -94,6 +97,198 @@ func (s *Server) DeletePipeline(ctx context.Context, req *dbpb.DeletePipelineReq
 		return nil, status.Error(codes.NotFound, "pipeline not found")
 	}
 	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline runs (F-07)
+// ---------------------------------------------------------------------------
+
+// CreateRun atomically creates a pipeline run (F-07) and one job instance per
+// job definition in the pipeline. Each instance is a fresh Job row bound to
+// the run (RunID) and the pipeline (PipelineID), carrying a snapshot of its
+// definition's spec, target group, retry policy, and ignore-failed flag.
+//
+// Each instance's depends_on is remapped from the definition job ids to the
+// new instance ids, so the run's internal dependencies (F-06) reference the
+// run's own job instances rather than the pipeline's definitions. This is what
+// makes two runs of the same pipeline independent: each run's instances
+// depend on each other, not on the other run's instances.
+//
+// The whole operation runs in a single transaction, so a run is never created
+// with a partial set of job instances. The run starts in the pending state;
+// the scheduler's CreateRun RPC (which calls this) then drives the instances,
+// and the scheduler's run-status loop derives the run's overall status from
+// them.
+func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*dbpb.CreateRunResponse, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	pipelineID := uint(req.GetPipelineId())
+	var pipeline models.Pipeline
+	if err := s.db.WithContext(ctx).First(&pipeline, pipelineID).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.CreateRunResponse{}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The run row is created first so the job instances can reference it.
+		run := &models.PipelineRun{
+			PipelineID: pipelineID,
+			Status:     models.RunStatusPending,
+			Trigger:    req.GetTrigger(),
+			Params:     req.GetParams(),
+		}
+		if err := tx.Create(run).Error; err != nil {
+			return err
+		}
+		response.Run = toProtoRun(run)
+
+		// Load the pipeline's job definitions (the run's job instances are
+		// created from these).
+		var defs []models.Job
+		if err := tx.Where("pipeline_id = ?", pipelineID).Order("id").Find(&defs).Error; err != nil {
+			return err
+		}
+		// Pass 1: create every job instance (without depends_on yet) so all
+		// instance ids are known, and record the definition-id -> instance-id
+		// mapping used to remap each instance's dependencies.
+		instances := make([]models.Job, 0, len(defs))
+		defToInstance := make(map[uint]uint, len(defs))
+		for i := range defs {
+			def := &defs[i]
+			job := &models.Job{
+				PipelineID:  &pipelineID,
+				RunID:       &run.ID,
+				Name:        def.Name,
+				TargetGroup: def.TargetGroup,
+				Status:      models.JobStatusPending,
+				Spec:        def.Spec,
+				// A new instance starts on its first attempt (F-04); the retry
+				// budget and ignore-failed flag are denormalized from the
+				// definition's spec, mirroring CreateJob.
+				Attempt: 1,
+			}
+			if def.Spec.Retry != nil {
+				job.MaxAttempts = def.Spec.Retry.MaxAttempts
+			}
+			job.IgnoreFailed = def.Spec.IgnoreFailed
+			if err := tx.Create(job).Error; err != nil {
+				return err
+			}
+			defToInstance[def.ID] = job.ID
+			instances = append(instances, *job)
+		}
+		// Pass 2: remap each instance's depends_on from the definition ids to
+		// the new instance ids. A dependency on a job outside this pipeline is
+		// left as-is (best-effort); in practice a pipeline's job dependencies
+		// reference other jobs in the same pipeline.
+		for i := range instances {
+			def := &defs[i]
+			if len(def.DependsOn) == 0 {
+				continue
+			}
+			remapped := make([]uint, len(def.DependsOn))
+			for j, defDepID := range def.DependsOn {
+				if instID, ok := defToInstance[defDepID]; ok {
+					remapped[j] = instID
+				} else {
+					remapped[j] = defDepID
+				}
+			}
+			if err := tx.Model(&models.Job{}).
+				Where("id = ?", instances[i].ID).
+				Select("DependsOn").
+				Updates(&models.Job{DependsOn: remapped}).Error; err != nil {
+				return err
+			}
+			instances[i].DependsOn = remapped
+		}
+		for i := range instances {
+			response.Jobs = append(response.Jobs, toProtoJob(&instances[i]))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	return response, nil
+}
+
+// GetRun fetches a pipeline run from the Database service.
+func (s *Server) GetRun(ctx context.Context, req *dbpb.GetRunRequest) (*dbpb.PipelineRun, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "run id is required")
+	}
+	var run models.PipelineRun
+	if err := s.db.WithContext(ctx).First(&run, req.GetId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoRun(&run), nil
+}
+
+// ListRuns lists pipeline runs, optionally filtered by pipeline and status.
+func (s *Server) ListRuns(ctx context.Context, req *dbpb.ListRunsRequest) (*dbpb.ListRunsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.PipelineRun{})
+	if req.GetPipelineId() > 0 {
+		query = query.Where("pipeline_id = ?", req.GetPipelineId())
+	}
+	if runStatus := req.GetStatus(); runStatus != dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
+		modelStatus, err := runStatusFromProto(runStatus)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		query = query.Where("status = ?", modelStatus)
+	}
+	var runs []models.PipelineRun
+	if err := query.Order("id").Find(&runs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListRunsResponse{}
+	for i := range runs {
+		response.Runs = append(response.Runs, toProtoRun(&runs[i]))
+	}
+	return response, nil
+}
+
+// UpdateRun applies a partial update to a run: a status of
+// RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps leave
+// the corresponding field unchanged. The scheduler's run-status loop uses it
+// to persist a run's derived status and start/finish timestamps.
+func (s *Server) UpdateRun(ctx context.Context, req *dbpb.UpdateRunRequest) (*dbpb.PipelineRun, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "run id is required")
+	}
+	var run models.PipelineRun
+	if err := s.db.WithContext(ctx).First(&run, req.GetId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	updates := map[string]any{}
+	if runStatus := req.GetStatus(); runStatus != dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
+		modelStatus, err := runStatusFromProto(runStatus)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		updates["status"] = modelStatus
+	}
+	if timestamp := req.GetStartedAt(); timestamp != nil {
+		instant := timestamp.AsTime()
+		updates["started_at"] = &instant
+	}
+	if timestamp := req.GetFinishedAt(); timestamp != nil {
+		instant := timestamp.AsTime()
+		updates["finished_at"] = &instant
+	}
+	if len(updates) > 0 {
+		updates["updated_at"] = time.Now()
+		if err := s.db.WithContext(ctx).Model(&models.PipelineRun{}).
+			Where("id = ?", req.GetId()).
+			Updates(updates).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	if err := s.db.WithContext(ctx).First(&run, req.GetId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoRun(&run), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +326,14 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 			return nil, grpcErr(err)
 		}
 	}
+	if req.GetRunId() > 0 {
+		runID := uint(req.GetRunId())
+		job.RunID = &runID
+		var run models.PipelineRun
+		if err := s.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
 	if err := s.db.WithContext(ctx).Create(job).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -149,6 +352,9 @@ func (s *Server) ListJobs(ctx context.Context, req *dbpb.ListJobsRequest) (*dbpb
 	query := s.db.WithContext(ctx).Model(&models.Job{})
 	if req.GetPipelineId() > 0 {
 		query = query.Where("pipeline_id = ?", req.GetPipelineId())
+	}
+	if req.GetRunId() > 0 {
+		query = query.Where("run_id = ?", req.GetRunId())
 	}
 	if jobStatus := req.GetStatus(); jobStatus != dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
 		modelStatus, err := jobStatusFromProto(jobStatus)
@@ -695,6 +901,25 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 	}
 }
 
+func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
+	proto := &dbpb.PipelineRun{
+		Id:         int64(run.ID),
+		PipelineId: int64(run.PipelineID),
+		Status:     runStatusToProto(run.Status),
+		Trigger:    run.Trigger,
+		Params:     run.Params,
+		CreatedAt:  timestamppb.New(run.CreatedAt),
+		UpdatedAt:  timestamppb.New(run.UpdatedAt),
+	}
+	if run.StartedAt != nil {
+		proto.StartedAt = timestamppb.New(*run.StartedAt)
+	}
+	if run.FinishedAt != nil {
+		proto.FinishedAt = timestamppb.New(*run.FinishedAt)
+	}
+	return proto
+}
+
 func toProtoJob(job *models.Job) *dbpb.Job {
 	proto := &dbpb.Job{
 		Id:           int64(job.ID),
@@ -713,6 +938,9 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
+	}
+	if job.RunID != nil {
+		proto.RunId = int64(*job.RunID)
 	}
 	if job.StartedAt != nil {
 		proto.StartedAt = timestamppb.New(*job.StartedAt)
@@ -971,6 +1199,40 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 		Name:          code.Name,
 		Email:         code.Email,
 		CreatedAt:     timestamppb.New(code.CreatedAt),
+	}
+}
+
+func runStatusToProto(status models.RunStatus) dbpb.RunStatus {
+	switch status {
+	case models.RunStatusPending:
+		return dbpb.RunStatus_RUN_STATUS_PENDING
+	case models.RunStatusRunning:
+		return dbpb.RunStatus_RUN_STATUS_RUNNING
+	case models.RunStatusSucceeded:
+		return dbpb.RunStatus_RUN_STATUS_SUCCEEDED
+	case models.RunStatusFailed:
+		return dbpb.RunStatus_RUN_STATUS_FAILED
+	case models.RunStatusCancelled:
+		return dbpb.RunStatus_RUN_STATUS_CANCELLED
+	default:
+		return dbpb.RunStatus_RUN_STATUS_UNSPECIFIED
+	}
+}
+
+func runStatusFromProto(status dbpb.RunStatus) (models.RunStatus, error) {
+	switch status {
+	case dbpb.RunStatus_RUN_STATUS_PENDING:
+		return models.RunStatusPending, nil
+	case dbpb.RunStatus_RUN_STATUS_RUNNING:
+		return models.RunStatusRunning, nil
+	case dbpb.RunStatus_RUN_STATUS_SUCCEEDED:
+		return models.RunStatusSucceeded, nil
+	case dbpb.RunStatus_RUN_STATUS_FAILED:
+		return models.RunStatusFailed, nil
+	case dbpb.RunStatus_RUN_STATUS_CANCELLED:
+		return models.RunStatusCancelled, nil
+	default:
+		return "", fmt.Errorf("unknown run status %v", status)
 	}
 }
 

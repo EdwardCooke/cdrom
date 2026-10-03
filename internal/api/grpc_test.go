@@ -221,6 +221,49 @@ func TestNotifyJobStatusValidation(t *testing.T) {
 	}
 }
 
+// TestNotifyRunStatusPublishes verifies that the scheduler's run-status loop
+// can fan a pipeline-run status change out to the UI over the event hub
+// (F-07), mirroring the run_status events the API publishes when a run is
+// created. It does not touch the database.
+func TestNotifyRunStatusPublishes(t *testing.T) {
+	hub := NewEventHub()
+	events, cancel := hub.Subscribe()
+	defer cancel()
+
+	client := startAPIServer(t, startArtifactsServer(t), hub)
+	ctx := context.Background()
+
+	if _, err := client.NotifyRunStatus(ctx, &apipb.NotifyRunStatusRequest{
+		RunId:  42,
+		Status: dbpb.RunStatus_RUN_STATUS_SUCCEEDED,
+	}); err != nil {
+		t.Fatalf("NotifyRunStatus: %v", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != EventRunStatus || ev.RunID != 42 || ev.Status != "succeeded" {
+			t.Errorf("event = %+v, want a run_status event for run 42 (succeeded)", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no run_status event published for NotifyRunStatus")
+	}
+}
+
+// TestNotifyRunStatusValidation verifies that a NotifyRunStatus call with a
+// missing run id or status is rejected.
+func TestNotifyRunStatusValidation(t *testing.T) {
+	client := startAPIServer(t, startArtifactsServer(t), nil)
+	ctx := context.Background()
+
+	if _, err := client.NotifyRunStatus(ctx, &apipb.NotifyRunStatusRequest{Status: dbpb.RunStatus_RUN_STATUS_SUCCEEDED}); err == nil {
+		t.Error("expected an error for a missing run id")
+	}
+	if _, err := client.NotifyRunStatus(ctx, &apipb.NotifyRunStatusRequest{RunId: 42}); err == nil {
+		t.Error("expected an error for a missing status")
+	}
+}
+
 // TestCancelJobDeliversToWorker verifies that the API's CancelJob RPC (F-05)
 // delivers a JobCancellation down a watching worker's WatchJobs stream, so the
 // worker can interrupt the running job.

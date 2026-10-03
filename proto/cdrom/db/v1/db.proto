@@ -22,6 +22,21 @@ service Database {
   rpc UpdatePipeline(UpdatePipelineRequest) returns (Pipeline);
   rpc DeletePipeline(DeletePipelineRequest) returns (google.protobuf.Empty);
 
+  // Pipeline runs (F-07). A run is one execution of a pipeline, owning a set
+  // of job instances. CreateRun atomically creates the run row and one job
+  // instance per job definition in the pipeline (remapping each instance's
+  // depends_on from the definition ids to the new instance ids); the
+  // scheduler then drives the instances. The other RPCs let the API (and the
+  // UI) list and fetch runs.
+  rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
+  rpc GetRun(GetRunRequest) returns (PipelineRun);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  // UpdateRun applies a partial update to a run: a status of
+  // RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps
+  // leave the corresponding field unchanged. The scheduler's run-status loop
+  // uses it to persist a run's derived status and start/finish timestamps.
+  rpc UpdateRun(UpdateRunRequest) returns (PipelineRun);
+
   // Jobs
   rpc CreateJob(CreateJobRequest) returns (Job);
   rpc GetJob(GetJobRequest) returns (Job);
@@ -124,6 +139,92 @@ message UpdatePipelineRequest {
 
 message DeletePipelineRequest {
   int64 id = 1;
+}
+
+// RunStatus is the lifecycle state of a pipeline run (F-07). A run's status
+// is derived from the statuses of its job instances: it is SUCCEEDED only if
+// every non-skipped job succeeded, FAILED if any job failed or timed out,
+// CANCELLED if the run was cancelled, and RUNNING while any job is still
+// pending or running.
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_PENDING = 1;
+  RUN_STATUS_RUNNING = 2;
+  RUN_STATUS_SUCCEEDED = 3;
+  RUN_STATUS_FAILED = 4;
+  RUN_STATUS_CANCELLED = 5;
+}
+
+// PipelineRun is one execution of a pipeline (F-07): a first-class execution
+// entity that owns a set of job instances. A run separates the pipeline
+// definition from each run of it, so the same pipeline can be executed many
+// times and each run can be compared, reported on, and browsed historically.
+//
+// A run's job instances are the jobs that carry the run's id in run_id. The
+// run's status is derived from those jobs (see RunStatus) and maintained by
+// the scheduler's run-status loop.
+message PipelineRun {
+  int64 id = 1;
+  // pipeline_id is the pipeline this run executed.
+  int64 pipeline_id = 2;
+  // status is the run's overall state, derived from its job instances.
+  RunStatus status = 3;
+  // trigger is how the run was started (e.g. "manual"); it is recorded so a
+  // run's origin is visible (F-09 will add cron / webhook / event).
+  string trigger = 4;
+  // params are the run's parameters (F-10); empty until parameters land.
+  map<string, string> params = 5;
+  // started_at is when the run started (its first job began); unset until
+  // then.
+  google.protobuf.Timestamp started_at = 6;
+  // finished_at is when the run reached a terminal status; unset while the
+  // run is still in flight.
+  google.protobuf.Timestamp finished_at = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message CreateRunRequest {
+  // pipeline_id is the pipeline to execute.
+  int64 pipeline_id = 1;
+  // trigger is how the run was started (e.g. "manual").
+  string trigger = 2;
+  // params are the run's parameters (F-10); empty until parameters land.
+  map<string, string> params = 3;
+}
+
+// CreateRunResponse is the result of CreateRun: the created run plus the job
+// instances created for it (one per job definition in the pipeline). The
+// scheduler uses the instances to drive the run (dispatching the
+// dependency-free ones to the API).
+message CreateRunResponse {
+  PipelineRun run = 1;
+  repeated Job jobs = 2;
+}
+
+message GetRunRequest {
+  int64 id = 1;
+}
+
+message ListRunsRequest {
+  // pipeline_id of 0 lists runs for all pipelines.
+  int64 pipeline_id = 1;
+  // status of RUN_STATUS_UNSPECIFIED lists runs in all states.
+  RunStatus status = 2;
+}
+
+message ListRunsResponse {
+  repeated PipelineRun runs = 1;
+}
+
+message UpdateRunRequest {
+  int64 id = 1;
+  // status of RUN_STATUS_UNSPECIFIED leaves the status unchanged.
+  RunStatus status = 2;
+  // started_at, when set, records when the run started.
+  google.protobuf.Timestamp started_at = 3;
+  // finished_at, when set, records when the run finished.
+  google.protobuf.Timestamp finished_at = 4;
 }
 
 enum JobStatus {
@@ -369,6 +470,12 @@ message Job {
   // job is treated as satisfied by the scheduler's dependency resolver, so
   // its dependents are dispatched rather than skipped.
   bool ignore_failed = 17;
+  // run_id is the pipeline run this job is an instance of (F-07); 0 when the
+  // job is not part of a run (e.g. a standalone job submitted directly). A
+  // job is a per-run instance of the pipeline's job definition: each run of a
+  // pipeline creates its own set of job rows, so two runs of the same
+  // pipeline are independent and both queryable.
+  int64 run_id = 18;
 }
 
 message CreateJobRequest {
@@ -381,6 +488,9 @@ message CreateJobRequest {
   // depends_on lists the ids of jobs this job depends on (F-06); see Job's
   // depends_on field for the gating/skip semantics.
   repeated int64 depends_on = 5;
+  // run_id is the pipeline run this job is an instance of (F-07); 0 when the
+  // job is not part of a run.
+  int64 run_id = 6;
 }
 
 message GetJobRequest {
@@ -392,6 +502,8 @@ message ListJobsRequest {
   int64 pipeline_id = 1;
   // status of JOB_STATUS_UNSPECIFIED lists jobs in all states.
   JobStatus status = 2;
+  // run_id of 0 lists jobs from all runs.
+  int64 run_id = 3;
 }
 
 message ListJobsResponse {

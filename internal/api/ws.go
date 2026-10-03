@@ -34,6 +34,7 @@ type wsMessage struct {
 type wsSnapshot struct {
 	Jobs    []wsJob    `json:"jobs"`
 	Workers []wsWorker `json:"workers"`
+	Runs    []wsRun    `json:"runs"`
 }
 
 type wsJob struct {
@@ -53,6 +54,14 @@ type wsJob struct {
 type wsWorker struct {
 	Name  string `json:"name"`
 	Group string `json:"group"`
+}
+
+// wsRun is a pipeline run in the WebSocket snapshot (F-07).
+type wsRun struct {
+	ID         int64  `json:"id"`
+	PipelineID int64  `json:"pipeline_id"`
+	Status     string `json:"status"`
+	Trigger    string `json:"trigger"`
 }
 
 // handleWebSocket upgrades the connection, sends a state snapshot, then
@@ -112,7 +121,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // subset of the services is wired up.
 func (s *Server) snapshot() (*wsSnapshot, error) {
 	ctx := context.Background()
-	snap := &wsSnapshot{Jobs: []wsJob{}, Workers: []wsWorker{}}
+	snap := &wsSnapshot{Jobs: []wsJob{}, Workers: []wsWorker{}, Runs: []wsRun{}}
 
 	if s.clients.Scheduler != nil {
 		jobsResp, err := s.clients.Scheduler.ListJobs(ctx, &schedpb.ListJobsRequest{})
@@ -141,6 +150,19 @@ func (s *Server) snapshot() (*wsSnapshot, error) {
 			snap.Workers = append(snap.Workers, wsWorker{
 				Name:  worker.GetName(),
 				Group: worker.GetGroup(),
+			})
+		}
+
+		runsResp, err := s.clients.Database.ListRuns(ctx, &dbpb.ListRunsRequest{})
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runsResp.GetRuns() {
+			snap.Runs = append(snap.Runs, wsRun{
+				ID:         run.GetId(),
+				PipelineID: run.GetPipelineId(),
+				Status:     runStatusName(run.GetStatus()),
+				Trigger:    run.GetTrigger(),
 			})
 		}
 	}

@@ -413,6 +413,45 @@ reference it rather than redefining it.
     validation; F-08 is expected to replace it with a named `needs` (job keys
     within a pipeline run), full parallel DAG resolution, and cycle
     validation at save time.
+- **Pipeline runs (F-07).** A **`PipelineRun`** is a first-class entity — one
+  execution of a pipeline, owning a set of job instances. It carries
+  `pipeline_id`, an overall `status` (`pending`, `running`, `succeeded`,
+  `failed`, `cancelled`), a `trigger` (how it was started, e.g. `manual`),
+  `params` (run parameters, F-10), and `started_at`/`finished_at`. A `Job`
+  gains a `run_id` and becomes a per-run *instance* of the pipeline's job
+  definitions, so the pipeline *definition* is separated from each *run* of
+  it.
+  - *Atomic `CreateRun`.* `Database.CreateRun` creates the run row and, in a
+    single transaction, one job instance per job definition in the pipeline.
+    Each instance copies the definition's spec, `target_group`, retry policy,
+    and `ignore_failed`, and is bound to the new run. Each instance's
+    `depends_on` is **remapped from the definition job ids to the new
+    instance ids**, so two runs of the same pipeline are fully independent
+    (a dependency in run A never points at a job in run B).
+  - *The scheduler drives the instances.* `Scheduler.CreateRun` calls
+    `Database.CreateRun` and then drives each instance: a job with a
+    `target_group` is dispatched to the API (which fans it out to the live
+    workers); a job with `depends_on` is left `pending` for the dependency
+    resolver (F-06); a job with an empty `target_group` and no dependencies is
+    left `pending` for an ephemeral agent.
+  - *Run status is derived, not reported.* A run has no target of its own, so
+    its status is *derived* from its job instances by a background
+    **run-status loop** that periodically re-derives each in-flight run's
+    status: `failed` if any job failed or timed out; `cancelled` if any job
+    was cancelled (and none failed); `running` if any job is still pending or
+    running; `succeeded` if every job succeeded or was skipped (a run with no
+    jobs succeeds). When the derived status changes, the loop persists it
+    (`Database.UpdateRun`, stamping `started_at` when the run leaves `pending`
+    and `finished_at` when it reaches a terminal status) and fans the change
+    out to the UI (`API.NotifyRunStatus`).
+  - *New RPCs, endpoints, and events.* `Database.CreateRun` / `GetRun` /
+    `ListRuns` / `UpdateRun`; `Scheduler.CreateRun`; `API.NotifyRunStatus`.
+    `Job` (db, scheduler, api) and `CreateJobRequest` / `ListJobsRequest` (db)
+    gain a `run_id`. New HTTP endpoints: `POST /api/pipelines/{id}/runs`,
+    `GET /api/pipelines/{id}/runs`, and `GET /api/runs/{id}`. A `run_status`
+    WebSocket event (run id + status) is published when a run is created and
+    whenever its derived status changes; the connect snapshot now also carries
+    the current runs.
 - **Shell override (shell handler).** A step may set the `shell` param to run
   through a user-chosen interpreter instead of executing `command` directly.
   When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -439,6 +478,7 @@ sequenceDiagram
     participant DB as Database
     participant W as Worker (group)
 
+    Note over UI,DB: a run is triggered via POST /api/pipelines/{id}/runs → SCHED CreateRun → DB.CreateRun (run + one job instance per definition, depends_on remapped to instance ids); each instance then flows through the path below
     UI->>API: POST /api/jobs (name, target_group, depends_on, spec)
     API->>SCHED: SubmitJob (spec, depends_on)
     SCHED->>DB: CreateJob (persist spec snapshot + depends_on)
@@ -465,6 +505,7 @@ sequenceDiagram
     Note over SCHED,DB: retry loop (F-04): SCHED asks the DB for retriable jobs (DB.ListRetriableJobs — failed and within budget), claims each next attempt (DB.ClaimJobRetry → pending, attempt+1) and re-dispatches it via the API after the policy's backoff
     Note over UI,W: cancel (F-05): UI → API POST /api/jobs/{id}/cancel → SCHED CancelJob → DB.CancelJob (cancelled, if pending/running) → API.CancelJob → WatchJobs stream: JobCancellation → W interrupts the running step and reports cancelled
     Note over SCHED,DB: dependency resolver (F-06): SCHED lists pending jobs with depends_on, checks each dependency's status (DB.GetJob); skips the job (DB.SkipJob) if a dependency failed/cancelled/timed_out/skipped, or clears depends_on and dispatches it once every dependency succeeded
+    Note over SCHED,DB: run-status loop (F-07): for a run, SCHED re-derives the run's status from its job instances (DB.ListJobs by run_id); on a change it persists it (DB.UpdateRun) and tells the API (NotifyRunStatus) to fan a run_status event out to the UI
 ```
 
 Job status transitions (see `proto/cdrom/db/v1/db.proto`):
@@ -496,14 +537,15 @@ stateDiagram-v2
 ### Live events
 
 `GET /api/ws` is a WebSocket endpoint. On connect the client receives a state
-snapshot (jobs + workers); afterwards it receives one message per event. Event
-types are `job_status` (job id + status — including `skipped`, F-06 — plus
-`attempt` / `max_attempts` for F-04), `worker` (name/group + action
-`registered` / `deregistered` / `watching`), and `job_log` (job id + step
-index + stream `stdout`/`stderr` + a chunk of output, F-02). Events are
-published from the gRPC server (worker lifecycle, job status reports,
-streamed job logs) and the HTTP handlers (job submit / cancel / re-run)
-through a shared `EventHub`; slow subscribers have
+snapshot (jobs + workers + runs); afterwards it receives one message per
+event. Event types are `job_status` (job id + status — including `skipped`,
+F-06 — plus `attempt` / `max_attempts` for F-04), `worker` (name/group +
+action `registered` / `deregistered` / `watching`), `job_log` (job id + step
+index + stream `stdout`/`stderr` + a chunk of output, F-02), and `run_status`
+(run id + status, F-07). Events are published from the gRPC server (worker
+lifecycle, job status reports, streamed job logs, run status notifications)
+and the HTTP handlers (job submit / cancel / re-run, run trigger) through a
+shared `EventHub`; slow subscribers have
 events dropped and resync from the snapshot on reconnect.
 
 ---
@@ -614,11 +656,12 @@ sequenceDiagram
 
 ## 7. Data & artifacts
 
-- **Durable state** lives only in the Database service. Pipelines, jobs, and
-  workers are GORM models in `internal/models`; the schema is derived via
-  `AutoMigrate`. The driver is swappable (SQLite for local development,
-  PostgreSQL for deployments) behind the database service's gRPC API — code
-  outside the database service never talks to a specific driver directly.
+- **Durable state** lives only in the Database service. Pipelines, pipeline
+  runs, jobs, and workers are GORM models in `internal/models`; the schema is
+  derived via `AutoMigrate`. The driver is swappable (SQLite for local
+  development, PostgreSQL for deployments) behind the database service's gRPC
+  API — code outside the database service never talks to a specific driver
+  directly.
 - A job's **execution spec** is persisted on the `Job` row as a JSON document
   (GORM `serializer:json` on a `text` column), so the spec snapshot survives
   across the gRPC boundary and is identical on every execution target.
@@ -727,7 +770,9 @@ internal/
     data/     pipeline/job data service
     artifacts/ general namespaced file store (artifacts + job logs; gRPC server;
               store interface with a filesystem implementation)
-    scheduler/ job lifecycle + dispatch (gRPC server) + a background watchdog
+    scheduler/ job lifecycle + dispatch (gRPC server) + CreateRun (F-07) + a
+              background run-status loop that re-derives each in-flight run's
+              status from its job instances (F-07) + a background watchdog
               that reaps running jobs past their timeout (F-03) + a background
               retry loop that re-dispatches failed jobs per their retry policy
               (F-04) + a background dependency resolver that skips/dispatches

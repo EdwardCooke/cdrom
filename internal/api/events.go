@@ -9,8 +9,11 @@ import (
 
 // Event is a single change notification broadcast to WebSocket subscribers.
 type Event struct {
-	Type   string `json:"type"`
-	JobID  int64  `json:"job_id,omitempty"`
+	Type  string `json:"type"`
+	JobID int64  `json:"job_id,omitempty"`
+	// RunID is the pipeline run a run_status event belongs to (F-07); 0 means
+	// the field is unset.
+	RunID  int64  `json:"run_id,omitempty"`
 	Status string `json:"status,omitempty"`
 	Worker string `json:"worker,omitempty"`
 	Group  string `json:"group,omitempty"`
@@ -36,6 +39,9 @@ const (
 	EventJobStatus = "job_status"
 	EventWorker    = "worker"
 	EventJobLog    = "job_log"
+	// EventRunStatus is a pipeline run status change (F-07); the event carries
+	// the run's id and its derived status.
+	EventRunStatus = "run_status"
 )
 
 // Job log stream names (the Event.Stream values for job_log events).

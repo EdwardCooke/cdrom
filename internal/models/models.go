@@ -19,6 +19,38 @@ type Pipeline struct {
 	Jobs        []Job  `json:"jobs,omitempty"`
 }
 
+// PipelineRun is one execution of a pipeline (F-07): a first-class execution
+// entity that owns a set of job instances. A run separates the pipeline
+// *definition* from each *run* of it, so the same pipeline can be executed
+// many times and each run can be compared, reported on, and browsed
+// historically ("run #42 of pipeline X").
+//
+// A run's job instances are the Job rows that carry the run's id in RunID.
+// The run's Status is derived from those jobs (see RunStatus): it is
+// succeeded only if every non-skipped job succeeded, failed if any job
+// failed or timed out, cancelled if the run was cancelled, and running while
+// any job is still pending or running. The derivation is maintained by the
+// scheduler's run-status loop.
+type PipelineRun struct {
+	gorm.Model
+	// PipelineID is the pipeline this run executed.
+	PipelineID uint `gorm:"index;not null" json:"pipeline_id"`
+	// Pipeline is the pipeline this run executed (loaded on demand).
+	Pipeline *Pipeline `json:"pipeline,omitempty"`
+	// Status is the run's overall state, derived from its job instances.
+	Status RunStatus `gorm:"default:pending;index" json:"status"`
+	// Trigger is how the run was started (e.g. "manual"); it is recorded so a
+	// run's origin is visible (F-09 will add cron / webhook / event).
+	Trigger string `json:"trigger"`
+	// Params are the run's parameters (F-10); empty until parameters land.
+	Params map[string]string `gorm:"type:text;serializer:json" json:"params,omitempty"`
+	// StartedAt is when the run started (its first job began); nil until then.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	// FinishedAt is when the run reached a terminal status; nil while the run
+	// is still in flight.
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
 // JobStatus represents the lifecycle state of a job.
 type JobStatus string
 
@@ -38,6 +70,21 @@ const (
 	// from failed so reporting and on_failure logic can tell "didn't run"
 	// apart from "ran and errored".
 	JobStatusSkipped JobStatus = "skipped"
+)
+
+// RunStatus is the lifecycle state of a pipeline run (F-07). A run's status
+// is derived from the statuses of its job instances: it is succeeded only if
+// every non-skipped job succeeded, failed if any job failed or timed out,
+// cancelled if it was cancelled, and running while any job is still pending
+// or running.
+type RunStatus string
+
+const (
+	RunStatusPending   RunStatus = "pending"
+	RunStatusRunning   RunStatus = "running"
+	RunStatusSucceeded RunStatus = "succeeded"
+	RunStatusFailed    RunStatus = "failed"
+	RunStatusCancelled RunStatus = "cancelled"
 )
 
 // StepStatus is the terminal outcome of a single step within a job's
@@ -205,13 +252,20 @@ type JobSpec struct {
 // budget copied from the spec's retry policy when the job was created.
 type Job struct {
 	gorm.Model
-	PipelineID  *uint      `gorm:"index" json:"pipeline_id"`
-	Pipeline    *Pipeline  `json:"pipeline,omitempty"`
-	Name        string     `gorm:"not null" json:"name"`
-	Status      JobStatus  `gorm:"default:pending;index" json:"status"`
-	TargetGroup string     `gorm:"index" json:"target_group"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	PipelineID *uint     `gorm:"index" json:"pipeline_id"`
+	Pipeline   *Pipeline `json:"pipeline,omitempty"`
+	// RunID is the pipeline run this job is an instance of (F-07); nil when
+	// the job is not part of a run (e.g. a standalone job submitted directly).
+	// A job is a per-run *instance* of the pipeline's job definition: each run
+	// of a pipeline creates its own set of job rows, so two runs of the same
+	// pipeline are independent and both queryable.
+	RunID       *uint        `gorm:"index" json:"run_id"`
+	Run         *PipelineRun `json:"run,omitempty"`
+	Name        string       `gorm:"not null" json:"name"`
+	Status      JobStatus    `gorm:"default:pending;index" json:"status"`
+	TargetGroup string       `gorm:"index" json:"target_group"`
+	StartedAt   *time.Time   `json:"started_at,omitempty"`
+	FinishedAt  *time.Time   `json:"finished_at,omitempty"`
 	// Spec is the execution spec snapshot, serialized to a JSON document in a
 	// text column (portable across SQLite and PostgreSQL).
 	Spec JobSpec `gorm:"type:text;serializer:json" json:"spec,omitempty"`
@@ -304,6 +358,7 @@ type IDPAuthCode struct {
 func All() []any {
 	return []any{
 		&Pipeline{},
+		&PipelineRun{},
 		&Job{},
 		&Worker{},
 		&IDPSigningKey{},

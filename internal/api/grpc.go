@@ -531,6 +531,27 @@ func (s *GRPCServer) NotifyJobStatus(ctx context.Context, req *apipb.NotifyJobSt
 	return &emptypb.Empty{}, nil
 }
 
+// NotifyRunStatus is called by the scheduler's run-status loop to fan a
+// pipeline run status change out to the UI over the WebSocket event hub
+// (F-07). It mirrors the run_status events the API publishes when a run is
+// created. It does not touch the database — the scheduler already persisted
+// the change through the Database service — it only publishes the event.
+func (s *GRPCServer) NotifyRunStatus(ctx context.Context, req *apipb.NotifyRunStatusRequest) (*emptypb.Empty, error) {
+	if req.GetRunId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "run_id is required")
+	}
+	if req.GetStatus() == dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
+		return nil, status.Error(codes.InvalidArgument, "status is required")
+	}
+	s.logger.Info("api: run status notified", "run", req.GetRunId(), "status", req.GetStatus())
+	s.publish(Event{
+		Type:   EventRunStatus,
+		RunID:  req.GetRunId(),
+		Status: runStatusName(req.GetStatus()),
+	})
+	return &emptypb.Empty{}, nil
+}
+
 // CancelJob is called by the scheduler to signal the execution target running
 // a job to stop the work (F-05). For a long-lived worker it delivers a
 // JobCancellation down the worker's WatchJobs stream; the worker interrupts

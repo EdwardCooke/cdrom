@@ -68,6 +68,14 @@ service API {
   // the event.
   rpc NotifyJobStatus(NotifyJobStatusRequest) returns (google.protobuf.Empty);
 
+  // NotifyRunStatus (called by the scheduler). The scheduler's run-status
+  // loop (F-07) uses it to fan a pipeline-run status change (e.g. a run that
+  // just succeeded or failed) out to the UI over the WebSocket event hub. It
+  // mirrors the run_status events the API publishes when a run's derived
+  // status changes. It does not touch the database (the scheduler already
+  // persisted the change); it only publishes the event.
+  rpc NotifyRunStatus(NotifyRunStatusRequest) returns (google.protobuf.Empty);
+
   // Artifact proxy (called by workers and agents). The API forwards these to
   // the artifacts service so execution targets never talk to it directly.
   rpc UploadArtifact(stream cdrom.artifacts.v1.ArtifactChunk)
@@ -146,6 +154,9 @@ message Job {
   // ignore_failed is the job's ignore-failed flag (F-06), denormalized from
   // the spec when the job was created.
   bool ignore_failed = 16;
+  // run_id is the pipeline run this job is an instance of (F-07); 0 when the
+  // job is not part of a run.
+  int64 run_id = 17;
 }
 
 message JobAssignment {
@@ -257,6 +268,16 @@ message NotifyJobStatusRequest {
   // max_attempts is the job's retry budget (0 means the job is never
   // retried).
   int32 max_attempts = 4;
+}
+
+// NotifyRunStatusRequest asks the API to fan a pipeline-run status change out
+// to the UI (F-07). The scheduler's run-status loop persists the change
+// through the Database service and then calls this to publish the event.
+message NotifyRunStatusRequest {
+  // run_id is the run whose status changed.
+  int64 run_id = 1;
+  // status is the run's new overall status.
+  cdrom.db.v1.RunStatus status = 2;
 }
 
 message ExchangeJobTokenRequest {

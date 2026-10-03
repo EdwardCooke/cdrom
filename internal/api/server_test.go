@@ -15,17 +15,27 @@ import (
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 )
 
-// fakeScheduler is a stub SchedulerClient that records the last SubmitJob and
-// RerunJob requests and returns a canned job.
+// fakeScheduler is a stub SchedulerClient that records the last SubmitJob,
+// RerunJob, and CreateRun requests and returns a canned job / run.
 type fakeScheduler struct {
 	submitted *schedpb.SubmitJobRequest
 	rerun     *schedpb.RerunJobRequest
+	created   *schedpb.CreateRunRequest
 	job       *schedpb.Job
+	run       *schedpb.Run
 }
 
 func (f *fakeScheduler) SubmitJob(ctx context.Context, in *schedpb.SubmitJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
 	f.submitted = in
 	return f.job, nil
+}
+
+func (f *fakeScheduler) CreateRun(ctx context.Context, in *schedpb.CreateRunRequest, opts ...grpc.CallOption) (*schedpb.Run, error) {
+	f.created = in
+	if f.run != nil {
+		return f.run, nil
+	}
+	return &schedpb.Run{Id: 1, PipelineId: in.GetPipelineId(), Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: in.GetTrigger()}, nil
 }
 
 func (f *fakeScheduler) GetJob(ctx context.Context, in *schedpb.GetJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
@@ -266,5 +276,68 @@ func TestRerunJob(t *testing.T) {
 	}
 	if fake.rerun.GetId() != 9 {
 		t.Errorf("rerun job id = %d, want 9", fake.rerun.GetId())
+	}
+}
+
+// TestCreateRun verifies that POST /api/pipelines/{id}/runs (F-07) forwards the
+// pipeline id, trigger, and params to the scheduler's CreateRun RPC and
+// returns the created run.
+func TestCreateRun(t *testing.T) {
+	fake := &fakeScheduler{run: &schedpb.Run{Id: 42, PipelineId: 3, Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: "manual"}}
+	srv := New(Clients{Scheduler: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"trigger": "manual", "params": {"env": "prod"}}`
+	resp, err := http.Post(ts.URL+"/api/pipelines/3/runs", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fake.created == nil {
+		t.Fatal("scheduler.CreateRun was not called")
+	}
+	if fake.created.GetPipelineId() != 3 {
+		t.Errorf("pipeline id = %d, want 3", fake.created.GetPipelineId())
+	}
+	if fake.created.GetTrigger() != "manual" {
+		t.Errorf("trigger = %q, want manual", fake.created.GetTrigger())
+	}
+	if got := fake.created.GetParams()["env"]; got != "prod" {
+		t.Errorf("params[env] = %q, want prod", got)
+	}
+}
+
+// TestCreateRunEmptyBody verifies that a run can be triggered with no body
+// (the default trigger and no params), exercising the io.EOF tolerance in the
+// handler.
+func TestCreateRunEmptyBody(t *testing.T) {
+	fake := &fakeScheduler{}
+	srv := New(Clients{Scheduler: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/pipelines/3/runs", "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fake.created == nil {
+		t.Fatal("scheduler.CreateRun was not called")
+	}
+	if fake.created.GetPipelineId() != 3 {
+		t.Errorf("pipeline id = %d, want 3", fake.created.GetPipelineId())
+	}
+	// The fake returns a default run when none is canned.
+	if fake.created.GetTrigger() != "" {
+		t.Errorf("trigger = %q, want empty", fake.created.GetTrigger())
 	}
 }
