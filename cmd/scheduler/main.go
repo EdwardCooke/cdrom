@@ -1,21 +1,28 @@
 // Command scheduler is the Cdrom scheduler service.
 //
-// It manages job lifecycle and dispatch. When a job targets a group of
-// long-lived workers, the scheduler pushes it to the API, which fans it out
-// to the live workers in that group. Jobs with an empty target group are
-// queued for ephemeral Kubernetes agents. All durable state is persisted
-// through the Database service.
+// It manages job lifecycle and dispatch. For high availability (F-23) it
+// writes to the shared Database service only: it persists the job and appends
+// an "assignment" event to the shared event log, which every API pod tails and
+// fans out to its local workers. It no longer dials a specific API pod, so a
+// job is delivered to whichever pod a worker happens to be connected to. Jobs
+// with an empty target group are queued for ephemeral Kubernetes agents. All
+// durable state is persisted through the Database service.
+//
+// The four background loops (watchdog, retry, dependency resolver, run-status)
+// run on exactly one replica at a time: the scheduler runs a leader election
+// (a lease on the Database service) and starts the loops only while it holds
+// the lease, stopping them if it loses it.
 package main
 
 import (
 	"context"
 	"net"
 	"os"
+	"sync"
 
 	"google.golang.org/grpc"
 
 	"cdrom/internal/config"
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/grpcutil"
@@ -48,12 +55,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer dbConn.Close()
-	apiConn, err := grpcutil.Dial(ctx, cfg.APIAddress, cfg.TLS)
-	if err != nil {
-		logger.Error("dial api service", "addr", cfg.APIAddress, "err", err)
-		os.Exit(1)
-	}
-	defer apiConn.Close()
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -66,38 +67,69 @@ func main() {
 		logger.Error("tls: server creds", "err", err)
 		os.Exit(1)
 	}
-	sched := scheduler.NewServer(
-		dbpb.NewDatabaseClient(dbConn), apipb.NewAPIClient(apiConn), logger)
-	// Start the job-timeout watchdog (F-03): it reaps running jobs that have
-	// exceeded their declared timeout even if the execution target goes
-	// silent. It runs until the process shuts down.
-	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
-	defer stopWatchdog()
-	sched.StartWatchdog(watchdogCtx)
-	// Start the job-retry loop (F-04): it re-dispatches failed jobs that
-	// still have retries remaining, after their policy's backoff. It runs
-	// until the process shuts down.
-	retryCtx, stopRetry := context.WithCancel(ctx)
-	defer stopRetry()
-	sched.StartRetryLoop(retryCtx)
-	// Start the job-dependency resolver (F-06): it skips a pending job whose
-	// dependency did not succeed, and dispatches a pending job once every
-	// dependency has succeeded. It runs until the process shuts down.
-	dependencyCtx, stopDependencyResolver := context.WithCancel(ctx)
-	defer stopDependencyResolver()
-	sched.StartDependencyResolver(dependencyCtx)
-	// Start the pipeline-run status loop (F-07): it re-derives each in-flight
-	// run's overall status from its job instances and persists it, fanning the
-	// change out to the UI. It runs until the process shuts down.
-	runStatusCtx, stopRunStatusLoop := context.WithCancel(ctx)
-	defer stopRunStatusLoop()
-	sched.StartRunStatusLoop(runStatusCtx)
+	sched := scheduler.NewServer(dbpb.NewDatabaseClient(dbConn), logger)
+
+	// The four background loops (F-03 watchdog, F-04 retry, F-06 dependency
+	// resolver, F-07 run-status) must run on exactly one scheduler replica at
+	// a time, or they would publish duplicate events (F-23). They are started
+	// when this replica wins the leader election and stopped when it loses the
+	// lease, so leadership can move between replicas without a restart.
+	loops := newLoopManager(ctx, sched)
+	electionCtx, stopElection := context.WithCancel(ctx)
+	defer stopElection()
+	sched.StartLeaderElection(electionCtx, loops.start, loops.stop)
+
 	srv := grpc.NewServer(grpc.Creds(creds))
 	schedpb.RegisterSchedulerServer(srv, sched)
 
-	logger.Info("cdrom scheduler service starting", "addr", addr, "db", cfg.DBAddress, "api", cfg.APIAddress)
+	logger.Info("cdrom scheduler service starting", "addr", addr, "db", cfg.DBAddress)
 	if err := grpcutil.Serve(lis, srv, logger); err != nil {
 		logger.Error("serve", "err", err)
 		os.Exit(1)
+	}
+	// Serve returned on a shutdown signal. Stop the leader election (which
+	// releases the lease so a peer can take over) and the loops, then exit.
+	stopElection()
+	loops.stop()
+}
+
+// loopManager starts and stops the scheduler's four background loops, gated
+// by leader election (F-23). It is safe for concurrent use: the
+// leader-election goroutine (onAcquire / onLose) and the shutdown path both
+// call into it.
+type loopManager struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	sched  *scheduler.Server
+	ctx    context.Context
+}
+
+func newLoopManager(ctx context.Context, sched *scheduler.Server) *loopManager {
+	return &loopManager{ctx: ctx, sched: sched}
+}
+
+// start begins the four background loops on a fresh context, stopping any
+// that are already running (a re-acquired leader restarts them cleanly).
+func (m *loopManager) start() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	loopsCtx, cancel := context.WithCancel(m.ctx)
+	m.cancel = cancel
+	m.sched.StartWatchdog(loopsCtx)
+	m.sched.StartRetryLoop(loopsCtx)
+	m.sched.StartDependencyResolver(loopsCtx)
+	m.sched.StartRunStatusLoop(loopsCtx)
+}
+
+// stop halts the running loops, if any.
+func (m *loopManager) stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
 	}
 }

@@ -48,8 +48,12 @@ type Store interface {
 	AppendLog(ctx context.Context, namespace, name string, data []byte) (*artifactspb.Artifact, error)
 	// DownloadLog opens the log named name in namespace for reading. The
 	// caller must close the returned reader. Reading a log that is still
-	// being written returns the output captured so far.
-	DownloadLog(ctx context.Context, namespace, name string) (*artifactspb.Artifact, io.ReadCloser, error)
+	// being written returns the output captured so far. When offset is
+	// greater than zero the reader is positioned at that byte offset (a
+	// range read of the log's tail); when it is zero the whole log is
+	// returned from the start. An offset beyond the log's current size
+	// yields an empty reader.
+	DownloadLog(ctx context.Context, namespace, name string, offset int64) (*artifactspb.Artifact, io.ReadCloser, error)
 	// GetLog returns the metadata of the log named name in namespace.
 	GetLog(ctx context.Context, namespace, name string) (*artifactspb.Artifact, error)
 	// ListLogs lists the logs in namespace (all namespaces when namespace is

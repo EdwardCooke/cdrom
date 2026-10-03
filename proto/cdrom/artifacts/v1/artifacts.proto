@@ -116,6 +116,12 @@ message DeleteArtifactRequest {
 message DownloadLogRequest {
   string namespace = 1;
   string name = 2;
+  // offset is the byte offset to start reading from (F-23). When 0 (the
+  // default) the whole log is returned. When greater than 0 only the bytes
+  // from offset to the end of the log are returned — this is how an API pod
+  // range-reads the delta of a log that another pod appended to (cross-pod
+  // near-live logs). Reading past the end of the log returns no data.
+  int64 offset = 3;
 }
 
 message GetLogRequest {

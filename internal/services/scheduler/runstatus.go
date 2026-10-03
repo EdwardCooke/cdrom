@@ -4,8 +4,9 @@
 // instances. The execution targets report each job's status to the API, which
 // persists it through the Database service; the run-status loop closes the
 // loop by periodically re-deriving each in-flight run's status from its job
-// instances and persisting the change (Database.UpdateRun) and fanning it out
-// to the UI (API.NotifyRunStatus).
+// instances and persisting the change (Database.UpdateRun) and appending a
+// "run_status" event to the shared event log (F-23), which every API pod tails
+// and fans out to its UI clients.
 //
 // Derivation: a run is succeeded only if every non-skipped job succeeded; it
 // is failed if any job failed or timed out, cancelled if any job was
@@ -18,10 +19,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/models"
 )
@@ -41,11 +40,12 @@ type runStatusDB interface {
 	UpdateRun(ctx context.Context, in *dbpb.UpdateRunRequest, opts ...grpc.CallOption) (*dbpb.PipelineRun, error)
 }
 
-// runStatusAPI is the subset of the API client the run-status loop uses to
-// fan a run's status change out to the UI. The concrete apipb.APIClient
-// satisfies it; tests inject a fake.
-type runStatusAPI interface {
-	NotifyRunStatus(ctx context.Context, in *apipb.NotifyRunStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+// runStatusPublisher is the subset of the Database client the run-status loop
+// uses to append a "run_status" event to the shared event log (F-23) so every
+// API pod can fan the run's status change out to its UI clients. The concrete
+// dbpb.DatabaseClient satisfies it; tests inject a fake.
+type runStatusPublisher interface {
+	PublishRunStatus(ctx context.Context, in *dbpb.PublishRunStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
 }
 
 // StartRunStatusLoop runs the pipeline-run status loop in the background
@@ -64,7 +64,7 @@ func (s *Server) StartRunStatusLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.processRunStatuses(ctx, s.db, s.api)
+				s.processRunStatuses(ctx, s.db, s.db)
 			}
 		}
 	}()
@@ -72,17 +72,18 @@ func (s *Server) StartRunStatusLoop(ctx context.Context) {
 
 // processRunStatuses re-derives the status of every in-flight run (pending or
 // running) from its job instances and, when the derived status differs from
-// the stored one, persists it and fans it out to the UI. db and api are the
-// loop's dependencies (the concrete clients in production, fakes in tests);
-// api may be nil to skip the UI notification.
-func (s *Server) processRunStatuses(ctx context.Context, db runStatusDB, api runStatusAPI) {
+// the stored one, persists it and appends a "run_status" event to the shared
+// event log (F-23). db and publisher are the loop's dependencies (the
+// concrete clients in production, fakes in tests); publisher may be nil to
+// skip the event append.
+func (s *Server) processRunStatuses(ctx context.Context, db runStatusDB, publisher runStatusPublisher) {
 	runs, err := s.inFlightRuns(ctx, db)
 	if err != nil {
 		s.logger.Warn("scheduler: run-status list runs", "err", err)
 		return
 	}
 	for _, run := range runs {
-		s.processRun(ctx, db, api, run)
+		s.processRun(ctx, db, publisher, run)
 	}
 }
 
@@ -103,8 +104,9 @@ func (s *Server) inFlightRuns(ctx context.Context, db runStatusDB) ([]*dbpb.Pipe
 
 // processRun re-derives a single run's status from its job instances and, if
 // it changed, persists the change (recording the run's start/finish times on
-// the relevant transitions) and fans it out to the UI.
-func (s *Server) processRun(ctx context.Context, db runStatusDB, api runStatusAPI, run *dbpb.PipelineRun) {
+// the relevant transitions) and appends a "run_status" event to the shared
+// event log (F-23).
+func (s *Server) processRun(ctx context.Context, db runStatusDB, publisher runStatusPublisher, run *dbpb.PipelineRun) {
 	jobsResp, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{RunId: run.GetId()})
 	if err != nil {
 		s.logger.Warn("scheduler: run-status list jobs", "run", run.GetId(), "err", err)
@@ -131,14 +133,14 @@ func (s *Server) processRun(ctx context.Context, db runStatusDB, api runStatusAP
 		return
 	}
 	s.logger.Info("scheduler: run status changed", "run", run.GetId(), "status", derived)
-	if api == nil {
+	if publisher == nil {
 		return
 	}
-	if _, err := api.NotifyRunStatus(ctx, &apipb.NotifyRunStatusRequest{
+	if _, err := publisher.PublishRunStatus(ctx, &dbpb.PublishRunStatusRequest{
 		RunId:  run.GetId(),
 		Status: runStatusToProto(derived),
 	}); err != nil {
-		s.logger.Warn("scheduler: notify api of run status", "run", run.GetId(), "err", err)
+		s.logger.Warn("scheduler: publish run status", "run", run.GetId(), "err", err)
 	}
 }
 

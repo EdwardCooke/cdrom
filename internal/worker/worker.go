@@ -86,6 +86,10 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	// Heartbeat in the background.
 	go w.heartbeat(ctx)
+	// Poll for pending jobs in the background (F-23): the authoritative
+	// catch-up path that picks up jobs published while the worker was
+	// unreachable or whose push nudge was dropped.
+	go w.poll(ctx)
 
 	// Watch for job assignments, reconnecting on transient failures.
 	for {
@@ -134,19 +138,89 @@ func (w *Worker) watch(ctx context.Context) error {
 		}
 		switch m := message.GetMessage().(type) {
 		case *apipb.WatchMessage_Assignment:
-			assignment := m.Assignment
-			// Run the job in a goroutine so the watch loop can keep receiving
-			// cancellations for it (F-05). The semaphore bounds the worker to
-			// one job at a time, preserving the previous sequential behavior.
-			w.sem <- struct{}{}
-			go func() {
-				defer func() { <-w.sem }()
-				w.execute(ctx, assignment.GetJob(), assignment.GetToken())
-			}()
+			// A full assignment (legacy push). The worker still claims the job
+			// atomically (F-23) so a job delivered to several workers is run by
+			// exactly one of them; the claim returns the fresh spec + token.
+			w.claimAndExecute(ctx, m.Assignment.GetJob().GetId())
+		case *apipb.WatchMessage_Nudge:
+			// A nudge (F-23): the push carries only the job id. The worker
+			// fetches the job and claims it atomically, so a job delivered via
+			// both push and poll is run once.
+			w.claimAndExecute(ctx, m.Nudge.GetJobId())
 		case *apipb.WatchMessage_Cancellation:
 			w.cancelJob(m.Cancellation.GetJobId())
 		}
 	}
+}
+
+// pollInterval is how often the worker polls the API for pending jobs in its
+// group (F-23). It is the authoritative catch-up path: if a push nudge is
+// dropped (queue full, pod restart, stream flap), the next poll picks the job
+// up. It is a variable (not a constant) so tests can shorten it.
+var pollInterval = 1 * time.Second
+
+// poll runs the worker's pull loop (F-23): on each tick it asks the API for
+// the pending jobs targeting its group and claims each one. It is the
+// authoritative delivery path — a job published while the worker was
+// unreachable (or whose push was dropped) is picked up here, so no job is
+// stranded pending.
+func (w *Worker) poll(ctx context.Context) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.pollOnce(ctx)
+		}
+	}
+}
+
+// pollOnce lists the pending jobs in the worker's group and claims each one.
+func (w *Worker) pollOnce(ctx context.Context) {
+	resp, err := w.deps.API.ListPendingJobs(ctx, &apipb.ListPendingJobsRequest{Group: w.group})
+	if err != nil {
+		w.logger.Warn("worker: list pending jobs", "err", err)
+		return
+	}
+	for _, job := range resp.GetJobs() {
+		w.claimAndExecute(ctx, job.GetId())
+	}
+}
+
+// claimAndExecute atomically claims a job (F-23) and, if this worker won the
+// claim, executes it. It is the single entry point for job acquisition, used
+// by both the push path (a nudge or full assignment on the WatchJobs stream)
+// and the pull path (the periodic poll). The claim is atomic in the database
+// (pending → running), so a job delivered to several workers — or via both
+// push and poll — is run by exactly one of them: the first to claim. The
+// others see claimed=false and skip.
+//
+// The job runs in a goroutine (bounded by the worker's semaphore to one job
+// at a time) so the watch loop stays free to receive cancellations (F-05).
+func (w *Worker) claimAndExecute(ctx context.Context, jobID int64) {
+	w.sem <- struct{}{}
+	go func() {
+		defer func() { <-w.sem }()
+		w.doClaimAndExecute(ctx, jobID)
+	}()
+}
+
+// doClaimAndExecute performs the atomic claim and, on success, executes the
+// claimed job (which carries its spec, upstream jobs, and a fresh job token).
+func (w *Worker) doClaimAndExecute(ctx context.Context, jobID int64) {
+	resp, err := w.deps.API.ClaimJob(ctx, &apipb.ClaimJobRequest{JobId: jobID})
+	if err != nil {
+		w.logger.Warn("worker: claim job", "job", jobID, "err", err)
+		return
+	}
+	if !resp.GetClaimed() {
+		// Another worker claimed it first, or it is no longer pending.
+		return
+	}
+	job := resp.GetJob()
+	w.execute(ctx, job, job.GetToken())
 }
 
 // cancelJob interrupts the job the worker is running (F-05): it marks the

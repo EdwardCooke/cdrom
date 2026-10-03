@@ -89,6 +89,13 @@ This means a worker or agent never dials the database, scheduler, or artifacts
 service directly. Artifact traffic from execution targets is **proxied**
 through the API to the artifacts service.
 
+> **Single-instance assumption.** The design above assumes **one API
+> instance**: worker streams, the UI event hub, and job dispatch all live in
+> that pod's memory. The high-availability design (multiple API pods, a
+> shared Postgres event log, hybrid push/pull dispatch, scheduler leader
+> election, cross-pod live logs) is documented in
+> [`HighAvailability.md`](HighAvailability.md).
+
 ---
 
 ## 2. The API / control plane
@@ -548,6 +555,14 @@ and the HTTP handlers (job submit / cancel / re-run, run trigger) through a
 shared `EventHub`; slow subscribers have
 events dropped and resync from the snapshot on reconnect.
 
+> **Per-pod state.** The `EventHub` is in-memory per API pod: a UI client is
+> only served live events by the pod it is connected to, and a scheduler
+> notification reaches only the pod it is sent to. With a single API pod this
+> is invisible; with multiple pods it is the core HA gap. The
+> [high-availability design](HighAvailability.md) replaces the per-pod
+> `EventHub` fan-out with a shared Postgres event log that every API pod
+> tails.
+
 ---
 
 ## 6. Authentication
@@ -681,6 +696,16 @@ sequenceDiagram
   the UI as `job_log` events. Finished logs are replayable:
   `GET /api/jobs/{id}/logs` lists a job's log files and
   `GET /api/jobs/{id}/logs/{name}` streams one.
+  `AppendLog` opens, writes, and **closes the file per chunk** — this
+  close-per-append is a correctness requirement for the high-availability
+  design (close-to-open consistency on a shared filesystem), not a
+  performance wart.
+- **Shared store for HA.** In a multi-pod deployment the artifacts store root
+  must be readable by every artifacts replica (a shared filesystem such as
+  CephFS or NFSv4.1 mounted `ReadWriteMany`, or an S3 / Azure Blob store
+  once those store kinds are implemented) so that one pod can range-read a
+  log that another pod appended. See the
+  [high-availability design](HighAvailability.md).
 
 ```mermaid
 flowchart LR

@@ -159,13 +159,16 @@ func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.Artifac
 
 // DownloadLog streams a log back: the first chunk carries metadata,
 // subsequent chunks carry data. Reading a log that is still being written
-// returns the output captured so far.
+// returns the output captured so far. When the request's offset is greater
+// than zero the stream begins at that byte offset (a range read of the log's
+// tail); this is how a consumer that has already read up to a size fetches
+// only the new bytes (F-23 cross-pod near-live logs).
 func (s *Server) DownloadLog(req *artifactspb.DownloadLogRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
 	namespace, name := req.GetNamespace(), req.GetName()
 	if namespace == "" || name == "" {
 		return status.Error(codes.InvalidArgument, "namespace and name are required")
 	}
-	artifact, reader, err := s.store.DownloadLog(stream.Context(), namespace, name)
+	artifact, reader, err := s.store.DownloadLog(stream.Context(), namespace, name, req.GetOffset())
 	if err != nil {
 		return err
 	}

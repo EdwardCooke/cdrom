@@ -148,7 +148,16 @@ func main() {
 		os.Exit(1)
 	}
 	grpcSrv := grpc.NewServer(grpc.Creds(creds))
-	apipb.RegisterAPIServer(grpcSrv, api.NewGRPCServer(clients.Database, clients.Artifacts, hub, jobAuth, logger))
+	grpcServer := api.NewGRPCServer(clients.Database, clients.Artifacts, hub, jobAuth, logger)
+	apipb.RegisterAPIServer(grpcSrv, grpcServer)
+
+	// Event-log tail loop (F-23): tails the shared event log and fans new
+	// events out to this pod's local workers and UI clients, so a job
+	// published by any pod reaches the workers this pod holds streams for. It
+	// also flushes this pod's coalesced job_log_updated events to the shared
+	// log. It runs until the gRPC server shuts down (signal received).
+	tailCtx, stopTail := context.WithCancel(ctx)
+	grpcServer.StartEventLogTail(tailCtx)
 
 	logger.Info("cdrom api starting", "grpc", grpcAddr, "http", httpAddr,
 		"db", cfg.DBAddress, "scheduler", cfg.SchedulerAddress, "artifacts", cfg.ArtifactsAddress,
@@ -157,6 +166,8 @@ func main() {
 		logger.Error("serve", "err", err)
 		os.Exit(1)
 	}
-	// gRPC server shut down (signal received); stop the HTTP server too.
+	// gRPC server shut down (signal received); stop the tail loop and the
+	// HTTP server too.
+	stopTail()
 	_ = httpSrv.Shutdown(context.Background())
 }

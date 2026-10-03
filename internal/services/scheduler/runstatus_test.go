@@ -5,9 +5,7 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/emptypb"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 )
@@ -87,16 +85,16 @@ func (f *fakeRunStatusDB) UpdateRun(ctx context.Context, in *dbpb.UpdateRunReque
 	return &dbpb.PipelineRun{Id: in.GetId(), Status: in.GetStatus()}, nil
 }
 
-// fakeRunStatusAPI is a stub API client for the run-status loop. It records
-// the runs the scheduler fanned out to the UI.
-type fakeRunStatusAPI struct {
-	apipb.APIClient // nil
-	notified        []*apipb.NotifyRunStatusRequest
+// fakeRunStatusPublisher is a stub Database publisher for the run-status
+// loop. It records the "run_status" events the scheduler appends to the
+// shared event log (F-23).
+type fakeRunStatusPublisher struct {
+	notified []*dbpb.PublishRunStatusRequest
 }
 
-func (f *fakeRunStatusAPI) NotifyRunStatus(ctx context.Context, in *apipb.NotifyRunStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (f *fakeRunStatusPublisher) PublishRunStatus(ctx context.Context, in *dbpb.PublishRunStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
 	f.notified = append(f.notified, in)
-	return &emptypb.Empty{}, nil
+	return &dbpb.PublishEventResponse{}, nil
 }
 
 // TestRunStatusLoopSucceedsRun verifies that a pending run whose job instances
@@ -110,10 +108,10 @@ func TestRunStatusLoopSucceedsRun(t *testing.T) {
 			{Id: 2, RunId: 100, Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED},
 		},
 	}
-	api := &fakeRunStatusAPI{}
-	s := &Server{db: db, api: api, logger: testLogger()}
+	publisher := &fakeRunStatusPublisher{}
+	s := &Server{db: db, logger: testLogger()}
 
-	s.processRunStatuses(context.Background(), db, api)
+	s.processRunStatuses(context.Background(), db, publisher)
 
 	if len(db.updated) != 1 {
 		t.Fatalf("UpdateRun called %d times, want 1", len(db.updated))
@@ -131,8 +129,8 @@ func TestRunStatusLoopSucceedsRun(t *testing.T) {
 	if update.GetFinishedAt() == nil {
 		t.Error("UpdateRun finished_at = nil, want set (run reached a terminal state)")
 	}
-	if len(api.notified) != 1 || api.notified[0].GetRunId() != 100 || api.notified[0].GetStatus() != dbpb.RunStatus_RUN_STATUS_SUCCEEDED {
-		t.Errorf("NotifyRunStatus = %+v, want run 100 SUCCEEDED", api.notified)
+	if len(publisher.notified) != 1 || publisher.notified[0].GetRunId() != 100 || publisher.notified[0].GetStatus() != dbpb.RunStatus_RUN_STATUS_SUCCEEDED {
+		t.Errorf("PublishRunStatus = %+v, want run 100 SUCCEEDED", publisher.notified)
 	}
 }
 
@@ -147,10 +145,10 @@ func TestRunStatusLoopRunningRun(t *testing.T) {
 			{Id: 2, RunId: 200, Status: dbpb.JobStatus_JOB_STATUS_RUNNING},
 		},
 	}
-	api := &fakeRunStatusAPI{}
-	s := &Server{db: db, api: api, logger: testLogger()}
+	publisher := &fakeRunStatusPublisher{}
+	s := &Server{db: db, logger: testLogger()}
 
-	s.processRunStatuses(context.Background(), db, api)
+	s.processRunStatuses(context.Background(), db, publisher)
 
 	if len(db.updated) != 1 {
 		t.Fatalf("UpdateRun called %d times, want 1", len(db.updated))
@@ -175,18 +173,18 @@ func TestRunStatusLoopNoopWhenUnchanged(t *testing.T) {
 		runs: []*dbpb.PipelineRun{{Id: 300, PipelineId: 1, Status: dbpb.RunStatus_RUN_STATUS_SUCCEEDED}},
 		jobs: []*dbpb.Job{{Id: 1, RunId: 300, Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED}},
 	}
-	api := &fakeRunStatusAPI{}
-	s := &Server{db: db, api: api, logger: testLogger()}
+	publisher := &fakeRunStatusPublisher{}
+	s := &Server{db: db, logger: testLogger()}
 
 	// The run is already succeeded and its only job succeeded: the derived
 	// status matches the stored one, so nothing is persisted or fanned out.
-	s.processRunStatuses(context.Background(), db, api)
+	s.processRunStatuses(context.Background(), db, publisher)
 
 	if len(db.updated) != 0 {
 		t.Errorf("UpdateRun called %d times, want 0 (status unchanged)", len(db.updated))
 	}
-	if len(api.notified) != 0 {
-		t.Errorf("NotifyRunStatus called %d times, want 0 (status unchanged)", len(api.notified))
+	if len(publisher.notified) != 0 {
+		t.Errorf("PublishRunStatus called %d times, want 0 (status unchanged)", len(publisher.notified))
 	}
 }
 
@@ -201,10 +199,10 @@ func TestRunStatusLoopSkippedJobsDoNotFailRun(t *testing.T) {
 			{Id: 2, RunId: 400, Status: dbpb.JobStatus_JOB_STATUS_SKIPPED},
 		},
 	}
-	api := &fakeRunStatusAPI{}
-	s := &Server{db: db, api: api, logger: testLogger()}
+	publisher := &fakeRunStatusPublisher{}
+	s := &Server{db: db, logger: testLogger()}
 
-	s.processRunStatuses(context.Background(), db, api)
+	s.processRunStatuses(context.Background(), db, publisher)
 
 	if len(db.updated) != 1 || db.updated[0].GetStatus() != dbpb.RunStatus_RUN_STATUS_SUCCEEDED {
 		t.Errorf("UpdateRun = %+v, want run 400 SUCCEEDED", db.updated)
@@ -216,11 +214,14 @@ func TestRunStatusLoopSkippedJobsDoNotFailRun(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // fakeCreateRunDB is a stub Database client for the scheduler's CreateRun RPC.
-// It records the CreateRun request and returns a canned run + job instances.
+// It records the CreateRun request, returns a canned run + job instances, and
+// records the "assignment" events the scheduler appends to the shared event
+// log (F-23) for the run's job instances.
 type fakeCreateRunDB struct {
 	dbpb.DatabaseClient // nil
 	request             *dbpb.CreateRunRequest
 	response            *dbpb.CreateRunResponse
+	dispatched          []int64 // job ids an "assignment" event was published for
 }
 
 func (f *fakeCreateRunDB) CreateRun(ctx context.Context, in *dbpb.CreateRunRequest, opts ...grpc.CallOption) (*dbpb.CreateRunResponse, error) {
@@ -228,16 +229,9 @@ func (f *fakeCreateRunDB) CreateRun(ctx context.Context, in *dbpb.CreateRunReque
 	return f.response, nil
 }
 
-// fakeDispatchAPI is a stub API client for the scheduler's CreateRun RPC. It
-// records the jobs the scheduler dispatched to the API.
-type fakeDispatchAPI struct {
-	apipb.APIClient // nil
-	dispatched      []*apipb.Job
-}
-
-func (f *fakeDispatchAPI) DispatchJob(ctx context.Context, in *apipb.DispatchJobRequest, opts ...grpc.CallOption) (*apipb.DispatchJobResponse, error) {
-	f.dispatched = append(f.dispatched, in.GetJob())
-	return &apipb.DispatchJobResponse{}, nil
+func (f *fakeCreateRunDB) PublishAssignment(ctx context.Context, in *dbpb.PublishAssignmentRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
+	f.dispatched = append(f.dispatched, in.GetJobId())
+	return &dbpb.PublishEventResponse{}, nil
 }
 
 // TestCreateRunDrivesInstances verifies that the scheduler's CreateRun RPC
@@ -257,8 +251,7 @@ func TestCreateRunDrivesInstances(t *testing.T) {
 			},
 		},
 	}
-	api := &fakeDispatchAPI{}
-	s := &Server{db: db, api: api, logger: testLogger()}
+	s := &Server{db: db, logger: testLogger()}
 
 	run, err := s.CreateRun(context.Background(), &schedpb.CreateRunRequest{
 		PipelineId: 1,
@@ -279,11 +272,11 @@ func TestCreateRunDrivesInstances(t *testing.T) {
 	// Only the dependency-free, group-targeted instance (build) is dispatched.
 	// The dependent instance (test) is held pending and the agent instance
 	// (agent-job) is not dispatched to live workers.
-	if len(api.dispatched) != 1 {
-		t.Fatalf("DispatchJob called %d times, want 1", len(api.dispatched))
+	if len(db.dispatched) != 1 {
+		t.Fatalf("assignment events = %v, want one (build)", db.dispatched)
 	}
-	if api.dispatched[0].GetId() != 1 {
-		t.Errorf("dispatched job = %d, want 1 (build)", api.dispatched[0].GetId())
+	if db.dispatched[0] != 1 {
+		t.Errorf("dispatched job = %d, want 1 (build)", db.dispatched[0])
 	}
 }
 
@@ -291,8 +284,7 @@ func TestCreateRunDrivesInstances(t *testing.T) {
 // no pipeline id (F-07).
 func TestCreateRunRequiresPipeline(t *testing.T) {
 	db := &fakeCreateRunDB{}
-	api := &fakeDispatchAPI{}
-	s := &Server{db: db, api: api, logger: testLogger()}
+	s := &Server{db: db, logger: testLogger()}
 
 	if _, err := s.CreateRun(context.Background(), &schedpb.CreateRunRequest{Trigger: "manual"}); err == nil {
 		t.Fatal("CreateRun with no pipeline_id = nil error, want an error")

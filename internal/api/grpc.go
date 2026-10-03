@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -55,6 +56,11 @@ var (
 // scheduler (DispatchJob), and proxies artifact traffic to the artifacts
 // service. Execution targets never talk to the scheduler, database, or
 // artifacts services directly.
+//
+// For high availability (F-23) the server also runs an event-log tail loop
+// (StartEventLogTail): it tails the shared event log and fans events out to
+// its local workers and UI clients, so a job published by any pod reaches the
+// workers this pod holds streams for. The fields below back that loop.
 type GRPCServer struct {
 	apipb.UnimplementedAPIServer
 	db        dbpb.DatabaseClient
@@ -66,6 +72,22 @@ type GRPCServer struct {
 	mu       sync.Mutex
 	live     map[string]*liveWorker // worker name -> live worker
 	watchers map[string]chan *apipb.WatchMessage
+
+	// tailCursor is this pod's position in the shared event log (the last
+	// event id it has fanned out). It is per-pod: each pod tails independently
+	// and fans out to its own local workers/UI.
+	tailCursor atomic.Int64
+	// logCursors tracks, per (jobID|log), the byte offset this pod has already
+	// range-read for cross-pod near-live logs (F-23).
+	logCursors map[string]int64
+	// coalescer coalesces job_log_updated events so the event log stays lean
+	// when a job produces many log chunks in a short time (F-23).
+	coalescer *logCoalescer
+	// published tracks event ids this pod published itself, so the tail loop
+	// does not re-publish them to the local EventHub (the pod already published
+	// them directly when it observed the state change).
+	publishedMu sync.Mutex
+	published   map[int64]struct{}
 }
 
 // liveWorker is a worker with an open WatchJobs stream.
@@ -87,13 +109,16 @@ func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient
 		logger = slog.Default()
 	}
 	return &GRPCServer{
-		db:        db,
-		artifacts: artifacts,
-		hub:       hub,
-		jobAuth:   jobAuth,
-		logger:    logger,
-		live:      make(map[string]*liveWorker),
-		watchers:  make(map[string]chan *apipb.WatchMessage),
+		db:         db,
+		artifacts:  artifacts,
+		hub:        hub,
+		jobAuth:    jobAuth,
+		logger:     logger,
+		live:       make(map[string]*liveWorker),
+		watchers:   make(map[string]chan *apipb.WatchMessage),
+		logCursors: make(map[string]int64),
+		coalescer:  newLogCoalescer(logCoalesceWindow),
+		published:  make(map[int64]struct{}),
 	}
 }
 
@@ -125,6 +150,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	s.mu.Unlock()
 	s.logger.Info("api: worker registered", "worker", registered.GetName(), "group", registered.GetGroup())
 	s.publish(Event{Type: EventWorker, Worker: registered.GetName(), Group: registered.GetGroup(), Action: WorkerRegistered})
+	s.publishWorkerEvent(ctx, registered.GetName(), registered.GetGroup(), WorkerRegistered)
 	return &apipb.Worker{
 		Name:       registered.GetName(),
 		Group:      registered.GetGroup(),
@@ -145,6 +171,7 @@ func (s *GRPCServer) DeregisterWorker(ctx context.Context, req *apipb.Deregister
 	s.removeLive(req.GetName())
 	s.logger.Info("api: worker deregistered", "worker", req.GetName())
 	s.publish(Event{Type: EventWorker, Worker: req.GetName(), Action: WorkerDeregistered})
+	s.publishWorkerEvent(ctx, req.GetName(), "", WorkerDeregistered)
 	return &emptypb.Empty{}, nil
 }
 
@@ -199,6 +226,7 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 
 	s.logger.Info("api: worker watching", "worker", name, "group", req.GetGroup())
 	s.publish(Event{Type: EventWorker, Worker: name, Group: req.GetGroup(), Action: WorkerWatching})
+	s.publishWorkerEvent(stream.Context(), name, req.GetGroup(), WorkerWatching)
 	for {
 		select {
 		case <-stream.Context().Done():
@@ -229,6 +257,66 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 		apiJob.Token = token
 	}
 	return apiJob, nil
+}
+
+// ClaimJob atomically claims a pending job for the calling worker (F-23). It
+// marks the job running via the Database service's conditional ClaimJob (a
+// no-op if the job is no longer pending), and on success returns the job with
+// its spec, upstream jobs, and a fresh job token. This is how a worker takes
+// ownership of a job it learned about via a push nudge or its periodic poll:
+// the claim is atomic, so a job delivered to several workers (or via both push
+// and poll) is run by exactly one of them — the first to claim — and the
+// others see claimed=false and skip.
+func (s *GRPCServer) ClaimJob(ctx context.Context, req *apipb.ClaimJobRequest) (*apipb.ClaimJobResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	resp, err := s.db.ClaimJob(ctx, &dbpb.ClaimJobRequest{Id: req.GetJobId()})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.GetClaimed() {
+		// The job was no longer pending (another worker claimed it first, or it
+		// reached a terminal state); the caller skips it.
+		return &apipb.ClaimJobResponse{Claimed: false}, nil
+	}
+	// The job is now running on this worker. Fetch it fresh (it now carries the
+	// running status and started_at) and hand the worker its spec, upstream
+	// jobs, and a job token.
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
+	if err != nil {
+		return nil, err
+	}
+	apiJob := toAPIJob(job)
+	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
+	if token := s.mintJobToken(ctx, apiJob); token != "" {
+		apiJob.Token = token
+	}
+	s.logger.Info("api: job claimed", "job", req.GetJobId())
+	return &apipb.ClaimJobResponse{Claimed: true, Job: apiJob}, nil
+}
+
+// ListPendingJobs returns the pending jobs that target the caller's worker
+// group (F-23). This is the worker's pull path: it polls it on a short
+// interval to pick up jobs that were published while it was unreachable, so
+// no job is stranded pending. It wraps the Database service's
+// ListPendingByGroup.
+func (s *GRPCServer) ListPendingJobs(ctx context.Context, req *apipb.ListPendingJobsRequest) (*apipb.ListPendingJobsResponse, error) {
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	resp, err := s.db.ListPendingByGroup(ctx, &dbpb.ListPendingByGroupRequest{Group: req.GetGroup()})
+	if err != nil {
+		return nil, err
+	}
+	result := &apipb.ListPendingJobsResponse{}
+	for _, job := range resp.GetJobs() {
+		result.Jobs = append(result.Jobs, toAPIJob(job))
+	}
+	return result, nil
 }
 
 // ReportJobStatus updates a job's status (and timestamps) via the Database
@@ -267,6 +355,9 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		Attempt:     updated.GetAttempt(),
 		MaxAttempts: updated.GetMaxAttempts(),
 	})
+	// Append the status change to the shared event log so other API pods fan
+	// it out to their UI clients (F-23).
+	s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
 	return toAPIJob(updated), nil
 }
 
@@ -360,12 +451,18 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 		// chunk is dropped and the combined job log is skipped too — both
 		// files live in the same (unreachable) store, so retrying the second
 		// would only double the time spent blocked on a down service.
-		if err := s.appendLogWithRetry(ctx, jobIDStr, stepName, data); err != nil {
+		if _, err := s.appendLogWithRetry(ctx, jobIDStr, stepName, data); err != nil {
 			s.logger.Warn("api: dropping log chunk (artifacts unreachable)",
 				"job", jobID, "step", stepIndex, "err", err)
-		} else if err := s.appendLogWithRetry(ctx, jobIDStr, jobLogName, data); err != nil {
+		} else if size, err := s.appendLogWithRetry(ctx, jobIDStr, jobLogName, data); err != nil {
 			s.logger.Warn("api: dropping job log chunk (artifacts unreachable)",
 				"job", jobID, "log", jobLogName, "err", err)
+		} else {
+			// The combined log grew to size bytes. Feed the coalescer (F-23):
+			// at most one job_log_updated event per (job, job.log) per window
+			// is published by the tail loop, carrying the latest size, so other
+			// API pods can range-read the delta from the shared artifacts store.
+			s.coalescer.record(jobID, jobLogName, stepIndex, streamName, size)
 		}
 	}
 	*received += int64(len(data))
@@ -381,47 +478,57 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 
 // appendLogWithRetry appends data to the named log for the job via the
 // artifacts service's AppendLog client stream, retrying on failure up to
-// appendLogAttempts times (appendLogRetryDelay apart). It returns the last
-// error if the chunk could not be persisted within the budget, so the caller
-// can drop it. The gRPC channel to the artifacts service reconnects on its
-// own, so a brief outage (a pod restart or scale event) is ridden out by
-// these retries: the chunk is persisted once the channel recovers.
-func (s *GRPCServer) appendLogWithRetry(ctx context.Context, jobID, name string, data []byte) error {
-	var err error
+// appendLogAttempts times (appendLogRetryDelay apart). It returns the log's
+// total size after the append and the last error if the chunk could not be
+// persisted within the budget, so the caller can drop it. The gRPC channel to
+// the artifacts service reconnects on its own, so a brief outage (a pod
+// restart or scale event) is ridden out by these retries: the chunk is
+// persisted once the channel recovers.
+func (s *GRPCServer) appendLogWithRetry(ctx context.Context, jobID, name string, data []byte) (int64, error) {
+	var (
+		err  error
+		size int64
+	)
 	for attempt := 0; attempt < appendLogAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return 0, ctx.Err()
 			case <-time.After(appendLogRetryDelay):
 			}
 		}
-		if err = s.appendLog(ctx, jobID, name, data); err == nil {
-			return nil
+		if size, err = s.appendLog(ctx, jobID, name, data); err == nil {
+			return size, nil
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 	}
-	return err
+	return 0, err
 }
 
 // appendLog appends data to the named log for the job via the artifacts
 // service's AppendLog client stream. A single chunk carries both the log's
-// metadata and the data.
-func (s *GRPCServer) appendLog(ctx context.Context, jobID, name string, data []byte) error {
+// metadata and the data. It returns the log's total size (in bytes) after the
+// append, which the caller uses to publish a job_log_updated pointer event
+// (F-23): the publisher already knows the size from the AppendLog response, so
+// no extra GetLog metadata call is needed.
+func (s *GRPCServer) appendLog(ctx context.Context, jobID, name string, data []byte) (int64, error) {
 	stream, err := s.artifacts.AppendLog(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := stream.Send(&artifactspb.ArtifactChunk{
 		Metadata: &artifactspb.Artifact{Namespace: jobID, Name: name},
 		Data:     data,
 	}); err != nil {
-		return err
+		return 0, err
 	}
-	_, err = stream.CloseAndRecv()
-	return err
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		return 0, err
+	}
+	return resp.GetArtifact().GetSize(), nil
 }
 
 // jobLogStreamName maps a JobLogStream enum to the short name the UI uses.
@@ -504,7 +611,26 @@ func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequ
 	} else {
 		s.logger.Info("api: job dispatched", "job", job.GetId(), "group", group, "workers", dispatched)
 	}
+	// Append an assignment event to the shared event log (F-23) so other API
+	// pods can nudge their local workers in the group. This pod already pushed
+	// directly to its local workers above; the event log is the cross-pod path.
+	s.publishAssignment(ctx, job.GetId(), group)
 	return &apipb.DispatchJobResponse{Dispatched: int32(dispatched)}, nil
+}
+
+// publishAssignment appends an "assignment" event to the shared event log
+// (F-23). It is best-effort: a failure to append does not fail the dispatch
+// (the worker's periodic poll is the authoritative path).
+func (s *GRPCServer) publishAssignment(ctx context.Context, jobID int64, group string) {
+	if s.db == nil {
+		return
+	}
+	resp, err := s.db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: jobID, TargetGroup: group})
+	if err != nil {
+		s.logger.Warn("api: publish assignment event", "job", jobID, "err", err)
+		return
+	}
+	s.markPublished(resp.GetId())
 }
 
 // NotifyJobStatus is called by the scheduler's watchdog to fan a job-status
@@ -582,7 +708,100 @@ func (s *GRPCServer) CancelJob(ctx context.Context, req *apipb.CancelJobRequest)
 	} else {
 		s.logger.Info("api: no live worker to signal for job cancellation", "job", req.GetJobId())
 	}
+	// Append a cancel event to the shared event log (F-23) so other API pods
+	// can deliver the cancellation to their local workers. This pod already
+	// pushed directly to its local workers above.
+	s.publishCancel(ctx, req.GetJobId())
 	return &emptypb.Empty{}, nil
+}
+
+// publishCancel appends a "cancel" event to the shared event log (F-23).
+// Best-effort: a failure does not fail the cancellation (the job is already
+// marked cancelled in the database; the target's next report reconciles it).
+func (s *GRPCServer) publishCancel(ctx context.Context, jobID int64) {
+	if s.db == nil {
+		return
+	}
+	resp, err := s.db.PublishCancel(ctx, &dbpb.PublishCancelRequest{JobId: jobID})
+	if err != nil {
+		s.logger.Warn("failed to publish cancel event", "job_id", jobID, "error", err)
+		return
+	}
+	s.markPublished(resp.GetId())
+}
+
+// publishJobStatus appends a "job_status" event to the shared event log so
+// every API pod can fan the status change out to its UI clients (F-23).
+func (s *GRPCServer) publishJobStatus(ctx context.Context, jobID int64, status dbpb.JobStatus, attempt, maxAttempts int32) {
+	if s.db == nil {
+		return
+	}
+	resp, err := s.db.PublishJobStatus(ctx, &dbpb.PublishJobStatusRequest{
+		JobId:       jobID,
+		Status:      status,
+		Attempt:     attempt,
+		MaxAttempts: maxAttempts,
+	})
+	if err != nil {
+		s.logger.Warn("failed to publish job_status event", "job_id", jobID, "error", err)
+		return
+	}
+	s.markPublished(resp.GetId())
+}
+
+// publishRunStatus appends a "run_status" event to the shared event log so
+// every API pod can fan the run status change out to its UI clients (F-23).
+func (s *GRPCServer) publishRunStatus(ctx context.Context, runID int64, status dbpb.RunStatus) {
+	if s.db == nil {
+		return
+	}
+	resp, err := s.db.PublishRunStatus(ctx, &dbpb.PublishRunStatusRequest{RunId: runID, Status: status})
+	if err != nil {
+		s.logger.Warn("failed to publish run_status event", "run_id", runID, "error", err)
+		return
+	}
+	s.markPublished(resp.GetId())
+}
+
+// publishWorkerEvent appends a "worker" event to the shared event log so every
+// API pod can fan the worker lifecycle change out to its UI clients (F-23).
+func (s *GRPCServer) publishWorkerEvent(ctx context.Context, name, group, action string) {
+	if s.db == nil {
+		return
+	}
+	resp, err := s.db.PublishWorkerEvent(ctx, &dbpb.PublishWorkerEventRequest{
+		Name:   name,
+		Group:  group,
+		Action: action,
+	})
+	if err != nil {
+		s.logger.Warn("failed to publish worker event", "worker", name, "error", err)
+		return
+	}
+	s.markPublished(resp.GetId())
+}
+
+// publishLogUpdated appends a "job_log_updated" pointer event to the shared
+// event log (F-23): it carries only the job id, log name, step index, stream,
+// and the current byte size — never the log bytes. Every API pod tails the
+// log and, when it has UI clients watching the job, range-reads the new bytes
+// from the shared artifacts store and fans them out.
+func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log string, stepIndex int32, stream string, size int64) {
+	if s.db == nil {
+		return
+	}
+	resp, err := s.db.PublishLogUpdated(ctx, &dbpb.PublishLogUpdatedRequest{
+		JobId:     jobID,
+		Log:       log,
+		StepIndex: stepIndex,
+		Stream:    stream,
+		Size:      size,
+	})
+	if err != nil {
+		s.logger.Warn("failed to publish job_log_updated event", "job_id", jobID, "error", err)
+		return
+	}
+	s.markPublished(resp.GetId())
 }
 
 // dispatch pushes an assignment (with the job token) to every live worker in

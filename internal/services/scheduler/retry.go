@@ -5,8 +5,10 @@
 // a job's terminal status to the API, which persists it through the Database
 // service; the retry loop closes the loop by periodically listing failed
 // jobs and, for each that still has retries remaining, atomically claiming
-// the next attempt (Database.ClaimJobRetry) and re-dispatching the job to the
-// API (which fans it out to the live workers) after the policy's backoff.
+// the next attempt (Database.ClaimJobRetry) and, after the policy's backoff,
+// appending a "job_status" (reset to pending) and an "assignment" event to
+// the shared event log (F-23), which every API pod tails and fans out to its
+// local workers.
 //
 // A retry is a new attempt on the same Job row (not a new Job), so the
 // pipeline run stays coherent: the job's attempt counter is incremented and
@@ -20,9 +22,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/emptypb"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
@@ -39,13 +39,14 @@ type retryClaimer interface {
 	ClaimJobRetry(ctx context.Context, in *dbpb.ClaimJobRetryRequest, opts ...grpc.CallOption) (*dbpb.ClaimJobRetryResponse, error)
 }
 
-// jobRelayer is the subset of the API client the retry loop uses: it fans a
-// retried job's reset to pending out to the UI (NotifyJobStatus) and
-// dispatches the job to the live workers (DispatchJob). The concrete
-// apipb.APIClient satisfies it; tests inject a fake.
-type jobRelayer interface {
-	NotifyJobStatus(ctx context.Context, in *apipb.NotifyJobStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	DispatchJob(ctx context.Context, in *apipb.DispatchJobRequest, opts ...grpc.CallOption) (*apipb.DispatchJobResponse, error)
+// retryPublisher is the subset of the Database client the retry loop uses to
+// append events to the shared event log (F-23): a "job_status" event for the
+// reset to pending (so the UI sees the job is being retried) and an
+// "assignment" event (so the workers in the group are nudged). The concrete
+// dbpb.DatabaseClient satisfies it; tests inject a fake.
+type retryPublisher interface {
+	PublishJobStatus(ctx context.Context, in *dbpb.PublishJobStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
+	PublishAssignment(ctx context.Context, in *dbpb.PublishAssignmentRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
 }
 
 // StartRetryLoop runs the job-retry loop in the background until ctx is
@@ -64,7 +65,7 @@ func (s *Server) StartRetryLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.retryFailedJobs(ctx, s.db, s.api)
+				s.retryFailedJobs(ctx, s.db, s.db)
 			}
 		}
 	}()
@@ -73,28 +74,29 @@ func (s *Server) StartRetryLoop(ctx context.Context) {
 // retryFailedJobs lists the jobs that still have retries remaining (the
 // database filters out jobs with no retry policy and jobs that have exhausted
 // their budget) and, for each, claims the next attempt (atomically) and
-// re-dispatches it after the policy's backoff. db and api are the loop's
-// dependencies (the concrete clients in production, fakes in tests); api may
-// be nil to skip the UI notification and dispatch.
-func (s *Server) retryFailedJobs(ctx context.Context, db retryClaimer, api jobRelayer) {
+// re-dispatches it after the policy's backoff. db and publisher are the
+// loop's dependencies (the concrete clients in production, fakes in tests);
+// publisher may be nil to skip the event appends.
+func (s *Server) retryFailedJobs(ctx context.Context, db retryClaimer, publisher retryPublisher) {
 	response, err := db.ListRetriableJobs(ctx, &dbpb.ListRetriableJobsRequest{})
 	if err != nil {
 		s.logger.Warn("scheduler: retry list retriable jobs", "err", err)
 		return
 	}
 	for _, job := range response.GetJobs() {
-		s.claimAndDispatch(ctx, db, api, job)
+		s.claimAndDispatch(ctx, db, publisher, job)
 	}
 }
 
 // claimAndDispatch claims the next retry attempt for a job (atomically) and,
-// on success, fans the reset to pending out to the UI and re-dispatches the
-// job after the policy's backoff. It returns whether the job was claimed. The
-// caller (retryFailedJobs) only passes jobs the database reported as still
-// having retries remaining; the atomic ClaimJobRetry is the final guard, so a
-// job that changed state (or exhausted its budget) between the list and the
-// claim is left untouched.
-func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, api jobRelayer, job *dbpb.Job) bool {
+// on success, appends a "job_status" event for the reset to pending (so the
+// UI sees the job is being retried) and re-dispatches the job after the
+// policy's backoff. It returns whether the job was claimed. The caller
+// (retryFailedJobs) only passes jobs the database reported as still having
+// retries remaining; the atomic ClaimJobRetry is the final guard, so a job
+// that changed state (or exhausted its budget) between the list and the claim
+// is left untouched.
+func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, publisher retryPublisher, job *dbpb.Job) bool {
 	resp, err := db.ClaimJobRetry(ctx, &dbpb.ClaimJobRetryRequest{Id: job.GetId()})
 	if err != nil {
 		s.logger.Warn("scheduler: claim retry", "job", job.GetId(), "err", err)
@@ -107,25 +109,25 @@ func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, api jobR
 	}
 	job.Attempt = resp.GetAttempt()
 	s.logger.Info("scheduler: retrying job", "job", job.GetId(), "attempt", resp.GetAttempt(), "max", job.GetMaxAttempts())
-	if api == nil {
+	if publisher == nil {
 		return true
 	}
-	// Fan the reset to pending out to the UI so it sees the job is being
-	// retried (the persisted status is the source of truth; this only
-	// publishes the event). The attempt and max_attempts are passed so the UI
-	// can render "attempt N of M".
-	if _, err := api.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{
+	// Append a "job_status" event for the reset to pending so the UI sees the
+	// job is being retried (the persisted status is the source of truth; this
+	// only publishes the event). The attempt and max_attempts are passed so
+	// the UI can render "attempt N of M".
+	if _, err := publisher.PublishJobStatus(ctx, &dbpb.PublishJobStatusRequest{
 		JobId:       job.GetId(),
 		Status:      dbpb.JobStatus_JOB_STATUS_PENDING,
 		Attempt:     job.GetAttempt(),
 		MaxAttempts: job.GetMaxAttempts(),
 	}); err != nil {
-		s.logger.Warn("scheduler: notify api of retried job", "job", job.GetId(), "err", err)
+		s.logger.Warn("scheduler: publish retried job status", "job", job.GetId(), "err", err)
 	}
 	backoff := job.GetSpec().GetRetry().GetBackoff().AsDuration()
 	if backoff <= 0 {
 		// No backoff: dispatch immediately.
-		s.dispatchForRetry(ctx, api, job)
+		s.dispatchForRetry(ctx, publisher, job)
 		return true
 	}
 	// Back off before re-dispatching. The goroutine is detached from the tick
@@ -137,20 +139,20 @@ func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, api jobR
 			return
 		case <-time.After(backoff):
 		}
-		s.dispatchForRetry(ctx, api, job)
+		s.dispatchForRetry(ctx, publisher, job)
 	}()
 	return true
 }
 
-// dispatchForRetry pushes a retried job to the API, which fans it out to the
-// live workers in the job's target group. A job with an empty target group is
-// for an ephemeral agent and is not dispatched to live workers.
-func (s *Server) dispatchForRetry(ctx context.Context, api jobRelayer, job *dbpb.Job) {
+// dispatchForRetry appends an "assignment" event for a retried job to the
+// shared event log (F-23), which every API pod tails and fans out to its
+// local workers in the job's target group. A job with an empty target group
+// is for an ephemeral agent and is not nudged.
+func (s *Server) dispatchForRetry(ctx context.Context, publisher retryPublisher, job *dbpb.Job) {
 	if job.GetTargetGroup() == "" {
 		return
 	}
-	if _, err := api.DispatchJob(ctx, &apipb.DispatchJobRequest{Job: toAPIJob(toProtoJob(job))}); err != nil {
-		s.logger.Warn("scheduler: dispatch retried job failed; job left pending",
-			"job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
+	if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: job.GetId(), TargetGroup: job.GetTargetGroup()}); err != nil {
+		s.logger.Warn("scheduler: publish retried job assignment", "job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
 	}
 }

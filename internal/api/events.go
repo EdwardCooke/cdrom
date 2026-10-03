@@ -107,6 +107,17 @@ func (h *EventHub) Publish(ev Event) {
 	}
 }
 
+// HasSubscribers reports whether any WebSocket subscriber is connected to the
+// hub. The event-log tail loop uses it to skip the artifacts range read for a
+// job_log_updated event when no UI client on this pod is watching (F-23):
+// the log bytes are durable in the artifacts store, so a UI client that
+// connects later resynchronizes from the persisted log.
+func (h *EventHub) HasSubscribers() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs) > 0
+}
+
 // jobStatusName maps a job status enum to the short name the UI uses.
 func jobStatusName(status dbpb.JobStatus) string {
 	switch status {

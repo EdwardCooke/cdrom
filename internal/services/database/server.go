@@ -2,8 +2,10 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -596,6 +598,57 @@ func (s *Server) SkipJob(ctx context.Context, req *dbpb.SkipJobRequest) (*dbpb.S
 	return &dbpb.SkipJobResponse{Skipped: result.RowsAffected > 0}, nil
 }
 
+// ClaimJob atomically claims a pending job for execution (F-23): it sets the
+// status to running (and the started timestamp) only if the job is still
+// pending. It returns whether the job was claimed. This is how a worker (or
+// the API on a worker's behalf) takes ownership of a job it picked up via the
+// pull path or a push nudge: the conditional update is atomic, so a job
+// delivered by both push and pull is claimed exactly once and the duplicate is
+// a no-op.
+func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb.ClaimJobResponse, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	startedAt := time.Now()
+	if timestamp := req.GetStartedAt(); timestamp != nil {
+		startedAt = timestamp.AsTime()
+	}
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status = ?", req.GetId(), models.JobStatusPending).
+		Updates(map[string]any{
+			"status":     models.JobStatusRunning,
+			"started_at": &startedAt,
+			"updated_at": time.Now(),
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.ClaimJobResponse{Claimed: result.RowsAffected > 0}, nil
+}
+
+// ListPendingByGroup returns the pending jobs that target the given worker
+// group (F-23). This is the pull path: a worker (or the API on its behalf)
+// polls it to pick up jobs that were published while it was unreachable, so
+// no job is stranded pending. Filtering in the database keeps the poll from
+// pulling every pending job over the wire as the system grows.
+func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingByGroupRequest) (*dbpb.ListJobsResponse, error) {
+	var jobs []models.Job
+	err := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("status = ? AND target_group = ?", models.JobStatusPending, req.GetGroup()).
+		Order("id").
+		Find(&jobs).Error
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListJobsResponse{}
+	for i := range jobs {
+		response.Jobs = append(response.Jobs, toProtoJob(&jobs[i]))
+	}
+	return response, nil
+}
+
 // ClaimJobRetry atomically claims the next retry attempt for a job (F-04):
 // it increments the job's attempt counter and resets it to pending (clearing
 // the finished timestamp) only if the job is in a retryable state (pending,
@@ -885,6 +938,269 @@ func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCo
 		return nil, grpcErr(err)
 	}
 	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Event log (F-23, high availability)
+// ---------------------------------------------------------------------------
+//
+// The event log is the shared, append-only coordination bus. The scheduler's
+// background loops and the API publish state changes to it; every API pod
+// tails it (TailEvents) and fans the events out to its local workers and UI
+// clients. An event is a pointer, not the data: the payload is a small JSON
+// object with just enough to handle the event, never the job spec, the log
+// bytes, or a token.
+//
+// Each publish appends one event row. (The design calls for the state change
+// and the event append to be a single transaction; the state changes here are
+// performed by the caller through the existing conditional RPCs, and the
+// event is appended immediately after. Because the log is a recent buffer and
+// the database state is the source of truth, a consumer that misses an event
+// resyncs from a state snapshot rather than depending on the log being
+// perfectly transactional with the state.)
+
+// defaultTailLimit bounds how many events TailEvents returns in one call when
+// the caller does not specify a limit.
+const defaultTailLimit = 1000
+
+// defaultLeaseTTL is the lease validity when the caller does not specify one.
+const defaultLeaseTTL = 10 * time.Second
+
+// appendEvent inserts a single event row and returns its id.
+func (s *Server) appendEvent(ctx context.Context, name, workerGroup string, payload any) (int64, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("database: marshal event payload: %w", err)
+	}
+	event := &models.Event{
+		Name:        name,
+		WorkerGroup: workerGroup,
+		Payload:     string(data),
+	}
+	if err := s.db.WithContext(ctx).Create(event).Error; err != nil {
+		return 0, grpcErr(err)
+	}
+	return int64(event.ID), nil
+}
+
+// PublishAssignment appends an "assignment" event for a job (a nudge: the
+// payload carries only the job id and target group, not the spec or token).
+func (s *Server) PublishAssignment(ctx context.Context, req *dbpb.PublishAssignmentRequest) (*dbpb.PublishEventResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	id, err := s.appendEvent(ctx, "assignment", req.GetTargetGroup(), map[string]any{
+		"job_id": req.GetJobId(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// PublishCancel appends a "cancel" event for a job.
+func (s *Server) PublishCancel(ctx context.Context, req *dbpb.PublishCancelRequest) (*dbpb.PublishEventResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	id, err := s.appendEvent(ctx, "cancel", "", map[string]any{"job_id": req.GetJobId()})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// PublishJobStatus appends a "job_status" event for a job's status change.
+func (s *Server) PublishJobStatus(ctx context.Context, req *dbpb.PublishJobStatusRequest) (*dbpb.PublishEventResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
+		return nil, status.Error(codes.InvalidArgument, "status is required")
+	}
+	id, err := s.appendEvent(ctx, "job_status", "", map[string]any{
+		"job_id":       req.GetJobId(),
+		"status":       jobStatusName(req.GetStatus()),
+		"attempt":      req.GetAttempt(),
+		"max_attempts": req.GetMaxAttempts(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// PublishRunStatus appends a "run_status" event for a run's status change.
+func (s *Server) PublishRunStatus(ctx context.Context, req *dbpb.PublishRunStatusRequest) (*dbpb.PublishEventResponse, error) {
+	if req.GetRunId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "run_id is required")
+	}
+	if req.GetStatus() == dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
+		return nil, status.Error(codes.InvalidArgument, "status is required")
+	}
+	id, err := s.appendEvent(ctx, "run_status", "", map[string]any{
+		"run_id": req.GetRunId(),
+		"status": runStatusName(req.GetStatus()),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// PublishWorkerEvent appends a "worker" event for a worker lifecycle change.
+func (s *Server) PublishWorkerEvent(ctx context.Context, req *dbpb.PublishWorkerEventRequest) (*dbpb.PublishEventResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	id, err := s.appendEvent(ctx, "worker", req.GetGroup(), map[string]any{
+		"name":   req.GetName(),
+		"action": req.GetAction(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
+// job's log has grown to a given size. The log bytes live in the artifacts
+// store, never in the event log; a consumer range-reads the delta.
+func (s *Server) PublishLogUpdated(ctx context.Context, req *dbpb.PublishLogUpdatedRequest) (*dbpb.PublishEventResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	id, err := s.appendEvent(ctx, "job_log_updated", "", map[string]any{
+		"job_id":     req.GetJobId(),
+		"log":        req.GetLog(),
+		"step_index": req.GetStepIndex(),
+		"stream":     req.GetStream(),
+		"size":       req.GetSize(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// TailEvents returns the events with id greater than cursor, in id order, up
+// to limit. This is how an API pod tails the log: it keeps a per-pod cursor,
+// fetches the new events, fans them out, and advances the cursor.
+func (s *Server) TailEvents(ctx context.Context, req *dbpb.TailEventsRequest) (*dbpb.TailEventsResponse, error) {
+	limit := int(req.GetLimit())
+	if limit <= 0 {
+		limit = defaultTailLimit
+	}
+	var events []models.Event
+	err := s.db.WithContext(ctx).
+		Model(&models.Event{}).
+		Where("id > ?", req.GetCursor()).
+		Order("id").
+		Limit(limit).
+		Find(&events).Error
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.TailEventsResponse{Cursor: req.GetCursor()}
+	for i := range events {
+		response.Events = append(response.Events, toProtoEvent(&events[i]))
+		response.Cursor = int64(events[i].ID)
+	}
+	return response, nil
+}
+
+// AcquireLease acquires the named lease for the caller, or re-acquires it if
+// the caller already holds it (a renewal). It succeeds if the lease is free,
+// expired, or already held by the caller; it fails if another replica holds
+// an unexpired lease.
+//
+// The acquire-or-renew is a portable compare-and-swap that is safe on both
+// SQLite and PostgreSQL:
+//
+//  1. A conditional UPDATE claims the row if it is held by the caller or is
+//     expired. It is a single atomic statement, so two replicas racing for an
+//     expired lease cannot both match it.
+//  2. If the update matched nothing, the row is either absent or held by
+//     someone else with an unexpired lease. The caller tries to INSERT; the
+//     unique constraint on name means at most one racing inserter wins, and a
+//     loser reports that it did not acquire.
+func (s *Server) AcquireLease(ctx context.Context, req *dbpb.AcquireLeaseRequest) (*dbpb.AcquireLeaseResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	if req.GetHolder() == "" {
+		return nil, status.Error(codes.InvalidArgument, "holder is required")
+	}
+	ttl := req.GetTtl().AsDuration()
+	if ttl <= 0 {
+		ttl = defaultLeaseTTL
+	}
+	now := time.Now()
+	expires := now.Add(ttl)
+	db := s.db.WithContext(ctx)
+
+	// Step 1: claim the row if it is ours or expired.
+	result := db.Model(&models.Lease{}).
+		Where("name = ? AND (holder = ? OR expires_at < ?)", req.GetName(), req.GetHolder(), now).
+		Updates(map[string]interface{}{"holder": req.GetHolder(), "expires_at": expires})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	if result.RowsAffected > 0 {
+		return &dbpb.AcquireLeaseResponse{Acquired: true}, nil
+	}
+
+	// Step 2: the row is absent or held by someone else unexpired. Try to
+	// insert; a racing inserter loses the unique constraint and reports that
+	// it did not acquire.
+	if err := db.Create(&models.Lease{Name: req.GetName(), Holder: req.GetHolder(), ExpiresAt: expires}).Error; err != nil {
+		if isUniqueViolation(err) {
+			return &dbpb.AcquireLeaseResponse{Acquired: false}, nil
+		}
+		return nil, grpcErr(err)
+	}
+	return &dbpb.AcquireLeaseResponse{Acquired: true}, nil
+}
+
+// ReleaseLease releases the named lease if the caller holds it. Releasing a
+// lease the caller does not hold is a no-op, so a replica that has already
+// lost the lease can still call this on shutdown without error.
+func (s *Server) ReleaseLease(ctx context.Context, req *dbpb.ReleaseLeaseRequest) (*emptypb.Empty, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	if req.GetHolder() == "" {
+		return nil, status.Error(codes.InvalidArgument, "holder is required")
+	}
+	result := s.db.WithContext(ctx).
+		Where("name = ? AND holder = ?", req.GetName(), req.GetHolder()).
+		Delete(&models.Lease{})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// isUniqueViolation reports whether err is a unique-constraint violation from
+// either supported backend.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "duplicate key value")
+}
+
+// toProtoEvent converts a model Event into a proto Event.
+func toProtoEvent(event *models.Event) *dbpb.Event {
+	return &dbpb.Event{
+		Id:          int64(event.ID),
+		Name:        event.Name,
+		WorkerGroup: event.WorkerGroup,
+		Payload:     event.Payload,
+		CreatedAt:   timestamppb.New(event.CreatedAt),
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1591,50 @@ func jobStatusFromProto(status dbpb.JobStatus) (models.JobStatus, error) {
 		return models.JobStatusSkipped, nil
 	default:
 		return "", fmt.Errorf("unknown job status %v", status)
+	}
+}
+
+// jobStatusName maps a job status enum to the short name the UI and the
+// event-log payload use (F-23). It mirrors the API's jobStatusName so a
+// job_status event published by the database service carries the same status
+// string the UI expects.
+func jobStatusName(status dbpb.JobStatus) string {
+	switch status {
+	case dbpb.JobStatus_JOB_STATUS_PENDING:
+		return "pending"
+	case dbpb.JobStatus_JOB_STATUS_RUNNING:
+		return "running"
+	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
+		return "succeeded"
+	case dbpb.JobStatus_JOB_STATUS_FAILED:
+		return "failed"
+	case dbpb.JobStatus_JOB_STATUS_CANCELLED:
+		return "cancelled"
+	case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+		return "timed_out"
+	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
+		return "skipped"
+	default:
+		return "unknown"
+	}
+}
+
+// runStatusName maps a run status enum to the short name the UI and the
+// event-log payload use (F-23).
+func runStatusName(status dbpb.RunStatus) string {
+	switch status {
+	case dbpb.RunStatus_RUN_STATUS_PENDING:
+		return "pending"
+	case dbpb.RunStatus_RUN_STATUS_RUNNING:
+		return "running"
+	case dbpb.RunStatus_RUN_STATUS_SUCCEEDED:
+		return "succeeded"
+	case dbpb.RunStatus_RUN_STATUS_FAILED:
+		return "failed"
+	case dbpb.RunStatus_RUN_STATUS_CANCELLED:
+		return "cancelled"
+	default:
+		return "unknown"
 	}
 }
 

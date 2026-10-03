@@ -449,9 +449,15 @@ func (x *DeleteArtifactRequest) GetName() string {
 // "step-0.log" for a step's output, or "job.log" for the combined output of
 // the whole job).
 type DownloadLogRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Namespace string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Name      string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// offset is the byte offset to start reading from (F-23). When 0 (the
+	// default) the whole log is returned. When greater than 0 only the bytes
+	// from offset to the end of the log are returned — this is how an API pod
+	// range-reads the delta of a log that another pod appended to (cross-pod
+	// near-live logs). Reading past the end of the log returns no data.
+	Offset        int64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -498,6 +504,13 @@ func (x *DownloadLogRequest) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *DownloadLogRequest) GetOffset() int64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
 }
 
 type GetLogRequest struct {
@@ -670,10 +683,11 @@ const file_cdrom_artifacts_v1_artifacts_proto_rawDesc = "" +
 	"\tartifacts\x18\x01 \x03(\v2\x1c.cdrom.artifacts.v1.ArtifactR\tartifacts\"I\n" +
 	"\x15DeleteArtifactRequest\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"F\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"^\n" +
 	"\x12DownloadLogRequest\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"A\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
+	"\x06offset\x18\x03 \x01(\x03R\x06offset\"A\n" +
 	"\rGetLogRequest\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"/\n" +

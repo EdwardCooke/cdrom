@@ -44,12 +44,17 @@ func (f *fakeWatchStream) Recv() (*apipb.WatchMessage, error) {
 
 // fakeAPIClient is a stub APIClient for worker tests. Only the methods a
 // worker uses are implemented; the rest are never called. StreamJobLogs fails
-// so the log sink (best-effort) does not block the job.
+// so the log sink (best-effort) does not block the job. ClaimJob returns the
+// job in jobs for a claimable job id (the worker fetches the full job from
+// the claim, not from the nudge, F-23); ListPendingJobs returns no jobs so
+// the worker's periodic poll does not interfere with the tests.
 type fakeAPIClient struct {
 	apipb.APIClient // nil; only the methods below are used by the worker
 	watchCh         chan *apipb.WatchMessage
 	mu              sync.Mutex
 	statuses        []dbpb.JobStatus
+	jobs            map[int64]*apipb.Job // job id -> job returned by ClaimJob
+	claimable       map[int64]bool       // job id -> whether the claim succeeds
 }
 
 func (f *fakeAPIClient) RegisterWorker(ctx context.Context, in *apipb.RegisterWorkerRequest, opts ...grpc.CallOption) (*apipb.Worker, error) {
@@ -77,6 +82,18 @@ func (f *fakeAPIClient) ReportJobStatus(ctx context.Context, in *apipb.ReportJob
 
 func (f *fakeAPIClient) StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[apipb.JobLogChunk, apipb.StreamJobLogsResponse], error) {
 	return nil, status.Error(codes.Unavailable, "streaming disabled in test")
+}
+
+func (f *fakeAPIClient) ClaimJob(ctx context.Context, in *apipb.ClaimJobRequest, opts ...grpc.CallOption) (*apipb.ClaimJobResponse, error) {
+	claimed := f.claimable[in.GetJobId()]
+	if !claimed {
+		return &apipb.ClaimJobResponse{Claimed: false}, nil
+	}
+	return &apipb.ClaimJobResponse{Claimed: true, Job: f.jobs[in.GetJobId()]}, nil
+}
+
+func (f *fakeAPIClient) ListPendingJobs(ctx context.Context, in *apipb.ListPendingJobsRequest, opts ...grpc.CallOption) (*apipb.ListPendingJobsResponse, error) {
+	return &apipb.ListPendingJobsResponse{}, nil
 }
 
 // waitForStatus polls the fake API client until the job reports the wanted
@@ -115,19 +132,27 @@ func TestWorkerCancelInterruptsRunningJob(t *testing.T) {
 
 	watchCh := make(chan *apipb.WatchMessage, 8)
 	t.Cleanup(func() { close(watchCh) }) // unblock the watch loop on test end
-	api := &fakeAPIClient{watchCh: watchCh}
+
+	// A job that blocks until it is cancelled. The worker claims it (F-23)
+	// and fetches the full job from the claim, so the fake returns it for the
+	// claimable job id.
+	job := &apipb.Job{
+		Id:   42,
+		Name: "long",
+		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "cancel-blocker"}}},
+	}
+	api := &fakeAPIClient{
+		watchCh:   watchCh,
+		jobs:      map[int64]*apipb.Job{42: job},
+		claimable: map[int64]bool{42: true},
+	}
 	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = w.Run(ctx) }()
 
-	// Dispatch a job that blocks until it is cancelled.
-	job := &apipb.Job{
-		Id:   42,
-		Name: "long",
-		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "cancel-blocker"}}},
-	}
+	// Dispatch the job: the worker claims it and runs it until it is cancelled.
 	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
 		Assignment: &apipb.JobAssignment{Job: job, WorkerName: "w1"},
 	}}

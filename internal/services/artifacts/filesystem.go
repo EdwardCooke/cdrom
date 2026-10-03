@@ -184,7 +184,7 @@ func (s *FilesystemStore) AppendLog(_ context.Context, namespace, name string, d
 	return s.statLog(namespace, name)
 }
 
-func (s *FilesystemStore) DownloadLog(_ context.Context, namespace, name string) (*artifactspb.Artifact, io.ReadCloser, error) {
+func (s *FilesystemStore) DownloadLog(_ context.Context, namespace, name string, offset int64) (*artifactspb.Artifact, io.ReadCloser, error) {
 	path, err := s.logPath(namespace, name)
 	if err != nil {
 		return nil, nil, err
@@ -196,6 +196,12 @@ func (s *FilesystemStore) DownloadLog(_ context.Context, namespace, name string)
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, status.Errorf(codes.Internal, "artifacts: open log: %v", err)
+	}
+	if offset > 0 {
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			file.Close()
+			return nil, nil, status.Errorf(codes.Internal, "artifacts: seek log: %v", err)
+		}
 	}
 	return artifact, file, nil
 }

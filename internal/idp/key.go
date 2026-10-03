@@ -29,8 +29,8 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/config"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
 // signingKey is a single RSA signing key with its validity window and a

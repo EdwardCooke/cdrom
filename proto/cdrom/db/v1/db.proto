@@ -86,6 +86,83 @@ service Database {
   // finished) is left untouched, so a job can never be skipped out from
   // under a target that is already running it.
   rpc SkipJob(SkipJobRequest) returns (SkipJobResponse);
+  // ClaimJob atomically claims a pending job for execution (F-23): it sets
+  // the status to RUNNING (and the started timestamp) only if the job is
+  // still PENDING. It returns whether the job was claimed. This is how a
+  // worker (or the API on a worker's behalf) takes ownership of a job it
+  // picked up via the pull path or a push nudge: the conditional update is
+  // atomic, so a job delivered by both push and pull is claimed exactly once
+  // and the duplicate is a no-op.
+  rpc ClaimJob(ClaimJobRequest) returns (ClaimJobResponse);
+  // ListPendingByGroup returns the pending jobs that target the given worker
+  // group (F-23). This is the pull path: a worker (or the API on its behalf)
+  // polls it to pick up jobs that were published while it was unreachable, so
+  // no job is stranded pending. Filtering in the database keeps the poll from
+  // pulling every pending job over the wire as the system grows.
+  rpc ListPendingByGroup(ListPendingByGroupRequest) returns (ListJobsResponse);
+  // StartJobExecution records that the calling worker has started running a
+  // job (fan-out): it creates the worker's JobExecution for the job's current
+  // attempt and marks the job running. A job that targets a worker group runs
+  // on every worker in the group; each worker's run is a separate execution,
+  // so the start is not exclusive (unlike the old single-claim work queue).
+  // Starting an execution for a job that is no longer pending (it reached a
+  // terminal state, or it is not targeted at the worker's group) is rejected.
+  rpc StartJobExecution(StartJobExecutionRequest) returns (JobExecution);
+  // ListJobExecutions returns a job's executions (one per worker that started
+  // it, for its current attempt). The scheduler's job-status loop uses it to
+  // derive the job's overall status from the per-worker outcomes (fan-out).
+  rpc ListJobExecutions(ListJobExecutionsRequest) returns (ListJobExecutionsResponse);
+
+  // Event log (F-23, high availability). The event log is the shared,
+  // append-only coordination bus: the scheduler's background loops and the
+  // API publish state changes to it, and every API pod tails it to fan events
+  // out to its local workers and UI clients. Publishing a state change and
+  // appending its event is a single transaction, so an event exists iff the
+  // state changed.
+  // PublishAssignment appends an "assignment" event for a job (a nudge: the
+  // payload carries only the job id and target group, not the spec or token).
+  // The job must already be persisted (pending).
+  rpc PublishAssignment(PublishAssignmentRequest) returns (PublishEventResponse);
+  // PublishCancel appends a "cancel" event for a job: a signal to the
+  // execution target running the job to stop the work (F-05). Every API pod
+  // tails the log and delivers the cancellation to its local workers, so a
+  // cancellation signalled on one pod reaches a worker running the job on
+  // another pod.
+  rpc PublishCancel(PublishCancelRequest) returns (PublishEventResponse);
+  // PublishJobStatus appends a "job_status" event for a job's status change.
+  // The status change itself is persisted by the caller (e.g. via UpdateJob
+  // or a conditional RPC); this only appends the event so the UI sees it.
+  rpc PublishJobStatus(PublishJobStatusRequest) returns (PublishEventResponse);
+  // PublishRunStatus appends a "run_status" event for a run's status change.
+  rpc PublishRunStatus(PublishRunStatusRequest) returns (PublishEventResponse);
+  // PublishWorkerEvent appends a "worker" event for a worker lifecycle change
+  // (registered / deregistered / watching).
+  rpc PublishWorkerEvent(PublishWorkerEventRequest) returns (PublishEventResponse);
+  // PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
+  // job's log has grown to a given size. The log bytes themselves live in the
+  // artifacts store, never in the event log; a consumer range-reads the delta
+  // from the store.
+  rpc PublishLogUpdated(PublishLogUpdatedRequest) returns (PublishEventResponse);
+  // TailEvents returns the events with id greater than cursor, in id order,
+  // up to limit. This is how an API pod tails the log: it keeps a per-pod
+  // cursor, fetches the new events, fans them out, and advances the cursor.
+  // When cursor is 0 the call returns the oldest retained events.
+  rpc TailEvents(TailEventsRequest) returns (TailEventsResponse);
+
+  // Leader election (F-23, high availability). The scheduler runs background
+  // loops (watchdog, retry, dependency resolver, run-status) that must run on
+  // exactly one replica at a time, or they would publish duplicate events. A
+  // lease is the coordination primitive: a replica acquires a named lease,
+  // renews it periodically, and runs the loops only while it holds it. The
+  // lease expires after its TTL if the holder stops renewing (a crash or
+  // network partition), so another replica can take over.
+  // AcquireLease acquires the named lease for the caller, or re-acquires it
+  // if the caller already holds it (a renewal). It succeeds if the lease is
+  // free, expired, or already held by the caller; it fails if another
+  // replica holds an unexpired lease.
+  rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
+  // ReleaseLease releases the named lease if the caller holds it.
+  rpc ReleaseLease(ReleaseLeaseRequest) returns (google.protobuf.Empty);
 
   // Workers
   rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
@@ -114,11 +191,19 @@ message Pipeline {
   string description = 3;
   google.protobuf.Timestamp created_at = 4;
   google.protobuf.Timestamp updated_at = 5;
+  // failure_mode is the pipeline's default failure mode (see FailureMode) for
+  // its jobs that fan out to a worker group. A job that sets its own
+  // failure_mode overrides the pipeline's; a job that sets none inherits this
+  // value (defaulting to ALL when the pipeline sets none).
+  FailureMode failure_mode = 6;
 }
 
 message CreatePipelineRequest {
   string name = 1;
   string description = 2;
+  // failure_mode is the pipeline's default failure mode for its jobs (see
+  // Pipeline.failure_mode); UNSPECIFIED means the default (ALL).
+  FailureMode failure_mode = 3;
 }
 
 message GetPipelineRequest {
@@ -135,6 +220,9 @@ message UpdatePipelineRequest {
   int64 id = 1;
   string name = 2;
   string description = 3;
+  // failure_mode, when set (not UNSPECIFIED), updates the pipeline's default
+  // failure mode (see Pipeline.failure_mode).
+  FailureMode failure_mode = 4;
 }
 
 message DeletePipelineRequest {
@@ -245,7 +333,24 @@ enum JobStatus {
   // from "ran and errored".
   JOB_STATUS_SKIPPED = 7;
 }
-
+// FailureMode controls how a job that runs on several workers (a job targeting
+// a worker group, which runs on every worker in the group) is judged from the
+// per-worker outcomes. It is set at the pipeline level and may be overridden
+// per job; a job that sets no failure mode inherits its pipeline's (defaulting
+// to ALL). It only affects jobs that fan out to more than one worker; a job on
+// a single target is unaffected.
+enum FailureMode {
+  FAILURE_MODE_UNSPECIFIED = 0;
+  // FAILURE_MODE_ALL: the job succeeds only if every worker's run succeeds;
+  // any worker that fails or times out fails the job.
+  FAILURE_MODE_ALL = 1;
+  // FAILURE_MODE_BEST_EFFORT: the job succeeds if every worker's run reaches
+  // a terminal state (a per-worker failure or timeout is recorded but does
+  // not fail the job).
+  FAILURE_MODE_BEST_EFFORT = 2;
+  // FAILURE_MODE_ANY: the job succeeds as soon as one worker's run succeeds.
+  FAILURE_MODE_ANY = 3;
+}
 // StepStatus is the terminal outcome of a single step within a job's
 // execution spec (F-06). It mirrors a subset of JobStatus but only the
 // states a step can actually reach: a step does not have its own pending or
@@ -414,6 +519,19 @@ message JobSpec {
   // not change the job's own status or stop a failed step from failing the
   // job (that is a step's ignore_failed).
   bool ignore_failed = 4;
+  // failure_mode controls how a job that runs on several workers (a job
+  // targeting a worker group, which runs on every worker in the group) is
+  // judged from the per-worker outcomes. It is set at the pipeline level and
+  // may be overridden per job; a job that sets no failure mode inherits its
+  // pipeline's (defaulting to ALL). It only affects jobs that fan out to
+  // more than one worker; a job on a single target is unaffected.
+  //   - ALL: the job succeeds only if every worker's run succeeds; any
+  //     worker that fails or times out fails the job.
+  //   - BEST_EFFORT: the job succeeds if every worker's run reaches a
+  //     terminal state (a per-worker failure or timeout is recorded but does
+  //     not fail the job).
+  //   - ANY: the job succeeds as soon as one worker's run succeeds.
+  FailureMode failure_mode = 5;
 }
 
 message Job {
@@ -476,6 +594,12 @@ message Job {
   // pipeline creates its own set of job rows, so two runs of the same
   // pipeline are independent and both queryable.
   int64 run_id = 18;
+  // failure_mode is the job's failure mode (see JobSpec.failure_mode),
+  // denormalized from the spec (or the pipeline's default) when the job was
+  // created. The scheduler's job-status loop uses it to derive the job's
+  // overall status from the per-worker outcomes of a job that fanned out to
+  // a worker group.
+  FailureMode failure_mode = 19;
 }
 
 message CreateJobRequest {
@@ -572,6 +696,187 @@ message SkipJobResponse {
   // skipped is true when the job was still pending and was marked skipped;
   // false when it had already started (or finished).
   bool skipped = 1;
+}
+
+message ClaimJobRequest {
+  int64 id = 1;
+  // started_at is the timestamp to record when the job is claimed; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp started_at = 2;
+}
+
+message ClaimJobResponse {
+  // claimed is true when the job was still pending and was marked running;
+  // false when it had already started (or finished).
+  bool claimed = 1;
+}
+
+message ListPendingByGroupRequest {
+  // group is the worker group to list pending jobs for.
+  string group = 1;
+}
+
+// JobExecution is one worker's run of a job (fan-out). A job that targets a
+// worker group runs on every worker in the group; each worker's run is a
+// separate JobExecution, tracked independently so the job's overall status can
+// be derived from the per-worker outcomes (see FailureMode). A job that runs
+// on a single target (an ephemeral agent, or a group with one worker) has a
+// single execution.
+message JobExecution {
+  int64 id = 1;
+  // job_id is the job this execution runs.
+  int64 job_id = 2;
+  // worker_name is the worker that runs (or ran) this execution.
+  string worker_name = 3;
+  // attempt is the job attempt this execution belongs to (F-04); a retry
+  // creates a fresh set of executions.
+  int32 attempt = 4;
+  // status is this execution's state: RUNNING while the worker is executing
+  // the job, and a terminal status (SUCCEEDED, FAILED, CANCELLED, or
+  // TIMED_OUT) once the worker reports its outcome.
+  JobStatus status = 5;
+  google.protobuf.Timestamp started_at = 6;
+  google.protobuf.Timestamp finished_at = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// StartJobExecutionRequest asks the database to record that the calling
+// worker has started running a job (fan-out). It creates the worker's
+// JobExecution for the job's current attempt and marks the job running.
+message StartJobExecutionRequest {
+  // job_id is the job the worker is starting.
+  int64 job_id = 1;
+  // worker_name is the worker starting the job.
+  string worker_name = 2;
+  // started_at is the timestamp to record when the execution starts; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp started_at = 3;
+}
+
+// ListJobExecutionsRequest asks for a job's executions (one per worker that
+// started it, for its current attempt).
+message ListJobExecutionsRequest {
+  // job_id is the job to list executions for.
+  int64 job_id = 1;
+}
+
+message ListJobExecutionsResponse {
+  repeated JobExecution executions = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Event log (F-23, high availability)
+// ---------------------------------------------------------------------------
+
+// Event is a row in the shared, append-only event log. It is a pointer, not
+// the data: payload is a small JSON object with just enough to handle the
+// event (e.g. a job id, or a log's new size), never the job spec, the log
+// bytes, or a token. A consumer does a follow-up lookup to fetch the actual
+// data, which keeps the table lean and makes it replay-safe.
+message Event {
+  // id is the monotonic cursor consumers track.
+  int64 id = 1;
+  // name is the event kind: "assignment", "cancel", "job_status",
+  // "run_status", "worker", or "job_log_updated".
+  string name = 2;
+  // worker_group is the group the event is relevant to (for group-scoped
+  // events like assignment); empty for events that are not group-scoped.
+  string worker_group = 3;
+  // payload is the small JSON object that carries the event's data.
+  string payload = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message PublishAssignmentRequest {
+  int64 job_id = 1;
+  // target_group is the group the job targets (recorded so an API pod can
+  // filter the event against the groups of its local workers).
+  string target_group = 2;
+}
+
+message PublishCancelRequest {
+  // job_id is the job to cancel.
+  int64 job_id = 1;
+}
+
+message PublishJobStatusRequest {
+  int64 job_id = 1;
+  JobStatus status = 2;
+  int32 attempt = 3;
+  int32 max_attempts = 4;
+}
+
+message PublishRunStatusRequest {
+  int64 run_id = 1;
+  RunStatus status = 2;
+}
+
+message PublishWorkerEventRequest {
+  string name = 1;
+  string group = 2;
+  // action is the worker lifecycle action: "registered", "deregistered", or
+  // "watching".
+  string action = 3;
+}
+
+message PublishLogUpdatedRequest {
+  int64 job_id = 1;
+  // log is the log file name (e.g. "job.log" or "step-0.log").
+  string log = 2;
+  int32 step_index = 3;
+  // stream is the output stream: "stdout" or "stderr".
+  string stream = 4;
+  // size is the log's total size (in bytes) after the append; the consumer
+  // range-reads [cursor, size) from the artifacts store.
+  int64 size = 5;
+}
+
+message PublishEventResponse {
+  // id is the id of the appended event (the cursor a consumer would see).
+  int64 id = 1;
+}
+
+message TailEventsRequest {
+  // cursor is the last event id the caller has processed; 0 means "from the
+  // beginning of the retained window".
+  int64 cursor = 1;
+  // limit bounds how many events are returned in one call; 0 means the
+  // server's default.
+  int32 limit = 2;
+}
+
+message TailEventsResponse {
+  repeated Event events = 1;
+  // cursor is the id of the last event returned (the value to pass as cursor
+  // on the next call); equal to the request's cursor when no events were
+  // returned.
+  int64 cursor = 2;
+}
+
+message AcquireLeaseRequest {
+  // name is the name of the lease to acquire (e.g. "scheduler").
+  string name = 1;
+  // holder is the identity of the replica trying to acquire the lease.
+  string holder = 2;
+  // ttl is how long the lease is valid from now; the holder must renew it
+  // before it expires or another replica can take it over.
+  google.protobuf.Duration ttl = 3;
+}
+
+message AcquireLeaseResponse {
+  // acquired is true when the caller now holds the lease (it was free,
+  // expired, or already held by the caller); false when another replica
+  // holds an unexpired lease.
+  bool acquired = 1;
+}
+
+message ReleaseLeaseRequest {
+  // name is the name of the lease to release.
+  string name = 1;
+  // holder is the identity of the replica releasing the lease; the lease is
+  // released only if this replica holds it.
+  string holder = 2;
 }
 
 message ClaimJobRetryRequest {

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	gormsqlite "github.com/glebarez/sqlite" // pure-Go driver: no cgo, builds on Windows and Linux
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	gormsqlite "github.com/glebarez/sqlite" // pure-Go driver: no cgo, builds on Windows and Linux
 
 	"cdrom/internal/models"
 )

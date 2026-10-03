@@ -81,7 +81,7 @@ func TestResolveJobDependenciesSkipsOnFailedDependency(t *testing.T) {
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 1 || db.skipCalls[0] != 2 {
@@ -101,7 +101,7 @@ func TestResolveJobDependenciesDispatchesWhenAllSucceeded(t *testing.T) {
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
@@ -124,7 +124,7 @@ func TestResolveJobDependenciesWaitsWhilePending(t *testing.T) {
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 0 {
@@ -147,7 +147,7 @@ func TestResolveJobDependenciesIgnoresJobsWithoutDependencies(t *testing.T) {
 		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_PENDING},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 0 || len(db.clearedDeps) != 0 || len(api.dispatchedIDs()) != 0 {
@@ -165,7 +165,7 @@ func TestResolveJobDependenciesEmptyTargetGroupNoDispatch(t *testing.T) {
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
@@ -185,7 +185,7 @@ func TestResolveJobDependenciesSkipPropagatesThroughSkippedDependency(t *testing
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 1 || db.skipCalls[0] != 2 {
@@ -206,7 +206,7 @@ func TestResolveJobDependenciesSkipAlreadyStartedIsNoop(t *testing.T) {
 		skipped: map[int64]bool{2: false},
 	}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 1 {
@@ -227,7 +227,7 @@ func TestResolveJobDependenciesFailedDependencyWithIgnoreFailedDispatches(t *tes
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 0 {
@@ -250,7 +250,7 @@ func TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedDispatches(t *t
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 0 {
@@ -270,7 +270,7 @@ func TestResolveJobDependenciesCancelledDependencyWithIgnoreFailedSkips(t *testi
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
 	}}
 	api := &fakeRelayer{}
-	s := NewServer(nil, nil, testLogger())
+	s := NewServer(nil, testLogger())
 	s.resolveJobDependencies(context.Background(), db, api)
 
 	if len(db.skipCalls) != 1 || db.skipCalls[0] != 2 {

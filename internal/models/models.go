@@ -353,6 +353,60 @@ type IDPAuthCode struct {
 	Email         string `json:"email"`
 }
 
+// Event is a row in the shared, append-only event log (F-23, high
+// availability). The event log is the coordination bus that makes the control
+// plane horizontally scalable: every API pod tails it and fans the events out
+// to its local workers and UI clients, and the scheduler's background loops
+// publish state changes to it instead of pushing to a specific API pod.
+//
+// An event is a *pointer*, not the data: the payload is a small JSON object
+// with just enough to handle the event (e.g. a job id, or a log's new size),
+// never the job spec, the log bytes, or a token. A consumer that sees an
+// event does a follow-up lookup (GetJob, a range read of the log delta) to
+// fetch the actual data. This keeps the table lean and makes it replay-safe:
+// a replayed event can never carry a stale spec or an expired token.
+//
+// The table is partitioned by CreatedAt (PostgreSQL) so old events can be
+// dropped as whole partitions (O(1), no bloat). The log is a *recent buffer*;
+// the database state (jobs, runs, workers) is the source of truth. A consumer
+// whose cursor has fallen out of the retained window resyncs from a state
+// snapshot rather than replaying the log.
+type Event struct {
+	gorm.Model
+	// Name is the event kind: "assignment", "cancel", "job_status",
+	// "run_status", "worker", or "job_log_updated".
+	Name string `gorm:"index;not null" json:"name"`
+	// WorkerGroup is the group the event is relevant to (for group-scoped
+	// events like assignment); empty for events that are not group-scoped
+	// (status, run status, log updates). An API pod filters events by this
+	// against the groups of the workers it holds streams for.
+	WorkerGroup string `gorm:"column:worker_group;index" json:"worker_group"`
+	// Payload is the small JSON object that carries the event's data (e.g.
+	// {"job_id": 42} or {"job_id": 42, "log": "job.log", "size": 183422}).
+	// It is stored as a JSON document in a text column (portable across
+	// SQLite and PostgreSQL).
+	Payload string `gorm:"type:text" json:"payload"`
+}
+
+// Lease is a named, expiring lock used for leader election (F-23, high
+// availability). A replica acquires a lease, renews it periodically, and runs
+// the work that must run on exactly one replica (the scheduler's background
+// loops) only while it holds the lease. If the holder stops renewing (a crash
+// or a network partition) the lease expires after its TTL and another replica
+// can take over, so the work is never left unattended.
+//
+// The row is keyed by Name (unique); Holder records which replica currently
+// holds it and ExpiresAt when the lease lapses.
+type Lease struct {
+	gorm.Model
+	// Name is the lease's name (e.g. "scheduler"); unique.
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
+	// Holder is the identity of the replica that currently holds the lease.
+	Holder string `gorm:"not null" json:"holder"`
+	// ExpiresAt is when the lease lapses if the holder does not renew it.
+	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
+}
+
 // All lists every model the database service must migrate. Add new entities
 // here so AutoMigrate always sees the complete set.
 func All() []any {
@@ -363,5 +417,7 @@ func All() []any {
 		&Worker{},
 		&IDPSigningKey{},
 		&IDPAuthCode{},
+		&Event{},
+		&Lease{},
 	}
 }

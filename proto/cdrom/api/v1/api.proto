@@ -26,10 +26,27 @@ service API {
   // Execution side (called by workers and agents).
   //
   // WatchJobs is a server stream: the worker identifies itself and receives a
-  // WatchMessage for every job dispatched to its group (a JobAssignment) and
-  // for every cancellation of a job it is running (a JobCancellation, F-05).
+  // WatchMessage for every job dispatched to its group (a JobAssignment or a
+  // JobNudge, F-23) and for every cancellation of a job it is running (a
+  // JobCancellation, F-05).
   rpc WatchJobs(WatchJobsRequest) returns (stream WatchMessage);
   rpc GetJob(GetJobRequest) returns (Job);
+  // StartJobExecution records that the calling worker has started running a
+  // job (fan-out): it creates the worker's JobExecution for the job's current
+  // attempt (via the Database service) and returns the job with its spec,
+  // upstream jobs, and a fresh job token. A job that targets a worker group
+  // runs on every worker in the group, so the start is not exclusive — every
+  // worker in the group starts its own execution. Starting an execution for a
+  // job that is no longer pending (it reached a terminal state, or it is not
+  // targeted at the worker's group) is rejected, so a job that finished
+  // before a slow worker started it is not run.
+  rpc StartJobExecution(StartJobExecutionRequest) returns (StartJobExecutionResponse);
+  // ListPendingJobs returns the pending jobs that target the caller's worker
+  // group (F-23). This is the worker's pull path: it polls it on a short
+  // interval to pick up jobs that were published while it was unreachable, so
+  // no job is stranded pending. It wraps the Database service's
+  // ListPendingByGroup.
+  rpc ListPendingJobs(ListPendingJobsRequest) returns (ListPendingJobsResponse);
   rpc ReportJobStatus(ReportJobStatusRequest) returns (Job);
   // CancelJob is called by the scheduler to signal the execution target
   // running a job to stop the work (F-05). The API delivers a JobCancellation
@@ -157,6 +174,11 @@ message Job {
   // run_id is the pipeline run this job is an instance of (F-07); 0 when the
   // job is not part of a run.
   int64 run_id = 17;
+  // failure_mode is the job's failure mode (see cdrom.db.v1.FailureMode),
+  // denormalized from the spec (or the pipeline's default) when the job was
+  // created. It controls how a job that fanned out to a worker group is
+  // judged from the per-worker outcomes.
+  cdrom.db.v1.FailureMode failure_mode = 18;
 }
 
 message JobAssignment {
@@ -176,13 +198,27 @@ message JobCancellation {
   int64 job_id = 1;
 }
 
+// JobNudge is a lightweight "you have a job" signal (F-23). It carries only
+// the job id, not the spec or token: on receiving it the worker calls GetJob
+// to fetch the fresh spec, job token, and upstream jobs, then claims and runs
+// the job. This keeps the shared event log lean and replay-safe (a replayed
+// nudge can never carry a stale spec or an expired token). It is the push
+// (fast-path) counterpart to the worker's periodic poll of pending jobs.
+message JobNudge {
+  // job_id is the job the worker should fetch and run.
+  int64 job_id = 1;
+}
+
 // WatchMessage is a single message on a worker's WatchJobs stream. Exactly
-// one of its fields is set: an assignment (a new job to run) or a
-// cancellation (stop a job the worker is running, F-05).
+// one of its fields is set: an assignment (a new job to run, carrying the
+// full job + token), a nudge (a new job to run, by id only — the worker
+// fetches it via GetJob, F-23), or a cancellation (stop a job the worker is
+// running, F-05).
 message WatchMessage {
   oneof message {
     JobAssignment assignment = 1;
     JobCancellation cancellation = 2;
+    JobNudge nudge = 3;
   }
 }
 
@@ -199,6 +235,39 @@ message CancelJobRequest {
 
 message GetJobRequest {
   int64 id = 1;
+}
+
+// StartJobExecutionRequest asks the API to record that the calling worker has
+// started running a job (fan-out).
+message StartJobExecutionRequest {
+  // job_id is the job the worker is starting.
+  int64 job_id = 1;
+  // worker_name is the worker starting the job.
+  string worker_name = 2;
+}
+
+// StartJobExecutionResponse is the result of a StartJobExecution call. When
+// started is true, job carries the job (spec, upstream jobs, and a fresh job
+// token); when started is false the job was no longer pending (it reached a
+// terminal state, or it is not targeted at the worker's group) and job is
+// empty.
+message StartJobExecutionResponse {
+  // started is true when the worker's execution was recorded and the job is
+  // running.
+  bool started = 1;
+  // job is the job the worker will run (set only when started is true).
+  Job job = 2;
+}
+
+// ListPendingJobsRequest asks the API for the pending jobs that target the
+// caller's worker group (F-23).
+message ListPendingJobsRequest {
+  // group is the worker group to list pending jobs for.
+  string group = 1;
+}
+
+message ListPendingJobsResponse {
+  repeated Job jobs = 1;
 }
 
 message ReportJobStatusRequest {

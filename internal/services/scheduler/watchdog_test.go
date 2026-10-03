@@ -9,10 +9,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/durationpb"
-	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
@@ -52,17 +50,18 @@ func (f *fakeDB) ReapJob(ctx context.Context, in *dbpb.ReapJobRequest, opts ...g
 	return &dbpb.ReapJobResponse{Reaped: reaped}, nil
 }
 
-// fakeAPI is a stub APIClient that records NotifyJobStatus calls.
-type fakeAPI struct {
+// fakeStatusPublisher is a stub Database publisher that records the
+// "job_status" events the watchdog appends to the shared event log (F-23).
+type fakeStatusPublisher struct {
 	notified map[int64]dbpb.JobStatus
 }
 
-func (f *fakeAPI) NotifyJobStatus(ctx context.Context, in *apipb.NotifyJobStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (f *fakeStatusPublisher) PublishJobStatus(ctx context.Context, in *dbpb.PublishJobStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
 	if f.notified == nil {
 		f.notified = make(map[int64]dbpb.JobStatus)
 	}
 	f.notified[in.GetJobId()] = in.GetStatus()
-	return &emptypb.Empty{}, nil
+	return &dbpb.PublishEventResponse{}, nil
 }
 
 // TestEffectiveTimeout verifies the effective-timeout rule: a job-level
@@ -143,22 +142,22 @@ func TestReapTimedOutJobs(t *testing.T) {
 		},
 		reaped: map[int64]bool{1: true}, // only job 1 is reaped by the db
 	}
-	api := &fakeAPI{}
+	publisher := &fakeStatusPublisher{}
 	s := &Server{logger: testLogger()}
 
-	s.reapTimedOutJobs(context.Background(), db, api)
+	s.reapTimedOutJobs(context.Background(), db, publisher)
 
-	if _, ok := api.notified[1]; !ok {
-		t.Error("job 1 (timed out) was not notified to the API")
+	if _, ok := publisher.notified[1]; !ok {
+		t.Error("job 1 (timed out) was not published")
 	}
-	if status, ok := api.notified[1]; !ok || status != dbpb.JobStatus_JOB_STATUS_TIMED_OUT {
-		t.Errorf("job 1 notified status = %v, want TIMED_OUT", status)
+	if status, ok := publisher.notified[1]; !ok || status != dbpb.JobStatus_JOB_STATUS_TIMED_OUT {
+		t.Errorf("job 1 published status = %v, want TIMED_OUT", status)
 	}
-	if _, ok := api.notified[2]; ok {
-		t.Error("job 2 (within timeout) was notified, want it left alone")
+	if _, ok := publisher.notified[2]; ok {
+		t.Error("job 2 (within timeout) was published, want it left alone")
 	}
-	if _, ok := api.notified[3]; ok {
-		t.Error("job 3 (no timeout) was notified, want it left alone")
+	if _, ok := publisher.notified[3]; ok {
+		t.Error("job 3 (no timeout) was published, want it left alone")
 	}
 }
 

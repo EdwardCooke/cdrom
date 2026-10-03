@@ -9,9 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/emptypb"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
@@ -60,8 +58,8 @@ func (f *fakeRetryDB) ClaimJobRetry(ctx context.Context, in *dbpb.ClaimJobRetryR
 	return &dbpb.ClaimJobRetryResponse{Claimed: claimed, Attempt: 2}, nil
 }
 
-// fakeRelayer is a stub APIClient that records NotifyJobStatus and
-// DispatchJob calls.
+// fakeRelayer is a stub Database publisher that records the "job_status" and
+// "assignment" events the retry loop appends to the shared event log (F-23).
 type fakeRelayer struct {
 	// mu guards dispatched: a retry's backoff dispatch runs in a detached
 	// goroutine that appends to it while the test's goroutine reads it.
@@ -70,19 +68,19 @@ type fakeRelayer struct {
 	dispatched []int64
 }
 
-func (f *fakeRelayer) NotifyJobStatus(ctx context.Context, in *apipb.NotifyJobStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (f *fakeRelayer) PublishJobStatus(ctx context.Context, in *dbpb.PublishJobStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
 	if f.notified == nil {
 		f.notified = make(map[int64]dbpb.JobStatus)
 	}
 	f.notified[in.GetJobId()] = in.GetStatus()
-	return &emptypb.Empty{}, nil
+	return &dbpb.PublishEventResponse{}, nil
 }
 
-func (f *fakeRelayer) DispatchJob(ctx context.Context, in *apipb.DispatchJobRequest, opts ...grpc.CallOption) (*apipb.DispatchJobResponse, error) {
+func (f *fakeRelayer) PublishAssignment(ctx context.Context, in *dbpb.PublishAssignmentRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.dispatched = append(f.dispatched, in.GetJob().GetId())
-	return &apipb.DispatchJobResponse{Dispatched: 1}, nil
+	f.dispatched = append(f.dispatched, in.GetJobId())
+	return &dbpb.PublishEventResponse{}, nil
 }
 
 // dispatchedIDs returns a copy of the recorded dispatches, safe to call from

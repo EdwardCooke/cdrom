@@ -15,12 +15,13 @@ execution targets.
 N-tier architecture with the following layers (top to bottom):
 
 1. **UI layer** — React (the only non-Go component)
-2. **API / controller layer** — Go. The **single control plane**. It exposes
-   the HTTP API consumed by the UI *and* a gRPC API consumed by execution
-   targets (workers, agents) and the scheduler. It holds the workers'
-   WatchJobs streams, relays job assignments pushed by the scheduler, and
-   proxies artifact traffic to the artifacts service. No business logic
-   belongs here.
+2. **API / controller layer** — Go. The **control plane** (one or more
+   replicas, F-23). It exposes the HTTP API consumed by the UI *and* a gRPC
+   API consumed by execution targets (workers, agents). It holds the workers'
+   WatchJobs streams, tails the shared event log (F-23) to fan job
+   assignments, cancellations, and status events out to its local workers and
+   UI clients, and proxies artifact traffic to the artifacts service. No
+   business logic belongs here.
 3. **Service layer** — Go services, one per concern. Each service is a
    **standalone process** exposing a **gRPC** interface (protos in `proto/`,
    generated code in `internal/gen/`):
@@ -28,9 +29,15 @@ N-tier architecture with the following layers (top to bottom):
      the only component allowed to touch it. All other components read/write
      data through its gRPC API.
    - **Scheduler** (`cmd/scheduler`) — manages job lifecycle and dispatch.
-     When a job targets a worker group it pushes it to the API (DispatchJob),
-     which fans it out to the live workers. Persists state through the
-     Database service. It also **creates pipeline runs** (F-07): `CreateRun`
+     It talks **only** to the Database service (F-23): when a job targets a
+     worker group it appends an "assignment" event to the shared event log,
+     which every API pod tails and fans out to its live workers (the workers'
+     ~1 s poll is the authoritative catch-up path). It no longer dials a
+     specific API pod. It runs the four background loops (below) on exactly
+     one replica at a time via **leader election** — a portable lease on the
+     Database service (`AcquireLease` / `ReleaseLease`) — so only the leader
+     reaps, retries, resolves dependencies, and re-derives run status. It
+     also **creates pipeline runs** (F-07): `CreateRun`
      asks the Database service to create a `PipelineRun` plus one job instance
      per job definition and then drives the instances, and a background
      **run-status loop** re-derives each in-flight run's overall status from
@@ -66,9 +73,11 @@ N-tier architecture with the following layers (top to bottom):
 4. **Execution layer** — where jobs actually run (see Execution Model below).
 
 **Topology rule:** execution targets (workers, agents) talk **only** to the
-API. The API talks to everything else (database, scheduler, artifacts). There
-is no central logs service — every process logs locally to stdout or a file
-(see Logging below).
+API. The API talks to everything else (database, scheduler, artifacts). The
+scheduler talks **only** to the Database service (F-23): it never dials a
+specific API pod, and job delivery to workers flows through the shared event
+log that every API pod tails. There is no central logs service — every
+process logs locally to stdout or a file (see Logging below).
 
 ### gRPC Conventions
 
@@ -481,7 +490,7 @@ highest: built-in defaults → config file → environment variables.
 | Service     | Default address | Env var (listen) | Env var (address of) |
 |-------------|-----------------|------------------|----------------------|
 | db          | 127.0.0.1:7101  | `CDROM_LISTEN_ADDR` | — |
-| scheduler   | 127.0.0.1:7102  | `CDROM_LISTEN_ADDR` | `CDROM_DB_ADDR`, `CDROM_API_ADDR` |
+| scheduler   | 127.0.0.1:7102  | `CDROM_LISTEN_ADDR` | `CDROM_DB_ADDR` |
 | artifacts   | 127.0.0.1:7103  | `CDROM_LISTEN_ADDR` | — |
 | api (gRPC)  | 127.0.0.1:7105  | `CDROM_LISTEN_ADDR` | db, scheduler, artifacts |
 | api (HTTP)  | 127.0.0.1:8080  | `CDROM_API_HTTP_ADDR` | — |
@@ -520,7 +529,8 @@ A minimal local run (plaintext, no certs):
 ```sh
 make build
 ./bin/db          # owns the SQLite file (cdrom.db) and runs migrations
-./bin/scheduler   # dials db and the api
+./bin/scheduler   # dials db (publishes to the shared event log; runs the
+                  # background loops only while it holds the leader lease)
 ./bin/artifacts   # stores files under ./artifacts
 ./bin/api         # gRPC on :7105 + HTTP on :8080, dials db/scheduler/artifacts
 ./bin/worker      # registers with the api, watches for jobs
@@ -665,3 +675,15 @@ To exercise the mTLS mint path, run both with the `tls` section set (see
 
 - Go module path is the placeholder `cdrom`; update `go.mod` and all imports when the
   repo is hosted (e.g. `github.com/<owner>/cdrom`).
+- **Event-log retention (F-23, remaining).** The high-availability control plane
+  (F-23) is implemented: a shared **event log** every API pod tails, **hybrid
+  push + pull** dispatch (workers poll pending-for-group ~1 s as the
+  authoritative path; API pods tail the log at ~50 ms and nudge local workers),
+  **scheduler leader election** (a portable lease on the Database service so only
+  one replica runs the four background loops), and **cross-pod near-live logs**
+  (a lean `job_log_updated` pointer event + a range read from the shared
+  artifacts store). See `docs/HighAvailability.md`. The one open item is
+  **event-log retention**: the `events` table is a plain append-only log today
+  and is not pruned; partitioning by `created_at` + a retention schedule (drop
+  old partitions) is a deployment concern to add when the log's growth warrants
+  it.

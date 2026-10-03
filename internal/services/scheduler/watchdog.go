@@ -15,9 +15,10 @@
 //
 // Reaping is conditional (Database.ReapJob): it marks the job timed_out only
 // if it is still pending or running, so a job that already reported a terminal
-// status is left untouched. When a job is reaped the watchdog tells the API
-// (NotifyJobStatus) to fan the status change out to the UI over the WebSocket
-// event hub, mirroring the job_status events a target's report would produce.
+// status is left untouched. When a job is reaped the watchdog appends a
+// "job_status" event to the shared event log (F-23), which every API pod tails
+// and fans out to its UI clients, mirroring the job_status events a target's
+// report would produce.
 package scheduler
 
 import (
@@ -25,9 +26,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/emptypb"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
@@ -43,11 +42,11 @@ type jobReaper interface {
 	ReapJob(ctx context.Context, in *dbpb.ReapJobRequest, opts ...grpc.CallOption) (*dbpb.ReapJobResponse, error)
 }
 
-// jobNotifier is the subset of the API client the watchdog uses to fan a
-// reaped job's status change out to the UI. The concrete apipb.APIClient
-// satisfies it; tests inject a fake.
-type jobNotifier interface {
-	NotifyJobStatus(ctx context.Context, in *apipb.NotifyJobStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+// jobStatusPublisher is the subset of the Database client the watchdog uses
+// to append a "job_status" event for a reaped job to the shared event log
+// (F-23). The concrete dbpb.DatabaseClient satisfies it; tests inject a fake.
+type jobStatusPublisher interface {
+	PublishJobStatus(ctx context.Context, in *dbpb.PublishJobStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
 }
 
 // StartWatchdog runs the job-timeout watchdog in the background until ctx is
@@ -67,7 +66,7 @@ func (s *Server) StartWatchdog(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.reapTimedOutJobs(ctx, s.db, s.api)
+				s.reapTimedOutJobs(ctx, s.db, s.db)
 			}
 		}
 	}()
@@ -76,10 +75,10 @@ func (s *Server) StartWatchdog(ctx context.Context) {
 // reapTimedOutJobs lists the running jobs and reaps any that have exceeded
 // their effective timeout. A job with no timeout is never reaped. Reaping is
 // conditional (Database.ReapJob), so a job that reported a terminal status
-// between the list and the reap is left untouched. db and api are the
+// between the list and the reap is left untouched. db and publisher are the
 // watchdog's dependencies (the concrete clients in production, fakes in
-// tests); api may be nil to skip the UI notification.
-func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, api jobNotifier) {
+// tests); publisher may be nil to skip the event append.
+func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, publisher jobStatusPublisher) {
 	response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: dbpb.JobStatus_JOB_STATUS_RUNNING})
 	if err != nil {
 		s.logger.Warn("scheduler: watchdog list running jobs", "err", err)
@@ -95,16 +94,17 @@ func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, api jobNoti
 		if now.Before(deadline) {
 			continue
 		}
-		if s.reap(ctx, db, api, job, deadline) {
+		if s.reap(ctx, db, publisher, job, deadline) {
 			s.logger.Info("scheduler: reaped timed-out job", "job", job.GetId(), "deadline", deadline)
 		}
 	}
 }
 
-// reap marks a job timed_out (conditionally) and, if it was reaped, tells the
-// API to fan the status change out to the UI. It returns whether the job was
+// reap marks a job timed_out (conditionally) and, if it was reaped, appends a
+// "job_status" event to the shared event log (F-23) so every API pod can fan
+// the status change out to its UI clients. It returns whether the job was
 // reaped.
-func (s *Server) reap(ctx context.Context, db jobReaper, api jobNotifier, job *dbpb.Job, deadline time.Time) bool {
+func (s *Server) reap(ctx context.Context, db jobReaper, publisher jobStatusPublisher, job *dbpb.Job, deadline time.Time) bool {
 	jobID := job.GetId()
 	resp, err := db.ReapJob(ctx, &dbpb.ReapJobRequest{Id: jobID})
 	if err != nil {
@@ -115,17 +115,17 @@ func (s *Server) reap(ctx context.Context, db jobReaper, api jobNotifier, job *d
 		// The job already reached a terminal state; nothing to do.
 		return false
 	}
-	// Fan the status change out to the UI. A nil api client (e.g. in tests)
-	// simply skips the notification — the persisted status is the source of
-	// truth.
-	if api != nil {
-		if _, err := api.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{
+	// Append the status change to the shared event log (F-23). A nil publisher
+	// (e.g. in tests) simply skips the event — the persisted status is the
+	// source of truth.
+	if publisher != nil {
+		if _, err := publisher.PublishJobStatus(ctx, &dbpb.PublishJobStatusRequest{
 			JobId:       jobID,
 			Status:      dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
 			Attempt:     job.GetAttempt(),
 			MaxAttempts: job.GetMaxAttempts(),
 		}); err != nil {
-			s.logger.Warn("scheduler: notify api of reaped job", "job", jobID, "err", err)
+			s.logger.Warn("scheduler: publish reaped job status", "job", jobID, "err", err)
 		}
 	}
 	return true

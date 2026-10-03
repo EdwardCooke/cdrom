@@ -6,12 +6,13 @@
 // and for each with unresolved dependencies checks each dependency's status:
 //
 //   - every dependency succeeded -> the job is released: its DependsOn is
-//     cleared (so it is not reconsidered) and it is dispatched exactly like a
-//     job with no dependencies;
+//     cleared (so it is not reconsidered) and an "assignment" event is
+//     appended to the shared event log (F-23), exactly like a job with no
+//     dependencies;
 //   - any dependency reached a terminal state other than succeeded (failed,
 //     cancelled, timed_out, or itself skipped) -> the job is marked skipped
-//     (Database.SkipJob) instead of running, and the scheduler fans the
-//     status change out to the UI (API.NotifyJobStatus);
+//     (Database.SkipJob) instead of running, and a "job_status" event is
+//     appended to the shared event log (F-23) so the UI sees the skip;
 //   - otherwise (a dependency is still pending or running) -> the job is left
 //     alone and reconsidered on the resolver's next tick.
 //
@@ -26,7 +27,6 @@ import (
 
 	"google.golang.org/grpc"
 
-	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
@@ -47,6 +47,16 @@ type jobDependencyChecker interface {
 	UpdateJob(ctx context.Context, in *dbpb.UpdateJobRequest, opts ...grpc.CallOption) (*dbpb.Job, error)
 }
 
+// dependencyPublisher is the subset of the Database client the dependency
+// resolver uses to append events to the shared event log (F-23): a
+// "job_status" event for a skipped job and an "assignment" event for a
+// released job. The concrete dbpb.DatabaseClient satisfies it; tests inject a
+// fake.
+type dependencyPublisher interface {
+	PublishJobStatus(ctx context.Context, in *dbpb.PublishJobStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
+	PublishAssignment(ctx context.Context, in *dbpb.PublishAssignmentRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
+}
+
 // StartDependencyResolver runs the job-dependency resolver in the background
 // until ctx is cancelled. It periodically resolves pending jobs that declare
 // dependencies (F-06). It is a no-op when the Database client is nil (e.g. in
@@ -63,17 +73,17 @@ func (s *Server) StartDependencyResolver(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.resolveJobDependencies(ctx, s.db, s.api)
+				s.resolveJobDependencies(ctx, s.db, s.db)
 			}
 		}
 	}()
 }
 
 // resolveJobDependencies lists pending jobs and resolves the dependencies of
-// each one that declares any (DependsOn). db and api are the resolver's
-// dependencies (the concrete clients in production, fakes in tests); api may
-// be nil to skip the UI notification and dispatch.
-func (s *Server) resolveJobDependencies(ctx context.Context, db jobDependencyChecker, api jobRelayer) {
+// each one that declares any (DependsOn). db and publisher are the resolver's
+// dependencies (the concrete clients in production, fakes in tests); publisher
+// may be nil to skip the event appends.
+func (s *Server) resolveJobDependencies(ctx context.Context, db jobDependencyChecker, publisher dependencyPublisher) {
 	response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: dbpb.JobStatus_JOB_STATUS_PENDING})
 	if err != nil {
 		s.logger.Warn("scheduler: dependency resolver list pending jobs", "err", err)
@@ -83,14 +93,14 @@ func (s *Server) resolveJobDependencies(ctx context.Context, db jobDependencyChe
 		if len(job.GetDependsOn()) == 0 {
 			continue
 		}
-		s.resolveJob(ctx, db, api, job)
+		s.resolveJob(ctx, db, publisher, job)
 	}
 }
 
 // resolveJob checks every one of job's dependencies and either skips the job
 // (a dependency did not succeed), releases it (every dependency succeeded),
 // or leaves it pending (a dependency is still pending or running).
-func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, api jobRelayer, job *dbpb.Job) {
+func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, publisher dependencyPublisher, job *dbpb.Job) {
 	allSucceeded := true
 	for _, depID := range job.GetDependsOn() {
 		dep, err := db.GetJob(ctx, &dbpb.GetJobRequest{Id: depID})
@@ -113,13 +123,13 @@ func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, api jo
 			// A dependency reached a terminal state other than succeeded: the
 			// job never runs (F-06). This short-circuits the remaining
 			// dependencies — any one of them failing is enough to skip.
-			s.skipJob(ctx, db, api, job)
+			s.skipJob(ctx, db, publisher, job)
 			return
 		case dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_SKIPPED:
 			// A cancelled or skipped dependency always blocks the job (skip
 			// propagates; a cancellation is not something ignore_failed can
 			// override): the job never runs (F-06).
-			s.skipJob(ctx, db, api, job)
+			s.skipJob(ctx, db, publisher, job)
 			return
 		default:
 			// Still pending or running: wait and check again next tick.
@@ -129,13 +139,14 @@ func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, api jo
 	if !allSucceeded {
 		return
 	}
-	s.releaseJob(ctx, db, api, job)
+	s.releaseJob(ctx, db, publisher, job)
 }
 
 // skipJob conditionally marks job as skipped (Database.SkipJob) and, if it
-// was skipped, fans the status change out to the UI. It is a no-op if the job
-// already started (or finished) between the list and the skip.
-func (s *Server) skipJob(ctx context.Context, db jobDependencyChecker, api jobRelayer, job *dbpb.Job) {
+// was skipped, appends a "job_status" event to the shared event log (F-23) so
+// every API pod can fan the skip out to its UI clients. It is a no-op if the
+// job already started (or finished) between the list and the skip.
+func (s *Server) skipJob(ctx context.Context, db jobDependencyChecker, publisher dependencyPublisher, job *dbpb.Job) {
 	resp, err := db.SkipJob(ctx, &dbpb.SkipJobRequest{Id: job.GetId()})
 	if err != nil {
 		s.logger.Warn("scheduler: skip job", "job", job.GetId(), "err", err)
@@ -146,39 +157,39 @@ func (s *Server) skipJob(ctx context.Context, db jobDependencyChecker, api jobRe
 		return
 	}
 	s.logger.Info("scheduler: job skipped (a dependency did not succeed)", "job", job.GetId(), "depends_on", job.GetDependsOn())
-	if api == nil {
+	if publisher == nil {
 		return
 	}
-	if _, err := api.NotifyJobStatus(ctx, &apipb.NotifyJobStatusRequest{
+	if _, err := publisher.PublishJobStatus(ctx, &dbpb.PublishJobStatusRequest{
 		JobId:       job.GetId(),
 		Status:      dbpb.JobStatus_JOB_STATUS_SKIPPED,
 		Attempt:     job.GetAttempt(),
 		MaxAttempts: job.GetMaxAttempts(),
 	}); err != nil {
-		s.logger.Warn("scheduler: notify api of skipped job", "job", job.GetId(), "err", err)
+		s.logger.Warn("scheduler: publish skipped job status", "job", job.GetId(), "err", err)
 	}
 }
 
 // releaseJob clears job's DependsOn (so it is not reconsidered on the next
-// tick) and dispatches it exactly like SubmitJob would have, had the job
-// never had dependencies. Clearing DependsOn first is best-effort: if it
-// fails the resolver simply reconsiders the job again next tick instead of
-// risking a job that is dispatched more than once.
-func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, api jobRelayer, job *dbpb.Job) {
+// tick) and appends an "assignment" event to the shared event log (F-23)
+// exactly like SubmitJob would have, had the job never had dependencies.
+// Clearing DependsOn first is best-effort: if it fails the resolver simply
+// reconsiders the job again next tick instead of risking a job that is
+// dispatched more than once.
+func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, publisher dependencyPublisher, job *dbpb.Job) {
 	if _, err := db.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: job.GetId(), ClearDependsOn: true}); err != nil {
 		s.logger.Warn("scheduler: clear job dependencies", "job", job.GetId(), "err", err)
 		return
 	}
 	s.logger.Info("scheduler: job dependencies satisfied", "job", job.GetId())
-	if api == nil {
+	if publisher == nil {
 		return
 	}
 	if job.GetTargetGroup() == "" {
 		s.logger.Info("scheduler: job queued for ephemeral agent", "job", job.GetId())
 		return
 	}
-	if _, err := api.DispatchJob(ctx, &apipb.DispatchJobRequest{Job: toAPIJob(toProtoJob(job))}); err != nil {
-		s.logger.Warn("scheduler: dispatch to api failed; job left pending",
-			"job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
+	if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: job.GetId(), TargetGroup: job.GetTargetGroup()}); err != nil {
+		s.logger.Warn("scheduler: publish released job assignment", "job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
 	}
 }

@@ -21,23 +21,25 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	API_RegisterWorker_FullMethodName   = "/cdrom.api.v1.API/RegisterWorker"
-	API_DeregisterWorker_FullMethodName = "/cdrom.api.v1.API/DeregisterWorker"
-	API_Heartbeat_FullMethodName        = "/cdrom.api.v1.API/Heartbeat"
-	API_WatchJobs_FullMethodName        = "/cdrom.api.v1.API/WatchJobs"
-	API_GetJob_FullMethodName           = "/cdrom.api.v1.API/GetJob"
-	API_ReportJobStatus_FullMethodName  = "/cdrom.api.v1.API/ReportJobStatus"
-	API_CancelJob_FullMethodName        = "/cdrom.api.v1.API/CancelJob"
-	API_StreamJobLogs_FullMethodName    = "/cdrom.api.v1.API/StreamJobLogs"
-	API_ExchangeJobToken_FullMethodName = "/cdrom.api.v1.API/ExchangeJobToken"
-	API_DispatchJob_FullMethodName      = "/cdrom.api.v1.API/DispatchJob"
-	API_NotifyJobStatus_FullMethodName  = "/cdrom.api.v1.API/NotifyJobStatus"
-	API_NotifyRunStatus_FullMethodName  = "/cdrom.api.v1.API/NotifyRunStatus"
-	API_UploadArtifact_FullMethodName   = "/cdrom.api.v1.API/UploadArtifact"
-	API_DownloadArtifact_FullMethodName = "/cdrom.api.v1.API/DownloadArtifact"
-	API_GetArtifact_FullMethodName      = "/cdrom.api.v1.API/GetArtifact"
-	API_ListArtifacts_FullMethodName    = "/cdrom.api.v1.API/ListArtifacts"
-	API_DeleteArtifact_FullMethodName   = "/cdrom.api.v1.API/DeleteArtifact"
+	API_RegisterWorker_FullMethodName    = "/cdrom.api.v1.API/RegisterWorker"
+	API_DeregisterWorker_FullMethodName  = "/cdrom.api.v1.API/DeregisterWorker"
+	API_Heartbeat_FullMethodName         = "/cdrom.api.v1.API/Heartbeat"
+	API_WatchJobs_FullMethodName         = "/cdrom.api.v1.API/WatchJobs"
+	API_GetJob_FullMethodName            = "/cdrom.api.v1.API/GetJob"
+	API_StartJobExecution_FullMethodName = "/cdrom.api.v1.API/StartJobExecution"
+	API_ListPendingJobs_FullMethodName   = "/cdrom.api.v1.API/ListPendingJobs"
+	API_ReportJobStatus_FullMethodName   = "/cdrom.api.v1.API/ReportJobStatus"
+	API_CancelJob_FullMethodName         = "/cdrom.api.v1.API/CancelJob"
+	API_StreamJobLogs_FullMethodName     = "/cdrom.api.v1.API/StreamJobLogs"
+	API_ExchangeJobToken_FullMethodName  = "/cdrom.api.v1.API/ExchangeJobToken"
+	API_DispatchJob_FullMethodName       = "/cdrom.api.v1.API/DispatchJob"
+	API_NotifyJobStatus_FullMethodName   = "/cdrom.api.v1.API/NotifyJobStatus"
+	API_NotifyRunStatus_FullMethodName   = "/cdrom.api.v1.API/NotifyRunStatus"
+	API_UploadArtifact_FullMethodName    = "/cdrom.api.v1.API/UploadArtifact"
+	API_DownloadArtifact_FullMethodName  = "/cdrom.api.v1.API/DownloadArtifact"
+	API_GetArtifact_FullMethodName       = "/cdrom.api.v1.API/GetArtifact"
+	API_ListArtifacts_FullMethodName     = "/cdrom.api.v1.API/ListArtifacts"
+	API_DeleteArtifact_FullMethodName    = "/cdrom.api.v1.API/DeleteArtifact"
 )
 
 // APIClient is the client API for API service.
@@ -59,10 +61,27 @@ type APIClient interface {
 	// Execution side (called by workers and agents).
 	//
 	// WatchJobs is a server stream: the worker identifies itself and receives a
-	// WatchMessage for every job dispatched to its group (a JobAssignment) and
-	// for every cancellation of a job it is running (a JobCancellation, F-05).
+	// WatchMessage for every job dispatched to its group (a JobAssignment or a
+	// JobNudge, F-23) and for every cancellation of a job it is running (a
+	// JobCancellation, F-05).
 	WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMessage], error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
+	// StartJobExecution records that the calling worker has started running a
+	// job (fan-out): it creates the worker's JobExecution for the job's current
+	// attempt (via the Database service) and returns the job with its spec,
+	// upstream jobs, and a fresh job token. A job that targets a worker group
+	// runs on every worker in the group, so the start is not exclusive — every
+	// worker in the group starts its own execution. Starting an execution for a
+	// job that is no longer pending (it reached a terminal state, or it is not
+	// targeted at the worker's group) is rejected, so a job that finished
+	// before a slow worker started it is not run.
+	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
+	// ListPendingJobs returns the pending jobs that target the caller's worker
+	// group (F-23). This is the worker's pull path: it polls it on a short
+	// interval to pick up jobs that were published while it was unreachable, so
+	// no job is stranded pending. It wraps the Database service's
+	// ListPendingByGroup.
+	ListPendingJobs(ctx context.Context, in *ListPendingJobsRequest, opts ...grpc.CallOption) (*ListPendingJobsResponse, error)
 	ReportJobStatus(ctx context.Context, in *ReportJobStatusRequest, opts ...grpc.CallOption) (*Job, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
@@ -173,6 +192,26 @@ func (c *aPIClient) GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Job)
 	err := c.cc.Invoke(ctx, API_GetJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartJobExecutionResponse)
+	err := c.cc.Invoke(ctx, API_StartJobExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) ListPendingJobs(ctx context.Context, in *ListPendingJobsRequest, opts ...grpc.CallOption) (*ListPendingJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPendingJobsResponse)
+	err := c.cc.Invoke(ctx, API_ListPendingJobs_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -333,10 +372,27 @@ type APIServer interface {
 	// Execution side (called by workers and agents).
 	//
 	// WatchJobs is a server stream: the worker identifies itself and receives a
-	// WatchMessage for every job dispatched to its group (a JobAssignment) and
-	// for every cancellation of a job it is running (a JobCancellation, F-05).
+	// WatchMessage for every job dispatched to its group (a JobAssignment or a
+	// JobNudge, F-23) and for every cancellation of a job it is running (a
+	// JobCancellation, F-05).
 	WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[WatchMessage]) error
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
+	// StartJobExecution records that the calling worker has started running a
+	// job (fan-out): it creates the worker's JobExecution for the job's current
+	// attempt (via the Database service) and returns the job with its spec,
+	// upstream jobs, and a fresh job token. A job that targets a worker group
+	// runs on every worker in the group, so the start is not exclusive — every
+	// worker in the group starts its own execution. Starting an execution for a
+	// job that is no longer pending (it reached a terminal state, or it is not
+	// targeted at the worker's group) is rejected, so a job that finished
+	// before a slow worker started it is not run.
+	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
+	// ListPendingJobs returns the pending jobs that target the caller's worker
+	// group (F-23). This is the worker's pull path: it polls it on a short
+	// interval to pick up jobs that were published while it was unreachable, so
+	// no job is stranded pending. It wraps the Database service's
+	// ListPendingByGroup.
+	ListPendingJobs(context.Context, *ListPendingJobsRequest) (*ListPendingJobsResponse, error)
 	ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
@@ -408,6 +464,12 @@ func (UnimplementedAPIServer) WatchJobs(*WatchJobsRequest, grpc.ServerStreamingS
 }
 func (UnimplementedAPIServer) GetJob(context.Context, *GetJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetJob not implemented")
+}
+func (UnimplementedAPIServer) StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartJobExecution not implemented")
+}
+func (UnimplementedAPIServer) ListPendingJobs(context.Context, *ListPendingJobsRequest) (*ListPendingJobsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPendingJobs not implemented")
 }
 func (UnimplementedAPIServer) ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportJobStatus not implemented")
@@ -545,6 +607,42 @@ func _API_GetJob_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(APIServer).GetJob(ctx, req.(*GetJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_StartJobExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartJobExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).StartJobExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_StartJobExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).StartJobExecution(ctx, req.(*StartJobExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_ListPendingJobs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPendingJobsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).ListPendingJobs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_ListPendingJobs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).ListPendingJobs(ctx, req.(*ListPendingJobsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -758,6 +856,14 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetJob",
 			Handler:    _API_GetJob_Handler,
+		},
+		{
+			MethodName: "StartJobExecution",
+			Handler:    _API_StartJobExecution_Handler,
+		},
+		{
+			MethodName: "ListPendingJobs",
+			Handler:    _API_ListPendingJobs_Handler,
 		},
 		{
 			MethodName: "ReportJobStatus",

@@ -40,6 +40,19 @@ const (
 	Database_ReapJob_FullMethodName            = "/cdrom.db.v1.Database/ReapJob"
 	Database_CancelJob_FullMethodName          = "/cdrom.db.v1.Database/CancelJob"
 	Database_SkipJob_FullMethodName            = "/cdrom.db.v1.Database/SkipJob"
+	Database_ClaimJob_FullMethodName           = "/cdrom.db.v1.Database/ClaimJob"
+	Database_ListPendingByGroup_FullMethodName = "/cdrom.db.v1.Database/ListPendingByGroup"
+	Database_StartJobExecution_FullMethodName  = "/cdrom.db.v1.Database/StartJobExecution"
+	Database_ListJobExecutions_FullMethodName  = "/cdrom.db.v1.Database/ListJobExecutions"
+	Database_PublishAssignment_FullMethodName  = "/cdrom.db.v1.Database/PublishAssignment"
+	Database_PublishCancel_FullMethodName      = "/cdrom.db.v1.Database/PublishCancel"
+	Database_PublishJobStatus_FullMethodName   = "/cdrom.db.v1.Database/PublishJobStatus"
+	Database_PublishRunStatus_FullMethodName   = "/cdrom.db.v1.Database/PublishRunStatus"
+	Database_PublishWorkerEvent_FullMethodName = "/cdrom.db.v1.Database/PublishWorkerEvent"
+	Database_PublishLogUpdated_FullMethodName  = "/cdrom.db.v1.Database/PublishLogUpdated"
+	Database_TailEvents_FullMethodName         = "/cdrom.db.v1.Database/TailEvents"
+	Database_AcquireLease_FullMethodName       = "/cdrom.db.v1.Database/AcquireLease"
+	Database_ReleaseLease_FullMethodName       = "/cdrom.db.v1.Database/ReleaseLease"
 	Database_RegisterWorker_FullMethodName     = "/cdrom.db.v1.Database/RegisterWorker"
 	Database_GetWorker_FullMethodName          = "/cdrom.db.v1.Database/GetWorker"
 	Database_ListWorkers_FullMethodName        = "/cdrom.db.v1.Database/ListWorkers"
@@ -132,6 +145,81 @@ type DatabaseClient interface {
 	// finished) is left untouched, so a job can never be skipped out from
 	// under a target that is already running it.
 	SkipJob(ctx context.Context, in *SkipJobRequest, opts ...grpc.CallOption) (*SkipJobResponse, error)
+	// ClaimJob atomically claims a pending job for execution (F-23): it sets
+	// the status to RUNNING (and the started timestamp) only if the job is
+	// still PENDING. It returns whether the job was claimed. This is how a
+	// worker (or the API on a worker's behalf) takes ownership of a job it
+	// picked up via the pull path or a push nudge: the conditional update is
+	// atomic, so a job delivered by both push and pull is claimed exactly once
+	// and the duplicate is a no-op.
+	ClaimJob(ctx context.Context, in *ClaimJobRequest, opts ...grpc.CallOption) (*ClaimJobResponse, error)
+	// ListPendingByGroup returns the pending jobs that target the given worker
+	// group (F-23). This is the pull path: a worker (or the API on its behalf)
+	// polls it to pick up jobs that were published while it was unreachable, so
+	// no job is stranded pending. Filtering in the database keeps the poll from
+	// pulling every pending job over the wire as the system grows.
+	ListPendingByGroup(ctx context.Context, in *ListPendingByGroupRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
+	// StartJobExecution records that the calling worker has started running a
+	// job (fan-out): it creates the worker's JobExecution for the job's current
+	// attempt and marks the job running. A job that targets a worker group runs
+	// on every worker in the group; each worker's run is a separate execution,
+	// so the start is not exclusive (unlike the old single-claim work queue).
+	// Starting an execution for a job that is no longer pending (it reached a
+	// terminal state, or it is not targeted at the worker's group) is rejected.
+	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error)
+	// ListJobExecutions returns a job's executions (one per worker that started
+	// it, for its current attempt). The scheduler's job-status loop uses it to
+	// derive the job's overall status from the per-worker outcomes (fan-out).
+	ListJobExecutions(ctx context.Context, in *ListJobExecutionsRequest, opts ...grpc.CallOption) (*ListJobExecutionsResponse, error)
+	// Event log (F-23, high availability). The event log is the shared,
+	// append-only coordination bus: the scheduler's background loops and the
+	// API publish state changes to it, and every API pod tails it to fan events
+	// out to its local workers and UI clients. Publishing a state change and
+	// appending its event is a single transaction, so an event exists iff the
+	// state changed.
+	// PublishAssignment appends an "assignment" event for a job (a nudge: the
+	// payload carries only the job id and target group, not the spec or token).
+	// The job must already be persisted (pending).
+	PublishAssignment(ctx context.Context, in *PublishAssignmentRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// PublishCancel appends a "cancel" event for a job: a signal to the
+	// execution target running the job to stop the work (F-05). Every API pod
+	// tails the log and delivers the cancellation to its local workers, so a
+	// cancellation signalled on one pod reaches a worker running the job on
+	// another pod.
+	PublishCancel(ctx context.Context, in *PublishCancelRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// PublishJobStatus appends a "job_status" event for a job's status change.
+	// The status change itself is persisted by the caller (e.g. via UpdateJob
+	// or a conditional RPC); this only appends the event so the UI sees it.
+	PublishJobStatus(ctx context.Context, in *PublishJobStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// PublishRunStatus appends a "run_status" event for a run's status change.
+	PublishRunStatus(ctx context.Context, in *PublishRunStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// PublishWorkerEvent appends a "worker" event for a worker lifecycle change
+	// (registered / deregistered / watching).
+	PublishWorkerEvent(ctx context.Context, in *PublishWorkerEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
+	// job's log has grown to a given size. The log bytes themselves live in the
+	// artifacts store, never in the event log; a consumer range-reads the delta
+	// from the store.
+	PublishLogUpdated(ctx context.Context, in *PublishLogUpdatedRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// TailEvents returns the events with id greater than cursor, in id order,
+	// up to limit. This is how an API pod tails the log: it keeps a per-pod
+	// cursor, fetches the new events, fans them out, and advances the cursor.
+	// When cursor is 0 the call returns the oldest retained events.
+	TailEvents(ctx context.Context, in *TailEventsRequest, opts ...grpc.CallOption) (*TailEventsResponse, error)
+	// Leader election (F-23, high availability). The scheduler runs background
+	// loops (watchdog, retry, dependency resolver, run-status) that must run on
+	// exactly one replica at a time, or they would publish duplicate events. A
+	// lease is the coordination primitive: a replica acquires a named lease,
+	// renews it periodically, and runs the loops only while it holds it. The
+	// lease expires after its TTL if the holder stops renewing (a crash or
+	// network partition), so another replica can take over.
+	// AcquireLease acquires the named lease for the caller, or re-acquires it
+	// if the caller already holds it (a renewal). It succeeds if the lease is
+	// free, expired, or already held by the caller; it fails if another
+	// replica holds an unexpired lease.
+	AcquireLease(ctx context.Context, in *AcquireLeaseRequest, opts ...grpc.CallOption) (*AcquireLeaseResponse, error)
+	// ReleaseLease releases the named lease if the caller holds it.
+	ReleaseLease(ctx context.Context, in *ReleaseLeaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Workers
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
@@ -359,6 +447,136 @@ func (c *databaseClient) SkipJob(ctx context.Context, in *SkipJobRequest, opts .
 	return out, nil
 }
 
+func (c *databaseClient) ClaimJob(ctx context.Context, in *ClaimJobRequest, opts ...grpc.CallOption) (*ClaimJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimJobResponse)
+	err := c.cc.Invoke(ctx, Database_ClaimJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListPendingByGroup(ctx context.Context, in *ListPendingByGroupRequest, opts ...grpc.CallOption) (*ListJobsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListJobsResponse)
+	err := c.cc.Invoke(ctx, Database_ListPendingByGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JobExecution)
+	err := c.cc.Invoke(ctx, Database_StartJobExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListJobExecutions(ctx context.Context, in *ListJobExecutionsRequest, opts ...grpc.CallOption) (*ListJobExecutionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListJobExecutionsResponse)
+	err := c.cc.Invoke(ctx, Database_ListJobExecutions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishAssignment(ctx context.Context, in *PublishAssignmentRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishAssignment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishCancel(ctx context.Context, in *PublishCancelRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishCancel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishJobStatus(ctx context.Context, in *PublishJobStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishJobStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishRunStatus(ctx context.Context, in *PublishRunStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishRunStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishWorkerEvent(ctx context.Context, in *PublishWorkerEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishWorkerEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishLogUpdated(ctx context.Context, in *PublishLogUpdatedRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishLogUpdated_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) TailEvents(ctx context.Context, in *TailEventsRequest, opts ...grpc.CallOption) (*TailEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TailEventsResponse)
+	err := c.cc.Invoke(ctx, Database_TailEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) AcquireLease(ctx context.Context, in *AcquireLeaseRequest, opts ...grpc.CallOption) (*AcquireLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcquireLeaseResponse)
+	err := c.cc.Invoke(ctx, Database_AcquireLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReleaseLease(ctx context.Context, in *ReleaseLeaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_ReleaseLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Worker)
@@ -539,6 +757,81 @@ type DatabaseServer interface {
 	// finished) is left untouched, so a job can never be skipped out from
 	// under a target that is already running it.
 	SkipJob(context.Context, *SkipJobRequest) (*SkipJobResponse, error)
+	// ClaimJob atomically claims a pending job for execution (F-23): it sets
+	// the status to RUNNING (and the started timestamp) only if the job is
+	// still PENDING. It returns whether the job was claimed. This is how a
+	// worker (or the API on a worker's behalf) takes ownership of a job it
+	// picked up via the pull path or a push nudge: the conditional update is
+	// atomic, so a job delivered by both push and pull is claimed exactly once
+	// and the duplicate is a no-op.
+	ClaimJob(context.Context, *ClaimJobRequest) (*ClaimJobResponse, error)
+	// ListPendingByGroup returns the pending jobs that target the given worker
+	// group (F-23). This is the pull path: a worker (or the API on its behalf)
+	// polls it to pick up jobs that were published while it was unreachable, so
+	// no job is stranded pending. Filtering in the database keeps the poll from
+	// pulling every pending job over the wire as the system grows.
+	ListPendingByGroup(context.Context, *ListPendingByGroupRequest) (*ListJobsResponse, error)
+	// StartJobExecution records that the calling worker has started running a
+	// job (fan-out): it creates the worker's JobExecution for the job's current
+	// attempt and marks the job running. A job that targets a worker group runs
+	// on every worker in the group; each worker's run is a separate execution,
+	// so the start is not exclusive (unlike the old single-claim work queue).
+	// Starting an execution for a job that is no longer pending (it reached a
+	// terminal state, or it is not targeted at the worker's group) is rejected.
+	StartJobExecution(context.Context, *StartJobExecutionRequest) (*JobExecution, error)
+	// ListJobExecutions returns a job's executions (one per worker that started
+	// it, for its current attempt). The scheduler's job-status loop uses it to
+	// derive the job's overall status from the per-worker outcomes (fan-out).
+	ListJobExecutions(context.Context, *ListJobExecutionsRequest) (*ListJobExecutionsResponse, error)
+	// Event log (F-23, high availability). The event log is the shared,
+	// append-only coordination bus: the scheduler's background loops and the
+	// API publish state changes to it, and every API pod tails it to fan events
+	// out to its local workers and UI clients. Publishing a state change and
+	// appending its event is a single transaction, so an event exists iff the
+	// state changed.
+	// PublishAssignment appends an "assignment" event for a job (a nudge: the
+	// payload carries only the job id and target group, not the spec or token).
+	// The job must already be persisted (pending).
+	PublishAssignment(context.Context, *PublishAssignmentRequest) (*PublishEventResponse, error)
+	// PublishCancel appends a "cancel" event for a job: a signal to the
+	// execution target running the job to stop the work (F-05). Every API pod
+	// tails the log and delivers the cancellation to its local workers, so a
+	// cancellation signalled on one pod reaches a worker running the job on
+	// another pod.
+	PublishCancel(context.Context, *PublishCancelRequest) (*PublishEventResponse, error)
+	// PublishJobStatus appends a "job_status" event for a job's status change.
+	// The status change itself is persisted by the caller (e.g. via UpdateJob
+	// or a conditional RPC); this only appends the event so the UI sees it.
+	PublishJobStatus(context.Context, *PublishJobStatusRequest) (*PublishEventResponse, error)
+	// PublishRunStatus appends a "run_status" event for a run's status change.
+	PublishRunStatus(context.Context, *PublishRunStatusRequest) (*PublishEventResponse, error)
+	// PublishWorkerEvent appends a "worker" event for a worker lifecycle change
+	// (registered / deregistered / watching).
+	PublishWorkerEvent(context.Context, *PublishWorkerEventRequest) (*PublishEventResponse, error)
+	// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
+	// job's log has grown to a given size. The log bytes themselves live in the
+	// artifacts store, never in the event log; a consumer range-reads the delta
+	// from the store.
+	PublishLogUpdated(context.Context, *PublishLogUpdatedRequest) (*PublishEventResponse, error)
+	// TailEvents returns the events with id greater than cursor, in id order,
+	// up to limit. This is how an API pod tails the log: it keeps a per-pod
+	// cursor, fetches the new events, fans them out, and advances the cursor.
+	// When cursor is 0 the call returns the oldest retained events.
+	TailEvents(context.Context, *TailEventsRequest) (*TailEventsResponse, error)
+	// Leader election (F-23, high availability). The scheduler runs background
+	// loops (watchdog, retry, dependency resolver, run-status) that must run on
+	// exactly one replica at a time, or they would publish duplicate events. A
+	// lease is the coordination primitive: a replica acquires a named lease,
+	// renews it periodically, and runs the loops only while it holds it. The
+	// lease expires after its TTL if the holder stops renewing (a crash or
+	// network partition), so another replica can take over.
+	// AcquireLease acquires the named lease for the caller, or re-acquires it
+	// if the caller already holds it (a renewal). It succeeds if the lease is
+	// free, expired, or already held by the caller; it fails if another
+	// replica holds an unexpired lease.
+	AcquireLease(context.Context, *AcquireLeaseRequest) (*AcquireLeaseResponse, error)
+	// ReleaseLease releases the named lease if the caller holds it.
+	ReleaseLease(context.Context, *ReleaseLeaseRequest) (*emptypb.Empty, error)
 	// Workers
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
 	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
@@ -625,6 +918,45 @@ func (UnimplementedDatabaseServer) CancelJob(context.Context, *CancelJobRequest)
 }
 func (UnimplementedDatabaseServer) SkipJob(context.Context, *SkipJobRequest) (*SkipJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SkipJob not implemented")
+}
+func (UnimplementedDatabaseServer) ClaimJob(context.Context, *ClaimJobRequest) (*ClaimJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimJob not implemented")
+}
+func (UnimplementedDatabaseServer) ListPendingByGroup(context.Context, *ListPendingByGroupRequest) (*ListJobsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPendingByGroup not implemented")
+}
+func (UnimplementedDatabaseServer) StartJobExecution(context.Context, *StartJobExecutionRequest) (*JobExecution, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartJobExecution not implemented")
+}
+func (UnimplementedDatabaseServer) ListJobExecutions(context.Context, *ListJobExecutionsRequest) (*ListJobExecutionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListJobExecutions not implemented")
+}
+func (UnimplementedDatabaseServer) PublishAssignment(context.Context, *PublishAssignmentRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishAssignment not implemented")
+}
+func (UnimplementedDatabaseServer) PublishCancel(context.Context, *PublishCancelRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishCancel not implemented")
+}
+func (UnimplementedDatabaseServer) PublishJobStatus(context.Context, *PublishJobStatusRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishJobStatus not implemented")
+}
+func (UnimplementedDatabaseServer) PublishRunStatus(context.Context, *PublishRunStatusRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishRunStatus not implemented")
+}
+func (UnimplementedDatabaseServer) PublishWorkerEvent(context.Context, *PublishWorkerEventRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishWorkerEvent not implemented")
+}
+func (UnimplementedDatabaseServer) PublishLogUpdated(context.Context, *PublishLogUpdatedRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishLogUpdated not implemented")
+}
+func (UnimplementedDatabaseServer) TailEvents(context.Context, *TailEventsRequest) (*TailEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TailEvents not implemented")
+}
+func (UnimplementedDatabaseServer) AcquireLease(context.Context, *AcquireLeaseRequest) (*AcquireLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcquireLease not implemented")
+}
+func (UnimplementedDatabaseServer) ReleaseLease(context.Context, *ReleaseLeaseRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseLease not implemented")
 }
 func (UnimplementedDatabaseServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
@@ -1037,6 +1369,240 @@ func _Database_SkipJob_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ClaimJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ClaimJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ClaimJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ClaimJob(ctx, req.(*ClaimJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListPendingByGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPendingByGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListPendingByGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListPendingByGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListPendingByGroup(ctx, req.(*ListPendingByGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_StartJobExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartJobExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).StartJobExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_StartJobExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).StartJobExecution(ctx, req.(*StartJobExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListJobExecutions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListJobExecutionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListJobExecutions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListJobExecutions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListJobExecutions(ctx, req.(*ListJobExecutionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishAssignment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishAssignmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishAssignment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishAssignment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishAssignment(ctx, req.(*PublishAssignmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishCancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishCancelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishCancel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishCancel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishCancel(ctx, req.(*PublishCancelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishJobStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishJobStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishJobStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishJobStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishJobStatus(ctx, req.(*PublishJobStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishRunStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishRunStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishRunStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishRunStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishRunStatus(ctx, req.(*PublishRunStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishWorkerEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishWorkerEventRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishWorkerEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishWorkerEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishWorkerEvent(ctx, req.(*PublishWorkerEventRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishLogUpdated_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishLogUpdatedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishLogUpdated(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishLogUpdated_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishLogUpdated(ctx, req.(*PublishLogUpdatedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_TailEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TailEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).TailEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_TailEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).TailEvents(ctx, req.(*TailEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_AcquireLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcquireLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AcquireLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AcquireLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AcquireLease(ctx, req.(*AcquireLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReleaseLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReleaseLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReleaseLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReleaseLease(ctx, req.(*ReleaseLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkerRequest)
 	if err := dec(in); err != nil {
@@ -1303,6 +1869,58 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SkipJob",
 			Handler:    _Database_SkipJob_Handler,
+		},
+		{
+			MethodName: "ClaimJob",
+			Handler:    _Database_ClaimJob_Handler,
+		},
+		{
+			MethodName: "ListPendingByGroup",
+			Handler:    _Database_ListPendingByGroup_Handler,
+		},
+		{
+			MethodName: "StartJobExecution",
+			Handler:    _Database_StartJobExecution_Handler,
+		},
+		{
+			MethodName: "ListJobExecutions",
+			Handler:    _Database_ListJobExecutions_Handler,
+		},
+		{
+			MethodName: "PublishAssignment",
+			Handler:    _Database_PublishAssignment_Handler,
+		},
+		{
+			MethodName: "PublishCancel",
+			Handler:    _Database_PublishCancel_Handler,
+		},
+		{
+			MethodName: "PublishJobStatus",
+			Handler:    _Database_PublishJobStatus_Handler,
+		},
+		{
+			MethodName: "PublishRunStatus",
+			Handler:    _Database_PublishRunStatus_Handler,
+		},
+		{
+			MethodName: "PublishWorkerEvent",
+			Handler:    _Database_PublishWorkerEvent_Handler,
+		},
+		{
+			MethodName: "PublishLogUpdated",
+			Handler:    _Database_PublishLogUpdated_Handler,
+		},
+		{
+			MethodName: "TailEvents",
+			Handler:    _Database_TailEvents_Handler,
+		},
+		{
+			MethodName: "AcquireLease",
+			Handler:    _Database_AcquireLease_Handler,
+		},
+		{
+			MethodName: "ReleaseLease",
+			Handler:    _Database_ReleaseLease_Handler,
 		},
 		{
 			MethodName: "RegisterWorker",
