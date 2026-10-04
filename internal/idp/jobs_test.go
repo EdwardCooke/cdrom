@@ -150,6 +150,95 @@ func TestJobTokenAudienceOverride(t *testing.T) {
 	}
 }
 
+// TestJobTokenTriggerAndUpstreamClaims mints a job token carrying the trigger
+// that started the run and the upstream OIDC claims a webhook caller
+// presented, and confirms the token is stamped with trigger_name,
+// trigger_type, and the upstream claims (prefixed with upstream_) (F-09).
+func TestJobTokenTriggerAndUpstreamClaims(t *testing.T) {
+	cfg := jobTestConfig()
+	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
+	if err != nil {
+		t.Fatalf("NewKeyManager: %v", err)
+	}
+	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	// The API passes the upstream claims JSON-encoded as a JSON object. A
+	// claim that is itself an object (job_config) keeps its structure.
+	upstream, _ := json.Marshal(map[string]any{
+		"org":        "acme",
+		"user":       "alice",
+		"job_config": map[string]any{"url": "https://gitlab.example.com/policy.yml", "sha": "abc"},
+	})
+	form := url.Values{
+		"grant_type":      {"job_token"},
+		"job_id":          {"42"},
+		"trigger_name":    {"github-push"},
+		"trigger_type":    {"webhook"},
+		"upstream_claims": {string(upstream)},
+	}
+	resp, err := http.DefaultClient.PostForm(ts.URL+"/token", form)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (body %s), want 200", resp.StatusCode, body)
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	provider, err := oidc.NewProvider(ctx, ts.URL)
+	if err != nil {
+		t.Fatalf("oidc discovery: %v", err)
+	}
+	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
+	idt, err := verifier.Verify(ctx, out.AccessToken)
+	if err != nil {
+		t.Fatalf("verify job token: %v", err)
+	}
+	var claims struct {
+		TriggerName    string `json:"trigger_name"`
+		TriggerType    string `json:"trigger_type"`
+		UpstreamOrg    string `json:"upstream_org"`
+		UpstreamUser   string `json:"upstream_user"`
+		UpstreamJobCfg struct {
+			URL string `json:"url"`
+			SHA string `json:"sha"`
+		} `json:"upstream_job_config"`
+	}
+	if err := idt.Claims(&claims); err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	if claims.TriggerName != "github-push" {
+		t.Errorf("trigger_name = %q, want github-push", claims.TriggerName)
+	}
+	if claims.TriggerType != "webhook" {
+		t.Errorf("trigger_type = %q, want webhook", claims.TriggerType)
+	}
+	if claims.UpstreamOrg != "acme" {
+		t.Errorf("upstream_org = %q, want acme", claims.UpstreamOrg)
+	}
+	if claims.UpstreamUser != "alice" {
+		t.Errorf("upstream_user = %q, want alice", claims.UpstreamUser)
+	}
+	// A complex upstream claim (an object) is stamped with its structure
+	// intact, not flattened to a string.
+	if claims.UpstreamJobCfg.SHA != "abc" {
+		t.Errorf("upstream_job_config.sha = %q, want abc", claims.UpstreamJobCfg.SHA)
+	}
+	if claims.UpstreamJobCfg.URL != "https://gitlab.example.com/policy.yml" {
+		t.Errorf("upstream_job_config.url = %q, want the policy url", claims.UpstreamJobCfg.URL)
+	}
+}
+
 // TestJobTokenRequiresClientCert confirms that when the IdP serves TLS, the
 // job_token grant rejects a client that did not present a client certificate
 // and accepts one that did (the API's mTLS identity).

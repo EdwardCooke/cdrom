@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package cdrom.scheduler.v1;
 
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 import "cdrom/db/v1/db.proto";
@@ -39,6 +41,12 @@ service Scheduler {
   // left pending for the dependency resolver). The run's overall status is
   // derived from its job instances by the scheduler's run-status loop.
   rpc CreateRun(CreateRunRequest) returns (Run);
+  // TriggerRun starts a run of a pipeline from a trigger (F-09): it atomically
+  // claims the trigger's fire window (Database.TriggerRun, so a trigger can
+  // never fire twice for the same window) and, when this call created the
+  // run, drives its job instances exactly like CreateRun. The API's webhook
+  // endpoint and the scheduler's cron and event loops call it.
+  rpc TriggerRun(TriggerRunRequest) returns (Run);
 }
 
 message Job {
@@ -129,7 +137,8 @@ message Run {
   int64 pipeline_id = 2;
   // status is the run's overall state, derived from its job instances.
   cdrom.db.v1.RunStatus status = 3;
-  // trigger is how the run was started (e.g. "manual").
+  // trigger is how the run was started (e.g. "manual", "cron", "webhook", or
+  // "event"); it is recorded so a run's origin is visible (F-09).
   string trigger = 4;
   // params are the run's parameters (F-10); empty until parameters land.
   map<string, string> params = 5;
@@ -141,6 +150,12 @@ message Run {
   google.protobuf.Timestamp finished_at = 7;
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
+  // trigger_name is the name of the trigger that started the run (F-09);
+  // empty for a manual run.
+  string trigger_name = 10;
+  // source_run_id is the id of the run that started this run (an event
+  // trigger, F-09); 0 when the run was not started by an event trigger.
+  int64 source_run_id = 11;
 }
 
 message CreateRunRequest {
@@ -150,4 +165,34 @@ message CreateRunRequest {
   string trigger = 2;
   // params are the run's parameters (F-10); empty until parameters land.
   map<string, string> params = 3;
+}
+
+// TriggerRunRequest is the request for the scheduler's TriggerRun RPC (F-09):
+// it names the pipeline and the trigger (by name) that fired, the trigger's
+// kind (so the fire window can be deduplicated), and the run parameters to
+// record on the run.
+message TriggerRunRequest {
+  // pipeline_id is the pipeline to execute.
+  int64 pipeline_id = 1;
+  // trigger_name is the name of the trigger that fired.
+  string trigger_name = 2;
+  // trigger_type is the kind of the trigger that fired (cron, webhook, or
+  // event); it selects the fire window used to deduplicate the run.
+  cdrom.db.v1.TriggerType trigger_type = 3;
+  // params are the run's parameters (a webhook's payload, or the trigger's
+  // static params).
+  map<string, string> params = 4;
+  // dedup_window is how long a run claimed by this trigger suppresses a
+  // duplicate run of the same pipeline started by the same trigger (a cron
+  // trigger passes its cron period, so a restart or a racing replica cannot
+  // fire the same scheduled time twice). Zero means no time-based
+  // deduplication (a webhook: every valid POST starts a run).
+  google.protobuf.Duration dedup_window = 5;
+  // upstream_claims are the claims of the OIDC token a webhook caller
+  // presented to start the run (F-09); the scheduler passes them to the
+  // database, which records them on the run and denormalizes them onto its
+  // job instances. They are the token's full claims as a JSON object (a claim
+  // that is an object or a list keeps its structure). Empty for a run not
+  // started by a webhook.
+  google.protobuf.Struct upstream_claims = 6;
 }

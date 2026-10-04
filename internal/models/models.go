@@ -22,7 +22,108 @@ type Pipeline struct {
 	// value (defaulting to FailureModeAll when the pipeline sets none).
 	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
 	Jobs        []Job       `json:"jobs,omitempty"`
+	// Triggers are the ways a run of the pipeline can be started other than a
+	// manual click (F-09): a cron schedule, a webhook, or an event (another
+	// pipeline's run reaching a state). They are stored as a JSON document in
+	// a text column (portable across SQLite and PostgreSQL).
+	Triggers []Trigger `gorm:"type:text;serializer:json" json:"triggers,omitempty"`
 }
+
+// Trigger is a way to start a pipeline run other than a manual click (F-09).
+// The Type selects the trigger kind and the remaining fields carry the
+// kind-specific settings:
+//
+//   - TriggerTypeCron: Cron is a standard five-field cron expression (minute,
+//     hour, day-of-month, month, day-of-week). The scheduler's cron loop
+//     starts a run at each scheduled time.
+//   - TriggerTypeWebhook: an external POST to the pipeline's webhook endpoint
+//     (authenticated with the shared Secret and/or the caller's OIDC token
+//     claims) starts a run, passing the request's JSON body as run
+//     parameters.
+//   - TriggerTypeEvent: when the run of another pipeline (EventPipeline)
+//     reaches EventStatus, a run of this pipeline is started (chaining).
+//
+// Params are static run parameters merged into the run's parameters when the
+// trigger fires (a webhook's payload overrides them on a key collision).
+type Trigger struct {
+	// Name is the trigger's name; it must be unique within the pipeline.
+	Name string `json:"name"`
+	// Type is the trigger kind (cron, webhook, or event).
+	Type TriggerType `json:"type"`
+	// Cron is the cron expression for a cron trigger (five fields: minute,
+	// hour, day-of-month, month, day-of-week).
+	Cron string `json:"cron,omitempty"`
+	// Secret is the shared secret for a webhook trigger; a webhook POST must
+	// present it (in the X-Cdrom-Webhook-Secret header) to start a run.
+	Secret string `json:"secret,omitempty"`
+	// EventPipeline is the name of the pipeline whose run reaching
+	// EventStatus starts a run of this pipeline (an event trigger).
+	EventPipeline string `json:"event_pipeline,omitempty"`
+	// EventStatus is the run status of EventPipeline that fires the trigger
+	// (an event trigger); one of the RunStatus values.
+	EventStatus RunStatus `json:"event_status,omitempty"`
+	// Params are static run parameters merged into the run's parameters when
+	// the trigger fires.
+	Params map[string]string `json:"params,omitempty"`
+	// OIDCIssuer is the OIDC issuer (a full URL) of the token a webhook
+	// caller must present to start a run (a webhook trigger). When set, the
+	// API verifies the caller's Bearer token against this issuer's JWKS and
+	// matches its claims against OIDCClaims. When empty (and no secret is
+	// set) the trigger is open.
+	OIDCIssuer string `json:"oidc_issuer,omitempty"`
+	// OIDCClaims are the claims a webhook caller's OIDC token must carry for
+	// the trigger to match (a webhook trigger). Each key is a claim name and
+	// each value is the expected value; a value of "*" is a wildcard that
+	// matches any value for that claim (including the claim being absent).
+	// Nested claims are addressed with a dot (e.g. "org.name"). When empty
+	// the trigger matches any token from OIDCIssuer.
+	OIDCClaims map[string]string `json:"oidc_claims,omitempty"`
+}
+
+// TriggerType is the kind of a pipeline trigger (F-09).
+type TriggerType string
+
+const (
+	// TriggerTypeCron starts a run on a cron schedule.
+	TriggerTypeCron TriggerType = "cron"
+	// TriggerTypeWebhook starts a run from an external POST.
+	TriggerTypeWebhook TriggerType = "webhook"
+	// TriggerTypeEvent starts a run when another pipeline's run reaches a
+	// state (chaining).
+	TriggerTypeEvent TriggerType = "event"
+)
+
+// TriggerSource is how a run was started (recorded on the run's Trigger
+// field, F-09).
+const (
+	// TriggerSourceManual is a run started by a human (the default).
+	TriggerSourceManual = "manual"
+	// TriggerSourceCron is a run started by a cron trigger.
+	TriggerSourceCron = "cron"
+	// TriggerSourceWebhook is a run started by a webhook POST.
+	TriggerSourceWebhook = "webhook"
+	// TriggerSourceEvent is a run started by an event trigger (another
+	// pipeline's run reaching a state).
+	TriggerSourceEvent = "event"
+)
+
+// Run parameter keys (F-09) recorded on a trigger-fired run so the trigger's
+// origin is recoverable from the run and so the database can deduplicate a
+// trigger that would otherwise fire twice for the same window. They are stored
+// in the run's Params map (a JSON document), not as dedicated columns, so they
+// travel with the run and are visible to the UI.
+const (
+	// ParamKeyTrigger is the name of the trigger that started the run (F-09).
+	ParamKeyTrigger = "cdrom.trigger"
+	// ParamKeySourceRun is the id of the run that started this run (an event
+	// trigger, F-09). It is what the database deduplicates an event trigger
+	// against, so the same source run can never start the same downstream run
+	// twice.
+	ParamKeySourceRun = "cdrom.source_run"
+	// ParamKeySourcePipeline is the name of the pipeline whose run started
+	// this run (an event trigger, F-09); informational.
+	ParamKeySourcePipeline = "cdrom.source_pipeline"
+)
 
 // PipelineRun is one execution of a pipeline (F-07): a first-class execution
 // entity that owns a set of job instances. A run separates the pipeline
@@ -44,11 +145,31 @@ type PipelineRun struct {
 	Pipeline *Pipeline `json:"pipeline,omitempty"`
 	// Status is the run's overall state, derived from its job instances.
 	Status RunStatus `gorm:"default:pending;index" json:"status"`
-	// Trigger is how the run was started (e.g. "manual"); it is recorded so a
-	// run's origin is visible (F-09 will add cron / webhook / event).
+	// Trigger is how the run was started (e.g. "manual", "cron", "webhook",
+	// or "event"); it is recorded so a run's origin is visible (F-09).
 	Trigger string `json:"trigger"`
+	// TriggerName is the name of the trigger that started the run (F-09);
+	// empty for a manual run. It is stored separately from Trigger (the
+	// source kind) so the database can find the runs a given trigger started
+	// (to deduplicate a trigger that would otherwise fire twice for the same
+	// window).
+	TriggerName string `gorm:"index" json:"trigger_name,omitempty"`
+	// SourceRunID is the id of the run that started this run (an event
+	// trigger, F-09); nil for a run not started by an event trigger. It is
+	// what the database deduplicates an event trigger against, so the same
+	// source run can never start the same downstream run twice.
+	SourceRunID *uint `gorm:"index" json:"source_run_id,omitempty"`
 	// Params are the run's parameters (F-10); empty until parameters land.
 	Params map[string]string `gorm:"type:text;serializer:json" json:"params,omitempty"`
+	// UpstreamClaims are the claims of the OIDC token a webhook caller
+	// presented to start this run (F-09); empty for a run not started by a
+	// webhook. They are the token's full claims as a JSON object, so a claim
+	// that is itself an object or a list (e.g. GitLab's "user_identities" or
+	// "job_config") keeps its structure rather than being flattened to a
+	// string. They are denormalized onto the run's job instances so the API
+	// can stamp them (prefixed with upstream_) onto the job tokens it hands to
+	// execution targets.
+	UpstreamClaims map[string]any `gorm:"type:text;serializer:json" json:"upstream_claims,omitempty"`
 	// StartedAt is when the run started (its first job began); nil until then.
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// FinishedAt is when the run reached a terminal status; nil while the run
@@ -359,6 +480,24 @@ type Job struct {
 	// job so the execution target can tell from the job alone whether to
 	// synchronize its workers at step boundaries.
 	StepBarrier bool `json:"step_barrier"`
+	// TriggerName is the name of the trigger that started the run this job is
+	// an instance of (F-09); empty for a job not started by a named trigger.
+	// It is denormalized from the run onto the job instance so the API can
+	// stamp it onto the job token it hands to the execution target.
+	TriggerName string `json:"trigger_name,omitempty"`
+	// TriggerType is how the run this job is an instance of was started
+	// (F-09): "manual", "cron", "webhook", or "event". It is denormalized
+	// from the run onto the job instance so the API can stamp it onto the job
+	// token it hands to the execution target.
+	TriggerType string `json:"trigger_type,omitempty"`
+	// UpstreamClaims are the claims of the OIDC token a webhook caller
+	// presented to start the run this job is an instance of (F-09); empty for a
+	// job not started by a webhook. They are the token's full claims as a JSON
+	// object (a claim that is an object or a list keeps its structure) and are
+	// denormalized from the run onto the job instance so the API can stamp them
+	// (prefixed with upstream_) onto the job token it hands to the execution
+	// target.
+	UpstreamClaims map[string]any `gorm:"type:text;serializer:json" json:"upstream_claims,omitempty"`
 }
 
 // StepCompletion records that one worker completed one step of a job's

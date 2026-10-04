@@ -104,22 +104,30 @@ func (a *JobTokenAuth) audienceOK(aud []string) bool {
 
 // Mint requests a job token for job from the IdP. The API authenticates to
 // the IdP with its mTLS client certificate (when the IdP serves TLS). The
-// token carries the IdP's default job-token audiences.
-func (a *JobTokenAuth) Mint(ctx context.Context, jobID, pipelineID int64, targetGroup string) (string, error) {
-	return a.mint(ctx, jobID, pipelineID, targetGroup, "")
+// token carries the IdP's default job-token audiences, the trigger that
+// started the run (triggerName/triggerType), and the upstream OIDC claims a
+// webhook caller presented (prefixed with upstream_). The upstream claims are
+// the token's full claims as a JSON object, so a claim that is itself an
+// object or a list (e.g. GitLab's "user_identities" or "job_config") keeps
+// its structure on the minted token.
+func (a *JobTokenAuth) Mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType string, upstreamClaims map[string]any) (string, error) {
+	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, "")
 }
 
 // Exchange requests a new job token for job from the IdP with a specific
 // audience (e.g. an outside resource the job needs to call). The API
-// authenticates to the IdP with its mTLS client certificate.
-func (a *JobTokenAuth) Exchange(ctx context.Context, jobID, pipelineID int64, targetGroup, audience string) (string, error) {
-	return a.mint(ctx, jobID, pipelineID, targetGroup, audience)
+// authenticates to the IdP with its mTLS client certificate. The token carries
+// the same trigger and upstream claims as the job's original token.
+func (a *JobTokenAuth) Exchange(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType, audience string, upstreamClaims map[string]any) (string, error) {
+	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, audience)
 }
 
 // mint requests a job token from the IdP's job_token grant. When audience is
 // non-empty the token is stamped for that audience; otherwise the IdP uses
-// its default job-token audiences.
-func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, targetGroup, audience string) (string, error) {
+// its default job-token audiences. The trigger that started the run and the
+// upstream OIDC claims a webhook caller presented (JSON-encoded, preserving
+// each claim's structure) are passed so the IdP can stamp them onto the token.
+func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType string, upstreamClaims map[string]any, audience string) (string, error) {
 	form := url.Values{
 		"grant_type": {"job_token"},
 		"job_id":     {strconv.FormatInt(jobID, 10)},
@@ -129,6 +137,17 @@ func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, target
 	}
 	if targetGroup != "" {
 		form.Set("target_group", targetGroup)
+	}
+	if triggerName != "" {
+		form.Set("trigger_name", triggerName)
+	}
+	if triggerType != "" {
+		form.Set("trigger_type", triggerType)
+	}
+	if len(upstreamClaims) > 0 {
+		if encoded, err := json.Marshal(upstreamClaims); err == nil {
+			form.Set("upstream_claims", string(encoded))
+		}
 	}
 	if audience != "" {
 		form.Set("audience", audience)

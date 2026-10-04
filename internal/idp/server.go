@@ -366,6 +366,8 @@ func (s *Server) handleJobTokenGrant(w http.ResponseWriter, r *http.Request) {
 	pipelineID := r.FormValue("pipeline_id")
 	targetGroup := r.FormValue("target_group")
 	audience := r.FormValue("audience")
+	triggerName := r.FormValue("trigger_name")
+	triggerType := r.FormValue("trigger_type")
 
 	var aud []string
 	if audience != "" {
@@ -386,12 +388,34 @@ func (s *Server) handleJobTokenGrant(w http.ResponseWriter, r *http.Request) {
 		"target_group": targetGroup,
 		"token_type":   "job",
 	}
+	// The trigger that started the run (F-09): let a job's steps — and the
+	// outside resources they call — see how the run was started.
+	if triggerName != "" {
+		claims["trigger_name"] = triggerName
+	}
+	if triggerType != "" {
+		claims["trigger_type"] = triggerType
+	}
+	// The upstream OIDC claims a webhook caller presented (F-09), prefixed
+	// with upstream_ so they are distinguishable from the job's own claims.
+	// The API passes them JSON-encoded as a JSON object; each claim keeps its
+	// structure (a claim that is itself an object or a list, e.g. GitLab's
+	// "user_identities" or "job_config", is stamped as that object/list, not
+	// flattened to a string). A value that is not a JSON object is ignored.
+	if encoded := r.FormValue("upstream_claims"); encoded != "" {
+		var upstream map[string]any
+		if err := json.Unmarshal([]byte(encoded), &upstream); err == nil {
+			for k, v := range upstream {
+				claims["upstream_"+k] = v
+			}
+		}
+	}
 	token, err := s.km.Sign(claims)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.logger.Info("idp: minted job token", "job", jobID, "pipeline", pipelineID, "group", targetGroup, "audience", audience)
+	s.logger.Info("idp: minted job token", "job", jobID, "pipeline", pipelineID, "group", targetGroup, "audience", audience, "trigger", triggerName, "trigger_type", triggerType)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": token,
 		"token_type":   "Bearer",

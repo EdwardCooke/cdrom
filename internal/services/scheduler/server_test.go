@@ -108,3 +108,103 @@ func TestDispatchRunInstanceHoldsNeeds(t *testing.T) {
 		t.Errorf("assignments = %v, want [2] (only the dependency-free group job)", got)
 	}
 }
+
+// fakeTriggerRunDB is a stub Database client for the scheduler's TriggerRun
+// RPC (F-09): it records the TriggerRun call and the "assignment" events the
+// scheduler appends to the shared event log (F-23) for the run's job
+// instances.
+type fakeTriggerRunDB struct {
+	dbpb.DatabaseClient // nil
+	run                 *dbpb.PipelineRun
+	jobs                []*dbpb.Job
+	created             bool
+	triggerRuns         []*dbpb.TriggerRunRequest
+	assignments         []int64
+}
+
+func (f *fakeTriggerRunDB) TriggerRun(ctx context.Context, in *dbpb.TriggerRunRequest, opts ...grpc.CallOption) (*dbpb.TriggerRunResponse, error) {
+	f.triggerRuns = append(f.triggerRuns, in)
+	resp := &dbpb.TriggerRunResponse{Created: f.created, Run: f.run}
+	for _, job := range f.jobs {
+		resp.Jobs = append(resp.Jobs, job)
+	}
+	return resp, nil
+}
+
+func (f *fakeTriggerRunDB) PublishAssignment(ctx context.Context, in *dbpb.PublishAssignmentRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
+	f.assignments = append(f.assignments, in.GetJobId())
+	return &dbpb.PublishEventResponse{}, nil
+}
+
+// TestTriggerRunDispatchesWhenCreated verifies the scheduler's TriggerRun RPC
+// (F-09): when the database creates the run, the scheduler drives its job
+// instances (dispatching a dependency-free group job to the event log).
+func TestTriggerRunDispatchesWhenCreated(t *testing.T) {
+	db := &fakeTriggerRunDB{
+		created: true,
+		run:     &dbpb.PipelineRun{Id: 50, PipelineId: 7, Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: "cron", TriggerName: "nightly"},
+		jobs:    []*dbpb.Job{{Id: 51, RunId: 50, TargetGroup: "linux-pool"}},
+	}
+	s := &Server{db: db, logger: testLogger()}
+
+	run, err := s.TriggerRun(context.Background(), &schedpb.TriggerRunRequest{
+		PipelineId:  7,
+		TriggerName: "nightly",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON,
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun: %v", err)
+	}
+	if run.GetId() != 50 {
+		t.Errorf("run id = %d, want 50", run.GetId())
+	}
+	if len(db.triggerRuns) != 1 {
+		t.Fatalf("db.TriggerRun called %d times, want 1", len(db.triggerRuns))
+	}
+	if got := db.assignments; len(got) != 1 || got[0] != 51 {
+		t.Errorf("assignments = %v, want [51] (the created run's group job)", got)
+	}
+}
+
+// TestTriggerRunNoopWhenAlreadyClaimed verifies the scheduler's TriggerRun RPC
+// (F-09): when the database reports the run was already claimed by an earlier
+// call (a duplicate for the same fire window), the scheduler drives nothing.
+func TestTriggerRunNoopWhenAlreadyClaimed(t *testing.T) {
+	db := &fakeTriggerRunDB{
+		created: false,
+		run:     &dbpb.PipelineRun{Id: 50, PipelineId: 7, Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: "cron", TriggerName: "nightly"},
+		jobs:    []*dbpb.Job{{Id: 51, RunId: 50, TargetGroup: "linux-pool"}},
+	}
+	s := &Server{db: db, logger: testLogger()}
+
+	run, err := s.TriggerRun(context.Background(), &schedpb.TriggerRunRequest{
+		PipelineId:  7,
+		TriggerName: "nightly",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON,
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun: %v", err)
+	}
+	if run.GetId() != 50 {
+		t.Errorf("run id = %d, want 50 (the existing run)", run.GetId())
+	}
+	if len(db.triggerRuns) != 1 {
+		t.Fatalf("db.TriggerRun called %d times, want 1", len(db.triggerRuns))
+	}
+	if len(db.assignments) != 0 {
+		t.Errorf("assignments = %v, want none (the run was already claimed)", db.assignments)
+	}
+}
+
+// TestTriggerRunValidates verifies the scheduler's TriggerRun RPC (F-09)
+// rejects a request with no pipeline id or trigger name.
+func TestTriggerRunValidates(t *testing.T) {
+	s := &Server{db: &fakeTriggerRunDB{}, logger: testLogger()}
+
+	if _, err := s.TriggerRun(context.Background(), &schedpb.TriggerRunRequest{TriggerName: "x"}); err == nil {
+		t.Errorf("TriggerRun with no pipeline_id: want error, got nil")
+	}
+	if _, err := s.TriggerRun(context.Background(), &schedpb.TriggerRunRequest{PipelineId: 7}); err == nil {
+		t.Errorf("TriggerRun with no trigger_name: want error, got nil")
+	}
+}

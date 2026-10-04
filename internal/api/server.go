@@ -4,6 +4,8 @@
 package api
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,13 +32,18 @@ type Clients struct {
 type Server struct {
 	clients Clients
 	hub     *EventHub
+	// webhookOIDC verifies the Bearer token a webhook caller presents against
+	// a trigger's oidc_issuer and returns its flattened claims. It is the
+	// production verifier by default; tests substitute a fake so the
+	// claim-matching path can be exercised without a live identity provider.
+	webhookOIDC webhookTokenVerifier
 }
 
 // New creates an API server over the given gRPC clients. hub is the event
 // hub that backs the /api/ws WebSocket endpoint; it may be nil to disable
 // the WebSocket endpoint.
 func New(clients Clients, hub *EventHub) *Server {
-	return &Server{clients: clients, hub: hub}
+	return &Server{clients: clients, hub: hub, webhookOIDC: newWebhookOIDCVerifier()}
 }
 
 // Handler builds the HTTP handler for the API.
@@ -54,6 +61,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pipelines/{id}/runs", s.createRun)
 	mux.HandleFunc("GET /api/pipelines/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
+
+	// Webhook trigger (F-09): an external POST (authenticated with the
+	// pipeline's webhook trigger secret) starts a run, passing the request's
+	// JSON body as run parameters.
+	mux.HandleFunc("POST /api/pipelines/{id}/webhook", s.webhook)
 
 	// Jobs (via the scheduler service).
 	mux.HandleFunc("POST /api/jobs", s.submitJob)
@@ -94,6 +106,34 @@ type pipelineRequest struct {
 	// present the pipeline's DAG is validated (unique keys, known needs, no
 	// cycle) before the pipeline is saved.
 	Jobs []pipelineJobRequest `json:"jobs,omitempty"`
+	// Triggers are the ways a run of the pipeline can be started other than a
+	// manual click (F-09): a cron schedule, a webhook, or an event (another
+	// pipeline's run reaching a state). When present they are validated
+	// (unique names, kind-specific fields present) before the pipeline is
+	// saved.
+	Triggers []triggerRequest `json:"triggers,omitempty"`
+}
+
+// triggerRequest is the JSON form of a single pipeline trigger (F-09). Type
+// selects the trigger kind ("cron", "webhook", or "event") and the remaining
+// fields carry the kind-specific settings: Cron for a cron trigger, Secret and
+// OIDCIssuer/OIDCClaims for a webhook trigger, and EventPipeline/EventStatus
+// for an event trigger.
+type triggerRequest struct {
+	Name          string            `json:"name"`
+	Type          string            `json:"type"`
+	Cron          string            `json:"cron,omitempty"`
+	Secret        string            `json:"secret,omitempty"`
+	EventPipeline string            `json:"event_pipeline,omitempty"`
+	EventStatus   string            `json:"event_status,omitempty"`
+	Params        map[string]string `json:"params,omitempty"`
+	// OIDCIssuer is the OIDC issuer of the token a webhook caller must
+	// present (a webhook trigger); when set the API verifies the caller's
+	// Bearer token against it and matches its claims against OIDCClaims.
+	OIDCIssuer string `json:"oidc_issuer,omitempty"`
+	// OIDCClaims are the claims a webhook caller's OIDC token must carry for
+	// the trigger to match (a webhook trigger); a value of "*" is a wildcard.
+	OIDCClaims map[string]string `json:"oidc_claims,omitempty"`
 }
 
 // pipelineJobRequest is the JSON form of a single job definition in a
@@ -123,6 +163,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Description: req.Description,
 		Jobs:        jobs,
+		Triggers:    triggersToProto(req.Triggers),
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -151,12 +192,71 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Description: req.Description,
 		Jobs:        jobs,
+		Triggers:    triggersToProto(req.Triggers),
 	})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, pipeline)
+}
+
+// triggersToProto converts the JSON trigger definitions into the proto Trigger
+// list carried to the database service (F-09). It returns nil when there are
+// no triggers, so an update with no triggers leaves the pipeline's triggers
+// unchanged.
+func triggersToProto(triggers []triggerRequest) []*dbpb.Trigger {
+	if len(triggers) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.Trigger, 0, len(triggers))
+	for _, trigger := range triggers {
+		out = append(out, &dbpb.Trigger{
+			Name:          trigger.Name,
+			Type:          triggerTypeFromName(trigger.Type),
+			Cron:          trigger.Cron,
+			Secret:        trigger.Secret,
+			EventPipeline: trigger.EventPipeline,
+			EventStatus:   runStatusFromName(trigger.EventStatus),
+			Params:        trigger.Params,
+			OidcIssuer:    trigger.OIDCIssuer,
+			OidcClaims:    trigger.OIDCClaims,
+		})
+	}
+	return out
+}
+
+// triggerTypeFromName maps a trigger's JSON type to the proto TriggerType
+// (F-09).
+func triggerTypeFromName(name string) dbpb.TriggerType {
+	switch name {
+	case "cron":
+		return dbpb.TriggerType_TRIGGER_TYPE_CRON
+	case "webhook":
+		return dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK
+	case "event":
+		return dbpb.TriggerType_TRIGGER_TYPE_EVENT
+	default:
+		return dbpb.TriggerType_TRIGGER_TYPE_UNSPECIFIED
+	}
+}
+
+// runStatusFromName maps a run status name to the proto RunStatus (F-09).
+func runStatusFromName(name string) dbpb.RunStatus {
+	switch name {
+	case "pending":
+		return dbpb.RunStatus_RUN_STATUS_PENDING
+	case "running":
+		return dbpb.RunStatus_RUN_STATUS_RUNNING
+	case "succeeded":
+		return dbpb.RunStatus_RUN_STATUS_SUCCEEDED
+	case "failed":
+		return dbpb.RunStatus_RUN_STATUS_FAILED
+	case "cancelled":
+		return dbpb.RunStatus_RUN_STATUS_CANCELLED
+	default:
+		return dbpb.RunStatus_RUN_STATUS_UNSPECIFIED
+	}
 }
 
 // pipelineJobsToProto converts the JSON job definitions into the proto
@@ -259,6 +359,143 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+// webhookSecretHeader is the header a webhook caller presents the pipeline's
+// webhook trigger secret in (F-09).
+const webhookSecretHeader = "X-Cdrom-Webhook-Secret"
+
+// webhook starts a run of a pipeline from a webhook trigger (F-09): an
+// external POST (e.g. from a git host). The request's JSON body (a flat object
+// of string values) is recorded as the run's parameters, so the caller can
+// pass a commit, branch, or any other context to the run.
+//
+// The handler looks up the pipeline's webhook triggers and matches the request
+// against them. A trigger may authenticate the caller in two independent
+// ways, both of which must hold when both are set:
+//
+//   - a non-empty secret: the presented secret (in the X-Cdrom-Webhook-Secret
+//     header) must match it (constant-time, to avoid a timing oracle);
+//   - a non-empty oidc_issuer: the caller must present an OIDC Bearer token
+//     that verifies against that issuer and whose claims satisfy the
+//     trigger's oidc_claims (a value of "*" is a wildcard matching any value,
+//     including the claim being absent).
+//
+// A trigger with neither a secret nor an oidc_issuer is open: any POST starts
+// a run. A matched trigger starts a run via the scheduler's TriggerRun RPC
+// (which atomically deduplicates it); when the caller authenticated with an
+// OIDC token the token's flattened claims are recorded on the run (and its
+// job instances) so the API can stamp them (prefixed with upstream_) onto the
+// job tokens it hands to execution targets. A pipeline with no webhook
+// trigger is rejected with 404.
+func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	pipeline, err := s.clients.Database.GetPipeline(r.Context(), &dbpb.GetPipelineRequest{Id: pipelineID})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	// Find the pipeline's webhook triggers.
+	var webhookTriggers []*dbpb.Trigger
+	for _, trigger := range pipeline.GetTriggers() {
+		if trigger.GetType() == dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK {
+			webhookTriggers = append(webhookTriggers, trigger)
+		}
+	}
+	if len(webhookTriggers) == 0 {
+		httpError(w, http.StatusNotFound, "pipeline has no webhook trigger")
+		return
+	}
+	// Match the request against the webhook triggers. A trigger is matched
+	// when every credential it sets is satisfied: a set secret must equal the
+	// presented secret (constant-time), and a set oidc_issuer must have a
+	// verifying Bearer token whose claims satisfy the trigger's oidc_claims.
+	// A trigger with neither is open (any request matches it).
+	secret := r.Header.Get(webhookSecretHeader)
+	token := httpBearerToken(r)
+	var matched *dbpb.Trigger
+	var upstreamClaims map[string]any
+	for _, trigger := range webhookTriggers {
+		if !webhookTriggerMatches(trigger, secret, token, r.Context(), s.webhookOIDC, &upstreamClaims) {
+			continue
+		}
+		matched = trigger
+		break
+	}
+	if matched == nil {
+		httpError(w, http.StatusUnauthorized, "webhook request matched no trigger")
+		return
+	}
+	// The request body is a flat object of string values, recorded as the
+	// run's parameters. An empty body is allowed (a run with the trigger's
+	// static params only).
+	var payload map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	// Merge the trigger's static params (the payload overrides them on a key
+	// collision).
+	params := make(map[string]string, len(matched.GetParams())+len(payload))
+	for k, v := range matched.GetParams() {
+		params[k] = v
+	}
+	for k, v := range payload {
+		params[k] = v
+	}
+	run, err := s.clients.Scheduler.TriggerRun(r.Context(), &schedpb.TriggerRunRequest{
+		PipelineId:     pipelineID,
+		TriggerName:    matched.GetName(),
+		TriggerType:    dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK,
+		Params:         params,
+		UpstreamClaims: upstreamClaimsToStruct(upstreamClaims),
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	s.publish(Event{Type: EventRunStatus, RunID: run.GetId(), Status: runStatusName(run.GetStatus())})
+	writeJSON(w, http.StatusCreated, run)
+}
+
+// webhookTriggerMatches reports whether a webhook trigger is satisfied by the
+// presented secret and OIDC token. A trigger with neither a secret nor an
+// oidc_issuer is open and always matches. When the trigger sets an
+// oidc_issuer the caller's Bearer token is verified against it and its claims
+// (flattened to dot-addressed string values) are matched against the
+// trigger's oidc_claims (a value of "*" is a wildcard); on a match the token's
+// full structured claims are written to upstreamClaims (so the caller can
+// record them on the run). A set secret must additionally equal the presented
+// secret (constant-time).
+func webhookTriggerMatches(trigger *dbpb.Trigger, secret, token string, ctx context.Context, verifier webhookTokenVerifier, upstreamClaims *map[string]any) bool {
+	issuer := trigger.GetOidcIssuer()
+	if issuer != "" {
+		if token == "" {
+			return false
+		}
+		claims, err := verifier.verifyToken(ctx, issuer, token)
+		if err != nil {
+			return false
+		}
+		// Match against the flattened claims (a trigger's oidc_claims are
+		// dot-addressed string values); record the raw structured claims so a
+		// complex claim (an object or a list) keeps its shape on the run.
+		if !oidcClaimsMatch(flattenClaims(claims), trigger.GetOidcClaims()) {
+			return false
+		}
+		if upstreamClaims != nil {
+			*upstreamClaims = claims
+		}
+	}
+	if trigger.GetSecret() != "" {
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(trigger.GetSecret())) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

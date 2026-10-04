@@ -3,6 +3,7 @@ syntax = "proto3";
 package cdrom.api.v1;
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 import "cdrom/db/v1/db.proto";
@@ -203,6 +204,21 @@ message Job {
   // key is the job's stable, pipeline-scoped identifier (F-08); empty when
   // the job is not part of a pipeline.
   string key = 20;
+  // trigger_name is the name of the trigger that started the run this job is
+  // an instance of (F-09); empty for a job not started by a named trigger.
+  // The API stamps it onto the job token it hands to the execution target.
+  string trigger_name = 21;
+  // trigger_type is how the run this job is an instance of was started
+  // (F-09): "manual", "cron", "webhook", or "event". The API stamps it onto
+  // the job token it hands to the execution target.
+  string trigger_type = 22;
+  // upstream_claims are the claims of the OIDC token a webhook caller
+  // presented to start the run this job is an instance of (F-09); empty for a
+  // job not started by a webhook. They are the token's full claims as a JSON
+  // object (a claim that is an object or a list keeps its structure). The API
+  // stamps them (prefixed with upstream_) onto the job token it hands to the
+  // execution target.
+  google.protobuf.Struct upstream_claims = 23;
 }
 
 message JobAssignment {

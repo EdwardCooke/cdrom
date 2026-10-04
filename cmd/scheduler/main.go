@@ -8,10 +8,11 @@
 // with an empty target group are queued for ephemeral Kubernetes agents. All
 // durable state is persisted through the Database service.
 //
-// The four background loops (watchdog, retry, dependency resolver, run-status)
-// run on exactly one replica at a time: the scheduler runs a leader election
-// (a lease on the Database service) and starts the loops only while it holds
-// the lease, stopping them if it loses it.
+// The background loops (watchdog, retry, dependency resolver, run-status,
+// job-status, cron trigger, event trigger) run on exactly one replica at a
+// time: the scheduler runs a leader election (a lease on the Database
+// service) and starts the loops only while it holds the lease, stopping them
+// if it loses it.
 package main
 
 import (
@@ -69,11 +70,12 @@ func main() {
 	}
 	sched := scheduler.NewServer(dbpb.NewDatabaseClient(dbConn), logger)
 
-	// The four background loops (F-03 watchdog, F-04 retry, F-06 dependency
-	// resolver, F-07 run-status) must run on exactly one scheduler replica at
-	// a time, or they would publish duplicate events (F-23). They are started
-	// when this replica wins the leader election and stopped when it loses the
-	// lease, so leadership can move between replicas without a restart.
+	// The background loops (F-03 watchdog, F-04 retry, F-06 dependency
+	// resolver, F-07 run-status, job-status, F-09 cron trigger, F-09 event
+	// trigger) must run on exactly one scheduler replica at a time, or they
+	// would publish duplicate events (F-23). They are started when this
+	// replica wins the leader election and stopped when it loses the lease,
+	// so leadership can move between replicas without a restart.
 	loops := newLoopManager(ctx, sched)
 	electionCtx, stopElection := context.WithCancel(ctx)
 	defer stopElection()
@@ -93,8 +95,8 @@ func main() {
 	loops.stop()
 }
 
-// loopManager starts and stops the scheduler's four background loops, gated
-// by leader election (F-23). It is safe for concurrent use: the
+// loopManager starts and stops the scheduler's background loops, gated by
+// leader election (F-23). It is safe for concurrent use: the
 // leader-election goroutine (onAcquire / onLose) and the shutdown path both
 // call into it.
 type loopManager struct {
@@ -108,8 +110,8 @@ func newLoopManager(ctx context.Context, sched *scheduler.Server) *loopManager {
 	return &loopManager{ctx: ctx, sched: sched}
 }
 
-// start begins the four background loops on a fresh context, stopping any
-// that are already running (a re-acquired leader restarts them cleanly).
+// start begins the background loops on a fresh context, stopping any that
+// are already running (a re-acquired leader restarts them cleanly).
 func (m *loopManager) start() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -123,6 +125,8 @@ func (m *loopManager) start() {
 	m.sched.StartDependencyResolver(loopsCtx)
 	m.sched.StartRunStatusLoop(loopsCtx)
 	m.sched.StartJobStatusLoop(loopsCtx)
+	m.sched.StartCronLoop(loopsCtx)
+	m.sched.StartEventTriggerLoop(loopsCtx)
 }
 
 // stop halts the running loops, if any.

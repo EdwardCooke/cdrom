@@ -270,6 +270,45 @@ func (s *Server) CreateRun(ctx context.Context, req *schedpb.CreateRunRequest) (
 	return run, nil
 }
 
+// TriggerRun starts a run of a pipeline from a trigger (F-09): it atomically
+// claims the trigger's fire window (Database.TriggerRun, so a trigger can
+// never fire twice for the same window) and, when this call created the run,
+// drives its job instances exactly like CreateRun. The API's webhook endpoint
+// and the scheduler's cron and event loops call it. When an earlier claim
+// already started the run (a duplicate for the same window) this call is a
+// no-op: it returns the existing run and drives nothing.
+func (s *Server) TriggerRun(ctx context.Context, req *schedpb.TriggerRunRequest) (*schedpb.Run, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	if req.GetTriggerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "trigger_name is required")
+	}
+	created, err := s.db.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+		PipelineId:     req.GetPipelineId(),
+		TriggerName:    req.GetTriggerName(),
+		TriggerType:    req.GetTriggerType(),
+		Params:         req.GetParams(),
+		DedupWindow:    req.GetDedupWindow(),
+		UpstreamClaims: req.GetUpstreamClaims(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	run := toProtoRun(created.GetRun())
+	if !created.GetCreated() {
+		// An earlier claim already started this run for the trigger's fire
+		// window; nothing to drive.
+		s.logger.Info("scheduler: trigger run already claimed", "run", run.GetId(), "pipeline", req.GetPipelineId(), "trigger", req.GetTriggerName())
+		return run, nil
+	}
+	for _, job := range created.GetJobs() {
+		s.dispatchRunInstance(ctx, job)
+	}
+	s.logger.Info("scheduler: trigger run created", "run", run.GetId(), "pipeline", req.GetPipelineId(), "trigger", req.GetTriggerName(), "jobs", len(created.GetJobs()))
+	return run, nil
+}
+
 // dispatchRunInstance drives a single job instance of a run (F-07), mirroring
 // SubmitJob's dispatch logic: an instance with dependencies (needs, F-08, or
 // depends_on, F-06) is left pending for the dependency resolver; an instance
@@ -317,14 +356,16 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 // toProtoRun converts a db proto PipelineRun into the scheduler's Run message.
 func toProtoRun(run *dbpb.PipelineRun) *schedpb.Run {
 	return &schedpb.Run{
-		Id:         run.GetId(),
-		PipelineId: run.GetPipelineId(),
-		Status:     run.GetStatus(),
-		Trigger:    run.GetTrigger(),
-		Params:     run.GetParams(),
-		StartedAt:  run.GetStartedAt(),
-		FinishedAt: run.GetFinishedAt(),
-		CreatedAt:  run.GetCreatedAt(),
-		UpdatedAt:  run.GetUpdatedAt(),
+		Id:          run.GetId(),
+		PipelineId:  run.GetPipelineId(),
+		Status:      run.GetStatus(),
+		Trigger:     run.GetTrigger(),
+		Params:      run.GetParams(),
+		StartedAt:   run.GetStartedAt(),
+		FinishedAt:  run.GetFinishedAt(),
+		CreatedAt:   run.GetCreatedAt(),
+		UpdatedAt:   run.GetUpdatedAt(),
+		TriggerName: run.GetTriggerName(),
+		SourceRunId: run.GetSourceRunId(),
 	}
 }

@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -45,6 +48,14 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		Name:        req.GetName(),
 		Description: req.GetDescription(),
 		FailureMode: failureModeFromProto(req.GetFailureMode()),
+		// The pipeline's triggers (F-09) are validated before anything is
+		// persisted: a malformed trigger (a bad cron expression, a webhook
+		// with no secret, a duplicate name) rejects the whole create, so a
+		// pipeline is never saved with a trigger that could never fire.
+		Triggers: triggersFromProto(req.GetTriggers()),
+	}
+	if err := validateTriggers(req.GetTriggers()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	// The pipeline's job definitions (F-08) are validated as a DAG before
 	// anything is persisted: a cycle or an unknown key rejects the whole
@@ -130,10 +141,26 @@ func (s *Server) GetPipeline(ctx context.Context, req *dbpb.GetPipelineRequest) 
 	return toProtoPipeline(&pipeline), nil
 }
 
-func (s *Server) ListPipelines(ctx context.Context, _ *dbpb.ListPipelinesRequest) (*dbpb.ListPipelinesResponse, error) {
+// ListPipelines lists pipelines, optionally restricted to those that carry at
+// least one trigger of a given type (F-09). The scheduler's cron and event
+// loops use the filter to fetch only the pipelines they act on. Triggers are
+// stored as a JSON column, so the type filter is applied in Go (portable
+// across SQLite and PostgreSQL) rather than in a driver-specific JSON query.
+func (s *Server) ListPipelines(ctx context.Context, req *dbpb.ListPipelinesRequest) (*dbpb.ListPipelinesResponse, error) {
 	var pipelines []models.Pipeline
 	if err := s.db.WithContext(ctx).Order("id").Find(&pipelines).Error; err != nil {
 		return nil, grpcErr(err)
+	}
+	// When a trigger type is requested, keep only the pipelines that carry at
+	// least one trigger of that type.
+	if triggerType := req.GetTriggerType(); triggerType != dbpb.TriggerType_TRIGGER_TYPE_UNSPECIFIED {
+		filtered := make([]models.Pipeline, 0, len(pipelines))
+		for i := range pipelines {
+			if pipelineHasTriggerType(&pipelines[i], triggerType) {
+				filtered = append(filtered, pipelines[i])
+			}
+		}
+		pipelines = filtered
 	}
 	response := &dbpb.ListPipelinesResponse{}
 	for i := range pipelines {
@@ -149,6 +176,17 @@ func (s *Server) ListPipelines(ctx context.Context, _ *dbpb.ListPipelinesRequest
 	return response, nil
 }
 
+// pipelineHasTriggerType reports whether the pipeline carries at least one
+// trigger of the given type (F-09).
+func pipelineHasTriggerType(pipeline *models.Pipeline, triggerType dbpb.TriggerType) bool {
+	for i := range pipeline.Triggers {
+		if triggerTypeToProto(pipeline.Triggers[i].Type) == triggerType {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineRequest) (*dbpb.Pipeline, error) {
 	var pipeline models.Pipeline
 	if err := s.db.WithContext(ctx).First(&pipeline, req.GetId()).Error; err != nil {
@@ -160,6 +198,16 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 	pipeline.Description = req.GetDescription()
 	if req.GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_UNSPECIFIED {
 		pipeline.FailureMode = failureModeFromProto(req.GetFailureMode())
+	}
+	// When triggers are supplied (F-09) they replace the pipeline's existing
+	// triggers: they are validated (unique names, kind-specific fields
+	// present) before anything is persisted. When none are supplied the
+	// pipeline's triggers are left unchanged.
+	if req.GetTriggers() != nil {
+		if err := validateTriggers(req.GetTriggers()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		pipeline.Triggers = triggersFromProto(req.GetTriggers())
 	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
@@ -282,97 +330,18 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 	}
 	response := &dbpb.CreateRunResponse{}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// The run row is created first so the job instances can reference it.
 		run := &models.PipelineRun{
-			PipelineID: pipelineID,
-			Status:     models.RunStatusPending,
-			Trigger:    req.GetTrigger(),
-			Params:     req.GetParams(),
+			PipelineID:  pipelineID,
+			Status:      models.RunStatusPending,
+			Trigger:     req.GetTrigger(),
+			TriggerName: req.GetTrigger(),
+			Params:      req.GetParams(),
 		}
-		if err := tx.Create(run).Error; err != nil {
+		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run)
+		if err != nil {
 			return err
 		}
-		response.Run = toProtoRun(run)
-
-		// Load the pipeline's job definitions (the run's job instances are
-		// created from these). Only the definitions (run_id IS NULL) are used;
-		// a pipeline's job instances from prior runs are excluded so they are
-		// not mistaken for definitions.
-		var defs []models.Job
-		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipelineID).Order("id").Find(&defs).Error; err != nil {
-			return err
-		}
-		// Pass 1: create every job instance (without depends_on yet) so all
-		// instance ids are known, and record the definition-id -> instance-id
-		// mapping used to remap each instance's depends_on to the run's own
-		// instance ids.
-		instances := make([]models.Job, 0, len(defs))
-		defToInstance := make(map[uint]uint, len(defs))
-		for i := range defs {
-			def := &defs[i]
-			job := &models.Job{
-				PipelineID:  &pipelineID,
-				RunID:       &run.ID,
-				Key:         def.Key,
-				Name:        def.Name,
-				TargetGroup: def.TargetGroup,
-				Status:      models.JobStatusPending,
-				Spec:        def.Spec,
-				// A new instance starts on its first attempt (F-04); the retry
-				// budget and ignore-failed flag are denormalized from the
-				// definition's spec, mirroring CreateJob.
-				Attempt: 1,
-			}
-			if def.Spec.Retry != nil {
-				job.MaxAttempts = def.Spec.Retry.MaxAttempts
-			}
-			job.IgnoreFailed = def.Spec.IgnoreFailed
-			// The instance's step-barrier flag is denormalized from its
-			// definition's spec, mirroring CreateJob.
-			job.StepBarrier = def.Spec.StepBarrier
-			// The instance's failure mode is denormalized from its definition's
-			// spec; when the spec sets none it inherits the pipeline's default
-			// (defaulting to FailureModeAll), mirroring CreateJob.
-			job.FailureMode = def.Spec.FailureMode
-			if job.FailureMode == "" {
-				job.FailureMode = pipeline.FailureMode
-			}
-			if job.FailureMode == "" {
-				job.FailureMode = models.FailureModeAll
-			}
-			if err := tx.Create(job).Error; err != nil {
-				return err
-			}
-			defToInstance[def.ID] = job.ID
-			instances = append(instances, *job)
-		}
-		// Pass 2: remap each instance's depends_on to the run's own instance
-		// ids. A definition's depends_on (already resolved from its needs at
-		// save time, F-08) are remapped from the definition ids to the run's
-		// instance ids. A dependency that cannot be resolved (an id outside
-		// this pipeline) is left as-is (best-effort); in practice a pipeline's
-		// job dependencies reference other jobs in the same pipeline.
-		for i := range instances {
-			def := &defs[i]
-			remapped := make([]uint, 0, len(def.DependsOn))
-			for _, defDepID := range def.DependsOn {
-				if instID, ok := defToInstance[defDepID]; ok {
-					remapped = append(remapped, instID)
-				} else {
-					remapped = append(remapped, defDepID)
-				}
-			}
-			if len(remapped) == 0 {
-				continue
-			}
-			if err := tx.Model(&models.Job{}).
-				Where("id = ?", instances[i].ID).
-				Select("DependsOn").
-				Updates(&models.Job{DependsOn: remapped}).Error; err != nil {
-				return err
-			}
-			instances[i].DependsOn = remapped
-		}
+		response.Run = toProtoRun(createdRun)
 		for i := range instances {
 			response.Jobs = append(response.Jobs, toProtoJob(&instances[i]))
 		}
@@ -384,13 +353,248 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 	return response, nil
 }
 
+// createRunAndInstances creates a pipeline run row and one job instance per
+// job definition in the pipeline, inside the caller's transaction (F-07).
+// Each instance is a fresh Job row bound to the run (RunID) and the pipeline
+// (PipelineID), carrying a snapshot of its definition's spec, target group,
+// retry policy, and ignore-failed flag. Each instance's depends_on is remapped
+// from the definition job ids to the new instance ids, so the run's internal
+// dependencies (F-06) reference the run's own job instances rather than the
+// pipeline's definitions.
+//
+// The run row is created first so the job instances can reference it. The
+// caller is responsible for committing (or rolling back) the transaction.
+func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, run *models.PipelineRun) (*models.PipelineRun, []models.Job, error) {
+	if err := tx.Create(run).Error; err != nil {
+		return nil, nil, err
+	}
+	pipelineID := run.PipelineID
+	// Load the pipeline's job definitions (the run's job instances are created
+	// from these). Only the definitions (run_id IS NULL) are used; a
+	// pipeline's job instances from prior runs are excluded so they are not
+	// mistaken for definitions.
+	var defs []models.Job
+	if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipelineID).Order("id").Find(&defs).Error; err != nil {
+		return nil, nil, err
+	}
+	// Pass 1: create every job instance (without depends_on yet) so all
+	// instance ids are known, and record the definition-id -> instance-id
+	// mapping used to remap each instance's depends_on to the run's own
+	// instance ids.
+	instances := make([]models.Job, 0, len(defs))
+	defToInstance := make(map[uint]uint, len(defs))
+	for i := range defs {
+		def := &defs[i]
+		job := &models.Job{
+			PipelineID:  &pipelineID,
+			RunID:       &run.ID,
+			Key:         def.Key,
+			Name:        def.Name,
+			TargetGroup: def.TargetGroup,
+			Status:      models.JobStatusPending,
+			Spec:        def.Spec,
+			// A new instance starts on its first attempt (F-04); the retry
+			// budget and ignore-failed flag are denormalized from the
+			// definition's spec, mirroring CreateJob.
+			Attempt: 1,
+		}
+		if def.Spec.Retry != nil {
+			job.MaxAttempts = def.Spec.Retry.MaxAttempts
+		}
+		job.IgnoreFailed = def.Spec.IgnoreFailed
+		// The instance's step-barrier flag is denormalized from its
+		// definition's spec, mirroring CreateJob.
+		job.StepBarrier = def.Spec.StepBarrier
+		// The instance's failure mode is denormalized from its definition's
+		// spec; when the spec sets none it inherits the pipeline's default
+		// (defaulting to FailureModeAll), mirroring CreateJob.
+		job.FailureMode = def.Spec.FailureMode
+		if job.FailureMode == "" {
+			job.FailureMode = pipeline.FailureMode
+		}
+		if job.FailureMode == "" {
+			job.FailureMode = models.FailureModeAll
+		}
+		// The instance's trigger origin and upstream claims are denormalized
+		// from the run (F-09): the API stamps them (the trigger name/type and
+		// the upstream OIDC claims, prefixed with upstream_) onto the job
+		// token it hands to the execution target.
+		job.TriggerName = run.TriggerName
+		job.TriggerType = run.Trigger
+		job.UpstreamClaims = run.UpstreamClaims
+		if err := tx.Create(job).Error; err != nil {
+			return nil, nil, err
+		}
+		defToInstance[def.ID] = job.ID
+		instances = append(instances, *job)
+	}
+	// Pass 2: remap each instance's depends_on to the run's own instance
+	// ids. A definition's depends_on (already resolved from its needs at
+	// save time, F-08) are remapped from the definition ids to the run's
+	// instance ids. A dependency that cannot be resolved (an id outside this
+	// pipeline) is left as-is (best-effort); in practice a pipeline's job
+	// dependencies reference other jobs in the same pipeline.
+	for i := range instances {
+		def := &defs[i]
+		remapped := make([]uint, 0, len(def.DependsOn))
+		for _, defDepID := range def.DependsOn {
+			if instID, ok := defToInstance[defDepID]; ok {
+				remapped = append(remapped, instID)
+			} else {
+				remapped = append(remapped, defDepID)
+			}
+		}
+		if len(remapped) == 0 {
+			continue
+		}
+		if err := tx.Model(&models.Job{}).
+			Where("id = ?", instances[i].ID).
+			Select("DependsOn").
+			Updates(&models.Job{DependsOn: remapped}).Error; err != nil {
+			return nil, nil, err
+		}
+		instances[i].DependsOn = remapped
+	}
+	return run, instances, nil
+}
+
+// TriggerRun atomically claims a trigger-fired run (F-09): it creates a
+// PipelineRun (started by the named trigger of the pipeline) and one job
+// instance per job definition, exactly like CreateRun, but only if the
+// trigger has not already started a run for the same fire window. The dedup
+// is what keeps a trigger from firing twice for the same window when the
+// scheduler is restarted or two replicas race:
+//
+//   - a cron trigger passes its cron period as the dedup window: a run
+//     started by the same trigger within that window suppresses a duplicate;
+//   - an event trigger records the source run's id: the same source run can
+//     never start the same downstream run twice.
+//
+// The check and the create run in a single transaction that locks the
+// pipeline row, so two concurrent claims are serialized: the first creates the
+// run, the second sees it and is a no-op. It returns the run that claimed the
+// window (created by this call, or by an earlier call) and whether this call
+// created it.
+func (s *Server) TriggerRun(ctx context.Context, req *dbpb.TriggerRunRequest) (*dbpb.TriggerRunResponse, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	if req.GetTriggerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "trigger_name is required")
+	}
+	pipelineID := uint(req.GetPipelineId())
+	response := &dbpb.TriggerRunResponse{}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Lock the pipeline row so concurrent claims of the same trigger are
+		// serialized: the first creates the run, the rest see it and no-op.
+		var pipeline models.Pipeline
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&pipeline, pipelineID).Error; err != nil {
+			return err
+		}
+		// Deduplicate against a run the same trigger already started for this
+		// fire window.
+		if existing, created, err := s.findDuplicateTriggerRun(tx, pipelineID, req); err != nil {
+			return err
+		} else if created {
+			// An earlier claim already started this run; this call is a no-op.
+			response.Run = toProtoRun(existing)
+			response.Created = false
+			return nil
+		}
+		// No duplicate: create the run and its job instances.
+		sourceRunID := sourceRunIDFromParams(req.GetParams())
+		run := &models.PipelineRun{
+			PipelineID:     pipelineID,
+			Status:         models.RunStatusPending,
+			Trigger:        triggerSourceFromType(req.GetTriggerType()),
+			TriggerName:    req.GetTriggerName(),
+			SourceRunID:    sourceRunID,
+			Params:         req.GetParams(),
+			UpstreamClaims: upstreamClaimsFromStruct(req.GetUpstreamClaims()),
+		}
+		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run)
+		if err != nil {
+			return err
+		}
+		response.Run = toProtoRun(createdRun)
+		response.Created = true
+		for i := range instances {
+			response.Jobs = append(response.Jobs, toProtoJob(&instances[i]))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	return response, nil
+}
+
+// findDuplicateTriggerRun reports whether a run the same trigger already
+// started for this fire window exists (F-09). It returns the existing run and
+// true when a duplicate is found (the caller should no-op), or nil and false
+// when the trigger may create a run. A cron trigger (a dedup window is set)
+// matches a run started by the same trigger within the window; an event
+// trigger (no window) matches a run started by the same source run.
+func (s *Server) findDuplicateTriggerRun(tx *gorm.DB, pipelineID uint, req *dbpb.TriggerRunRequest) (*models.PipelineRun, bool, error) {
+	query := tx.Model(&models.PipelineRun{}).
+		Where("pipeline_id = ? AND trigger_name = ?", pipelineID, req.GetTriggerName())
+	if window := req.GetDedupWindow().AsDuration(); window > 0 {
+		// A cron trigger: a run started by the same trigger within the window
+		// (its cron period) suppresses a duplicate.
+		since := time.Now().Add(-window)
+		query = query.Where("created_at >= ?", since)
+	} else if sourceRunID := sourceRunIDFromParams(req.GetParams()); sourceRunID != nil {
+		// An event trigger: the same source run can never start the same
+		// downstream run twice.
+		query = query.Where("source_run_id = ?", *sourceRunID)
+	}
+	var existing []models.PipelineRun
+	if err := query.Order("id DESC").Limit(1).Find(&existing).Error; err != nil {
+		return nil, false, err
+	}
+	if len(existing) == 0 {
+		return nil, false, nil
+	}
+	return &existing[0], true, nil
+}
+
+// sourceRunIDFromParams extracts the source run's id (an event trigger, F-09)
+// from a run's params, or nil when absent.
+func sourceRunIDFromParams(params map[string]string) *uint {
+	raw, ok := params[models.ParamKeySourceRun]
+	if !ok || raw == "" {
+		return nil
+	}
+	id, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return nil
+	}
+	value := uint(id)
+	return &value
+}
+
+// triggerSourceFromType maps a trigger's kind to the run's trigger source
+// (F-09): the value recorded on the run's Trigger field.
+func triggerSourceFromType(t dbpb.TriggerType) string {
+	switch t {
+	case dbpb.TriggerType_TRIGGER_TYPE_CRON:
+		return models.TriggerSourceCron
+	case dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK:
+		return models.TriggerSourceWebhook
+	case dbpb.TriggerType_TRIGGER_TYPE_EVENT:
+		return models.TriggerSourceEvent
+	default:
+		return models.TriggerSourceManual
+	}
+}
+
 // GetRun fetches a pipeline run from the Database service.
 func (s *Server) GetRun(ctx context.Context, req *dbpb.GetRunRequest) (*dbpb.PipelineRun, error) {
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "run id is required")
 	}
 	var run models.PipelineRun
-	if err := s.db.WithContext(ctx).First(&run, req.GetId()).Error; err != nil {
+	if err := s.db.WithContext(ctx).Preload("Pipeline").First(&run, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	return toProtoRun(&run), nil
@@ -409,8 +613,16 @@ func (s *Server) ListRuns(ctx context.Context, req *dbpb.ListRunsRequest) (*dbpb
 		}
 		query = query.Where("status = ?", modelStatus)
 	}
+	if finishedAfter := req.GetFinishedAfter(); finishedAfter != nil {
+		// A run that has not finished (finished_at is null) is excluded.
+		query = query.Where("finished_at IS NOT NULL AND finished_at >= ?", finishedAfter.AsTime())
+	}
+	// Preload each run's pipeline so the response carries the pipeline's name
+	// (F-09): the scheduler's event loop matches a finished run against the
+	// pipelines its event triggers watch by name, without fetching every
+	// pipeline.
 	var runs []models.PipelineRun
-	if err := query.Order("id").Find(&runs).Error; err != nil {
+	if err := query.Preload("Pipeline").Order("id").Find(&runs).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	response := &dbpb.ListRunsResponse{}
@@ -1847,6 +2059,141 @@ func validateJobDAG(defs []*dbpb.JobDefinition) error {
 	return nil
 }
 
+// validateTriggers checks a set of trigger definitions (F-09) for well-formed
+// triggers: names are non-empty and unique within the pipeline, and each
+// trigger carries the fields its kind requires (a cron trigger a cron
+// expression that parses, an event trigger a watched pipeline and status). A
+// webhook trigger's secret is optional: when set it is enforced on the
+// webhook endpoint, when empty the trigger is open. It returns a descriptive
+// error naming the offending trigger, or nil when the set is valid.
+func validateTriggers(triggers []*dbpb.Trigger) error {
+	seen := make(map[string]struct{}, len(triggers))
+	for _, trigger := range triggers {
+		name := trigger.GetName()
+		if name == "" {
+			return fmt.Errorf("trigger has an empty name")
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("duplicate trigger name %q", name)
+		}
+		seen[name] = struct{}{}
+		switch trigger.GetType() {
+		case dbpb.TriggerType_TRIGGER_TYPE_UNSPECIFIED:
+			return fmt.Errorf("trigger %q has no type", name)
+		case dbpb.TriggerType_TRIGGER_TYPE_CRON:
+			if trigger.GetCron() == "" {
+				return fmt.Errorf("cron trigger %q has no cron expression", name)
+			}
+			if _, err := cron.ParseStandard(trigger.GetCron()); err != nil {
+				return fmt.Errorf("cron trigger %q has an invalid cron expression %q: %v", name, trigger.GetCron(), err)
+			}
+		case dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK:
+			// A webhook trigger's secret is optional: when set it is enforced
+			// on the webhook endpoint, when empty the trigger is open (any
+			// POST starts a run). Its OIDC issuer and claims are also
+			// optional: when the issuer is set the API verifies the caller's
+			// Bearer token against it and matches its claims against
+			// oidc_claims (a value of "*" is a wildcard).
+			for claim := range trigger.GetOidcClaims() {
+				if claim == "" {
+					return fmt.Errorf("webhook trigger %q has an oidc_claims entry with an empty claim name", name)
+				}
+			}
+		case dbpb.TriggerType_TRIGGER_TYPE_EVENT:
+			if trigger.GetEventPipeline() == "" {
+				return fmt.Errorf("event trigger %q has no event_pipeline", name)
+			}
+			if trigger.GetEventStatus() == dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
+				return fmt.Errorf("event trigger %q has no event_status", name)
+			}
+		default:
+			return fmt.Errorf("trigger %q has unknown type %v", name, trigger.GetType())
+		}
+	}
+	return nil
+}
+
+// triggersFromProto converts a list of proto triggers into the model's
+// triggers (F-09). An empty list yields nil, so an update with no triggers
+// leaves the pipeline's triggers unchanged.
+func triggersFromProto(triggers []*dbpb.Trigger) []models.Trigger {
+	if len(triggers) == 0 {
+		return nil
+	}
+	out := make([]models.Trigger, 0, len(triggers))
+	for _, trigger := range triggers {
+		var eventStatus models.RunStatus
+		if trigger.GetEventStatus() != dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
+			eventStatus, _ = runStatusFromProto(trigger.GetEventStatus())
+		}
+		out = append(out, models.Trigger{
+			Name:          trigger.GetName(),
+			Type:          triggerTypeFromProto(trigger.GetType()),
+			Cron:          trigger.GetCron(),
+			Secret:        trigger.GetSecret(),
+			EventPipeline: trigger.GetEventPipeline(),
+			EventStatus:   eventStatus,
+			Params:        trigger.GetParams(),
+			OIDCIssuer:    trigger.GetOidcIssuer(),
+			OIDCClaims:    trigger.GetOidcClaims(),
+		})
+	}
+	return out
+}
+
+// triggersToProto converts the model's triggers into a list of proto triggers
+// (F-09). An empty slice yields nil.
+func triggersToProto(triggers []models.Trigger) []*dbpb.Trigger {
+	if len(triggers) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.Trigger, 0, len(triggers))
+	for i := range triggers {
+		out = append(out, &dbpb.Trigger{
+			Name:          triggers[i].Name,
+			Type:          triggerTypeToProto(triggers[i].Type),
+			Cron:          triggers[i].Cron,
+			Secret:        triggers[i].Secret,
+			EventPipeline: triggers[i].EventPipeline,
+			EventStatus:   runStatusToProto(triggers[i].EventStatus),
+			Params:        triggers[i].Params,
+			OidcIssuer:    triggers[i].OIDCIssuer,
+			OidcClaims:    triggers[i].OIDCClaims,
+		})
+	}
+	return out
+}
+
+// triggerTypeFromProto converts a proto TriggerType to the model's
+// TriggerType (F-09).
+func triggerTypeFromProto(t dbpb.TriggerType) models.TriggerType {
+	switch t {
+	case dbpb.TriggerType_TRIGGER_TYPE_CRON:
+		return models.TriggerTypeCron
+	case dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK:
+		return models.TriggerTypeWebhook
+	case dbpb.TriggerType_TRIGGER_TYPE_EVENT:
+		return models.TriggerTypeEvent
+	default:
+		return ""
+	}
+}
+
+// triggerTypeToProto converts the model's TriggerType to a proto TriggerType
+// (F-09).
+func triggerTypeToProto(t models.TriggerType) dbpb.TriggerType {
+	switch t {
+	case models.TriggerTypeCron:
+		return dbpb.TriggerType_TRIGGER_TYPE_CRON
+	case models.TriggerTypeWebhook:
+		return dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK
+	case models.TriggerTypeEvent:
+		return dbpb.TriggerType_TRIGGER_TYPE_EVENT
+	default:
+		return dbpb.TriggerType_TRIGGER_TYPE_UNSPECIFIED
+	}
+}
+
 // jobDefinitionsFromProto converts a list of proto job definitions into the
 // model's job definitions (F-08). A definition's name defaults to its key when
 // empty, and its failure mode defaults to FailureModeAll. The definition's
@@ -1977,18 +2324,61 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		UpdatedAt:   timestamppb.New(pipeline.UpdatedAt),
 		FailureMode: failureModeToProto(pipeline.FailureMode),
 		Jobs:        toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
+		Triggers:    triggersToProto(pipeline.Triggers),
 	}
+}
+
+// upstreamClaimsToStruct converts a run's or job's upstream claims (a JSON
+// object of arbitrary values, e.g. GitLab's nested "user_identities" list or
+// "job_config" object) into a protobuf Struct so it can cross the gRPC
+// boundary without flattening complex values to strings. A nil or empty map
+// yields a nil Struct (the proto's "absent" representation).
+func upstreamClaimsToStruct(claims map[string]any) *structpb.Struct {
+	if len(claims) == 0 {
+		return nil
+	}
+	s, err := structpb.NewStruct(claims)
+	if err != nil {
+		// A claim value that is not JSON-encodable (e.g. a time.Time) would
+		// fail here; that cannot happen for OIDC claims, which are JSON
+		// scalars, objects, or lists. Fall back to an empty struct rather
+		// than dropping the run's other fields.
+		return &structpb.Struct{Fields: map[string]*structpb.Value{}}
+	}
+	return s
+}
+
+// upstreamClaimsFromStruct converts a protobuf Struct of upstream claims back
+// to a JSON-object map (nil for an absent/empty struct). Each field's value is
+// decoded to its Go representation (a nested object becomes a map, a list a
+// slice, a number a float64), so a complex claim keeps its structure.
+func upstreamClaimsFromStruct(s *structpb.Struct) map[string]any {
+	if s == nil || len(s.GetFields()) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(s.GetFields()))
+	for k, v := range s.GetFields() {
+		out[k] = v.AsInterface()
+	}
+	return out
 }
 
 func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 	proto := &dbpb.PipelineRun{
-		Id:         int64(run.ID),
-		PipelineId: int64(run.PipelineID),
-		Status:     runStatusToProto(run.Status),
-		Trigger:    run.Trigger,
-		Params:     run.Params,
-		CreatedAt:  timestamppb.New(run.CreatedAt),
-		UpdatedAt:  timestamppb.New(run.UpdatedAt),
+		Id:             int64(run.ID),
+		PipelineId:     int64(run.PipelineID),
+		Status:         runStatusToProto(run.Status),
+		Trigger:        run.Trigger,
+		Params:         run.Params,
+		CreatedAt:      timestamppb.New(run.CreatedAt),
+		UpdatedAt:      timestamppb.New(run.UpdatedAt),
+		TriggerName:    run.TriggerName,
+		UpstreamClaims: upstreamClaimsToStruct(run.UpstreamClaims),
+	}
+	if run.Pipeline != nil {
+		// The pipeline's name (F-09): the scheduler's event loop matches a
+		// finished run against the pipelines its event triggers watch by name.
+		proto.PipelineName = run.Pipeline.Name
 	}
 	if run.StartedAt != nil {
 		proto.StartedAt = timestamppb.New(*run.StartedAt)
@@ -1996,27 +2386,33 @@ func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 	if run.FinishedAt != nil {
 		proto.FinishedAt = timestamppb.New(*run.FinishedAt)
 	}
+	if run.SourceRunID != nil {
+		proto.SourceRunId = int64(*run.SourceRunID)
+	}
 	return proto
 }
 
 func toProtoJob(job *models.Job) *dbpb.Job {
 	proto := &dbpb.Job{
-		Id:           int64(job.ID),
-		Name:         job.Name,
-		Status:       jobStatusToProto(job.Status),
-		TargetGroup:  job.TargetGroup,
-		CreatedAt:    timestamppb.New(job.CreatedAt),
-		UpdatedAt:    timestamppb.New(job.UpdatedAt),
-		Spec:         specToProto(job.Spec),
-		Attempt:      int32(job.Attempt),
-		MaxAttempts:  int32(job.MaxAttempts),
-		DependsOn:    dependsOnToProto(job.DependsOn),
-		StepResults:  stepResultsToProto(job.StepResults),
-		Outputs:      job.Outputs,
-		IgnoreFailed: job.IgnoreFailed,
-		FailureMode:  failureModeToProto(job.FailureMode),
-		StepBarrier:  job.StepBarrier,
-		Key:          job.Key,
+		Id:             int64(job.ID),
+		Name:           job.Name,
+		Status:         jobStatusToProto(job.Status),
+		TargetGroup:    job.TargetGroup,
+		CreatedAt:      timestamppb.New(job.CreatedAt),
+		UpdatedAt:      timestamppb.New(job.UpdatedAt),
+		Spec:           specToProto(job.Spec),
+		Attempt:        int32(job.Attempt),
+		MaxAttempts:    int32(job.MaxAttempts),
+		DependsOn:      dependsOnToProto(job.DependsOn),
+		StepResults:    stepResultsToProto(job.StepResults),
+		Outputs:        job.Outputs,
+		IgnoreFailed:   job.IgnoreFailed,
+		FailureMode:    failureModeToProto(job.FailureMode),
+		StepBarrier:    job.StepBarrier,
+		Key:            job.Key,
+		TriggerName:    job.TriggerName,
+		TriggerType:    job.TriggerType,
+		UpstreamClaims: upstreamClaimsToStruct(job.UpstreamClaims),
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)

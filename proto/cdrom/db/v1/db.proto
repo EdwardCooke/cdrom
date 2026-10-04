@@ -4,6 +4,7 @@ package cdrom.db.v1;
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "cdrom/internal/gen/cdrom/db/v1;dbv1";
@@ -21,6 +22,18 @@ service Database {
   rpc ListPipelines(ListPipelinesRequest) returns (ListPipelinesResponse);
   rpc UpdatePipeline(UpdatePipelineRequest) returns (Pipeline);
   rpc DeletePipeline(DeletePipelineRequest) returns (google.protobuf.Empty);
+  // TriggerRun atomically claims a trigger-fired run (F-09): it creates a
+  // PipelineRun (triggered by the named trigger of the pipeline) and one job
+  // instance per job definition, exactly like CreateRun, but only if no run
+  // of the pipeline started by the same trigger has already started within
+  // the trigger's fire window (the window is the trigger's cron period for a
+  // cron trigger, and a short debounce for webhook/event triggers). The
+  // atomic claim is what keeps a trigger from firing twice for the same
+  // window when the scheduler is restarted or two replicas race: the second
+  // claim finds the first run and is a no-op. It returns the created run (or
+  // the run that already claimed the window) and whether this call created
+  // it.
+  rpc TriggerRun(TriggerRunRequest) returns (TriggerRunResponse);
 
   // Pipeline runs (F-07). A run is one execution of a pipeline, owning a set
   // of job instances. CreateRun atomically creates the run row and one job
@@ -238,6 +251,76 @@ message Pipeline {
   // group, and spec. A run of the pipeline creates one job instance per
   // definition (see CreateRun).
   repeated JobDefinition jobs = 7;
+  // triggers are the ways a run of the pipeline can be started other than a
+  // manual click (F-09): a cron schedule, a webhook, or an event (another
+  // pipeline's run reaching a state).
+  repeated Trigger triggers = 8;
+}
+
+// Trigger is a way to start a pipeline run other than a manual click (F-09).
+// The type selects the trigger kind and the remaining fields carry the
+// kind-specific settings:
+//
+//   - CRON: cron is a standard five-field cron expression (minute, hour,
+//     day-of-month, month, day-of-week). The scheduler's cron loop starts a
+//     run at each scheduled time.
+//   - WEBHOOK: an external POST to the pipeline's webhook endpoint
+//     (authenticated with the shared secret and/or the caller's OIDC token
+//     claims) starts a run, passing the request's JSON body as run
+//     parameters.
+//   - EVENT: when the run of another pipeline (event_pipeline) reaches
+//     event_status, a run of this pipeline is started (chaining).
+//
+// params are static run parameters merged into the run's parameters when the
+// trigger fires (a webhook's payload overrides them on a key collision).
+message Trigger {
+  // name is the trigger's name; it must be unique within the pipeline.
+  string name = 1;
+  // type is the trigger kind (cron, webhook, or event).
+  TriggerType type = 2;
+  // cron is the cron expression for a cron trigger (five fields: minute,
+  // hour, day-of-month, month, day-of-week).
+  string cron = 3;
+  // secret is the optional shared secret for a webhook trigger. When set, a
+  // webhook POST must present it (in the X-Cdrom-Webhook-Secret header) to
+  // start a run; when empty the trigger is open and any POST starts a run.
+  string secret = 4;
+  // event_pipeline is the name of the pipeline whose run reaching
+  // event_status starts a run of this pipeline (an event trigger).
+  string event_pipeline = 5;
+  // event_status is the run status of event_pipeline that fires the trigger
+  // (an event trigger).
+  RunStatus event_status = 6;
+  // params are static run parameters merged into the run's parameters when
+  // the trigger fires.
+  map<string, string> params = 7;
+  // oidc_issuer is the OIDC issuer (a full URL, e.g.
+  // https://github.com/login/oauth or the local IdP's address) of the token
+  // a webhook caller must present to start a run (a webhook trigger). When
+  // set, the API verifies the caller's Bearer token against this issuer's
+  // JWKS and matches its claims against oidc_claims. When empty (and no
+  // secret is set) the trigger is open.
+  string oidc_issuer = 8;
+  // oidc_claims are the claims a webhook caller's OIDC token must carry for
+  // the trigger to match (a webhook trigger). Each key is a claim name and
+  // each value is the expected value; a value of "*" is a wildcard that
+  // matches any value for that claim (including the claim being absent).
+  // Nested claims are addressed with a dot (e.g. "org.name") to reach a
+  // claim that a provider nests (e.g. GitLab's "resource_access"). When
+  // empty the trigger matches any token from oidc_issuer.
+  map<string, string> oidc_claims = 9;
+}
+
+// TriggerType is the kind of a pipeline trigger (F-09).
+enum TriggerType {
+  TRIGGER_TYPE_UNSPECIFIED = 0;
+  // TRIGGER_TYPE_CRON starts a run on a cron schedule.
+  TRIGGER_TYPE_CRON = 1;
+  // TRIGGER_TYPE_WEBHOOK starts a run from an external POST.
+  TRIGGER_TYPE_WEBHOOK = 2;
+  // TRIGGER_TYPE_EVENT starts a run when another pipeline's run reaches a
+  // state (chaining).
+  TRIGGER_TYPE_EVENT = 3;
 }
 
 message CreatePipelineRequest {
@@ -251,13 +334,23 @@ message CreatePipelineRequest {
   // expressed as keys) is validated for cycles and unknown keys before
   // anything is persisted.
   repeated JobDefinition jobs = 4;
+  // triggers are the pipeline's trigger definitions (F-09); when present
+  // they are validated (unique names, kind-specific fields present) and
+  // persisted alongside the pipeline.
+  repeated Trigger triggers = 5;
 }
 
 message GetPipelineRequest {
   int64 id = 1;
 }
 
-message ListPipelinesRequest {}
+message ListPipelinesRequest {
+  // trigger_type, when set (not UNSPECIFIED), restricts the result to
+  // pipelines that have at least one trigger of that type (F-09). The
+  // scheduler's cron and event loops use it to fetch only the pipelines they
+  // act on. When UNSPECIFIED, all pipelines are returned.
+  TriggerType trigger_type = 1;
+}
 
 message ListPipelinesResponse {
   repeated Pipeline pipelines = 1;
@@ -276,6 +369,12 @@ message UpdatePipelineRequest {
   // keys before anything is persisted. When absent the pipeline's job
   // definitions are left unchanged.
   repeated JobDefinition jobs = 5;
+  // triggers, when present, replaces the pipeline's trigger definitions
+  // (F-09): the pipeline's existing triggers are removed and these are
+  // created in their place, and they are validated (unique names,
+  // kind-specific fields present) before anything is persisted. When absent
+  // the pipeline's triggers are left unchanged.
+  repeated Trigger triggers = 6;
 }
 
 message DeletePipelineRequest {
@@ -310,8 +409,8 @@ message PipelineRun {
   int64 pipeline_id = 2;
   // status is the run's overall state, derived from its job instances.
   RunStatus status = 3;
-  // trigger is how the run was started (e.g. "manual"); it is recorded so a
-  // run's origin is visible (F-09 will add cron / webhook / event).
+  // trigger is how the run was started (e.g. "manual", "cron", "webhook", or
+  // "event"); it is recorded so a run's origin is visible (F-09).
   string trigger = 4;
   // params are the run's parameters (F-10); empty until parameters land.
   map<string, string> params = 5;
@@ -323,6 +422,26 @@ message PipelineRun {
   google.protobuf.Timestamp finished_at = 7;
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
+  // trigger_name is the name of the trigger that started the run (F-09);
+  // empty for a manual run.
+  string trigger_name = 10;
+  // source_run_id is the id of the run that started this run (an event
+  // trigger, F-09); 0 when the run was not started by an event trigger.
+  int64 source_run_id = 11;
+  // pipeline_name is the name of the pipeline this run executed (F-09); the
+  // scheduler's event loop uses it to match a finished run against the
+  // pipelines its event triggers watch, without fetching every pipeline.
+  string pipeline_name = 12;
+  // upstream_claims are the claims of the OIDC token a webhook caller
+  // presented to start this run (F-09); empty for a run not started by a
+  // webhook. They are the token's full claims as a JSON object, so a claim
+  // that is itself an object or a list (e.g. GitLab's "user_identities" or
+  // "job_config") keeps its structure rather than being flattened to a
+  // string. They are denormalized onto the run's job instances so the API
+  // can stamp them (prefixed with upstream_) onto the job tokens it hands to
+  // execution targets, letting a job's steps (or the outside resources they
+  // call) see who triggered the run.
+  google.protobuf.Struct upstream_claims = 13;
 }
 
 message CreateRunRequest {
@@ -343,6 +462,54 @@ message CreateRunResponse {
   repeated Job jobs = 2;
 }
 
+// TriggerRunRequest is the request for TriggerRun (F-09): it names the
+// pipeline and the trigger (by name) that fired, the trigger's kind (so the
+// server knows the fire window to deduplicate against), and the run
+// parameters to record on the run (a webhook's payload, or the trigger's
+// static params).
+message TriggerRunRequest {
+  // pipeline_id is the pipeline to execute.
+  int64 pipeline_id = 1;
+  // trigger_name is the name of the trigger that fired (it must be one of
+  // the pipeline's trigger definitions).
+  string trigger_name = 2;
+  // trigger_type is the kind of the trigger that fired (cron, webhook, or
+  // event); it selects the fire window used to deduplicate the run.
+  TriggerType trigger_type = 3;
+  // params are the run's parameters (a webhook's payload, or the trigger's
+  // static params). For an event trigger the caller records the source run's
+  // id under the cdrom.source_run key, which the database deduplicates
+  // against (the same source run can never start the same downstream run
+  // twice).
+  map<string, string> params = 4;
+  // dedup_window is how long a run claimed by this trigger suppresses a
+  // duplicate run of the same pipeline started by the same trigger (a cron
+  // trigger passes its cron period, so a restart or a racing replica cannot
+  // fire the same scheduled time twice). Zero means no time-based
+  // deduplication (a webhook: every valid POST starts a run).
+  google.protobuf.Duration dedup_window = 5;
+  // upstream_claims are the claims of the OIDC token a webhook caller
+  // presented to start the run (F-09); the database records them on the run
+  // and denormalizes them onto its job instances so the API can stamp them
+  // (prefixed with upstream_) onto the job tokens it hands to execution
+  // targets. They are the token's full claims as a JSON object (a claim that
+  // is an object or a list keeps its structure). Empty for a run not started
+  // by a webhook.
+  google.protobuf.Struct upstream_claims = 6;
+}
+
+// TriggerRunResponse is the result of TriggerRun: the run that claimed the
+// trigger's fire window (created by this call, or by an earlier call that
+// already claimed it) plus the job instances created for it (empty when an
+// earlier call created the run), and whether this call created the run.
+message TriggerRunResponse {
+  PipelineRun run = 1;
+  repeated Job jobs = 2;
+  // created is true when this call created the run; false when an earlier
+  // call already claimed the trigger's fire window (this call is a no-op).
+  bool created = 3;
+}
+
 message GetRunRequest {
   int64 id = 1;
 }
@@ -352,6 +519,10 @@ message ListRunsRequest {
   int64 pipeline_id = 1;
   // status of RUN_STATUS_UNSPECIFIED lists runs in all states.
   RunStatus status = 2;
+  // finished_after, when set, lists only runs that finished at or after this
+  // time (a run that has not finished is excluded). The scheduler's event
+  // trigger loop (F-09) uses it to bound its scan to recently-finished runs.
+  google.protobuf.Timestamp finished_after = 3;
 }
 
 message ListRunsResponse {
@@ -677,6 +848,24 @@ message Job {
   // re-creation of the run's job instances. Empty when the job is not part of
   // a pipeline.
   string key = 21;
+  // trigger_name is the name of the trigger that started the run this job is
+  // an instance of (F-09); empty for a job not started by a named trigger.
+  // It is denormalized from the run onto the job instance so the API can
+  // stamp it onto the job token it hands to the execution target.
+  string trigger_name = 22;
+  // trigger_type is how the run this job is an instance of was started
+  // (F-09): "manual", "cron", "webhook", or "event". It is denormalized from
+  // the run onto the job instance so the API can stamp it onto the job token
+  // it hands to the execution target.
+  string trigger_type = 23;
+  // upstream_claims are the claims of the OIDC token a webhook caller
+  // presented to start the run this job is an instance of (F-09); empty for a
+  // job not started by a webhook. They are the token's full claims as a JSON
+  // object (a claim that is an object or a list keeps its structure) and are
+  // denormalized from the run onto the job instance so the API can stamp them
+  // (prefixed with upstream_) onto the job token it hands to the execution
+  // target.
+  google.protobuf.Struct upstream_claims = 24;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative

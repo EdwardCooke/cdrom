@@ -507,6 +507,39 @@ reference it rather than redefining it.
     `UpdatePipelineRequest` (a `jobs` field).
     `POST /api/pipelines` and `PUT /api/pipelines/{id}` accept a `jobs` list;
     `POST /api/jobs` with a `pipeline_id` persists a definition.
+- **Triggers (F-09).** A pipeline may carry **triggers** — ways to start a run
+  other than a manual click: a **cron** trigger (a five-field cron expression),
+  a **webhook** trigger (an external POST; a trigger may authenticate the
+  caller with a shared secret and/or by **OIDC claims** — the caller presents
+  a Bearer token from a configured issuer and the trigger matches only when
+  the token's claims satisfy the trigger's required claims, with `*`
+  wildcards and dot-addressed nested claims; when a trigger sets neither a
+  secret nor an OIDC issuer it is open and any POST starts a run), and an
+  **event** trigger (start a run when a run of another pipeline reaches a
+  watched status). Triggers are stored on the `Pipeline` (a JSON column) and
+  validated at save time. All three kinds funnel through `Database.TriggerRun`
+  (wrapped by the scheduler's `TriggerRun` RPC), which atomically claims the
+  trigger's fire window — creating a `PipelineRun` plus one job instance per
+  job definition only if the trigger has not already started a run for the
+  window (a cron trigger dedups by a window shorter than its period; an event
+  trigger dedups by the source run's id) — so a racing replica can never fire
+  the same window twice. The scheduler runs a leader-gated **cron loop**
+  (fires a run at each cron trigger's scheduled time, listing only pipelines
+  that carry a cron trigger via `ListPipelines`' `trigger_type` filter) and a
+  leader-gated **event loop** (fires a run when another pipeline's run reaches
+  a watched status, listing only pipelines that carry an event trigger and
+  matching a finished run against a rule by the run's `pipeline_name`); the
+  API exposes `POST /api/pipelines/{id}/webhook` for webhook triggers
+  (secret- and/or OIDC-claim-authenticated per the trigger's credentials, open
+  when it sets neither; the JSON body recorded as run parameters). The run
+  records its `trigger` source, `trigger_name`, `pipeline_name`, and, for an
+  event trigger, its `source_run_id`; a webhook-triggered run also records the
+  caller's token claims as `upstream_claims` (a JSON object that preserves
+  each claim's structure — a claim that is an object or a list, e.g. GitLab's
+  `user_identities` or `job_config`, stays an object/list), denormalized onto
+  the run's job instances and stamped onto their job tokens as `upstream_*`
+  claims (alongside `trigger_name` / `trigger_type`). See AGENTS.md for the
+  full design.
 - **Shell override (shell handler).** A step may set the `shell` param to run
   through a user-chosen interpreter instead of executing `command` directly.
   When `shell` is set the target executes `<shell> <args> <command>` — `args`

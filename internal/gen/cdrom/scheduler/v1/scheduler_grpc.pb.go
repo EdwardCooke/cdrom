@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Scheduler_SubmitJob_FullMethodName = "/cdrom.scheduler.v1.Scheduler/SubmitJob"
-	Scheduler_GetJob_FullMethodName    = "/cdrom.scheduler.v1.Scheduler/GetJob"
-	Scheduler_ListJobs_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/ListJobs"
-	Scheduler_CancelJob_FullMethodName = "/cdrom.scheduler.v1.Scheduler/CancelJob"
-	Scheduler_RerunJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/RerunJob"
-	Scheduler_CreateRun_FullMethodName = "/cdrom.scheduler.v1.Scheduler/CreateRun"
+	Scheduler_SubmitJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/SubmitJob"
+	Scheduler_GetJob_FullMethodName     = "/cdrom.scheduler.v1.Scheduler/GetJob"
+	Scheduler_ListJobs_FullMethodName   = "/cdrom.scheduler.v1.Scheduler/ListJobs"
+	Scheduler_CancelJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/CancelJob"
+	Scheduler_RerunJob_FullMethodName   = "/cdrom.scheduler.v1.Scheduler/RerunJob"
+	Scheduler_CreateRun_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/CreateRun"
+	Scheduler_TriggerRun_FullMethodName = "/cdrom.scheduler.v1.Scheduler/TriggerRun"
 )
 
 // SchedulerClient is the client API for Scheduler service.
@@ -62,6 +63,12 @@ type SchedulerClient interface {
 	// left pending for the dependency resolver). The run's overall status is
 	// derived from its job instances by the scheduler's run-status loop.
 	CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*Run, error)
+	// TriggerRun starts a run of a pipeline from a trigger (F-09): it atomically
+	// claims the trigger's fire window (Database.TriggerRun, so a trigger can
+	// never fire twice for the same window) and, when this call created the
+	// run, drives its job instances exactly like CreateRun. The API's webhook
+	// endpoint and the scheduler's cron and event loops call it.
+	TriggerRun(ctx context.Context, in *TriggerRunRequest, opts ...grpc.CallOption) (*Run, error)
 }
 
 type schedulerClient struct {
@@ -132,6 +139,16 @@ func (c *schedulerClient) CreateRun(ctx context.Context, in *CreateRunRequest, o
 	return out, nil
 }
 
+func (c *schedulerClient) TriggerRun(ctx context.Context, in *TriggerRunRequest, opts ...grpc.CallOption) (*Run, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Run)
+	err := c.cc.Invoke(ctx, Scheduler_TriggerRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SchedulerServer is the server API for Scheduler service.
 // All implementations must embed UnimplementedSchedulerServer
 // for forward compatibility.
@@ -167,6 +184,12 @@ type SchedulerServer interface {
 	// left pending for the dependency resolver). The run's overall status is
 	// derived from its job instances by the scheduler's run-status loop.
 	CreateRun(context.Context, *CreateRunRequest) (*Run, error)
+	// TriggerRun starts a run of a pipeline from a trigger (F-09): it atomically
+	// claims the trigger's fire window (Database.TriggerRun, so a trigger can
+	// never fire twice for the same window) and, when this call created the
+	// run, drives its job instances exactly like CreateRun. The API's webhook
+	// endpoint and the scheduler's cron and event loops call it.
+	TriggerRun(context.Context, *TriggerRunRequest) (*Run, error)
 	mustEmbedUnimplementedSchedulerServer()
 }
 
@@ -194,6 +217,9 @@ func (UnimplementedSchedulerServer) RerunJob(context.Context, *RerunJobRequest) 
 }
 func (UnimplementedSchedulerServer) CreateRun(context.Context, *CreateRunRequest) (*Run, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRun not implemented")
+}
+func (UnimplementedSchedulerServer) TriggerRun(context.Context, *TriggerRunRequest) (*Run, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerRun not implemented")
 }
 func (UnimplementedSchedulerServer) mustEmbedUnimplementedSchedulerServer() {}
 func (UnimplementedSchedulerServer) testEmbeddedByValue()                   {}
@@ -324,6 +350,24 @@ func _Scheduler_CreateRun_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Scheduler_TriggerRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).TriggerRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_TriggerRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).TriggerRun(ctx, req.(*TriggerRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Scheduler_ServiceDesc is the grpc.ServiceDesc for Scheduler service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -354,6 +398,10 @@ var Scheduler_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateRun",
 			Handler:    _Scheduler_CreateRun_Handler,
+		},
+		{
+			MethodName: "TriggerRun",
+			Handler:    _Scheduler_TriggerRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

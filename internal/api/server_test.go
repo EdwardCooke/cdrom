@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,11 +17,12 @@ import (
 )
 
 // fakeScheduler is a stub SchedulerClient that records the last SubmitJob,
-// RerunJob, and CreateRun requests and returns a canned job / run.
+// RerunJob, CreateRun, and TriggerRun requests and returns a canned job / run.
 type fakeScheduler struct {
 	submitted *schedpb.SubmitJobRequest
 	rerun     *schedpb.RerunJobRequest
 	created   *schedpb.CreateRunRequest
+	triggered *schedpb.TriggerRunRequest
 	job       *schedpb.Job
 	run       *schedpb.Run
 }
@@ -36,6 +38,14 @@ func (f *fakeScheduler) CreateRun(ctx context.Context, in *schedpb.CreateRunRequ
 		return f.run, nil
 	}
 	return &schedpb.Run{Id: 1, PipelineId: in.GetPipelineId(), Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: in.GetTrigger()}, nil
+}
+
+func (f *fakeScheduler) TriggerRun(ctx context.Context, in *schedpb.TriggerRunRequest, opts ...grpc.CallOption) (*schedpb.Run, error) {
+	f.triggered = in
+	if f.run != nil {
+		return f.run, nil
+	}
+	return &schedpb.Run{Id: 1, PipelineId: in.GetPipelineId(), Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: "webhook", TriggerName: in.GetTriggerName()}, nil
 }
 
 func (f *fakeScheduler) GetJob(ctx context.Context, in *schedpb.GetJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
@@ -361,6 +371,13 @@ func (f *fakeDatabase) CreatePipeline(ctx context.Context, in *dbpb.CreatePipeli
 	return &dbpb.Pipeline{Id: 1, Name: in.GetName()}, nil
 }
 
+func (f *fakeDatabase) GetPipeline(ctx context.Context, in *dbpb.GetPipelineRequest, opts ...grpc.CallOption) (*dbpb.Pipeline, error) {
+	if f.pipeline != nil {
+		return f.pipeline, nil
+	}
+	return &dbpb.Pipeline{Id: in.GetId(), Name: "pipeline"}, nil
+}
+
 func (f *fakeDatabase) CreateJob(ctx context.Context, in *dbpb.CreateJobRequest, opts ...grpc.CallOption) (*dbpb.Job, error) {
 	f.createdJob = in
 	if f.job != nil {
@@ -478,5 +495,205 @@ func TestSubmitStandaloneJobGoesToScheduler(t *testing.T) {
 	}
 	if fakeDB.createdJob != nil {
 		t.Error("database.CreateJob was called for a standalone job, want it routed to the scheduler")
+	}
+}
+
+// webhookPipeline returns a canned pipeline with a single webhook trigger (the
+// given secret) for the API's webhook handler tests (F-09).
+func webhookPipeline(id int64, secret string) *dbpb.Pipeline {
+	return &dbpb.Pipeline{
+		Id:   id,
+		Name: "deploy",
+		Triggers: []*dbpb.Trigger{
+			{Name: "hook", Type: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK, Secret: secret,
+				Params: map[string]string{"env": "staging"}},
+		},
+	}
+}
+
+// doWebhook posts to the pipeline's webhook endpoint with the given secret
+// header and JSON body.
+func doWebhook(t *testing.T, ts *httptest.Server, pipelineID int64, secret, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+fmt.Sprintf("/api/pipelines/%d/webhook", pipelineID), bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		req.Header.Set(webhookSecretHeader, secret)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	return resp
+}
+
+// TestWebhookStartsRun verifies that a webhook POST with a valid secret
+// (F-09) starts a run of the pipeline via the scheduler's TriggerRun RPC,
+// merging the trigger's static params with the request's JSON body (the body
+// wins on a key collision).
+func TestWebhookStartsRun(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: webhookPipeline(3, "s3cret")}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := doWebhook(t, ts, 3, "s3cret", `{"commit": "abc123", "env": "prod"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fakeSched.triggered == nil {
+		t.Fatal("scheduler.TriggerRun was not called")
+	}
+	if fakeSched.triggered.GetPipelineId() != 3 {
+		t.Errorf("pipeline id = %d, want 3", fakeSched.triggered.GetPipelineId())
+	}
+	if fakeSched.triggered.GetTriggerName() != "hook" {
+		t.Errorf("trigger = %q, want hook", fakeSched.triggered.GetTriggerName())
+	}
+	if fakeSched.triggered.GetTriggerType() != dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK {
+		t.Errorf("type = %v, want WEBHOOK", fakeSched.triggered.GetTriggerType())
+	}
+	// The static param (env=staging) is overridden by the body (env=prod);
+	// the body's commit param is added.
+	if got := fakeSched.triggered.GetParams()["env"]; got != "prod" {
+		t.Errorf("params[env] = %q, want prod (body overrides static)", got)
+	}
+	if got := fakeSched.triggered.GetParams()["commit"]; got != "abc123" {
+		t.Errorf("params[commit] = %q, want abc123", got)
+	}
+}
+
+// TestWebhookEmptyBody verifies that a webhook POST with a valid secret and an
+// empty body starts a run with the trigger's static params only (F-09).
+func TestWebhookEmptyBody(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: webhookPipeline(3, "s3cret")}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := doWebhook(t, ts, 3, "s3cret", "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fakeSched.triggered == nil {
+		t.Fatal("scheduler.TriggerRun was not called")
+	}
+	if got := fakeSched.triggered.GetParams()["env"]; got != "staging" {
+		t.Errorf("params[env] = %q, want staging (static param)", got)
+	}
+}
+
+// TestWebhookRejectsBadSecret verifies that a webhook POST with a secret that
+// matches none of the pipeline's webhook triggers is rejected with 401 (F-09).
+func TestWebhookRejectsBadSecret(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: webhookPipeline(3, "s3cret")}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := doWebhook(t, ts, 3, "wrong", `{"commit": "abc"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if fakeSched.triggered != nil {
+		t.Error("scheduler.TriggerRun was called for a bad secret, want it rejected")
+	}
+}
+
+// TestWebhookRejectsMissingSecret verifies that a webhook POST with no secret
+// header is rejected with 401 (F-09).
+func TestWebhookRejectsMissingSecret(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: webhookPipeline(3, "s3cret")}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := doWebhook(t, ts, 3, "", `{"commit": "abc"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	if fakeSched.triggered != nil {
+		t.Error("scheduler.TriggerRun was called for a missing secret, want it rejected")
+	}
+}
+
+// TestWebhookOpenTrigger verifies that a webhook trigger with an empty secret
+// is open: any POST (with or without a secret header) starts a run (F-09).
+func TestWebhookOpenTrigger(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: webhookPipeline(3, "")}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// No secret header at all.
+	resp := doWebhook(t, ts, 3, "", `{"commit": "abc"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fakeSched.triggered == nil {
+		t.Fatal("scheduler.TriggerRun was not called for an open trigger")
+	}
+	if fakeSched.triggered.GetTriggerName() != "hook" {
+		t.Errorf("trigger = %q, want hook", fakeSched.triggered.GetTriggerName())
+	}
+	if got := fakeSched.triggered.GetParams()["env"]; got != "staging" {
+		t.Errorf("params[env] = %q, want staging (static param)", got)
+	}
+	if got := fakeSched.triggered.GetParams()["commit"]; got != "abc" {
+		t.Errorf("params[commit] = %q, want abc", got)
+	}
+}
+
+// TestWebhookNoTrigger verifies that a webhook POST to a pipeline with no
+// webhook trigger is rejected with 404 (F-09).
+func TestWebhookNoTrigger(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: &dbpb.Pipeline{Id: 3, Name: "deploy"}}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := doWebhook(t, ts, 3, "s3cret", `{"commit": "abc"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if fakeSched.triggered != nil {
+		t.Error("scheduler.TriggerRun was called for a pipeline with no webhook trigger")
+	}
+}
+
+// TestWebhookRejectsInvalidBody verifies that a webhook POST with a valid
+// secret but a malformed JSON body is rejected with 400 (F-09).
+func TestWebhookRejectsInvalidBody(t *testing.T) {
+	fakeDB := &fakeDatabase{pipeline: webhookPipeline(3, "s3cret")}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp := doWebhook(t, ts, 3, "s3cret", `{not valid json`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if fakeSched.triggered != nil {
+		t.Error("scheduler.TriggerRun was called for an invalid body, want it rejected")
 	}
 }

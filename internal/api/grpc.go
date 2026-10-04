@@ -661,10 +661,12 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
 		return nil, err
 	}
-	// Look up the job so the new token carries the same pipeline/group scope.
+	// Look up the job so the new token carries the same pipeline/group scope
+	// and the same trigger and upstream claims as the job's original token.
 	// A nil db client (e.g. in tests) simply means the scope is left empty.
 	var pipelineID int64
-	var targetGroup string
+	var targetGroup, triggerName, triggerType string
+	var upstreamClaims map[string]any
 	if s.db != nil {
 		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
 		if err != nil {
@@ -672,8 +674,11 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		}
 		pipelineID = job.GetPipelineId()
 		targetGroup = job.GetTargetGroup()
+		triggerName = job.GetTriggerName()
+		triggerType = job.GetTriggerType()
+		upstreamClaims = upstreamClaimsFromStruct(job.GetUpstreamClaims())
 	}
-	token, err := s.jobAuth.Exchange(ctx, req.GetJobId(), pipelineID, targetGroup, req.GetAudience())
+	token, err := s.jobAuth.Exchange(ctx, req.GetJobId(), pipelineID, targetGroup, triggerName, triggerType, req.GetAudience(), upstreamClaims)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "api: exchange job token: %v", err)
 	}
@@ -935,12 +940,16 @@ func (s *GRPCServer) dispatch(group string, job *apipb.Job, token string) int {
 // mintJobToken requests a job token for job from the IdP when job-token auth
 // is enabled. It returns "" when disabled or when minting fails (the job is
 // still dispatched; the target's status reports will be rejected until it has
-// a valid token).
+// a valid token). The token carries the trigger that started the run
+// (trigger_name/trigger_type) and the upstream OIDC claims a webhook caller
+// presented (prefixed with upstream_), so a job's steps — and the outside
+// resources they call — can see how the run was started.
 func (s *GRPCServer) mintJobToken(ctx context.Context, job *apipb.Job) string {
 	if !s.jobAuth.Enabled() {
 		return ""
 	}
-	token, err := s.jobAuth.Mint(ctx, job.GetId(), job.GetPipelineId(), job.GetTargetGroup())
+	token, err := s.jobAuth.Mint(ctx, job.GetId(), job.GetPipelineId(), job.GetTargetGroup(),
+		job.GetTriggerName(), job.GetTriggerType(), upstreamClaimsFromStruct(job.GetUpstreamClaims()))
 	if err != nil {
 		s.logger.Warn("api: mint job token failed; dispatching without token", "job", job.GetId(), "err", err)
 		return ""
@@ -1114,23 +1123,26 @@ func bearerToken(ctx context.Context) string {
 
 func toAPIJob(job *dbpb.Job) *apipb.Job {
 	return &apipb.Job{
-		Id:           job.GetId(),
-		PipelineId:   job.GetPipelineId(),
-		Name:         job.GetName(),
-		Status:       job.GetStatus(),
-		TargetGroup:  job.GetTargetGroup(),
-		StartedAt:    job.GetStartedAt(),
-		FinishedAt:   job.GetFinishedAt(),
-		Spec:         job.GetSpec(),
-		Attempt:      job.GetAttempt(),
-		MaxAttempts:  job.GetMaxAttempts(),
-		DependsOn:    job.GetDependsOn(),
-		StepResults:  job.GetStepResults(),
-		Outputs:      job.GetOutputs(),
-		IgnoreFailed: job.GetIgnoreFailed(),
-		FailureMode:  job.GetFailureMode(),
-		StepBarrier:  job.GetStepBarrier(),
-		Key:          job.GetKey(),
+		Id:             job.GetId(),
+		PipelineId:     job.GetPipelineId(),
+		Name:           job.GetName(),
+		Status:         job.GetStatus(),
+		TargetGroup:    job.GetTargetGroup(),
+		StartedAt:      job.GetStartedAt(),
+		FinishedAt:     job.GetFinishedAt(),
+		Spec:           job.GetSpec(),
+		Attempt:        job.GetAttempt(),
+		MaxAttempts:    job.GetMaxAttempts(),
+		DependsOn:      job.GetDependsOn(),
+		StepResults:    job.GetStepResults(),
+		Outputs:        job.GetOutputs(),
+		IgnoreFailed:   job.GetIgnoreFailed(),
+		FailureMode:    job.GetFailureMode(),
+		StepBarrier:    job.GetStepBarrier(),
+		Key:            job.GetKey(),
+		TriggerName:    job.GetTriggerName(),
+		TriggerType:    job.GetTriggerType(),
+		UpstreamClaims: job.GetUpstreamClaims(),
 	}
 }
 

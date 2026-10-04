@@ -2230,3 +2230,415 @@ func TestCreateJobWithNeedsValidatesDAG(t *testing.T) {
 		t.Error("CreateJob with an unknown need succeeded, want an error")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Triggers (F-09)
+// ---------------------------------------------------------------------------
+
+// TestCreatePipelineWithTriggers verifies that a pipeline's triggers (F-09)
+// are persisted and round-trip through GetPipeline: a cron trigger (with its
+// expression and params), a webhook trigger (with its secret), and an event
+// trigger (with its watched pipeline and status).
+func TestCreatePipelineWithTriggers(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "nightly",
+		Triggers: []*dbpb.Trigger{
+			{Name: "every-minute", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *",
+				Params: map[string]string{"branch": "main"}},
+			{Name: "hook", Type: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK, Secret: "s3cret"},
+			{Name: "on-build", Type: dbpb.TriggerType_TRIGGER_TYPE_EVENT, EventPipeline: "build",
+				EventStatus: dbpb.RunStatus_RUN_STATUS_SUCCEEDED},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if got := len(pipeline.GetTriggers()); got != 3 {
+		t.Fatalf("pipeline triggers = %d, want 3", got)
+	}
+
+	// The triggers round-trip through GetPipeline.
+	fetched, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	byName := map[string]*dbpb.Trigger{}
+	for _, trigger := range fetched.GetTriggers() {
+		byName[trigger.GetName()] = trigger
+	}
+	if cron := byName["every-minute"]; cron == nil || cron.GetCron() != "* * * * *" || cron.GetParams()["branch"] != "main" {
+		t.Errorf("cron trigger = %+v, want cron expression and params", cron)
+	}
+	if hook := byName["hook"]; hook == nil || hook.GetSecret() != "s3cret" {
+		t.Errorf("webhook trigger = %+v, want secret", hook)
+	}
+	if event := byName["on-build"]; event == nil || event.GetEventPipeline() != "build" ||
+		event.GetEventStatus() != dbpb.RunStatus_RUN_STATUS_SUCCEEDED {
+		t.Errorf("event trigger = %+v, want watched pipeline and status", event)
+	}
+}
+
+// TestUpdatePipelineReplacesTriggers verifies that updating a pipeline with a
+// non-nil triggers list replaces its triggers (F-09).
+func TestUpdatePipelineReplacesTriggers(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:     "p",
+		Triggers: []*dbpb.Trigger{{Name: "old", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	updated, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:       pipeline.GetId(),
+		Triggers: []*dbpb.Trigger{{Name: "new", Type: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK, Secret: "s"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+	if got := len(updated.GetTriggers()); got != 1 {
+		t.Fatalf("updated triggers = %d, want 1", got)
+	}
+	if updated.GetTriggers()[0].GetName() != "new" {
+		t.Errorf("updated trigger = %q, want new", updated.GetTriggers()[0].GetName())
+	}
+}
+
+// TestCreatePipelineWebhookOptionalSecret verifies that a webhook trigger with
+// an empty secret is accepted (F-09): the secret is optional and only enforced
+// on the webhook endpoint when set.
+func TestCreatePipelineWebhookOptionalSecret(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:     "open",
+		Triggers: []*dbpb.Trigger{{Name: "open-hook", Type: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline with an empty-secret webhook trigger: %v (want accepted)", err)
+	}
+	fetched, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	if got := len(fetched.GetTriggers()); got != 1 {
+		t.Fatalf("triggers = %d, want 1", got)
+	}
+	if fetched.GetTriggers()[0].GetSecret() != "" {
+		t.Errorf("secret = %q, want empty (optional)", fetched.GetTriggers()[0].GetSecret())
+	}
+}
+
+// TestCreatePipelineWebhookOIDCClaims verifies that a webhook trigger's
+// oidc_issuer and oidc_claims round-trip through the database (F-09).
+func TestCreatePipelineWebhookOIDCClaims(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "oidc-hook",
+		Triggers: []*dbpb.Trigger{{
+			Name:       "github",
+			Type:       dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK,
+			OidcIssuer: "https://github.com",
+			OidcClaims: map[string]string{"org": "acme", "repo": "*"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	fetched, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	if got := len(fetched.GetTriggers()); got != 1 {
+		t.Fatalf("triggers = %d, want 1", got)
+	}
+	trigger := fetched.GetTriggers()[0]
+	if trigger.GetOidcIssuer() != "https://github.com" {
+		t.Errorf("oidc_issuer = %q, want https://github.com", trigger.GetOidcIssuer())
+	}
+	if trigger.GetOidcClaims()["org"] != "acme" || trigger.GetOidcClaims()["repo"] != "*" {
+		t.Errorf("oidc_claims = %v, want org=acme repo=*", trigger.GetOidcClaims())
+	}
+}
+
+// TestCreatePipelineRejectsWebhookEmptyClaimName verifies that a webhook
+// trigger with an empty claim name in oidc_claims is rejected at save time
+// (F-09).
+func TestCreatePipelineRejectsWebhookEmptyClaimName(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "bad-claim",
+		Triggers: []*dbpb.Trigger{{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK,
+			OidcIssuer: "https://idp.example", OidcClaims: map[string]string{"": "v"}}},
+	})
+	if err == nil {
+		t.Fatal("CreatePipeline with an empty claim name: want an error, got nil")
+	}
+}
+
+// TestCreatePipelineRejectsInvalidTriggers verifies that a pipeline with
+// malformed triggers is rejected at save time (F-09): an empty name, a
+// duplicate name, a cron trigger with no/invalid expression, and an event
+// trigger with no watched pipeline or status. (A webhook trigger's secret is
+// optional, so a webhook with no secret is valid.)
+func TestCreatePipelineRejectsInvalidTriggers(t *testing.T) {
+	cases := []struct {
+		name     string
+		triggers []*dbpb.Trigger
+	}{
+		{"empty name", []*dbpb.Trigger{{Name: "", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *"}}},
+		{"duplicate name", []*dbpb.Trigger{
+			{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *"},
+			{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK, Secret: "s"},
+		}},
+		{"cron no expression", []*dbpb.Trigger{{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON}}},
+		{"cron invalid expression", []*dbpb.Trigger{{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "not a cron"}}},
+		{"event no pipeline", []*dbpb.Trigger{{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_EVENT, EventStatus: dbpb.RunStatus_RUN_STATUS_SUCCEEDED}}},
+		{"event no status", []*dbpb.Trigger{{Name: "x", Type: dbpb.TriggerType_TRIGGER_TYPE_EVENT, EventPipeline: "build"}}},
+		{"no type", []*dbpb.Trigger{{Name: "x"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := startServer(t)
+			_, err := client.CreatePipeline(context.Background(), &dbpb.CreatePipelineRequest{
+				Name: "p", Triggers: tc.triggers,
+			})
+			if err == nil {
+				t.Fatalf("CreatePipeline with %s succeeded, want an error", tc.name)
+			}
+			if status.Code(err) != codes.InvalidArgument {
+				t.Errorf("error code = %v, want InvalidArgument", status.Code(err))
+			}
+		})
+	}
+}
+
+// TestTriggerRunCreatesRun verifies that TriggerRun (F-09) creates a run of
+// the pipeline (with one job instance per job definition) and records the
+// trigger's source and name on the run.
+func TestTriggerRunCreatesRun(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:     "nightly",
+		Jobs:     []*dbpb.JobDefinition{jobDef("build", "", "linux-pool")},
+		Triggers: []*dbpb.Trigger{{Name: "every-minute", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+
+	resp, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+		PipelineId:  pipeline.GetId(),
+		TriggerName: "every-minute",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON,
+		DedupWindow: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun: %v", err)
+	}
+	if !resp.GetCreated() {
+		t.Fatalf("created = false, want true")
+	}
+	run := resp.GetRun()
+	if run.GetTrigger() != "cron" {
+		t.Errorf("run trigger = %q, want cron", run.GetTrigger())
+	}
+	if run.GetTriggerName() != "every-minute" {
+		t.Errorf("run trigger_name = %q, want every-minute", run.GetTriggerName())
+	}
+	if got := len(resp.GetJobs()); got != 1 {
+		t.Errorf("run created %d jobs, want 1", got)
+	}
+}
+
+// TestTriggerRunDedupsCron verifies that a second TriggerRun for the same
+// cron trigger within the dedup window is a no-op (F-09): it returns the
+// existing run and reports created=false, so a racing replica cannot fire the
+// same scheduled time twice.
+func TestTriggerRunDedupsCron(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:     "nightly",
+		Jobs:     []*dbpb.JobDefinition{jobDef("build", "", "linux-pool")},
+		Triggers: []*dbpb.Trigger{{Name: "every-minute", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	first, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+		PipelineId:  pipeline.GetId(),
+		TriggerName: "every-minute",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON,
+		DedupWindow: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun (1st): %v", err)
+	}
+	if !first.GetCreated() {
+		t.Fatalf("first TriggerRun created = false, want true")
+	}
+	// A duplicate within the window is a no-op.
+	second, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+		PipelineId:  pipeline.GetId(),
+		TriggerName: "every-minute",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON,
+		DedupWindow: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun (2nd): %v", err)
+	}
+	if second.GetCreated() {
+		t.Errorf("second TriggerRun created = true, want false (deduped)")
+	}
+	if second.GetRun().GetId() != first.GetRun().GetId() {
+		t.Errorf("second run id = %d, want the first run's id %d", second.GetRun().GetId(), first.GetRun().GetId())
+	}
+}
+
+// TestTriggerRunDedupsEvent verifies that an event trigger's run is
+// deduplicated by its source run's id (F-09): the same source run can never
+// start the same downstream run twice.
+func TestTriggerRunDedupsEvent(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{jobDef("deploy", "", "linux-pool")},
+		Triggers: []*dbpb.Trigger{{Name: "on-build", Type: dbpb.TriggerType_TRIGGER_TYPE_EVENT,
+			EventPipeline: "build", EventStatus: dbpb.RunStatus_RUN_STATUS_SUCCEEDED}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	params := map[string]string{"cdrom.source_run": "100", "cdrom.source_pipeline": "build"}
+	first, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+		PipelineId:  pipeline.GetId(),
+		TriggerName: "on-build",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_EVENT,
+		Params:      params,
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun (1st): %v", err)
+	}
+	if !first.GetCreated() {
+		t.Fatalf("first TriggerRun created = false, want true")
+	}
+	// The source run's id is recorded on the run.
+	if first.GetRun().GetSourceRunId() != 100 {
+		t.Errorf("run source_run_id = %d, want 100", first.GetRun().GetSourceRunId())
+	}
+	// The same source run is a no-op.
+	second, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+		PipelineId:  pipeline.GetId(),
+		TriggerName: "on-build",
+		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_EVENT,
+		Params:      params,
+	})
+	if err != nil {
+		t.Fatalf("TriggerRun (2nd): %v", err)
+	}
+	if second.GetCreated() {
+		t.Errorf("second TriggerRun created = true, want false (deduped by source run)")
+	}
+}
+
+// TestTriggerRunValidates verifies that TriggerRun (F-09) rejects a request
+// with no pipeline id or trigger name.
+func TestTriggerRunValidates(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	if _, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{TriggerName: "x"}); err == nil {
+		t.Error("TriggerRun with no pipeline_id: want error, got nil")
+	}
+	if _, err := client.TriggerRun(ctx, &dbpb.TriggerRunRequest{PipelineId: 1}); err == nil {
+		t.Error("TriggerRun with no trigger_name: want error, got nil")
+	}
+}
+
+// TestListPipelinesFilterByTriggerType verifies that ListPipelines (F-09)
+// restricts its result to pipelines that carry at least one trigger of the
+// requested type: the scheduler's cron and event loops use it to fetch only
+// the pipelines they act on. An UNSPECIFIED type returns every pipeline.
+func TestListPipelinesFilterByTriggerType(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// A pipeline with a cron trigger, one with an event trigger, and one with
+	// no triggers at all.
+	if _, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:     "cron-pipeline",
+		Triggers: []*dbpb.Trigger{{Name: "c", Type: dbpb.TriggerType_TRIGGER_TYPE_CRON, Cron: "* * * * *"}},
+	}); err != nil {
+		t.Fatalf("CreatePipeline (cron): %v", err)
+	}
+	if _, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "event-pipeline",
+		Triggers: []*dbpb.Trigger{{Name: "e", Type: dbpb.TriggerType_TRIGGER_TYPE_EVENT,
+			EventPipeline: "cron-pipeline", EventStatus: dbpb.RunStatus_RUN_STATUS_SUCCEEDED}},
+	}); err != nil {
+		t.Fatalf("CreatePipeline (event): %v", err)
+	}
+	if _, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: "plain"}); err != nil {
+		t.Fatalf("CreatePipeline (plain): %v", err)
+	}
+
+	names := func(resp *dbpb.ListPipelinesResponse) map[string]bool {
+		out := make(map[string]bool, len(resp.GetPipelines()))
+		for _, p := range resp.GetPipelines() {
+			out[p.GetName()] = true
+		}
+		return out
+	}
+
+	// No filter: every pipeline is returned.
+	all, err := client.ListPipelines(ctx, &dbpb.ListPipelinesRequest{})
+	if err != nil {
+		t.Fatalf("ListPipelines (all): %v", err)
+	}
+	if got := len(all.GetPipelines()); got != 3 {
+		t.Errorf("ListPipelines (all) = %d pipelines, want 3", got)
+	}
+
+	// Cron filter: only the cron pipeline.
+	cronResp, err := client.ListPipelines(ctx, &dbpb.ListPipelinesRequest{TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON})
+	if err != nil {
+		t.Fatalf("ListPipelines (cron): %v", err)
+	}
+	if got := names(cronResp); len(got) != 1 || !got["cron-pipeline"] {
+		t.Errorf("ListPipelines (cron) = %v, want only cron-pipeline", got)
+	}
+
+	// Event filter: only the event pipeline.
+	eventResp, err := client.ListPipelines(ctx, &dbpb.ListPipelinesRequest{TriggerType: dbpb.TriggerType_TRIGGER_TYPE_EVENT})
+	if err != nil {
+		t.Fatalf("ListPipelines (event): %v", err)
+	}
+	if got := names(eventResp); len(got) != 1 || !got["event-pipeline"] {
+		t.Errorf("ListPipelines (event) = %v, want only event-pipeline", got)
+	}
+
+	// Webhook filter: no pipeline has a webhook trigger, so none are returned.
+	webhookResp, err := client.ListPipelines(ctx, &dbpb.ListPipelinesRequest{TriggerType: dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK})
+	if err != nil {
+		t.Fatalf("ListPipelines (webhook): %v", err)
+	}
+	if got := len(webhookResp.GetPipelines()); got != 0 {
+		t.Errorf("ListPipelines (webhook) = %d pipelines, want 0", got)
+	}
+}

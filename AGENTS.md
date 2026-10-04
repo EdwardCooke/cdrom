@@ -33,14 +33,14 @@ N-tier architecture with the following layers (top to bottom):
      worker group it appends an "assignment" event to the shared event log,
      which every API pod tails and fans out to its live workers (the workers'
      ~1 s poll is the authoritative catch-up path). It no longer dials a
-     specific API pod. It runs the five background loops (below) on exactly
+     specific API pod. It runs the background loops (below) on exactly
      one replica at a time via **leader election** — a portable lease on the
      Database service (`AcquireLease` / `ReleaseLease` / `GetLease`) with a
      long TTL backstop and a short heartbeat window (the leader heartbeats on
      every renewal, so a follower takes over quickly once the leader's
      heartbeat goes stale) — so only the leader reaps, retries, resolves
-     dependencies, re-derives run status, and re-derives group jobs' fan-out
-     status. It
+     dependencies, re-derives run status, re-derives group jobs' fan-out
+     status, and fires cron / event triggers. It
      also **creates pipeline runs** (F-07): `CreateRun`
      asks the Database service to create a `PipelineRun` plus one job instance
      per job definition and then drives the instances, and a background
@@ -52,10 +52,19 @@ N-tier architecture with the following layers (top to bottom):
      policy (F-04), **cancels** a job by persisting the cancellation and
      signalling the execution target to stop the work (F-05), a background
      **dependency resolver** that skips a pending job whose dependency failed
-     (or dispatches it once every dependency succeeded, F-06), and a background
+     (or dispatches it once every dependency succeeded, F-06), a background
      **job-status loop** that re-derives each in-flight group job's overall
      status from the per-worker outcomes of its fan-out executions (see
-     Fan-out below) and fans the change out to the UI.
+     Fan-out below) and fans the change out to the UI, a background
+     **cron trigger loop** that starts a run of a pipeline at each of its
+     cron triggers' scheduled times (F-09), and a background **event trigger
+     loop** that starts a run of a pipeline when a run of another pipeline
+     reaches a status one of its event triggers watches (F-09). It also
+     **starts trigger-fired runs** (F-09): `TriggerRun` asks the Database
+     service to atomically claim a trigger's fire window (creating a
+     `PipelineRun` plus one job instance per job definition only if the
+     trigger has not already started a run for the window) and then drives
+     the instances.
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -409,6 +418,112 @@ scheduler dispatches ready jobs in parallel where possible.
   `POST /api/pipelines` and `PUT /api/pipelines/{id}` accept a `jobs` list;
   `POST /api/jobs` with a `pipeline_id` persists a definition.
 
+**Triggers (F-09):** a pipeline may carry **triggers** — ways to start a run
+other than a manual click: a **cron** trigger (a standard five-field cron
+expression), a **webhook** trigger (an external POST; a trigger may
+authenticate the caller with a shared secret and/or by **OIDC claims** — the
+caller presents a Bearer token from a configured issuer and the trigger
+matches only when the token's claims satisfy the trigger's required claims,
+with `*` wildcards and dot-addressed nested claims; when a trigger sets
+neither a secret nor an OIDC issuer it is open and any POST starts a run),
+and an **event** trigger (start a run when a run of another pipeline reaches a
+watched status, i.e. chaining). Triggers are stored on the `Pipeline` (a JSON
+column) and validated at save time (unique non-empty names; a cron expression
+that parses; an event pipeline + status; a webhook's `oidc_claims` entries
+have non-empty claim names).
+
+- **`TriggerRun` is the single, atomic claim path.** All three kinds funnel
+  through `Database.TriggerRun` (wrapped by the scheduler's `TriggerRun` RPC):
+  it creates a `PipelineRun` (started by the named trigger) plus one job
+  instance per job definition — reusing `CreateRun`'s `createRunAndInstances`
+  — but only if the trigger has not already started a run for the same fire
+  window. The check and the create run in one transaction that locks the
+  pipeline row, so a racing replica is serialized: the first claim creates the
+  run, the rest see it and no-op. The run records its `trigger` source
+  (`cron` / `webhook` / `event`), its `trigger_name`, and, for an event
+  trigger, its `source_run_id`. For a webhook trigger it also records the
+  caller's token claims as the run's `upstream_claims` (a JSON object that
+  preserves each claim's structure — a claim that is an object or a list, e.g.
+  GitLab's `user_identities` or `job_config`, stays an object/list), which are
+  denormalized onto each of the run's job instances (so a job token can carry
+  them, see Job Tokens below). The scheduler's `TriggerRun` RPC drives the
+  claimed run's instances exactly like `CreateRun` (and no-ops when an earlier
+  claim already started the run).
+- **Dedup keeps a trigger from firing twice.** A cron trigger passes a dedup
+  window (shorter than the minimum cron period): a run the same trigger started
+  within the window suppresses a duplicate, so a racing replica cannot fire the
+  same scheduled time twice while the next legitimate fire (a full period
+  later) is not suppressed. An event trigger records the source run's id: the
+  same source run can never start the same downstream run twice.
+- **Cron loop.** A leader-gated background loop
+  (`internal/services/scheduler/cron.go`, started from `cmd/scheduler`) ticks
+  once a second, lists only the pipelines that carry a cron trigger
+  (`ListPipelines` with `trigger_type` set to `cron`), keeps the parsed
+  schedule and next fire time per (pipeline, trigger), and — when a trigger is
+  due — calls `TriggerRun` to claim the run and advances to the next fire
+  time. On a restart it recomputes the next fire as `schedule.Next(now)`, so a
+  time that already passed is not re-fired; the database's dedup is the
+  authoritative guard against the racing-replica case.
+- **Event loop.** A leader-gated background loop
+  (`internal/services/scheduler/eventtrigger.go`, started from
+  `cmd/scheduler`) ticks every few seconds, lists only the pipelines that
+  carry an event trigger (`ListPipelines` with `trigger_type` set to `event`)
+  to build its rules, and — for each recently-finished run (a lookback
+  window) whose pipeline name and status match an event trigger — calls
+  `TriggerRun` to start a run of the triggered pipeline, recording the source
+  run's id and the source pipeline's name in the run's params. The loop
+  matches a run against a rule by the run's `pipeline_name` (preloaded with
+  the run by the database service), so a watched pipeline that carries no
+  trigger of its own still matches. An in-memory set of already-fired source
+  run ids is an optimization; the database's dedup (by source run id) makes a
+  re-fire after a restart a no-op.
+- **Webhook endpoint.** `POST /api/pipelines/{id}/webhook` (API) looks up the
+  pipeline's webhook triggers and, for each, checks every credential the
+  trigger sets: the presented secret (constant-time, via the
+  `X-Cdrom-Webhook-Secret` header) and, when the trigger has an
+  `oidc_issuer`, the caller's Bearer token (verified against the issuer via
+  OIDC discovery + JWKS, cached per issuer in
+  `internal/api/webhookoidc.go`, and matched against the trigger's
+  `oidc_claims` — a `*` value is a wildcard, any other value must be present
+  and equal; nested claims are flattened to dot-addressed keys **for matching
+  only** so a trigger can require a nested claim by its dot path). A trigger
+  matches when **all** of its set credentials are satisfied; a trigger with
+  neither a secret nor an `oidc_issuer` is open and matches any request. On a
+  match the handler decodes the request's JSON body (a flat object of string
+  values; an empty body is allowed) as run parameters, merged over the
+  trigger's static params (the body wins on a collision), and calls the
+  scheduler's `TriggerRun` (which atomically dedups it), passing the matched
+  token's claims (as a JSON object preserving each claim's structure) as the
+  run's `upstream_claims`. A request that matches no trigger is 401; a
+  pipeline with no webhook trigger is 404.
+- **Job-token trigger claims.** The job tokens the API mints for a run's jobs
+  carry the run's trigger context so a downstream application (a step handler,
+  an external service the job calls) can make allow/deny decisions: a
+  `trigger_name` claim (the trigger's name) and a `trigger_type` claim
+  (`cron` / `webhook` / `event`), plus — for a webhook-triggered run — the
+  run's `upstream_claims` stamped as `upstream_<claim>` (e.g. `upstream_org`,
+  `upstream_user`); a claim that is itself an object or a list (e.g. GitLab's
+  `user_identities` or `job_config`) is stamped as that object/list, not
+  flattened to a string. The API reads these off the job (denormalized onto
+  the job instance at run creation) and passes them to the IdP's `job_token`
+  grant, which stamps them onto the RS256 token it signs. `ExchangeJobToken`
+  re-stamps the same trigger context onto the exchanged token.
+- **New RPCs / fields.** `Database.TriggerRun` / `Scheduler.TriggerRun`;
+  `Trigger` message + `TriggerType` enum (db); `triggers` on `Pipeline`,
+  `CreatePipelineRequest`, and `UpdatePipelineRequest` (db); `trigger_type`
+  on `ListPipelinesRequest` (db, so the cron and event loops fetch only the
+  pipelines that carry a trigger of that type); `trigger_name`,
+  `source_run_id`, `pipeline_name`, and `upstream_claims` (a
+  `google.protobuf.Struct` — a JSON object, so a claim that is an object or a
+  list keeps its structure) on `PipelineRun` (db, scheduler);
+  `upstream_claims` (a `google.protobuf.Struct`) on `TriggerRunRequest` (db,
+  scheduler); `oidc_issuer` and `oidc_claims` (a `map<string, string>` of
+  dot-addressed claim name → expected value, used for matching) on `Trigger`
+  (db); `trigger_name`, `trigger_type`, and `upstream_claims` (a
+  `google.protobuf.Struct`) on `Job` (db, api); and `finished_after` on
+  `ListRunsRequest` (db, so the event loop can scan recently-finished runs).
+  `POST /api/pipelines/{id}/webhook` (API).
+
 **Fan-out (worker groups):** a job that targets a worker group runs on
 **every** worker in the group — not on a single worker that wins a claim.
 Each worker's run is a separate **`JobExecution`** (one row per
@@ -613,7 +728,12 @@ internal/
               a pending job once its depends_on dependencies resolve (F-06,
               also the resolver F-08's `needs`-based DAG dispatch reuses) + a
               background job-status loop that re-derives each in-flight group
-              job's overall status from its fan-out executions
+              job's overall status from its fan-out executions + a background
+              cron trigger loop that starts a run at each cron trigger's
+              scheduled time (F-09) + a background event trigger loop that
+              starts a run when another pipeline's run reaches a watched
+              status (F-09) + the TriggerRun RPC that atomically claims a
+              trigger's fire window and drives the run's instances (F-09)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker implementation (implements the executor's
               StepBarrier via the API's ReportStepCompletion/CheckStepBarrier
@@ -804,12 +924,19 @@ open. The API mints one short-lived RS256 token per job: on dispatch it is
 delivered to workers inside the `JobAssignment` (gRPC field `token`), and on
 `GetJob` it is returned in the `Job` for ephemeral agents. Claims: `iss`,
 `sub: "job:<jobID>"`, `aud` (the configured audiences), `exp`, `iat`,
-`job_id`, `pipeline_id`, `target_group`, `token_type: "job"`.
+`job_id`, `pipeline_id`, `target_group`, `token_type: "job"`, plus — when the
+job belongs to a trigger-fired run — `trigger_name` and `trigger_type` and,
+for a webhook-triggered run, the run's `upstream_claims` stamped as
+`upstream_<claim>` (see the Job-token trigger claims note under Triggers
+above).
 - **Exchange:** a job can request a **new token for a different audience**
 (e.g. an outside resource it must call) via the `ExchangeJobToken` RPC. The
 caller presents its existing job token (scoped to the job) and a target
 `audience`; the API mints a fresh token from the IdP stamped for that
 audience. Any audience is accepted — the IdP stamps whatever is requested.
+The exchanged token re-stamps the job's trigger context (`trigger_name`,
+`trigger_type`, and `upstream_*` claims) so the downstream audience sees the
+same identity that triggered the run.
 - **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs
 (`UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts` with a
 `namespace`, `DeleteArtifact`) require a `Bearer <token>` in the gRPC
@@ -848,7 +975,7 @@ To exercise the mTLS mint path, run both with the `tls` section set (see
   push + pull** dispatch (workers poll pending-for-group ~1 s as the
   authoritative path; API pods tail the log at ~50 ms and nudge local workers),
   **scheduler leader election** (a portable lease on the Database service so only
-  one replica runs the five background loops; ownership and liveness are
+  one replica runs the background loops; ownership and liveness are
   decoupled — a long TTL backstop keeps ownership stable across transient blips
   while a short heartbeat window lets a follower take over quickly once the
   leader's heartbeat goes stale), and **cross-pod near-live logs** (a lean

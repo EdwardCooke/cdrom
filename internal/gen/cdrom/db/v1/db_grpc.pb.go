@@ -25,6 +25,7 @@ const (
 	Database_ListPipelines_FullMethodName           = "/cdrom.db.v1.Database/ListPipelines"
 	Database_UpdatePipeline_FullMethodName          = "/cdrom.db.v1.Database/UpdatePipeline"
 	Database_DeletePipeline_FullMethodName          = "/cdrom.db.v1.Database/DeletePipeline"
+	Database_TriggerRun_FullMethodName              = "/cdrom.db.v1.Database/TriggerRun"
 	Database_CreateRun_FullMethodName               = "/cdrom.db.v1.Database/CreateRun"
 	Database_GetRun_FullMethodName                  = "/cdrom.db.v1.Database/GetRun"
 	Database_ListRuns_FullMethodName                = "/cdrom.db.v1.Database/ListRuns"
@@ -87,6 +88,18 @@ type DatabaseClient interface {
 	ListPipelines(ctx context.Context, in *ListPipelinesRequest, opts ...grpc.CallOption) (*ListPipelinesResponse, error)
 	UpdatePipeline(ctx context.Context, in *UpdatePipelineRequest, opts ...grpc.CallOption) (*Pipeline, error)
 	DeletePipeline(ctx context.Context, in *DeletePipelineRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// TriggerRun atomically claims a trigger-fired run (F-09): it creates a
+	// PipelineRun (triggered by the named trigger of the pipeline) and one job
+	// instance per job definition, exactly like CreateRun, but only if no run
+	// of the pipeline started by the same trigger has already started within
+	// the trigger's fire window (the window is the trigger's cron period for a
+	// cron trigger, and a short debounce for webhook/event triggers). The
+	// atomic claim is what keeps a trigger from firing twice for the same
+	// window when the scheduler is restarted or two replicas race: the second
+	// claim finds the first run and is a no-op. It returns the created run (or
+	// the run that already claimed the window) and whether this call created
+	// it.
+	TriggerRun(ctx context.Context, in *TriggerRunRequest, opts ...grpc.CallOption) (*TriggerRunResponse, error)
 	// Pipeline runs (F-07). A run is one execution of a pipeline, owning a set
 	// of job instances. CreateRun atomically creates the run row and one job
 	// instance per job definition in the pipeline (remapping each instance's
@@ -333,6 +346,16 @@ func (c *databaseClient) DeletePipeline(ctx context.Context, in *DeletePipelineR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_DeletePipeline_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) TriggerRun(ctx context.Context, in *TriggerRunRequest, opts ...grpc.CallOption) (*TriggerRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TriggerRunResponse)
+	err := c.cc.Invoke(ctx, Database_TriggerRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -786,6 +809,18 @@ type DatabaseServer interface {
 	ListPipelines(context.Context, *ListPipelinesRequest) (*ListPipelinesResponse, error)
 	UpdatePipeline(context.Context, *UpdatePipelineRequest) (*Pipeline, error)
 	DeletePipeline(context.Context, *DeletePipelineRequest) (*emptypb.Empty, error)
+	// TriggerRun atomically claims a trigger-fired run (F-09): it creates a
+	// PipelineRun (triggered by the named trigger of the pipeline) and one job
+	// instance per job definition, exactly like CreateRun, but only if no run
+	// of the pipeline started by the same trigger has already started within
+	// the trigger's fire window (the window is the trigger's cron period for a
+	// cron trigger, and a short debounce for webhook/event triggers). The
+	// atomic claim is what keeps a trigger from firing twice for the same
+	// window when the scheduler is restarted or two replicas race: the second
+	// claim finds the first run and is a no-op. It returns the created run (or
+	// the run that already claimed the window) and whether this call created
+	// it.
+	TriggerRun(context.Context, *TriggerRunRequest) (*TriggerRunResponse, error)
 	// Pipeline runs (F-07). A run is one execution of a pipeline, owning a set
 	// of job instances. CreateRun atomically creates the run row and one job
 	// instance per job definition in the pipeline (remapping each instance's
@@ -1002,6 +1037,9 @@ func (UnimplementedDatabaseServer) UpdatePipeline(context.Context, *UpdatePipeli
 }
 func (UnimplementedDatabaseServer) DeletePipeline(context.Context, *DeletePipelineRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeletePipeline not implemented")
+}
+func (UnimplementedDatabaseServer) TriggerRun(context.Context, *TriggerRunRequest) (*TriggerRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TriggerRun not implemented")
 }
 func (UnimplementedDatabaseServer) CreateRun(context.Context, *CreateRunRequest) (*CreateRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRun not implemented")
@@ -1239,6 +1277,24 @@ func _Database_DeletePipeline_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).DeletePipeline(ctx, req.(*DeletePipelineRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_TriggerRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TriggerRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).TriggerRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_TriggerRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).TriggerRun(ctx, req.(*TriggerRunRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2043,6 +2099,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeletePipeline",
 			Handler:    _Database_DeletePipeline_Handler,
+		},
+		{
+			MethodName: "TriggerRun",
+			Handler:    _Database_TriggerRun_Handler,
 		},
 		{
 			MethodName: "CreateRun",
