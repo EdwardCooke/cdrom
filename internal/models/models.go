@@ -16,7 +16,12 @@ type Pipeline struct {
 	gorm.Model
 	Name        string `gorm:"uniqueIndex;not null" json:"name"`
 	Description string `json:"description"`
-	Jobs        []Job  `json:"jobs,omitempty"`
+	// FailureMode is the pipeline's default failure mode (see FailureMode) for
+	// its jobs that fan out to a worker group. A job that sets its own
+	// FailureMode overrides the pipeline's; a job that sets none inherits this
+	// value (defaulting to FailureModeAll when the pipeline sets none).
+	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
+	Jobs        []Job       `json:"jobs,omitempty"`
 }
 
 // PipelineRun is one execution of a pipeline (F-07): a first-class execution
@@ -100,6 +105,26 @@ const (
 	// step never ran; it does not fail the job.
 	StepStatusSkipped  StepStatus = "skipped"
 	StepStatusTimedOut StepStatus = "timed_out"
+)
+
+// FailureMode controls how a job that runs on several workers (a job targeting
+// a worker group, which runs on every worker in the group) is judged from the
+// per-worker outcomes. It is set at the pipeline level and may be overridden
+// per job; a job that sets no failure mode inherits its pipeline's (defaulting
+// to FailureModeAll). It only affects jobs that fan out to more than one
+// worker; a job on a single target is unaffected.
+type FailureMode string
+
+const (
+	// FailureModeAll: the job succeeds only if every worker's run succeeds;
+	// any worker that fails or times out fails the job.
+	FailureModeAll FailureMode = "all"
+	// FailureModeBestEffort: the job succeeds if every worker's run reaches a
+	// terminal state (a per-worker failure or timeout is recorded but does not
+	// fail the job).
+	FailureModeBestEffort FailureMode = "best_effort"
+	// FailureModeAny: the job succeeds as soon as one worker's run succeeds.
+	FailureModeAny FailureMode = "any"
 )
 
 // StepResult is the terminal outcome of one step of a job's execution spec,
@@ -235,6 +260,18 @@ type JobSpec struct {
 	// does not change the job's own status or stop a failed step from failing
 	// the job (that is a step's IgnoreFailed).
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
+	// FailureMode controls how a job that fans out to a worker group is judged
+	// from the per-worker outcomes (see FailureMode). An empty value means the
+	// job inherits its pipeline's failure mode (defaulting to FailureModeAll).
+	FailureMode FailureMode `json:"failure_mode,omitempty"`
+	// StepBarrier, when true, makes a job that fans out to a worker group
+	// synchronize its workers at each step boundary: after a worker completes
+	// a step it waits until every worker alive at the step's start has
+	// completed it before starting the next step. A worker that dies mid-step
+	// is dropped from the barrier (it is no longer alive), so a dead worker
+	// cannot wedge the job. It only affects jobs that fan out to more than
+	// one worker; a job on a single target runs its steps unbarriered.
+	StepBarrier bool `json:"step_barrier,omitempty"`
 }
 
 // Job is a single unit of work belonging to a pipeline.
@@ -301,6 +338,72 @@ type Job struct {
 	// the job so the scheduler's dependency resolver can treat a failed job
 	// with the flag set as satisfied without re-reading the spec.
 	IgnoreFailed bool `json:"ignore_failed"`
+	// FailureMode is the job's failure mode (see FailureMode), denormalized
+	// from the spec (or the pipeline's default) when the job was created. The
+	// scheduler's job-status loop uses it to derive the job's overall status
+	// from the per-worker outcomes of a job that fanned out to a worker group.
+	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
+	// StepBarrier is the job's step-barrier flag (see JobSpec.StepBarrier),
+	// denormalized from the spec when the job was created. It is set on the
+	// job so the execution target can tell from the job alone whether to
+	// synchronize its workers at step boundaries.
+	StepBarrier bool `json:"step_barrier"`
+}
+
+// StepCompletion records that one worker completed one step of a job's
+// current attempt (the cross-worker step barrier). A job that fans out to a
+// worker group with the step barrier enabled waits, after each step, until
+// every worker alive at the step's start has a StepCompletion row for that
+// step; the barrier is satisfied when that is the case. A worker that dies
+// mid-step is dropped from the barrier (it is no longer alive), so a dead
+// worker cannot wedge the job.
+type StepCompletion struct {
+	gorm.Model
+	// JobID is the job the step belongs to.
+	JobID uint `gorm:"uniqueIndex:idx_step_completion_unique,priority:1;not null" json:"job_id"`
+	// WorkerName is the worker that completed the step.
+	WorkerName string `gorm:"uniqueIndex:idx_step_completion_unique,priority:2;not null" json:"worker_name"`
+	// StepIndex is the 0-based index of the step that was completed.
+	StepIndex int `gorm:"uniqueIndex:idx_step_completion_unique,priority:3" json:"step_index"`
+	// Attempt is the job attempt this completion belongs to (F-04); a retry
+	// starts a fresh set of completions.
+	Attempt int `gorm:"uniqueIndex:idx_step_completion_unique,priority:4" json:"attempt"`
+}
+
+// JobExecution is one worker's run of a job (fan-out). A job that targets a
+// worker group runs on every worker in the group; each worker's run is a
+// separate JobExecution, tracked independently so the job's overall status can
+// be derived from the per-worker outcomes (see FailureMode). A job that runs
+// on a single target (an ephemeral agent, or a group with one worker) has a
+// single execution.
+//
+// The Job row's status is the *derived* overall status (maintained by the
+// scheduler's job-status loop); each JobExecution's status is that worker's
+// own outcome, reported by the worker.
+type JobExecution struct {
+	gorm.Model
+	// JobID is the job this execution runs.
+	JobID uint `gorm:"index:idx_job_execution_job_attempt,priority:1;not null" json:"job_id"`
+	// WorkerName is the worker that runs (or ran) this execution.
+	WorkerName string `gorm:"index;not null" json:"worker_name"`
+	// Attempt is the job attempt this execution belongs to (F-04); a retry
+	// creates a fresh set of executions.
+	Attempt int `gorm:"index:idx_job_execution_job_attempt,priority:2" json:"attempt"`
+	// Status is this execution's state: running while the worker is executing
+	// the job, and a terminal status (succeeded, failed, cancelled, or
+	// timed_out) once the worker reports its outcome.
+	Status JobStatus `gorm:"default:running;index" json:"status"`
+	// StartedAt is when the worker started the execution.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	// FinishedAt is when the execution reached a terminal status; nil while
+	// it is still running.
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	// StepResults is the terminal outcome of each step that ran (or was
+	// skipped by its condition) during this worker's run of the job (F-06),
+	// reported by the worker alongside the execution's final status.
+	StepResults []StepResult `gorm:"type:text;serializer:json" json:"step_results,omitempty"`
+	// Outputs are the named values this worker's run produced (F-06).
+	Outputs map[string]string `gorm:"type:text;serializer:json" json:"outputs,omitempty"`
 }
 
 // Worker is a long-lived worker process registered on a deployment target.
@@ -392,19 +495,28 @@ type Event struct {
 // availability). A replica acquires a lease, renews it periodically, and runs
 // the work that must run on exactly one replica (the scheduler's background
 // loops) only while it holds the lease. If the holder stops renewing (a crash
-// or a network partition) the lease expires after its TTL and another replica
-// can take over, so the work is never left unattended.
+// or a network partition) another replica can take over, so the work is never
+// left unattended.
 //
-// The row is keyed by Name (unique); Holder records which replica currently
-// holds it and ExpiresAt when the lease lapses.
+// Ownership and liveness are decoupled. The row is keyed by Name (unique);
+// Holder records which replica currently holds it, ExpiresAt is the long TTL
+// backstop (ownership lapses then even if the holder is still heartbeating),
+// and LastHeartbeat is when the holder last renewed it. A follower may take
+// over once LastHeartbeat is stale (older than the heartbeat window) even if
+// ExpiresAt has not lapsed, so a restarted or wedged leader is detected
+// quickly instead of waiting for the full TTL.
 type Lease struct {
 	gorm.Model
 	// Name is the lease's name (e.g. "scheduler"); unique.
 	Name string `gorm:"uniqueIndex;not null" json:"name"`
 	// Holder is the identity of the replica that currently holds the lease.
 	Holder string `gorm:"not null" json:"holder"`
-	// ExpiresAt is when the lease lapses if the holder does not renew it.
+	// ExpiresAt is the lease's TTL backstop: ownership lapses then if the
+	// holder has not renewed.
 	ExpiresAt time.Time `gorm:"not null" json:"expires_at"`
+	// LastHeartbeat is when the holder last renewed the lease; a follower may
+	// take over once this is older than the heartbeat window.
+	LastHeartbeat time.Time `gorm:"not null" json:"last_heartbeat"`
 }
 
 // All lists every model the database service must migrate. Add new entities
@@ -414,6 +526,8 @@ func All() []any {
 		&Pipeline{},
 		&PipelineRun{},
 		&Job{},
+		&JobExecution{},
+		&StepCompletion{},
 		&Worker{},
 		&IDPSigningKey{},
 		&IDPAuthCode{},

@@ -48,6 +48,21 @@ service API {
   // ListPendingByGroup.
   rpc ListPendingJobs(ListPendingJobsRequest) returns (ListPendingJobsResponse);
   rpc ReportJobStatus(ReportJobStatusRequest) returns (Job);
+  // ReportStepCompletion records that the calling worker has completed a step
+  // of a job (the cross-worker step barrier). A worker that runs a job with a
+  // step barrier reports each step it finishes; the barrier for a step is
+  // satisfied once every worker that is alive has completed it. The API
+  // forwards the completion to the Database service. When job-token auth is
+  // enabled the caller must present a job token scoped to the job.
+  rpc ReportStepCompletion(ReportStepCompletionRequest) returns (google.protobuf.Empty);
+  // CheckStepBarrier reports whether the barrier for a job's step is satisfied
+  // (every worker alive at the step's start has completed it) or whether the
+  // job has been cancelled (so a waiting worker can stop). A worker that runs
+  // a job with a step barrier polls it after each step before proceeding to
+  // the next. The API forwards the check to the Database service. When
+  // job-token auth is enabled the caller must present a job token scoped to
+  // the job.
+  rpc CheckStepBarrier(CheckStepBarrierRequest) returns (CheckStepBarrierResponse);
   // CancelJob is called by the scheduler to signal the execution target
   // running a job to stop the work (F-05). The API delivers a JobCancellation
   // down the worker's WatchJobs stream (for a long-lived worker) or, for an
@@ -179,6 +194,12 @@ message Job {
   // created. It controls how a job that fanned out to a worker group is
   // judged from the per-worker outcomes.
   cdrom.db.v1.FailureMode failure_mode = 18;
+  // step_barrier is the job's step-barrier flag, denormalized from the spec
+  // when the job was created. When true, a job that fans out to a worker
+  // group synchronizes its workers at each step boundary: after a worker
+  // completes a step it waits until every worker alive at the step's start has
+  // completed it before starting the next step.
+  bool step_barrier = 19;
 }
 
 message JobAssignment {
@@ -282,6 +303,43 @@ message ReportJobStatusRequest {
   // outputs are the named values the job produced (F-06); absent/empty leaves
   // the previously recorded outputs unchanged.
   map<string, string> outputs = 6;
+  // worker_name is the worker reporting the status (set by long-lived
+  // workers). When set and the job targets a worker group, the status is
+  // recorded against the worker's execution of the job (fan-out) rather than
+  // the job row; the job's overall status is derived from the executions by
+  // the scheduler. An ephemeral agent (no worker name) reports against the
+  // job row directly.
+  string worker_name = 7;
+}
+
+// ReportStepCompletionRequest records that the calling worker has completed a
+// step of a job (the cross-worker step barrier).
+message ReportStepCompletionRequest {
+  // job_id is the job the step belongs to.
+  int64 job_id = 1;
+  // worker_name is the worker that completed the step.
+  string worker_name = 2;
+  // step_index is the 0-based index of the step the worker completed.
+  int32 step_index = 3;
+}
+
+// CheckStepBarrierRequest asks whether the barrier for a job's step is
+// satisfied or whether the job has been cancelled.
+message CheckStepBarrierRequest {
+  // job_id is the job to check.
+  int64 job_id = 1;
+  // step_index is the 0-based index of the step whose barrier is checked.
+  int32 step_index = 2;
+}
+
+// CheckStepBarrierResponse is the result of a CheckStepBarrier call.
+message CheckStepBarrierResponse {
+  // satisfied is true when every worker alive at the step's start has
+  // completed the step (the worker may proceed to the next step).
+  bool satisfied = 1;
+  // cancelled is true when the job has been cancelled (a waiting worker
+  // should stop and report the job cancelled).
+  bool cancelled = 2;
 }
 
 // JobLogStream names which output stream a chunk of log data belongs to.

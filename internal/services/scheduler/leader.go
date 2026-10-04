@@ -13,19 +13,32 @@ import (
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
-// Leader-election tuning (F-23). The lease TTL is how long a lease stays
-// valid after the last renewal; the renewal interval is how often the holder
-// re-acquires it. The interval is well under the TTL so a healthy holder
-// never lapses, while a crashed or partitioned holder lapses within the TTL
-// and another replica can take over.
+// Leader-election tuning (F-23). Ownership and liveness are decoupled: the
+// lease TTL is a long backstop that keeps the holder's ownership stable
+// across transient blips, while the heartbeat window is short so a follower
+// takes over quickly once the holder stops heartbeating (a restarted or
+// wedged leader). The renewal (heartbeat) interval is well under the
+// heartbeat window so a healthy leader is never seen as stale, and a few
+// missed heartbeats (a crash or partition) are detected within the window
+// instead of the full TTL.
 const (
 	// leaseName is the name of the scheduler's leader lease.
 	leaseName = "scheduler"
-	// leaseTTL is how long a lease is valid from its last renewal.
-	leaseTTL = 10 * time.Second
-	// leaseRenewInterval is how often the holder renews the lease.
-	leaseRenewInterval = 3 * time.Second
+	// leaseTTL is the lease's backstop validity from its last renewal:
+	// ownership lapses this long after the last renewal even if the holder is
+	// still heartbeating. It is deliberately long so a transient blip does not
+	// hand leadership to a peer.
+	leaseTTL = 5 * time.Minute
+	// leaseHeartbeatTTL is the liveness window: a follower may take over the
+	// lease once the holder's last heartbeat is older than this, even if the
+	// TTL backstop has not lapsed. It is a few missed heartbeats.
+	leaseHeartbeatTTL = 30 * time.Second
 )
+
+// leaseRenewInterval is how often the holder renews the lease (and
+// heartbeats). It is well under the heartbeat window. It is a variable (not a
+// constant) so tests can shorten it.
+var leaseRenewInterval = 10 * time.Second
 
 // leaderIdentity returns a stable, unique identity for this scheduler replica
 // to use as the lease holder. It combines the hostname and process id with a
@@ -46,8 +59,8 @@ func leaderIdentity() string {
 
 // StartLeaderElection runs the scheduler's leader-election loop in the
 // background until ctx is cancelled (F-23). It acquires the named lease on
-// the Database service, renews it periodically, and runs the four background
-// loops only while this replica holds the lease.
+// the Database service, renews it (and heartbeats) periodically, and runs the
+// background loops only while this replica holds the lease.
 //
 // onAcquire is called exactly once when this replica transitions from
 // non-leader to leader (it should start the loops); onLose is called exactly
@@ -55,11 +68,14 @@ func leaderIdentity() string {
 // Both callbacks run on the election's goroutine. If onAcquire or onLose is
 // nil the corresponding transition is a no-op.
 //
+// Ownership and liveness are decoupled: the lease has a long TTL backstop
+// (ownership stays stable across transient blips) and a short heartbeat
+// window (a follower takes over quickly once the holder stops heartbeating).
 // The election is best-effort: a failure to reach the Database service on a
 // renewal is treated as "not acquired" for that tick, so a transient outage
 // demotes this replica and another (or the same, once the DB is reachable
 // again) can lead. The conditional acquire on the Database side means two
-// replicas can never both believe they hold the lease for an unexpired term.
+// replicas can never both believe they hold the lease for a live term.
 func (s *Server) StartLeaderElection(ctx context.Context, onAcquire, onLose func()) {
 	if s.db == nil {
 		return
@@ -94,13 +110,14 @@ func (s *Server) runLeaderElection(ctx context.Context, onAcquire, onLose func()
 	}
 }
 
-// tryAcquire attempts to acquire (or renew) the lease and fires the
-// onAcquire / onLose callbacks on a leadership transition.
+// tryAcquire attempts to acquire (or renew, which also heartbeats) the lease
+// and fires the onAcquire / onLose callbacks on a leadership transition.
 func (s *Server) tryAcquire(ctx context.Context, holder string, isLeader *bool, onAcquire, onLose func()) {
 	resp, err := s.db.AcquireLease(ctx, &dbpb.AcquireLeaseRequest{
-		Name:   leaseName,
-		Holder: holder,
-		Ttl:    durationpb.New(leaseTTL),
+		Name:         leaseName,
+		Holder:       holder,
+		Ttl:          durationpb.New(leaseTTL),
+		HeartbeatTtl: durationpb.New(leaseHeartbeatTTL),
 	})
 	if err != nil {
 		s.logger.Warn("scheduler: leader election acquire", "holder", holder, "err", err)

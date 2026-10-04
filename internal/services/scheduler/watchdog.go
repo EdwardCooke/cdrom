@@ -86,6 +86,17 @@ func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, publisher j
 	}
 	now := time.Now()
 	for _, job := range response.GetJobs() {
+		if job.GetTargetGroup() != "" {
+			// A job that targets a worker group runs on every worker in the
+			// group (fan-out). Each worker enforces its own execution's timeout
+			// and reports it to its execution; the job's overall status is
+			// derived from the executions by the job-status loop, which drops a
+			// worker that has gone quiet (a dead worker's in-progress execution
+			// does not block the job). The job-level watchdog would wrongly reap
+			// the whole job as timed_out while other workers are still running,
+			// so group jobs are not reaped here.
+			continue
+		}
 		deadline, ok := jobDeadline(job)
 		if !ok {
 			// No timeout declared: the job runs unbounded.

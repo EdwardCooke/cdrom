@@ -41,6 +41,13 @@ import (
 // executor's per-step error wrapping.
 var ErrTimeout = errors.New("executor: timed out")
 
+// ErrCancelled is returned by Execute (wrapped by a StepBarrier) when a job is
+// cancelled while a worker is waiting at a step barrier. Callers (the worker)
+// use errors.Is(err, ErrCancelled) to report the job as cancelled rather than
+// failed. A job that is cancelled while a step is running is surfaced through
+// the job's context cancellation instead (see the worker's user-cancel path).
+var ErrCancelled = errors.New("executor: cancelled")
+
 // StepOutputDirEnv is the environment variable the executor sets on a step
 // that declares outputs (F-06): it names the per-step directory the step
 // writes its output files into (one file per declared output name). After the
@@ -158,6 +165,18 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			}
 			return stepErr
 		}
+		// The step succeeded. If the job uses the cross-worker step barrier and
+		// there is a next step, synchronize with the job's other workers: wait
+		// until every worker alive at this step's start has completed it before
+		// starting the next step. A worker that dies mid-step is dropped from
+		// the barrier, so a dead worker cannot wedge the job. The barrier is
+		// bounded by the job's context (the job-level timeout, when set), so a
+		// job stuck at a barrier times out like any other hung job.
+		if barrier := StepBarrierFromContext(ctx); barrier != nil && i+1 < len(spec.GetSteps()) {
+			if err := barrier.SyncStep(jobCtx, i); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -228,6 +247,51 @@ func LogSinkFromContext(ctx context.Context) LogSink {
 func StepIndexFromContext(ctx context.Context) int {
 	index, _ := ctx.Value(stepIndexKey{}).(int)
 	return index
+}
+
+// StepBarrier synchronizes the workers of a job that fans out to a worker
+// group at each step boundary (the cross-worker step barrier). After a worker
+// completes a step, Execute calls SyncStep for that step: the worker reports
+// its completion and then waits until every worker alive at the step's start
+// has completed it, before starting the next step. A worker that dies
+// mid-step is dropped from the barrier (it is no longer alive), so a dead
+// worker cannot wedge the job.
+//
+// The barrier is set in the context (via ContextWithStepBarrier) only for a
+// job that has the step-barrier flag set and targets a worker group; a job on
+// a single target (an ephemeral agent) runs its steps unbarriered.
+//
+// Implementations must be safe for concurrent use. SyncStep is called with the
+// job's context (already bounded by the job-level timeout, when set) and must
+// return promptly when that context is cancelled (the worker is shutting down
+// or the job was cancelled). When the job is cancelled while a worker is
+// waiting, SyncStep returns ErrCancelled (wrapped with the context) so the
+// worker can report the job as cancelled.
+type StepBarrier interface {
+	// SyncStep records that the worker completed stepIndex and blocks until the
+	// barrier for that step is satisfied (every worker alive at the step's
+	// start has completed it) or the job is cancelled (it returns ErrCancelled)
+	// or ctx is done (it returns ctx.Err()).
+	SyncStep(ctx context.Context, stepIndex int) error
+}
+
+type stepBarrierKey struct{}
+
+// ContextWithStepBarrier returns a context that carries barrier, so Execute
+// synchronizes the job's workers at each step boundary. A nil barrier returns
+// ctx unchanged.
+func ContextWithStepBarrier(ctx context.Context, barrier StepBarrier) context.Context {
+	if barrier == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, stepBarrierKey{}, barrier)
+}
+
+// StepBarrierFromContext returns the StepBarrier carried by ctx, or nil when
+// none is set.
+func StepBarrierFromContext(ctx context.Context) StepBarrier {
+	barrier, _ := ctx.Value(stepBarrierKey{}).(StepBarrier)
+	return barrier
 }
 
 // ---------------------------------------------------------------------------

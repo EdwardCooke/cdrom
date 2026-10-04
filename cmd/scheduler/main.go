@@ -122,6 +122,7 @@ func (m *loopManager) start() {
 	m.sched.StartRetryLoop(loopsCtx)
 	m.sched.StartDependencyResolver(loopsCtx)
 	m.sched.StartRunStatusLoop(loopsCtx)
+	m.sched.StartJobStatusLoop(loopsCtx)
 }
 
 // stop halts the running loops, if any.

@@ -107,11 +107,35 @@ service Database {
   // so the start is not exclusive (unlike the old single-claim work queue).
   // Starting an execution for a job that is no longer pending (it reached a
   // terminal state, or it is not targeted at the worker's group) is rejected.
-  rpc StartJobExecution(StartJobExecutionRequest) returns (JobExecution);
+  rpc StartJobExecution(StartJobExecutionRequest) returns (StartJobExecutionResponse);
   // ListJobExecutions returns a job's executions (one per worker that started
   // it, for its current attempt). The scheduler's job-status loop uses it to
   // derive the job's overall status from the per-worker outcomes (fan-out).
   rpc ListJobExecutions(ListJobExecutionsRequest) returns (ListJobExecutionsResponse);
+  // UpdateJobExecution records a worker's outcome for its execution of a job
+  // (fan-out): it sets the execution's terminal status (and finished
+  // timestamp, step results, and outputs) for the worker's execution of the
+  // job's current attempt. The job row's overall status is not touched here —
+  // it is derived from the executions by the scheduler's job-status loop.
+  rpc UpdateJobExecution(UpdateJobExecutionRequest) returns (JobExecution);
+  // AbandonWorkerExecutions marks all of a worker's running executions as
+  // failed (fan-out). It is called when a worker re-registers after a
+  // restart: the worker's in-progress executions from before the restart are
+  // abandoned (the worker will not resume them) so they do not block the job's
+  // overall status.
+  rpc AbandonWorkerExecutions(AbandonWorkerExecutionsRequest) returns (google.protobuf.Empty);
+  // ReportStepCompletion records that a worker has completed a step of a job
+  // (the cross-worker step barrier). A worker that runs a job with a step
+  // barrier reports each step it finishes; the barrier for a step is satisfied
+  // once every worker that is alive has reported that step. The completion is
+  // recorded for the job's current attempt.
+  rpc ReportStepCompletion(ReportStepCompletionRequest) returns (google.protobuf.Empty);
+  // CheckStepBarrier reports whether the barrier for a job's step is satisfied
+  // (every worker alive at the step's start has completed it) or whether the
+  // job has been cancelled (so a waiting worker can stop). A worker that runs
+  // a job with a step barrier polls it after each step before proceeding to
+  // the next.
+  rpc CheckStepBarrier(CheckStepBarrierRequest) returns (CheckStepBarrierResponse);
 
   // Event log (F-23, high availability). The event log is the shared,
   // append-only coordination bus: the scheduler's background loops and the
@@ -150,19 +174,32 @@ service Database {
   rpc TailEvents(TailEventsRequest) returns (TailEventsResponse);
 
   // Leader election (F-23, high availability). The scheduler runs background
-  // loops (watchdog, retry, dependency resolver, run-status) that must run on
-  // exactly one replica at a time, or they would publish duplicate events. A
-  // lease is the coordination primitive: a replica acquires a named lease,
-  // renews it periodically, and runs the loops only while it holds it. The
-  // lease expires after its TTL if the holder stops renewing (a crash or
-  // network partition), so another replica can take over.
+  // loops (watchdog, retry, dependency resolver, run-status, job-status) that
+  // must run on exactly one replica at a time, or they would publish duplicate
+  // events. A lease is the coordination primitive: a replica acquires a named
+  // lease, renews it periodically, and runs the loops only while it holds it.
+  //
+  // Ownership and liveness are decoupled. The lease has a long TTL (a
+  // backstop) that keeps the holder's ownership stable across transient
+  // blips, and a short heartbeat window: the leader stamps a heartbeat on
+  // every renewal, and a follower may take over as soon as the holder's
+  // heartbeat is stale (older than the heartbeat window) even though the
+  // long TTL has not lapsed. This detects a restarted or wedged leader
+  // quickly (within a few missed heartbeats) instead of waiting for the full
+  // TTL. The atomic compare-and-swap in AcquireLease still guarantees that at
+  // most one replica takes over, so two replicas can never both lead.
   // AcquireLease acquires the named lease for the caller, or re-acquires it
-  // if the caller already holds it (a renewal). It succeeds if the lease is
-  // free, expired, or already held by the caller; it fails if another
-  // replica holds an unexpired lease.
+  // if the caller already holds it (a renewal, which also refreshes the
+  // heartbeat). It succeeds if the lease is free, its TTL has lapsed, its
+  // heartbeat is stale, or it is already held by the caller; it fails if
+  // another replica holds a live lease.
   rpc AcquireLease(AcquireLeaseRequest) returns (AcquireLeaseResponse);
   // ReleaseLease releases the named lease if the caller holds it.
   rpc ReleaseLease(ReleaseLeaseRequest) returns (google.protobuf.Empty);
+  // GetLease returns the current state of the named lease (holder, TTL
+  // expiry, and last heartbeat) so followers and observers can watch the
+  // leader's liveness. A lease that has never been acquired is NotFound.
+  rpc GetLease(GetLeaseRequest) returns (Lease);
 
   // Workers
   rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
@@ -532,6 +569,14 @@ message JobSpec {
   //     not fail the job).
   //   - ANY: the job succeeds as soon as one worker's run succeeds.
   FailureMode failure_mode = 5;
+  // step_barrier, when true, makes a job that runs on several workers (a job
+  // targeting a worker group) run its steps in lockstep: no worker proceeds
+  // to step N+1 until every worker that is alive has completed step N. The
+  // barrier is computed over the workers that are alive at the time each step
+  // starts (a worker that dies mid-job is dropped from the barrier, so it
+  // does not block the others). It only affects jobs that fan out to more
+  // than one worker; a job on a single target is unaffected.
+  bool step_barrier = 6;
 }
 
 message Job {
@@ -600,6 +645,12 @@ message Job {
   // overall status from the per-worker outcomes of a job that fanned out to
   // a worker group.
   FailureMode failure_mode = 19;
+  // step_barrier is the job's step-barrier flag (see JobSpec.step_barrier),
+  // denormalized from the spec when the job was created. When true, a job
+  // that fanned out to a worker group runs its steps in lockstep: no worker
+  // proceeds to step N+1 until every worker alive at step N's start has
+  // completed step N.
+  bool step_barrier = 20;
 }
 
 message CreateJobRequest {
@@ -739,6 +790,11 @@ message JobExecution {
   google.protobuf.Timestamp finished_at = 7;
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
+  // step_results is the terminal outcome of each step that ran (or was
+  // skipped by its condition) during this worker's run of the job (F-06).
+  repeated StepResult step_results = 10;
+  // outputs are the named values this worker's run produced (F-06).
+  map<string, string> outputs = 11;
 }
 
 // StartJobExecutionRequest asks the database to record that the calling
@@ -754,6 +810,18 @@ message StartJobExecutionRequest {
   google.protobuf.Timestamp started_at = 3;
 }
 
+// StartJobExecutionResponse is the result of a StartJobExecution call. When
+// started is true, execution carries the worker's new execution; when started
+// is false the job was not started (it is no longer pending, or it is not
+// targeted at a worker group) and execution is empty.
+message StartJobExecutionResponse {
+  // started is true when the worker's execution was recorded and the job is
+  // running.
+  bool started = 1;
+  // execution is the worker's execution (set only when started is true).
+  JobExecution execution = 2;
+}
+
 // ListJobExecutionsRequest asks for a job's executions (one per worker that
 // started it, for its current attempt).
 message ListJobExecutionsRequest {
@@ -763,6 +831,87 @@ message ListJobExecutionsRequest {
 
 message ListJobExecutionsResponse {
   repeated JobExecution executions = 1;
+}
+
+// UpdateJobExecutionRequest records a worker's outcome for its execution of a
+// job (fan-out).
+message UpdateJobExecutionRequest {
+  // job_id is the job the execution runs.
+  int64 job_id = 1;
+  // worker_name is the worker whose execution is updated.
+  string worker_name = 2;
+  // status is the execution's new status (a terminal status on the worker's
+  // final report).
+  JobStatus status = 3;
+  // finished_at is the timestamp to record when the execution finishes; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp finished_at = 4;
+  // step_results replaces the execution's recorded per-step outcomes (F-06);
+  // absent/empty leaves the previously recorded results unchanged.
+  repeated StepResult step_results = 5;
+  // outputs replaces the execution's recorded outputs (F-06); absent/empty
+  // leaves the previously recorded outputs unchanged.
+  map<string, string> outputs = 6;
+}
+
+// AbandonWorkerExecutionsRequest asks the database to abandon a worker's
+// running executions (fan-out).
+message AbandonWorkerExecutionsRequest {
+  // worker_name is the worker whose running executions are abandoned.
+  string worker_name = 1;
+}
+
+// StepCompletion is one worker's completion of a step of a job (the
+// cross-worker step barrier). A job that runs on several workers with a step
+// barrier runs its steps in lockstep: no worker proceeds to step N+1 until
+// every worker that is alive has completed step N. Each worker's completion of
+// a step is recorded here (one row per (job, worker, step, attempt)); the
+// barrier for a step is satisfied once every worker alive at the step's start
+// has a completion row for it.
+message StepCompletion {
+  int64 id = 1;
+  // job_id is the job this step belongs to.
+  int64 job_id = 2;
+  // worker_name is the worker that completed the step.
+  string worker_name = 3;
+  // step_index is the 0-based index of the step in the job's spec.
+  int32 step_index = 4;
+  // attempt is the job attempt this completion belongs to (F-04); a retry
+  // creates a fresh set of completions.
+  int32 attempt = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// ReportStepCompletionRequest records that a worker has completed a step of a
+// job (the cross-worker step barrier).
+message ReportStepCompletionRequest {
+  // job_id is the job the step belongs to.
+  int64 job_id = 1;
+  // worker_name is the worker that completed the step.
+  string worker_name = 2;
+  // step_index is the 0-based index of the step the worker completed.
+  int32 step_index = 3;
+}
+
+// CheckStepBarrierRequest asks whether the barrier for a job's step is
+// satisfied (every worker alive at the step's start has completed it) or
+// whether the job has been cancelled (so a waiting worker can stop).
+message CheckStepBarrierRequest {
+  // job_id is the job to check.
+  int64 job_id = 1;
+  // step_index is the 0-based index of the step whose barrier is checked.
+  int32 step_index = 2;
+}
+
+// CheckStepBarrierResponse is the result of a CheckStepBarrier call.
+message CheckStepBarrierResponse {
+  // satisfied is true when every worker alive at the step's start has
+  // completed the step (the worker may proceed to the next step).
+  bool satisfied = 1;
+  // cancelled is true when the job has been cancelled (a waiting worker
+  // should stop and report the job cancelled).
+  bool cancelled = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -859,15 +1008,22 @@ message AcquireLeaseRequest {
   string name = 1;
   // holder is the identity of the replica trying to acquire the lease.
   string holder = 2;
-  // ttl is how long the lease is valid from now; the holder must renew it
-  // before it expires or another replica can take it over.
+  // ttl is the lease's backstop validity from now: the holder keeps ownership
+  // for this long even if it stops heartbeating (a crash or partition). It is
+  // deliberately long so a transient blip does not hand leadership to a peer.
   google.protobuf.Duration ttl = 3;
+  // heartbeat_ttl is the liveness window: a replica may take over the lease
+  // once the current holder's last heartbeat is older than this, even if the
+  // ttl backstop has not lapsed. It is deliberately short (a few missed
+  // heartbeats) so a restarted or wedged leader is detected quickly. When
+  // absent, the server's default is used.
+  google.protobuf.Duration heartbeat_ttl = 4;
 }
 
 message AcquireLeaseResponse {
-  // acquired is true when the caller now holds the lease (it was free,
-  // expired, or already held by the caller); false when another replica
-  // holds an unexpired lease.
+  // acquired is true when the caller now holds the lease (it was free, its
+  // ttl had lapsed, its heartbeat was stale, or it was already held by the
+  // caller); false when another replica holds a live lease.
   bool acquired = 1;
 }
 
@@ -877,6 +1033,25 @@ message ReleaseLeaseRequest {
   // holder is the identity of the replica releasing the lease; the lease is
   // released only if this replica holds it.
   string holder = 2;
+}
+
+message GetLeaseRequest {
+  // name is the name of the lease to read (e.g. "scheduler").
+  string name = 1;
+}
+
+// Lease is the current state of a named leader-election lease.
+message Lease {
+  // name is the lease's name (e.g. "scheduler").
+  string name = 1;
+  // holder is the identity of the replica that currently holds the lease.
+  string holder = 2;
+  // expires_at is when the lease's ttl backstop lapses (ownership is lost
+  // then even if the holder is still heartbeating).
+  google.protobuf.Timestamp expires_at = 3;
+  // last_heartbeat is when the holder last renewed the lease; a follower may
+  // take over once this is older than the heartbeat window.
+  google.protobuf.Timestamp last_heartbeat = 4;
 }
 
 message ClaimJobRetryRequest {

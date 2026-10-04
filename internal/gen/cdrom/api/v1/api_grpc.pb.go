@@ -21,25 +21,27 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	API_RegisterWorker_FullMethodName    = "/cdrom.api.v1.API/RegisterWorker"
-	API_DeregisterWorker_FullMethodName  = "/cdrom.api.v1.API/DeregisterWorker"
-	API_Heartbeat_FullMethodName         = "/cdrom.api.v1.API/Heartbeat"
-	API_WatchJobs_FullMethodName         = "/cdrom.api.v1.API/WatchJobs"
-	API_GetJob_FullMethodName            = "/cdrom.api.v1.API/GetJob"
-	API_StartJobExecution_FullMethodName = "/cdrom.api.v1.API/StartJobExecution"
-	API_ListPendingJobs_FullMethodName   = "/cdrom.api.v1.API/ListPendingJobs"
-	API_ReportJobStatus_FullMethodName   = "/cdrom.api.v1.API/ReportJobStatus"
-	API_CancelJob_FullMethodName         = "/cdrom.api.v1.API/CancelJob"
-	API_StreamJobLogs_FullMethodName     = "/cdrom.api.v1.API/StreamJobLogs"
-	API_ExchangeJobToken_FullMethodName  = "/cdrom.api.v1.API/ExchangeJobToken"
-	API_DispatchJob_FullMethodName       = "/cdrom.api.v1.API/DispatchJob"
-	API_NotifyJobStatus_FullMethodName   = "/cdrom.api.v1.API/NotifyJobStatus"
-	API_NotifyRunStatus_FullMethodName   = "/cdrom.api.v1.API/NotifyRunStatus"
-	API_UploadArtifact_FullMethodName    = "/cdrom.api.v1.API/UploadArtifact"
-	API_DownloadArtifact_FullMethodName  = "/cdrom.api.v1.API/DownloadArtifact"
-	API_GetArtifact_FullMethodName       = "/cdrom.api.v1.API/GetArtifact"
-	API_ListArtifacts_FullMethodName     = "/cdrom.api.v1.API/ListArtifacts"
-	API_DeleteArtifact_FullMethodName    = "/cdrom.api.v1.API/DeleteArtifact"
+	API_RegisterWorker_FullMethodName       = "/cdrom.api.v1.API/RegisterWorker"
+	API_DeregisterWorker_FullMethodName     = "/cdrom.api.v1.API/DeregisterWorker"
+	API_Heartbeat_FullMethodName            = "/cdrom.api.v1.API/Heartbeat"
+	API_WatchJobs_FullMethodName            = "/cdrom.api.v1.API/WatchJobs"
+	API_GetJob_FullMethodName               = "/cdrom.api.v1.API/GetJob"
+	API_StartJobExecution_FullMethodName    = "/cdrom.api.v1.API/StartJobExecution"
+	API_ListPendingJobs_FullMethodName      = "/cdrom.api.v1.API/ListPendingJobs"
+	API_ReportJobStatus_FullMethodName      = "/cdrom.api.v1.API/ReportJobStatus"
+	API_ReportStepCompletion_FullMethodName = "/cdrom.api.v1.API/ReportStepCompletion"
+	API_CheckStepBarrier_FullMethodName     = "/cdrom.api.v1.API/CheckStepBarrier"
+	API_CancelJob_FullMethodName            = "/cdrom.api.v1.API/CancelJob"
+	API_StreamJobLogs_FullMethodName        = "/cdrom.api.v1.API/StreamJobLogs"
+	API_ExchangeJobToken_FullMethodName     = "/cdrom.api.v1.API/ExchangeJobToken"
+	API_DispatchJob_FullMethodName          = "/cdrom.api.v1.API/DispatchJob"
+	API_NotifyJobStatus_FullMethodName      = "/cdrom.api.v1.API/NotifyJobStatus"
+	API_NotifyRunStatus_FullMethodName      = "/cdrom.api.v1.API/NotifyRunStatus"
+	API_UploadArtifact_FullMethodName       = "/cdrom.api.v1.API/UploadArtifact"
+	API_DownloadArtifact_FullMethodName     = "/cdrom.api.v1.API/DownloadArtifact"
+	API_GetArtifact_FullMethodName          = "/cdrom.api.v1.API/GetArtifact"
+	API_ListArtifacts_FullMethodName        = "/cdrom.api.v1.API/ListArtifacts"
+	API_DeleteArtifact_FullMethodName       = "/cdrom.api.v1.API/DeleteArtifact"
 )
 
 // APIClient is the client API for API service.
@@ -83,6 +85,21 @@ type APIClient interface {
 	// ListPendingByGroup.
 	ListPendingJobs(ctx context.Context, in *ListPendingJobsRequest, opts ...grpc.CallOption) (*ListPendingJobsResponse, error)
 	ReportJobStatus(ctx context.Context, in *ReportJobStatusRequest, opts ...grpc.CallOption) (*Job, error)
+	// ReportStepCompletion records that the calling worker has completed a step
+	// of a job (the cross-worker step barrier). A worker that runs a job with a
+	// step barrier reports each step it finishes; the barrier for a step is
+	// satisfied once every worker that is alive has completed it. The API
+	// forwards the completion to the Database service. When job-token auth is
+	// enabled the caller must present a job token scoped to the job.
+	ReportStepCompletion(ctx context.Context, in *ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
+	// (every worker alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// a job with a step barrier polls it after each step before proceeding to
+	// the next. The API forwards the check to the Database service. When
+	// job-token auth is enabled the caller must present a job token scoped to
+	// the job.
+	CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
 	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
@@ -222,6 +239,26 @@ func (c *aPIClient) ReportJobStatus(ctx context.Context, in *ReportJobStatusRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Job)
 	err := c.cc.Invoke(ctx, API_ReportJobStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) ReportStepCompletion(ctx context.Context, in *ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, API_ReportStepCompletion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckStepBarrierResponse)
+	err := c.cc.Invoke(ctx, API_CheckStepBarrier_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -394,6 +431,21 @@ type APIServer interface {
 	// ListPendingByGroup.
 	ListPendingJobs(context.Context, *ListPendingJobsRequest) (*ListPendingJobsResponse, error)
 	ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error)
+	// ReportStepCompletion records that the calling worker has completed a step
+	// of a job (the cross-worker step barrier). A worker that runs a job with a
+	// step barrier reports each step it finishes; the barrier for a step is
+	// satisfied once every worker that is alive has completed it. The API
+	// forwards the completion to the Database service. When job-token auth is
+	// enabled the caller must present a job token scoped to the job.
+	ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error)
+	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
+	// (every worker alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// a job with a step barrier polls it after each step before proceeding to
+	// the next. The API forwards the check to the Database service. When
+	// job-token auth is enabled the caller must present a job token scoped to
+	// the job.
+	CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
 	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
@@ -473,6 +525,12 @@ func (UnimplementedAPIServer) ListPendingJobs(context.Context, *ListPendingJobsR
 }
 func (UnimplementedAPIServer) ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportJobStatus not implemented")
+}
+func (UnimplementedAPIServer) ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportStepCompletion not implemented")
+}
+func (UnimplementedAPIServer) CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckStepBarrier not implemented")
 }
 func (UnimplementedAPIServer) CancelJob(context.Context, *CancelJobRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
@@ -661,6 +719,42 @@ func _API_ReportJobStatus_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(APIServer).ReportJobStatus(ctx, req.(*ReportJobStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_ReportStepCompletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportStepCompletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).ReportStepCompletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_ReportStepCompletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).ReportStepCompletion(ctx, req.(*ReportStepCompletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_CheckStepBarrier_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckStepBarrierRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).CheckStepBarrier(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_CheckStepBarrier_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).CheckStepBarrier(ctx, req.(*CheckStepBarrierRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -868,6 +962,14 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportJobStatus",
 			Handler:    _API_ReportJobStatus_Handler,
+		},
+		{
+			MethodName: "ReportStepCompletion",
+			Handler:    _API_ReportStepCompletion_Handler,
+		},
+		{
+			MethodName: "CheckStepBarrier",
+			Handler:    _API_CheckStepBarrier_Handler,
 		},
 		{
 			MethodName: "CancelJob",

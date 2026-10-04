@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -463,5 +464,82 @@ func TestExecuteConditionUpstreamJobFailedSkips(t *testing.T) {
 	results := collector.All()
 	if len(results) != 1 || results[0].Status != StepStatusSkipped {
 		t.Fatalf("results = %+v, want one skipped result", results)
+	}
+}
+
+// fakeStepBarrier is a StepBarrier for tests: it records the step indices it
+// is asked to synchronize on and returns a configurable error (to simulate a
+// cancellation or failure while waiting at the barrier).
+type fakeStepBarrier struct {
+	synced []int
+	err    error
+}
+
+func (b *fakeStepBarrier) SyncStep(ctx context.Context, stepIndex int) error {
+	b.synced = append(b.synced, stepIndex)
+	return b.err
+}
+
+// TestExecuteStepBarrierSyncsBetweenSteps verifies that, when a step barrier is
+// set in the context, Execute calls SyncStep after each step that is followed
+// by another step (not after the last step), and that the job succeeds when
+// the barrier is satisfied.
+func TestExecuteStepBarrierSyncsBetweenSteps(t *testing.T) {
+	RegisterStepType("barrier-step", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		return nil
+	})
+	barrier := &fakeStepBarrier{}
+	ctx := ContextWithStepBarrier(context.Background(), barrier)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "barrier-step"},
+		{Type: "barrier-step"},
+		{Type: "barrier-step"},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	// SyncStep is called after steps 0 and 1 (each is followed by another
+	// step), but not after step 2 (the last step).
+	if len(barrier.synced) != 2 || barrier.synced[0] != 0 || barrier.synced[1] != 1 {
+		t.Errorf("barrier.synced = %v, want [0 1]", barrier.synced)
+	}
+}
+
+// TestExecuteStepBarrierNoBarrierWhenUnset verifies that, when no step barrier
+// is set in the context, Execute does not synchronize between steps (a job on
+// a single target runs its steps unbarriered).
+func TestExecuteStepBarrierNoBarrierWhenUnset(t *testing.T) {
+	RegisterStepType("barrier-step2", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		return nil
+	})
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "barrier-step2"},
+		{Type: "barrier-step2"},
+	}}
+	// No barrier in the context: Execute must not attempt to synchronize.
+	if err := Execute(context.Background(), spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+// TestExecuteStepBarrierCancelledStopsJob verifies that a barrier that reports
+// the job was cancelled (ErrCancelled) stops the job with that error, so the
+// worker can report the job cancelled (distinct from a failure).
+func TestExecuteStepBarrierCancelledStopsJob(t *testing.T) {
+	RegisterStepType("barrier-step3", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		return nil
+	})
+	barrier := &fakeStepBarrier{err: fmt.Errorf("%w: job cancelled at barrier", ErrCancelled)}
+	ctx := ContextWithStepBarrier(context.Background(), barrier)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "barrier-step3"},
+		{Type: "barrier-step3"},
+	}}
+	err := Execute(ctx, spec, testLogger())
+	if err == nil {
+		t.Fatal("expected an error when the barrier reports cancellation, got nil")
+	}
+	if !errors.Is(err, ErrCancelled) {
+		t.Errorf("error = %v, want it to wrap ErrCancelled", err)
 	}
 }

@@ -41,7 +41,11 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "pipeline name is required")
 	}
-	pipeline := &models.Pipeline{Name: req.GetName(), Description: req.GetDescription()}
+	pipeline := &models.Pipeline{
+		Name:        req.GetName(),
+		Description: req.GetDescription(),
+		FailureMode: failureModeFromProto(req.GetFailureMode()),
+	}
 	if err := s.db.WithContext(ctx).Create(pipeline).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -77,6 +81,9 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 		pipeline.Name = req.GetName()
 	}
 	pipeline.Description = req.GetDescription()
+	if req.GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_UNSPECIFIED {
+		pipeline.FailureMode = failureModeFromProto(req.GetFailureMode())
+	}
 	if err := s.db.WithContext(ctx).Save(&pipeline).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -173,6 +180,19 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 				job.MaxAttempts = def.Spec.Retry.MaxAttempts
 			}
 			job.IgnoreFailed = def.Spec.IgnoreFailed
+			// The instance's step-barrier flag is denormalized from its
+			// definition's spec, mirroring CreateJob.
+			job.StepBarrier = def.Spec.StepBarrier
+			// The instance's failure mode is denormalized from its definition's
+			// spec; when the spec sets none it inherits the pipeline's default
+			// (defaulting to FailureModeAll), mirroring CreateJob.
+			job.FailureMode = def.Spec.FailureMode
+			if job.FailureMode == "" {
+				job.FailureMode = pipeline.FailureMode
+			}
+			if job.FailureMode == "" {
+				job.FailureMode = models.FailureModeAll
+			}
 			if err := tx.Create(job).Error; err != nil {
 				return err
 			}
@@ -320,6 +340,13 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	// scheduler's dependency resolver can treat a failed job with the flag set
 	// as satisfied without re-reading the spec (F-06).
 	job.IgnoreFailed = spec.IgnoreFailed
+	// The job's step-barrier flag is denormalized from the spec so the
+	// execution target can tell from the job alone whether to synchronize its
+	// workers at step boundaries.
+	job.StepBarrier = spec.StepBarrier
+	// The job's failure mode is denormalized from the spec; when the spec sets
+	// none it inherits the pipeline's default (defaulting to FailureModeAll).
+	job.FailureMode = spec.FailureMode
 	if req.GetPipelineId() > 0 {
 		pipelineID := uint(req.GetPipelineId())
 		job.PipelineID = &pipelineID
@@ -327,6 +354,12 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 		if err := s.db.WithContext(ctx).First(&pipeline, pipelineID).Error; err != nil {
 			return nil, grpcErr(err)
 		}
+		if job.FailureMode == "" {
+			job.FailureMode = pipeline.FailureMode
+		}
+	}
+	if job.FailureMode == "" {
+		job.FailureMode = models.FailureModeAll
 	}
 	if req.GetRunId() > 0 {
 		runID := uint(req.GetRunId())
@@ -649,6 +682,298 @@ func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingBy
 	return response, nil
 }
 
+// StartJobExecution records that the calling worker has started running a job
+// (fan-out): it creates the worker's JobExecution for the job's current
+// attempt and marks the job running. A job that targets a worker group runs on
+// every worker in the group; each worker's run is a separate execution, so the
+// start is not exclusive (unlike the old single-claim work queue).
+//
+// The start is rejected (started=false) when the job is no longer pending — it
+// reached a terminal state, or it is not targeted at the worker's group — so a
+// job that finished before a slow worker started it is not run. The execution
+// row is created only when the job is still pending and the job is marked
+// running, so a job that is already running (started by another worker) still
+// gets a fresh execution row for this worker (fan-out), but a job that is
+// terminal does not.
+func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecutionRequest) (*dbpb.StartJobExecutionResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetWorkerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	}
+	db := s.db.WithContext(ctx)
+	var job models.Job
+	if err := db.First(&job, req.GetJobId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// A job that has reached a terminal state is not started. A job that is
+	// still pending or running is started: for fan-out, several workers in the
+	// group each start their own execution, so the start is allowed even after
+	// the first worker has marked the job running.
+	if isTerminalJobStatus(job.Status) {
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
+	}
+	if job.TargetGroup == "" {
+		// A job with an empty target group runs on an ephemeral agent, not on
+		// a long-lived worker; a worker starting it is a no-op.
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
+	}
+	startedAt := time.Now()
+	if timestamp := req.GetStartedAt(); timestamp != nil {
+		startedAt = timestamp.AsTime()
+	}
+	execution := &models.JobExecution{
+		JobID:      uint(req.GetJobId()),
+		WorkerName: req.GetWorkerName(),
+		Attempt:    job.Attempt,
+		Status:     models.JobStatusRunning,
+		StartedAt:  &startedAt,
+	}
+	if err := db.Create(execution).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// Mark the job running (best-effort: it is already running if another
+	// worker started it first; the conditional update is a no-op then).
+	now := time.Now()
+	db.Model(&models.Job{}).
+		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusPending).
+		Updates(map[string]any{
+			"status":     models.JobStatusRunning,
+			"started_at": &startedAt,
+			"updated_at": &now,
+		})
+	return &dbpb.StartJobExecutionResponse{Started: true, Execution: toProtoJobExecution(execution)}, nil
+}
+
+// ListJobExecutions returns a job's executions (one per worker that started
+// it, for its current attempt). The scheduler's job-status loop uses them to
+// derive the job's overall status from the per-worker outcomes (fan-out).
+func (s *Server) ListJobExecutions(ctx context.Context, req *dbpb.ListJobExecutionsRequest) (*dbpb.ListJobExecutionsResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	var job models.Job
+	if err := s.db.WithContext(ctx).First(&job, req.GetJobId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	var executions []models.JobExecution
+	err := s.db.WithContext(ctx).
+		Where("job_id = ? AND attempt = ?", req.GetJobId(), job.Attempt).
+		Order("id").
+		Find(&executions).Error
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListJobExecutionsResponse{}
+	for i := range executions {
+		response.Executions = append(response.Executions, toProtoJobExecution(&executions[i]))
+	}
+	return response, nil
+}
+
+// UpdateJobExecution records a worker's outcome for its execution of a job
+// (fan-out): it sets the execution's status (and finished timestamp, step
+// results, and outputs) for the worker's execution of the job's current
+// attempt. The job row's overall status is not touched here — it is derived
+// from the executions by the scheduler's job-status loop. A late report for an
+// execution that already reached a terminal status is a no-op (the conditional
+// update only applies while the execution is running), so a worker that
+// finished just as its job was cancelled cannot clobber the terminal status.
+func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExecutionRequest) (*dbpb.JobExecution, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetWorkerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	}
+	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
+		return nil, status.Error(codes.InvalidArgument, "status is required")
+	}
+	db := s.db.WithContext(ctx)
+	var job models.Job
+	if err := db.First(&job, req.GetJobId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	modelStatus, err := jobStatusFromProto(req.GetStatus())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	updates := map[string]any{
+		"status":     modelStatus,
+		"updated_at": time.Now(),
+	}
+	if timestamp := req.GetFinishedAt(); timestamp != nil {
+		instant := timestamp.AsTime()
+		updates["finished_at"] = &instant
+	}
+	// The conditional update applies only while the execution is running, so a
+	// late report for an execution that already reached a terminal status is a
+	// no-op (mirroring the job-level terminal-status guard, F-05).
+	result := db.Model(&models.JobExecution{}).
+		Where("job_id = ? AND worker_name = ? AND attempt = ? AND status = ?",
+			req.GetJobId(), req.GetWorkerName(), job.Attempt, models.JobStatusRunning).
+		Updates(updates)
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	// step_results and outputs (F-06) are informational per-step outcomes, not
+	// part of the terminal-status guard: they are persisted whenever the worker
+	// reports them (even on the execution's final report). Like the job-level
+	// equivalents, they use an explicit Select so the JSON serializer runs.
+	if results := req.GetStepResults(); len(results) > 0 {
+		if err := db.Model(&models.JobExecution{}).
+			Where("job_id = ? AND worker_name = ? AND attempt = ?", req.GetJobId(), req.GetWorkerName(), job.Attempt).
+			Select("StepResults").
+			Updates(&models.JobExecution{StepResults: stepResultsFromProto(results)}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	if outputs := req.GetOutputs(); len(outputs) > 0 {
+		if err := db.Model(&models.JobExecution{}).
+			Where("job_id = ? AND worker_name = ? AND attempt = ?", req.GetJobId(), req.GetWorkerName(), job.Attempt).
+			Select("Outputs").
+			Updates(&models.JobExecution{Outputs: outputs}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	var execution models.JobExecution
+	if err := db.Where("job_id = ? AND worker_name = ? AND attempt = ?", req.GetJobId(), req.GetWorkerName(), job.Attempt).
+		First(&execution).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoJobExecution(&execution), nil
+}
+
+// AbandonWorkerExecutions marks all of a worker's running executions as failed
+// (fan-out). It is called when a worker re-registers after a restart: the
+// worker's in-progress executions from before the restart are abandoned (the
+// worker will not resume them) so they do not block the job's overall status.
+// The job row's overall status is re-derived by the scheduler's job-status
+// loop.
+func (s *Server) AbandonWorkerExecutions(ctx context.Context, req *dbpb.AbandonWorkerExecutionsRequest) (*emptypb.Empty, error) {
+	if req.GetWorkerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	}
+	now := time.Now()
+	result := s.db.WithContext(ctx).
+		Model(&models.JobExecution{}).
+		Where("worker_name = ? AND status = ?", req.GetWorkerName(), models.JobStatusRunning).
+		Updates(map[string]any{
+			"status":      models.JobStatusFailed,
+			"finished_at": &now,
+			"updated_at":  now,
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ReportStepCompletion records that a worker completed a step of a job (the
+// cross-worker step barrier). It upserts a StepCompletion row for the job's
+// current attempt: a worker that reports the same step twice (e.g. after a
+// retry of the same attempt) updates the existing row rather than inserting a
+// duplicate. The row is keyed by (job, worker, step, attempt).
+func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepCompletionRequest) (*emptypb.Empty, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetWorkerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	}
+	db := s.db.WithContext(ctx)
+	var job models.Job
+	if err := db.First(&job, req.GetJobId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	completion := &models.StepCompletion{
+		JobID:      uint(req.GetJobId()),
+		WorkerName: req.GetWorkerName(),
+		StepIndex:  int(req.GetStepIndex()),
+		Attempt:    job.Attempt,
+	}
+	// Upsert on the composite key: insert the row if it is absent, otherwise
+	// refresh its timestamp (the completion is idempotent).
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "job_id"}, {Name: "worker_name"}, {Name: "step_index"}, {Name: "attempt"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{"updated_at"}),
+	}).Create(completion).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// CheckStepBarrier reports whether the barrier for a job's step is satisfied
+// (every worker alive at the step's start has completed it) or whether the job
+// has been cancelled. A worker that is not alive (it has not heartbeated
+// within the liveness window) is dropped from the barrier, so a worker that
+// dies mid-step cannot wedge the job. The barrier is satisfied when every
+// alive worker in the job's group has a StepCompletion row for the job's
+// current attempt and the step in question.
+func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrierRequest) (*dbpb.CheckStepBarrierResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	db := s.db.WithContext(ctx)
+	var job models.Job
+	if err := db.First(&job, req.GetJobId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// A cancelled job releases the barrier: a waiting worker should stop and
+	// report the job cancelled.
+	if job.Status == models.JobStatusCancelled {
+		return &dbpb.CheckStepBarrierResponse{Cancelled: true}, nil
+	}
+	// The barrier only applies to a job that fans out to a worker group; a job
+	// on a single target (an ephemeral agent) has no barrier to wait on.
+	if job.TargetGroup == "" {
+		return &dbpb.CheckStepBarrierResponse{Satisfied: true}, nil
+	}
+	var workers []models.Worker
+	if err := db.Where("worker_group = ?", job.TargetGroup).Find(&workers).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// A worker is alive when its last_seen_at is within the liveness window.
+	now := time.Now()
+	alive := make([]string, 0, len(workers))
+	for i := range workers {
+		lastSeen := workers[i].LastSeenAt
+		if lastSeen == nil {
+			continue
+		}
+		if now.Sub(*lastSeen) <= workerAliveThreshold {
+			alive = append(alive, workers[i].Name)
+		}
+	}
+	if len(alive) == 0 {
+		// No alive worker in the group (e.g. every worker is down). The
+		// barrier is vacuously satisfied; the job-status loop and watchdog
+		// handle the job's overall status.
+		return &dbpb.CheckStepBarrierResponse{Satisfied: true}, nil
+	}
+	// Collect the set of workers that have completed this step for the job's
+	// current attempt.
+	var completions []models.StepCompletion
+	if err := db.Where("job_id = ? AND step_index = ? AND attempt = ?",
+		job.ID, int(req.GetStepIndex()), job.Attempt).Find(&completions).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	completed := make(map[string]bool, len(completions))
+	for i := range completions {
+		completed[completions[i].WorkerName] = true
+	}
+	// The barrier is satisfied when every alive worker has completed the step.
+	for _, name := range alive {
+		if !completed[name] {
+			return &dbpb.CheckStepBarrierResponse{Satisfied: false}, nil
+		}
+	}
+	return &dbpb.CheckStepBarrierResponse{Satisfied: true}, nil
+}
+
 // ClaimJobRetry atomically claims the next retry attempt for a job (F-04):
 // it increments the job's attempt counter and resets it to pending (clearing
 // the finished timestamp) only if the job is in a retryable state (pending,
@@ -963,8 +1288,25 @@ func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCo
 // the caller does not specify a limit.
 const defaultTailLimit = 1000
 
-// defaultLeaseTTL is the lease validity when the caller does not specify one.
+// defaultLeaseTTL is the lease's TTL backstop when the caller does not
+// specify one: ownership lapses this long after the last renewal even if the
+// holder is still heartbeating.
 const defaultLeaseTTL = 10 * time.Second
+
+// defaultLeaseHeartbeatTTL is the liveness window when the caller does not
+// specify one: a replica may take over the lease once the holder's last
+// heartbeat is older than this, even if the TTL backstop has not lapsed.
+const defaultLeaseHeartbeatTTL = 30 * time.Second
+
+// workerAliveThreshold is how recent a worker's last_seen_at must be for it to
+// be considered alive. A worker that has not heartbeated within this window is
+// considered dead and is dropped from a job's step barrier (its missing step
+// completion does not block the job). The worker heartbeats every ~10s, so the
+// threshold is a few missed heartbeats. It mirrors the scheduler's
+// workerAliveThreshold so the step barrier and the job-status loop agree on
+// which workers are alive. It is a variable (not a constant) so tests can
+// shorten it.
+var workerAliveThreshold = 30 * time.Second
 
 // appendEvent inserts a single event row and returns its id.
 func (s *Server) appendEvent(ctx context.Context, name, workerGroup string, payload any) (int64, error) {
@@ -1110,20 +1452,25 @@ func (s *Server) TailEvents(ctx context.Context, req *dbpb.TailEventsRequest) (*
 }
 
 // AcquireLease acquires the named lease for the caller, or re-acquires it if
-// the caller already holds it (a renewal). It succeeds if the lease is free,
-// expired, or already held by the caller; it fails if another replica holds
-// an unexpired lease.
+// the caller already holds it (a renewal, which also refreshes the
+// heartbeat). It succeeds if the lease is free, its TTL backstop has lapsed,
+// its heartbeat is stale, or it is already held by the caller; it fails if
+// another replica holds a live lease.
 //
-// The acquire-or-renew is a portable compare-and-swap that is safe on both
-// SQLite and PostgreSQL:
+// Ownership and liveness are decoupled: the long TTL backstop keeps the
+// holder's ownership stable across transient blips, while the short heartbeat
+// window lets a follower take over quickly once the holder stops heartbeating
+// (a restarted or wedged leader). The acquire-or-renew is a portable
+// compare-and-swap that is safe on both SQLite and PostgreSQL:
 //
-//  1. A conditional UPDATE claims the row if it is held by the caller or is
-//     expired. It is a single atomic statement, so two replicas racing for an
-//     expired lease cannot both match it.
+//  1. A conditional UPDATE claims the row if it is held by the caller, or is
+//     held by someone else whose TTL backstop has lapsed or whose heartbeat
+//     is stale. It is a single atomic statement, so two replicas racing for a
+//     stale lease cannot both match it.
 //  2. If the update matched nothing, the row is either absent or held by
-//     someone else with an unexpired lease. The caller tries to INSERT; the
-//     unique constraint on name means at most one racing inserter wins, and a
-//     loser reports that it did not acquire.
+//     someone else with a live lease. The caller tries to INSERT; the unique
+//     constraint on name means at most one racing inserter wins, and a loser
+//     reports that it did not acquire.
 func (s *Server) AcquireLease(ctx context.Context, req *dbpb.AcquireLeaseRequest) (*dbpb.AcquireLeaseResponse, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
@@ -1135,14 +1482,28 @@ func (s *Server) AcquireLease(ctx context.Context, req *dbpb.AcquireLeaseRequest
 	if ttl <= 0 {
 		ttl = defaultLeaseTTL
 	}
+	heartbeatTTL := req.GetHeartbeatTtl().AsDuration()
+	if heartbeatTTL <= 0 {
+		heartbeatTTL = defaultLeaseHeartbeatTTL
+	}
 	now := time.Now()
 	expires := now.Add(ttl)
+	// A lease held by another replica is stale (and thus take-over-able) when
+	// its TTL backstop has lapsed or its last heartbeat is older than the
+	// heartbeat window.
+	heartbeatCutoff := now.Add(-heartbeatTTL)
 	db := s.db.WithContext(ctx)
 
-	// Step 1: claim the row if it is ours or expired.
+	// Step 1: claim the row if it is ours, or held by someone else whose TTL
+	// backstop has lapsed or whose heartbeat is stale.
 	result := db.Model(&models.Lease{}).
-		Where("name = ? AND (holder = ? OR expires_at < ?)", req.GetName(), req.GetHolder(), now).
-		Updates(map[string]interface{}{"holder": req.GetHolder(), "expires_at": expires})
+		Where("name = ? AND (holder = ? OR expires_at < ? OR last_heartbeat < ?)",
+			req.GetName(), req.GetHolder(), now, heartbeatCutoff).
+		Updates(map[string]interface{}{
+			"holder":         req.GetHolder(),
+			"expires_at":     expires,
+			"last_heartbeat": now,
+		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
 	}
@@ -1150,10 +1511,10 @@ func (s *Server) AcquireLease(ctx context.Context, req *dbpb.AcquireLeaseRequest
 		return &dbpb.AcquireLeaseResponse{Acquired: true}, nil
 	}
 
-	// Step 2: the row is absent or held by someone else unexpired. Try to
-	// insert; a racing inserter loses the unique constraint and reports that
-	// it did not acquire.
-	if err := db.Create(&models.Lease{Name: req.GetName(), Holder: req.GetHolder(), ExpiresAt: expires}).Error; err != nil {
+	// Step 2: the row is absent or held by someone else with a live lease.
+	// Try to insert; a racing inserter loses the unique constraint and reports
+	// that it did not acquire.
+	if err := db.Create(&models.Lease{Name: req.GetName(), Holder: req.GetHolder(), ExpiresAt: expires, LastHeartbeat: now}).Error; err != nil {
 		if isUniqueViolation(err) {
 			return &dbpb.AcquireLeaseResponse{Acquired: false}, nil
 		}
@@ -1162,9 +1523,31 @@ func (s *Server) AcquireLease(ctx context.Context, req *dbpb.AcquireLeaseRequest
 	return &dbpb.AcquireLeaseResponse{Acquired: true}, nil
 }
 
+// GetLease returns the current state of the named lease (holder, TTL expiry,
+// and last heartbeat) so followers and observers can watch the leader's
+// liveness. A lease that has never been acquired is NotFound.
+func (s *Server) GetLease(ctx context.Context, req *dbpb.GetLeaseRequest) (*dbpb.Lease, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	var lease models.Lease
+	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&lease).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &dbpb.Lease{
+		Name:          lease.Name,
+		Holder:        lease.Holder,
+		ExpiresAt:     timestamppb.New(lease.ExpiresAt),
+		LastHeartbeat: timestamppb.New(lease.LastHeartbeat),
+	}, nil
+}
+
 // ReleaseLease releases the named lease if the caller holds it. Releasing a
 // lease the caller does not hold is a no-op, so a replica that has already
-// lost the lease can still call this on shutdown without error.
+// lost the lease can still call this on shutdown without error. The row is
+// hard-deleted (Unscoped) so the lease's name is freed and another replica
+// can re-acquire it: a soft delete would leave the row occupying the unique
+// name index and block the next acquire's insert.
 func (s *Server) ReleaseLease(ctx context.Context, req *dbpb.ReleaseLeaseRequest) (*emptypb.Empty, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
@@ -1173,6 +1556,7 @@ func (s *Server) ReleaseLease(ctx context.Context, req *dbpb.ReleaseLeaseRequest
 		return nil, status.Error(codes.InvalidArgument, "holder is required")
 	}
 	result := s.db.WithContext(ctx).
+		Unscoped().
 		Where("name = ? AND holder = ?", req.GetName(), req.GetHolder()).
 		Delete(&models.Lease{})
 	if result.Error != nil {
@@ -1214,6 +1598,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		Description: pipeline.Description,
 		CreatedAt:   timestamppb.New(pipeline.CreatedAt),
 		UpdatedAt:   timestamppb.New(pipeline.UpdatedAt),
+		FailureMode: failureModeToProto(pipeline.FailureMode),
 	}
 }
 
@@ -1251,6 +1636,8 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		StepResults:  stepResultsToProto(job.StepResults),
 		Outputs:      job.Outputs,
 		IgnoreFailed: job.IgnoreFailed,
+		FailureMode:  failureModeToProto(job.FailureMode),
+		StepBarrier:  job.StepBarrier,
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
@@ -1379,6 +1766,8 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 		Timeout:      spec.GetTimeout().AsDuration(),
 		Retry:        retryPolicyFromProto(spec.GetRetry()),
 		IgnoreFailed: spec.GetIgnoreFailed(),
+		FailureMode:  failureModeFromProto(spec.GetFailureMode()),
+		StepBarrier:  spec.GetStepBarrier(),
 	}
 }
 
@@ -1386,7 +1775,7 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 // no steps, no timeout, and no retry policy yields a nil proto (so it
 // round-trips to an empty spec).
 func specToProto(spec models.JobSpec) *dbpb.JobSpec {
-	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil {
+	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil && spec.FailureMode == "" && !spec.StepBarrier {
 		return nil
 	}
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
@@ -1407,6 +1796,8 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 		Timeout:      durationpb.New(spec.Timeout),
 		Retry:        retryPolicyToProto(spec.Retry),
 		IgnoreFailed: spec.IgnoreFailed,
+		FailureMode:  failureModeToProto(spec.FailureMode),
+		StepBarrier:  spec.StepBarrier,
 	}
 }
 
@@ -1470,6 +1861,55 @@ func toProtoWorker(worker *models.Worker) *dbpb.Worker {
 		proto.LastSeenAt = timestamppb.New(*worker.LastSeenAt)
 	}
 	return proto
+}
+
+func toProtoJobExecution(execution *models.JobExecution) *dbpb.JobExecution {
+	proto := &dbpb.JobExecution{
+		Id:          int64(execution.ID),
+		JobId:       int64(execution.JobID),
+		WorkerName:  execution.WorkerName,
+		Attempt:     int32(execution.Attempt),
+		Status:      jobStatusToProto(execution.Status),
+		StepResults: stepResultsToProto(execution.StepResults),
+		Outputs:     execution.Outputs,
+	}
+	if execution.StartedAt != nil {
+		proto.StartedAt = timestamppb.New(*execution.StartedAt)
+	}
+	if execution.FinishedAt != nil {
+		proto.FinishedAt = timestamppb.New(*execution.FinishedAt)
+	}
+	return proto
+}
+
+// failureModeToProto converts a model FailureMode into its proto form. An
+// empty value yields UNSPECIFIED (the caller then applies the default).
+func failureModeToProto(mode models.FailureMode) dbpb.FailureMode {
+	switch mode {
+	case models.FailureModeBestEffort:
+		return dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT
+	case models.FailureModeAny:
+		return dbpb.FailureMode_FAILURE_MODE_ANY
+	case models.FailureModeAll:
+		return dbpb.FailureMode_FAILURE_MODE_ALL
+	default:
+		return dbpb.FailureMode_FAILURE_MODE_UNSPECIFIED
+	}
+}
+
+// failureModeFromProto converts a proto FailureMode into its model form.
+// UNSPECIFIED yields "" (the caller then applies the default).
+func failureModeFromProto(mode dbpb.FailureMode) models.FailureMode {
+	switch mode {
+	case dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT:
+		return models.FailureModeBestEffort
+	case dbpb.FailureMode_FAILURE_MODE_ANY:
+		return models.FailureModeAny
+	case dbpb.FailureMode_FAILURE_MODE_ALL:
+		return models.FailureModeAll
+	default:
+		return ""
+	}
 }
 
 func toProtoIDPSigningKey(key *models.IDPSigningKey) *dbpb.IDPSigningKey {
@@ -1549,6 +1989,17 @@ func runStatusFromProto(status dbpb.RunStatus) (models.RunStatus, error) {
 		return models.RunStatusCancelled, nil
 	default:
 		return "", fmt.Errorf("unknown run status %v", status)
+	}
+}
+
+// isTerminalJobStatus reports whether a job status is terminal (the job will
+// not change again): succeeded, failed, cancelled, timed_out, or skipped.
+func isTerminalJobStatus(status models.JobStatus) bool {
+	switch status {
+	case models.JobStatusSucceeded, models.JobStatusFailed, models.JobStatusCancelled, models.JobStatusTimedOut, models.JobStatusSkipped:
+		return true
+	default:
+		return false
 	}
 }
 

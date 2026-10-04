@@ -33,10 +33,14 @@ N-tier architecture with the following layers (top to bottom):
      worker group it appends an "assignment" event to the shared event log,
      which every API pod tails and fans out to its live workers (the workers'
      ~1 s poll is the authoritative catch-up path). It no longer dials a
-     specific API pod. It runs the four background loops (below) on exactly
+     specific API pod. It runs the five background loops (below) on exactly
      one replica at a time via **leader election** — a portable lease on the
-     Database service (`AcquireLease` / `ReleaseLease`) — so only the leader
-     reaps, retries, resolves dependencies, and re-derives run status. It
+     Database service (`AcquireLease` / `ReleaseLease` / `GetLease`) with a
+     long TTL backstop and a short heartbeat window (the leader heartbeats on
+     every renewal, so a follower takes over quickly once the leader's
+     heartbeat goes stale) — so only the leader reaps, retries, resolves
+     dependencies, re-derives run status, and re-derives group jobs' fan-out
+     status. It
      also **creates pipeline runs** (F-07): `CreateRun`
      asks the Database service to create a `PipelineRun` plus one job instance
      per job definition and then drives the instances, and a background
@@ -46,9 +50,12 @@ N-tier architecture with the following layers (top to bottom):
      declared timeout even if the execution target goes silent (F-03), a
      background **retry loop** that re-dispatches failed jobs per their retry
      policy (F-04), **cancels** a job by persisting the cancellation and
-     signalling the execution target to stop the work (F-05), and a background
+     signalling the execution target to stop the work (F-05), a background
      **dependency resolver** that skips a pending job whose dependency failed
-     (or dispatches it once every dependency succeeded, F-06).
+     (or dispatches it once every dependency succeeded, F-06), and a background
+     **job-status loop** that re-derives each in-flight group job's overall
+     status from the per-worker outcomes of its fan-out executions (see
+     Fan-out below) and fans the change out to the UI.
    - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
      store** (filesystem-backed, streamed uploads/downloads). Every file lives
      in an opaque *namespace* that groups related files; the service is
@@ -355,6 +362,71 @@ definitions, so the pipeline *definition* is separated from each *run* of it.
   status) is published when a run is created and whenever its derived status
   changes; the connect snapshot now also carries the current runs.
 
+**Fan-out (worker groups):** a job that targets a worker group runs on
+**every** worker in the group — not on a single worker that wins a claim.
+Each worker's run is a separate **`JobExecution`** (one row per
+(job, worker, attempt)); the job row's status is the *derived* overall status,
+not a worker's report. This replaces the earlier single-claim work queue
+(F-23), where exactly one worker won the job via an atomic `ClaimJob`.
+
+- **Starting an execution.** When a worker receives an assignment (or finds a
+  pending job for its group on its ~1 s poll) it calls the API's
+  `StartJobExecution`, which records the worker's `JobExecution` for the job's
+  current attempt and (best-effort) marks the job `running`. The start is
+  allowed even after the first worker has already marked the job `running`
+  (fan-out: several workers each start their own execution); it is rejected
+  only when the job has reached a terminal state or has an empty `target_group`
+  (an ephemeral agent, not a worker). The API returns the full job (spec,
+  upstream jobs, and a minted job token) so the worker can execute it.
+- **Reporting an outcome.** A worker reports its outcome to *its own
+  execution*, not the job row: `ReportJobStatus` carries the worker's name,
+  and when the job targets a group the API routes the report to
+  `Database.UpdateJobExecution` (status, finish time, step results, outputs)
+  instead of `Database.UpdateJob`. A late report for an execution that already
+  reached a terminal status is a no-op (the conditional update applies only
+  while the execution is `running`), mirroring the job-level terminal-status
+  guard (F-05). Agents and non-group jobs still report straight to the job row.
+- **Deriving the job status.** The scheduler's background **job-status loop**
+  (`internal/services/scheduler/jobstatus.go`, started from `cmd/scheduler`,
+  leader-gated) periodically re-derives each in-flight group job's status from
+  the per-worker outcomes of the workers that are **alive** (a worker is alive
+  when its `last_seen_at` is within ~30 s; workers heartbeat every ~10 s),
+  per the job's failure mode. Only the most recent execution per alive worker
+  is considered: a worker that restarted and re-ran the job supersedes its
+  abandoned (pre-restart) execution, and a worker that is not alive is dropped
+  entirely (its in-progress execution does not block the job). When the derived
+  status differs from the stored one, the loop persists it (`Database.UpdateJob`,
+  stamping `finished_at` when the job first reaches a terminal status) and
+  appends a `job_status` event to the shared event log (F-23), which every API
+  pod tails and fans out to its UI clients.
+- **Failure mode.** A job (or its pipeline, as the default) carries a
+  `failure_mode` that controls how the per-worker outcomes combine into the
+  job's overall status:
+  - **`all`** (default): failed if any worker's run failed or timed out;
+    running while any is still running; succeeded only if every worker's run
+    succeeded.
+  - **`best_effort`**: running while any worker's run is still running;
+    succeeded once every worker's run reaches a terminal state (a per-worker
+    failure or timeout is recorded but does not fail the job).
+  - **`any`**: succeeded as soon as one worker's run succeeds; running while
+    none has succeeded and some are still running; failed only if every
+    worker's run failed or timed out.
+  The mode is set on the `JobSpec` (`failure_mode`) and denormalized onto the
+  `Job` row at creation (a job's own mode overrides the pipeline's; a job that
+  sets none inherits the pipeline's, defaulting to `all`). It is carried on
+  the job protos (db, scheduler, api) and surfaced to the UI.
+- **Worker restarts.** When a worker re-registers after a restart, the API
+  calls `Database.AbandonWorkerExecutions` to mark the worker's stale
+  in-progress executions `failed` (the worker will not resume them), so they
+  do not block the job's overall status; the job-status loop then re-derives
+  the status from the worker's fresh execution (or, if the worker is down,
+  drops it via liveness).
+- **Watchdog interaction.** The job-level watchdog (F-03) skips group jobs:
+  fan-out workers enforce their own execution timeouts, and the job-status
+  loop drops dead workers via liveness, so the job-level watchdog would
+  otherwise wrongly reap a group job as `timed_out` while other workers are
+  still running.
+
 **Shell override (shell handler):** a step may set the `shell` param to run
 through a user-chosen interpreter instead of executing `command` directly.
 When `shell` is set the target executes `<shell> <args> <command>` — `args`
@@ -364,6 +436,47 @@ are the shell's own flags and `command` is passed as the final argument (e.g.
 behavior with a specific shell rather than a platform default. When `shell` is
 empty the step runs `command` directly, preserving the no-implicit-shell
 contract.
+
+**Step barrier (cross-worker step synchronization):** a job that fans out to a
+worker group can be given the `step_barrier` flag (on its `JobSpec`,
+denormalized onto the `Job` row at creation). When set, the job's workers
+synchronize at each step boundary: after a worker completes a step it reports
+the completion to the API (which records a `StepCompletion` row for the job's
+current attempt) and then waits until **every worker alive at the step's start
+has completed it** before starting the next step. A worker that dies mid-step
+is dropped from the barrier (it is no longer alive — its `last_seen_at` is
+stale), so a dead worker cannot wedge the job; this is the step-level
+counterpart to the job-status loop dropping dead workers. The barrier only
+applies to jobs that target a worker group; a job on a single target (an
+ephemeral agent) runs its steps unbarriered.
+
+- **Mechanism.** The executor (`internal/executor`) gains a `StepBarrier`
+  interface (mirroring the `LogSink` / `StepStatusReporter` context patterns),
+  injected via `executor.ContextWithStepBarrier`. After each step that is
+  followed by another step, `Execute` calls `barrier.SyncStep(ctx, stepIndex)`
+  (bounded by the job's context, so a job stuck at a barrier times out like
+  any other hung job). The worker implements it (`internal/worker/barrier.go`):
+  it reports the step completion via the API's `ReportStepCompletion` RPC and
+  then polls the API's `CheckStepBarrier` RPC until it is satisfied, the job
+  is cancelled, or the job's context is done.
+- **`CheckStepBarrier` (Database service).** Returns `cancelled` when the job
+  is cancelled (a waiting worker stops and reports the job `cancelled`);
+  `satisfied` when every alive worker in the job's group has a `StepCompletion`
+  row for the job's current attempt and the step in question (a worker is
+  alive when its `last_seen_at` is within the liveness window, mirroring the
+  scheduler's `workerAliveThreshold`); otherwise not satisfied. A job with an
+  empty target group is vacuously satisfied (no barrier).
+- **New RPCs.** `Database.ReportStepCompletion` / `CheckStepBarrier` and
+  `API.ReportStepCompletion` / `CheckStepBarrier` (the API forwards to the
+  Database service; both API RPCs require a job token when job-token auth is
+  enabled, like `ReportJobStatus`). The `Job` protos (db, api) and `JobSpec`
+  (db) gain a `step_barrier` flag.
+- **Cancellation at the barrier.** When the job is cancelled while a worker is
+  waiting, `CheckStepBarrier` reports `cancelled`; the worker's barrier returns
+  `executor.ErrCancelled`, and the worker reports the job `cancelled` (distinct
+  from a failure). A cancellation delivered on the `WatchJobs` stream while a
+  step is *running* is handled by the existing F-05 path (the job's context is
+  cancelled, interrupting the running step).
 
 ### Logging
 
@@ -430,10 +543,12 @@ internal/
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
-              LogSink and an optional StepStatusReporter in the context —
-              evaluating each step's `condition` (F-06) to skip it when false,
-              and reporting each step's terminal status for a caller's
-              StepResultCollector to attach to its final status report; used
+              LogSink, an optional StepStatusReporter, and an optional
+              StepBarrier in the context — evaluating each step's `condition`
+              (F-06) to skip it when false, reporting each step's terminal
+              status for a caller's StepResultCollector to attach to its final
+              status report, and synchronizing a job's workers at each step
+              boundary via the StepBarrier (cross-worker step barrier); used
               by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
               executor.DefaultType, tees step output to a LogSink when present);
@@ -448,9 +563,14 @@ internal/
               that reaps running jobs past their timeout (F-03) + a background
               retry loop that re-dispatches failed jobs per their retry policy
               (F-04) + a background dependency resolver that skips/dispatches
-              a pending job once its depends_on dependencies resolve (F-06)
+              a pending job once its depends_on dependencies resolve (F-06) + a
+              background job-status loop that re-derives each in-flight group
+              job's overall status from its fan-out executions
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
-  worker/     long-lived worker implementation
+  worker/     long-lived worker implementation (implements the executor's
+              StepBarrier via the API's ReportStepCompletion/CheckStepBarrier
+              RPCs, so a job that fans out to a worker group synchronizes its
+              workers at each step boundary)
   agent/      ephemeral agent implementation
   idp/        local OIDC identity provider (JWT issuer, auto key rotation;
               signing keys + auth codes persisted through the Database service)
@@ -680,9 +800,12 @@ To exercise the mTLS mint path, run both with the `tls` section set (see
   push + pull** dispatch (workers poll pending-for-group ~1 s as the
   authoritative path; API pods tail the log at ~50 ms and nudge local workers),
   **scheduler leader election** (a portable lease on the Database service so only
-  one replica runs the four background loops), and **cross-pod near-live logs**
-  (a lean `job_log_updated` pointer event + a range read from the shared
-  artifacts store). See `docs/HighAvailability.md`. The one open item is
+  one replica runs the five background loops; ownership and liveness are
+  decoupled — a long TTL backstop keeps ownership stable across transient blips
+  while a short heartbeat window lets a follower take over quickly once the
+  leader's heartbeat goes stale), and **cross-pod near-live logs** (a lean
+  `job_log_updated` pointer event + a range read from the shared artifacts
+  store). See `docs/HighAvailability.md`. The one open item is
   **event-log retention**: the `events` table is a plain append-only log today
   and is not pruned; partitioning by `created_at` + a retention schedule (drop
   old partitions) is a deployment concern to add when the log's growth warrants

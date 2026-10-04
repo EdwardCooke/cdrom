@@ -20,49 +20,54 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Database_CreatePipeline_FullMethodName     = "/cdrom.db.v1.Database/CreatePipeline"
-	Database_GetPipeline_FullMethodName        = "/cdrom.db.v1.Database/GetPipeline"
-	Database_ListPipelines_FullMethodName      = "/cdrom.db.v1.Database/ListPipelines"
-	Database_UpdatePipeline_FullMethodName     = "/cdrom.db.v1.Database/UpdatePipeline"
-	Database_DeletePipeline_FullMethodName     = "/cdrom.db.v1.Database/DeletePipeline"
-	Database_CreateRun_FullMethodName          = "/cdrom.db.v1.Database/CreateRun"
-	Database_GetRun_FullMethodName             = "/cdrom.db.v1.Database/GetRun"
-	Database_ListRuns_FullMethodName           = "/cdrom.db.v1.Database/ListRuns"
-	Database_UpdateRun_FullMethodName          = "/cdrom.db.v1.Database/UpdateRun"
-	Database_CreateJob_FullMethodName          = "/cdrom.db.v1.Database/CreateJob"
-	Database_GetJob_FullMethodName             = "/cdrom.db.v1.Database/GetJob"
-	Database_ListJobs_FullMethodName           = "/cdrom.db.v1.Database/ListJobs"
-	Database_ListRetriableJobs_FullMethodName  = "/cdrom.db.v1.Database/ListRetriableJobs"
-	Database_UpdateJob_FullMethodName          = "/cdrom.db.v1.Database/UpdateJob"
-	Database_DeleteJob_FullMethodName          = "/cdrom.db.v1.Database/DeleteJob"
-	Database_ClaimJobRetry_FullMethodName      = "/cdrom.db.v1.Database/ClaimJobRetry"
-	Database_RerunJob_FullMethodName           = "/cdrom.db.v1.Database/RerunJob"
-	Database_ReapJob_FullMethodName            = "/cdrom.db.v1.Database/ReapJob"
-	Database_CancelJob_FullMethodName          = "/cdrom.db.v1.Database/CancelJob"
-	Database_SkipJob_FullMethodName            = "/cdrom.db.v1.Database/SkipJob"
-	Database_ClaimJob_FullMethodName           = "/cdrom.db.v1.Database/ClaimJob"
-	Database_ListPendingByGroup_FullMethodName = "/cdrom.db.v1.Database/ListPendingByGroup"
-	Database_StartJobExecution_FullMethodName  = "/cdrom.db.v1.Database/StartJobExecution"
-	Database_ListJobExecutions_FullMethodName  = "/cdrom.db.v1.Database/ListJobExecutions"
-	Database_PublishAssignment_FullMethodName  = "/cdrom.db.v1.Database/PublishAssignment"
-	Database_PublishCancel_FullMethodName      = "/cdrom.db.v1.Database/PublishCancel"
-	Database_PublishJobStatus_FullMethodName   = "/cdrom.db.v1.Database/PublishJobStatus"
-	Database_PublishRunStatus_FullMethodName   = "/cdrom.db.v1.Database/PublishRunStatus"
-	Database_PublishWorkerEvent_FullMethodName = "/cdrom.db.v1.Database/PublishWorkerEvent"
-	Database_PublishLogUpdated_FullMethodName  = "/cdrom.db.v1.Database/PublishLogUpdated"
-	Database_TailEvents_FullMethodName         = "/cdrom.db.v1.Database/TailEvents"
-	Database_AcquireLease_FullMethodName       = "/cdrom.db.v1.Database/AcquireLease"
-	Database_ReleaseLease_FullMethodName       = "/cdrom.db.v1.Database/ReleaseLease"
-	Database_RegisterWorker_FullMethodName     = "/cdrom.db.v1.Database/RegisterWorker"
-	Database_GetWorker_FullMethodName          = "/cdrom.db.v1.Database/GetWorker"
-	Database_ListWorkers_FullMethodName        = "/cdrom.db.v1.Database/ListWorkers"
-	Database_HeartbeatWorker_FullMethodName    = "/cdrom.db.v1.Database/HeartbeatWorker"
-	Database_DeleteWorker_FullMethodName       = "/cdrom.db.v1.Database/DeleteWorker"
-	Database_ListIDPSigningKeys_FullMethodName = "/cdrom.db.v1.Database/ListIDPSigningKeys"
-	Database_SetIDPSigningKeys_FullMethodName  = "/cdrom.db.v1.Database/SetIDPSigningKeys"
-	Database_StoreIDPAuthCode_FullMethodName   = "/cdrom.db.v1.Database/StoreIDPAuthCode"
-	Database_ConsumeIDPAuthCode_FullMethodName = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
-	Database_PruneIDPAuthCodes_FullMethodName  = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
+	Database_CreatePipeline_FullMethodName          = "/cdrom.db.v1.Database/CreatePipeline"
+	Database_GetPipeline_FullMethodName             = "/cdrom.db.v1.Database/GetPipeline"
+	Database_ListPipelines_FullMethodName           = "/cdrom.db.v1.Database/ListPipelines"
+	Database_UpdatePipeline_FullMethodName          = "/cdrom.db.v1.Database/UpdatePipeline"
+	Database_DeletePipeline_FullMethodName          = "/cdrom.db.v1.Database/DeletePipeline"
+	Database_CreateRun_FullMethodName               = "/cdrom.db.v1.Database/CreateRun"
+	Database_GetRun_FullMethodName                  = "/cdrom.db.v1.Database/GetRun"
+	Database_ListRuns_FullMethodName                = "/cdrom.db.v1.Database/ListRuns"
+	Database_UpdateRun_FullMethodName               = "/cdrom.db.v1.Database/UpdateRun"
+	Database_CreateJob_FullMethodName               = "/cdrom.db.v1.Database/CreateJob"
+	Database_GetJob_FullMethodName                  = "/cdrom.db.v1.Database/GetJob"
+	Database_ListJobs_FullMethodName                = "/cdrom.db.v1.Database/ListJobs"
+	Database_ListRetriableJobs_FullMethodName       = "/cdrom.db.v1.Database/ListRetriableJobs"
+	Database_UpdateJob_FullMethodName               = "/cdrom.db.v1.Database/UpdateJob"
+	Database_DeleteJob_FullMethodName               = "/cdrom.db.v1.Database/DeleteJob"
+	Database_ClaimJobRetry_FullMethodName           = "/cdrom.db.v1.Database/ClaimJobRetry"
+	Database_RerunJob_FullMethodName                = "/cdrom.db.v1.Database/RerunJob"
+	Database_ReapJob_FullMethodName                 = "/cdrom.db.v1.Database/ReapJob"
+	Database_CancelJob_FullMethodName               = "/cdrom.db.v1.Database/CancelJob"
+	Database_SkipJob_FullMethodName                 = "/cdrom.db.v1.Database/SkipJob"
+	Database_ClaimJob_FullMethodName                = "/cdrom.db.v1.Database/ClaimJob"
+	Database_ListPendingByGroup_FullMethodName      = "/cdrom.db.v1.Database/ListPendingByGroup"
+	Database_StartJobExecution_FullMethodName       = "/cdrom.db.v1.Database/StartJobExecution"
+	Database_ListJobExecutions_FullMethodName       = "/cdrom.db.v1.Database/ListJobExecutions"
+	Database_UpdateJobExecution_FullMethodName      = "/cdrom.db.v1.Database/UpdateJobExecution"
+	Database_AbandonWorkerExecutions_FullMethodName = "/cdrom.db.v1.Database/AbandonWorkerExecutions"
+	Database_ReportStepCompletion_FullMethodName    = "/cdrom.db.v1.Database/ReportStepCompletion"
+	Database_CheckStepBarrier_FullMethodName        = "/cdrom.db.v1.Database/CheckStepBarrier"
+	Database_PublishAssignment_FullMethodName       = "/cdrom.db.v1.Database/PublishAssignment"
+	Database_PublishCancel_FullMethodName           = "/cdrom.db.v1.Database/PublishCancel"
+	Database_PublishJobStatus_FullMethodName        = "/cdrom.db.v1.Database/PublishJobStatus"
+	Database_PublishRunStatus_FullMethodName        = "/cdrom.db.v1.Database/PublishRunStatus"
+	Database_PublishWorkerEvent_FullMethodName      = "/cdrom.db.v1.Database/PublishWorkerEvent"
+	Database_PublishLogUpdated_FullMethodName       = "/cdrom.db.v1.Database/PublishLogUpdated"
+	Database_TailEvents_FullMethodName              = "/cdrom.db.v1.Database/TailEvents"
+	Database_AcquireLease_FullMethodName            = "/cdrom.db.v1.Database/AcquireLease"
+	Database_ReleaseLease_FullMethodName            = "/cdrom.db.v1.Database/ReleaseLease"
+	Database_GetLease_FullMethodName                = "/cdrom.db.v1.Database/GetLease"
+	Database_RegisterWorker_FullMethodName          = "/cdrom.db.v1.Database/RegisterWorker"
+	Database_GetWorker_FullMethodName               = "/cdrom.db.v1.Database/GetWorker"
+	Database_ListWorkers_FullMethodName             = "/cdrom.db.v1.Database/ListWorkers"
+	Database_HeartbeatWorker_FullMethodName         = "/cdrom.db.v1.Database/HeartbeatWorker"
+	Database_DeleteWorker_FullMethodName            = "/cdrom.db.v1.Database/DeleteWorker"
+	Database_ListIDPSigningKeys_FullMethodName      = "/cdrom.db.v1.Database/ListIDPSigningKeys"
+	Database_SetIDPSigningKeys_FullMethodName       = "/cdrom.db.v1.Database/SetIDPSigningKeys"
+	Database_StoreIDPAuthCode_FullMethodName        = "/cdrom.db.v1.Database/StoreIDPAuthCode"
+	Database_ConsumeIDPAuthCode_FullMethodName      = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
+	Database_PruneIDPAuthCodes_FullMethodName       = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -166,11 +171,35 @@ type DatabaseClient interface {
 	// so the start is not exclusive (unlike the old single-claim work queue).
 	// Starting an execution for a job that is no longer pending (it reached a
 	// terminal state, or it is not targeted at the worker's group) is rejected.
-	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error)
+	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
 	// ListJobExecutions returns a job's executions (one per worker that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
 	// derive the job's overall status from the per-worker outcomes (fan-out).
 	ListJobExecutions(ctx context.Context, in *ListJobExecutionsRequest, opts ...grpc.CallOption) (*ListJobExecutionsResponse, error)
+	// UpdateJobExecution records a worker's outcome for its execution of a job
+	// (fan-out): it sets the execution's terminal status (and finished
+	// timestamp, step results, and outputs) for the worker's execution of the
+	// job's current attempt. The job row's overall status is not touched here —
+	// it is derived from the executions by the scheduler's job-status loop.
+	UpdateJobExecution(ctx context.Context, in *UpdateJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error)
+	// AbandonWorkerExecutions marks all of a worker's running executions as
+	// failed (fan-out). It is called when a worker re-registers after a
+	// restart: the worker's in-progress executions from before the restart are
+	// abandoned (the worker will not resume them) so they do not block the job's
+	// overall status.
+	AbandonWorkerExecutions(ctx context.Context, in *AbandonWorkerExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ReportStepCompletion records that a worker has completed a step of a job
+	// (the cross-worker step barrier). A worker that runs a job with a step
+	// barrier reports each step it finishes; the barrier for a step is satisfied
+	// once every worker that is alive has reported that step. The completion is
+	// recorded for the job's current attempt.
+	ReportStepCompletion(ctx context.Context, in *ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
+	// (every worker alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// a job with a step barrier polls it after each step before proceeding to
+	// the next.
+	CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error)
 	// Event log (F-23, high availability). The event log is the shared,
 	// append-only coordination bus: the scheduler's background loops and the
 	// API publish state changes to it, and every API pod tails it to fan events
@@ -207,19 +236,32 @@ type DatabaseClient interface {
 	// When cursor is 0 the call returns the oldest retained events.
 	TailEvents(ctx context.Context, in *TailEventsRequest, opts ...grpc.CallOption) (*TailEventsResponse, error)
 	// Leader election (F-23, high availability). The scheduler runs background
-	// loops (watchdog, retry, dependency resolver, run-status) that must run on
-	// exactly one replica at a time, or they would publish duplicate events. A
-	// lease is the coordination primitive: a replica acquires a named lease,
-	// renews it periodically, and runs the loops only while it holds it. The
-	// lease expires after its TTL if the holder stops renewing (a crash or
-	// network partition), so another replica can take over.
+	// loops (watchdog, retry, dependency resolver, run-status, job-status) that
+	// must run on exactly one replica at a time, or they would publish duplicate
+	// events. A lease is the coordination primitive: a replica acquires a named
+	// lease, renews it periodically, and runs the loops only while it holds it.
+	//
+	// Ownership and liveness are decoupled. The lease has a long TTL (a
+	// backstop) that keeps the holder's ownership stable across transient
+	// blips, and a short heartbeat window: the leader stamps a heartbeat on
+	// every renewal, and a follower may take over as soon as the holder's
+	// heartbeat is stale (older than the heartbeat window) even though the
+	// long TTL has not lapsed. This detects a restarted or wedged leader
+	// quickly (within a few missed heartbeats) instead of waiting for the full
+	// TTL. The atomic compare-and-swap in AcquireLease still guarantees that at
+	// most one replica takes over, so two replicas can never both lead.
 	// AcquireLease acquires the named lease for the caller, or re-acquires it
-	// if the caller already holds it (a renewal). It succeeds if the lease is
-	// free, expired, or already held by the caller; it fails if another
-	// replica holds an unexpired lease.
+	// if the caller already holds it (a renewal, which also refreshes the
+	// heartbeat). It succeeds if the lease is free, its TTL has lapsed, its
+	// heartbeat is stale, or it is already held by the caller; it fails if
+	// another replica holds a live lease.
 	AcquireLease(ctx context.Context, in *AcquireLeaseRequest, opts ...grpc.CallOption) (*AcquireLeaseResponse, error)
 	// ReleaseLease releases the named lease if the caller holds it.
 	ReleaseLease(ctx context.Context, in *ReleaseLeaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// GetLease returns the current state of the named lease (holder, TTL
+	// expiry, and last heartbeat) so followers and observers can watch the
+	// leader's liveness. A lease that has never been acquired is NotFound.
+	GetLease(ctx context.Context, in *GetLeaseRequest, opts ...grpc.CallOption) (*Lease, error)
 	// Workers
 	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
 	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
@@ -467,9 +509,9 @@ func (c *databaseClient) ListPendingByGroup(ctx context.Context, in *ListPending
 	return out, nil
 }
 
-func (c *databaseClient) StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error) {
+func (c *databaseClient) StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(JobExecution)
+	out := new(StartJobExecutionResponse)
 	err := c.cc.Invoke(ctx, Database_StartJobExecution_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -481,6 +523,46 @@ func (c *databaseClient) ListJobExecutions(ctx context.Context, in *ListJobExecu
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListJobExecutionsResponse)
 	err := c.cc.Invoke(ctx, Database_ListJobExecutions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateJobExecution(ctx context.Context, in *UpdateJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JobExecution)
+	err := c.cc.Invoke(ctx, Database_UpdateJobExecution_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) AbandonWorkerExecutions(ctx context.Context, in *AbandonWorkerExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_AbandonWorkerExecutions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReportStepCompletion(ctx context.Context, in *ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_ReportStepCompletion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckStepBarrierResponse)
+	err := c.cc.Invoke(ctx, Database_CheckStepBarrier_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -571,6 +653,16 @@ func (c *databaseClient) ReleaseLease(ctx context.Context, in *ReleaseLeaseReque
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_ReleaseLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetLease(ctx context.Context, in *GetLeaseRequest, opts ...grpc.CallOption) (*Lease, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Lease)
+	err := c.cc.Invoke(ctx, Database_GetLease_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -778,11 +870,35 @@ type DatabaseServer interface {
 	// so the start is not exclusive (unlike the old single-claim work queue).
 	// Starting an execution for a job that is no longer pending (it reached a
 	// terminal state, or it is not targeted at the worker's group) is rejected.
-	StartJobExecution(context.Context, *StartJobExecutionRequest) (*JobExecution, error)
+	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
 	// ListJobExecutions returns a job's executions (one per worker that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
 	// derive the job's overall status from the per-worker outcomes (fan-out).
 	ListJobExecutions(context.Context, *ListJobExecutionsRequest) (*ListJobExecutionsResponse, error)
+	// UpdateJobExecution records a worker's outcome for its execution of a job
+	// (fan-out): it sets the execution's terminal status (and finished
+	// timestamp, step results, and outputs) for the worker's execution of the
+	// job's current attempt. The job row's overall status is not touched here —
+	// it is derived from the executions by the scheduler's job-status loop.
+	UpdateJobExecution(context.Context, *UpdateJobExecutionRequest) (*JobExecution, error)
+	// AbandonWorkerExecutions marks all of a worker's running executions as
+	// failed (fan-out). It is called when a worker re-registers after a
+	// restart: the worker's in-progress executions from before the restart are
+	// abandoned (the worker will not resume them) so they do not block the job's
+	// overall status.
+	AbandonWorkerExecutions(context.Context, *AbandonWorkerExecutionsRequest) (*emptypb.Empty, error)
+	// ReportStepCompletion records that a worker has completed a step of a job
+	// (the cross-worker step barrier). A worker that runs a job with a step
+	// barrier reports each step it finishes; the barrier for a step is satisfied
+	// once every worker that is alive has reported that step. The completion is
+	// recorded for the job's current attempt.
+	ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error)
+	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
+	// (every worker alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// a job with a step barrier polls it after each step before proceeding to
+	// the next.
+	CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error)
 	// Event log (F-23, high availability). The event log is the shared,
 	// append-only coordination bus: the scheduler's background loops and the
 	// API publish state changes to it, and every API pod tails it to fan events
@@ -819,19 +935,32 @@ type DatabaseServer interface {
 	// When cursor is 0 the call returns the oldest retained events.
 	TailEvents(context.Context, *TailEventsRequest) (*TailEventsResponse, error)
 	// Leader election (F-23, high availability). The scheduler runs background
-	// loops (watchdog, retry, dependency resolver, run-status) that must run on
-	// exactly one replica at a time, or they would publish duplicate events. A
-	// lease is the coordination primitive: a replica acquires a named lease,
-	// renews it periodically, and runs the loops only while it holds it. The
-	// lease expires after its TTL if the holder stops renewing (a crash or
-	// network partition), so another replica can take over.
+	// loops (watchdog, retry, dependency resolver, run-status, job-status) that
+	// must run on exactly one replica at a time, or they would publish duplicate
+	// events. A lease is the coordination primitive: a replica acquires a named
+	// lease, renews it periodically, and runs the loops only while it holds it.
+	//
+	// Ownership and liveness are decoupled. The lease has a long TTL (a
+	// backstop) that keeps the holder's ownership stable across transient
+	// blips, and a short heartbeat window: the leader stamps a heartbeat on
+	// every renewal, and a follower may take over as soon as the holder's
+	// heartbeat is stale (older than the heartbeat window) even though the
+	// long TTL has not lapsed. This detects a restarted or wedged leader
+	// quickly (within a few missed heartbeats) instead of waiting for the full
+	// TTL. The atomic compare-and-swap in AcquireLease still guarantees that at
+	// most one replica takes over, so two replicas can never both lead.
 	// AcquireLease acquires the named lease for the caller, or re-acquires it
-	// if the caller already holds it (a renewal). It succeeds if the lease is
-	// free, expired, or already held by the caller; it fails if another
-	// replica holds an unexpired lease.
+	// if the caller already holds it (a renewal, which also refreshes the
+	// heartbeat). It succeeds if the lease is free, its TTL has lapsed, its
+	// heartbeat is stale, or it is already held by the caller; it fails if
+	// another replica holds a live lease.
 	AcquireLease(context.Context, *AcquireLeaseRequest) (*AcquireLeaseResponse, error)
 	// ReleaseLease releases the named lease if the caller holds it.
 	ReleaseLease(context.Context, *ReleaseLeaseRequest) (*emptypb.Empty, error)
+	// GetLease returns the current state of the named lease (holder, TTL
+	// expiry, and last heartbeat) so followers and observers can watch the
+	// leader's liveness. A lease that has never been acquired is NotFound.
+	GetLease(context.Context, *GetLeaseRequest) (*Lease, error)
 	// Workers
 	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
 	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
@@ -925,11 +1054,23 @@ func (UnimplementedDatabaseServer) ClaimJob(context.Context, *ClaimJobRequest) (
 func (UnimplementedDatabaseServer) ListPendingByGroup(context.Context, *ListPendingByGroupRequest) (*ListJobsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPendingByGroup not implemented")
 }
-func (UnimplementedDatabaseServer) StartJobExecution(context.Context, *StartJobExecutionRequest) (*JobExecution, error) {
+func (UnimplementedDatabaseServer) StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StartJobExecution not implemented")
 }
 func (UnimplementedDatabaseServer) ListJobExecutions(context.Context, *ListJobExecutionsRequest) (*ListJobExecutionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListJobExecutions not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateJobExecution(context.Context, *UpdateJobExecutionRequest) (*JobExecution, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateJobExecution not implemented")
+}
+func (UnimplementedDatabaseServer) AbandonWorkerExecutions(context.Context, *AbandonWorkerExecutionsRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method AbandonWorkerExecutions not implemented")
+}
+func (UnimplementedDatabaseServer) ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportStepCompletion not implemented")
+}
+func (UnimplementedDatabaseServer) CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckStepBarrier not implemented")
 }
 func (UnimplementedDatabaseServer) PublishAssignment(context.Context, *PublishAssignmentRequest) (*PublishEventResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishAssignment not implemented")
@@ -957,6 +1098,9 @@ func (UnimplementedDatabaseServer) AcquireLease(context.Context, *AcquireLeaseRe
 }
 func (UnimplementedDatabaseServer) ReleaseLease(context.Context, *ReleaseLeaseRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReleaseLease not implemented")
+}
+func (UnimplementedDatabaseServer) GetLease(context.Context, *GetLeaseRequest) (*Lease, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLease not implemented")
 }
 func (UnimplementedDatabaseServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
 	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
@@ -1441,6 +1585,78 @@ func _Database_ListJobExecutions_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_UpdateJobExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateJobExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateJobExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateJobExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateJobExecution(ctx, req.(*UpdateJobExecutionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_AbandonWorkerExecutions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbandonWorkerExecutionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AbandonWorkerExecutions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AbandonWorkerExecutions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AbandonWorkerExecutions(ctx, req.(*AbandonWorkerExecutionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReportStepCompletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportStepCompletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReportStepCompletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReportStepCompletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReportStepCompletion(ctx, req.(*ReportStepCompletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CheckStepBarrier_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckStepBarrierRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CheckStepBarrier(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CheckStepBarrier_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CheckStepBarrier(ctx, req.(*CheckStepBarrierRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_PublishAssignment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PublishAssignmentRequest)
 	if err := dec(in); err != nil {
@@ -1599,6 +1815,24 @@ func _Database_ReleaseLease_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).ReleaseLease(ctx, req.(*ReleaseLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetLease(ctx, req.(*GetLeaseRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1887,6 +2121,22 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_ListJobExecutions_Handler,
 		},
 		{
+			MethodName: "UpdateJobExecution",
+			Handler:    _Database_UpdateJobExecution_Handler,
+		},
+		{
+			MethodName: "AbandonWorkerExecutions",
+			Handler:    _Database_AbandonWorkerExecutions_Handler,
+		},
+		{
+			MethodName: "ReportStepCompletion",
+			Handler:    _Database_ReportStepCompletion_Handler,
+		},
+		{
+			MethodName: "CheckStepBarrier",
+			Handler:    _Database_CheckStepBarrier_Handler,
+		},
+		{
 			MethodName: "PublishAssignment",
 			Handler:    _Database_PublishAssignment_Handler,
 		},
@@ -1921,6 +2171,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReleaseLease",
 			Handler:    _Database_ReleaseLease_Handler,
+		},
+		{
+			MethodName: "GetLease",
+			Handler:    _Database_GetLease_Handler,
 		},
 		{
 			MethodName: "RegisterWorker",

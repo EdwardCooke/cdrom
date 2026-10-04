@@ -140,6 +140,14 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	if err != nil {
 		return nil, err
 	}
+	// A worker that re-registers after a restart will not resume the jobs it
+	// was running before the restart. Abandon its stale running executions
+	// (fan-out) so they do not block the jobs' overall status. Best-effort: a
+	// failure here does not fail the registration (the scheduler's job-status
+	// loop re-derives the jobs' status from the executions).
+	if _, err := s.db.AbandonWorkerExecutions(ctx, &dbpb.AbandonWorkerExecutionsRequest{WorkerName: registered.GetName()}); err != nil {
+		s.logger.Warn("api: abandon worker executions", "worker", registered.GetName(), "err", err)
+	}
 	s.mu.Lock()
 	s.live[registered.GetName()] = &liveWorker{
 		name:     registered.GetName(),
@@ -259,29 +267,36 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 	return apiJob, nil
 }
 
-// ClaimJob atomically claims a pending job for the calling worker (F-23). It
-// marks the job running via the Database service's conditional ClaimJob (a
-// no-op if the job is no longer pending), and on success returns the job with
-// its spec, upstream jobs, and a fresh job token. This is how a worker takes
-// ownership of a job it learned about via a push nudge or its periodic poll:
-// the claim is atomic, so a job delivered to several workers (or via both push
-// and poll) is run by exactly one of them — the first to claim — and the
-// others see claimed=false and skip.
-func (s *GRPCServer) ClaimJob(ctx context.Context, req *apipb.ClaimJobRequest) (*apipb.ClaimJobResponse, error) {
+// StartJobExecution records that the calling worker has started running a job
+// (fan-out). It creates the worker's JobExecution for the job's current
+// attempt via the Database service and, on success, returns the job with its
+// spec, upstream jobs, and a fresh job token. A job that targets a worker
+// group runs on every worker in the group, so the start is not exclusive:
+// every worker in the group starts its own execution. Starting an execution
+// for a job that is no longer pending (it reached a terminal state, or it is
+// not targeted at a worker group) is rejected, so a job that finished before a
+// slow worker started it is not run.
+func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobExecutionRequest) (*apipb.StartJobExecutionResponse, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetWorkerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
 	}
 	if s.db == nil {
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
-	resp, err := s.db.ClaimJob(ctx, &dbpb.ClaimJobRequest{Id: req.GetJobId()})
+	resp, err := s.db.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{
+		JobId:      req.GetJobId(),
+		WorkerName: req.GetWorkerName(),
+	})
 	if err != nil {
 		return nil, err
 	}
-	if !resp.GetClaimed() {
-		// The job was no longer pending (another worker claimed it first, or it
-		// reached a terminal state); the caller skips it.
-		return &apipb.ClaimJobResponse{Claimed: false}, nil
+	if !resp.GetStarted() {
+		// The job was no longer pending (it reached a terminal state, or it is
+		// not targeted at a worker group); the caller skips it.
+		return &apipb.StartJobExecutionResponse{Started: false}, nil
 	}
 	// The job is now running on this worker. Fetch it fresh (it now carries the
 	// running status and started_at) and hand the worker its spec, upstream
@@ -295,8 +310,8 @@ func (s *GRPCServer) ClaimJob(ctx context.Context, req *apipb.ClaimJobRequest) (
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
 		apiJob.Token = token
 	}
-	s.logger.Info("api: job claimed", "job", req.GetJobId())
-	return &apipb.ClaimJobResponse{Claimed: true, Job: apiJob}, nil
+	s.logger.Info("api: job execution started", "job", req.GetJobId(), "worker", req.GetWorkerName())
+	return &apipb.StartJobExecutionResponse{Started: true, Job: apiJob}, nil
 }
 
 // ListPendingJobs returns the pending jobs that target the caller's worker
@@ -332,6 +347,33 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
 		return nil, err
 	}
+	// A report from a named worker for a job that targets a worker group is a
+	// fan-out report: it is recorded against the worker's execution of the job
+	// (one per worker), not the job row. The job's overall status is derived
+	// from the executions by the scheduler's job-status loop, so the job row
+	// and the job_status event are left for that loop.
+	if req.GetWorkerName() != "" && s.db != nil {
+		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
+		if err != nil {
+			return nil, err
+		}
+		if job.GetTargetGroup() != "" {
+			if _, err := s.db.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
+				JobId:       req.GetJobId(),
+				WorkerName:  req.GetWorkerName(),
+				Status:      req.GetStatus(),
+				FinishedAt:  req.GetFinishedAt(),
+				StepResults: req.GetStepResults(),
+				Outputs:     req.GetOutputs(),
+			}); err != nil {
+				return nil, err
+			}
+			s.logger.Info("api: job execution status reported", "job", req.GetJobId(), "worker", req.GetWorkerName(), "status", req.GetStatus())
+			return toAPIJob(job), nil
+		}
+	}
+	// A report from an ephemeral agent (no worker name) — or a job that does
+	// not target a worker group — updates the job row directly.
 	updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
 		Id:          req.GetJobId(),
 		Status:      req.GetStatus(),
@@ -359,6 +401,63 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	// it out to their UI clients (F-23).
 	s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
 	return toAPIJob(updated), nil
+}
+
+// ReportStepCompletion records that the calling worker completed a step of a
+// job (the cross-worker step barrier). It forwards the report to the Database
+// service, which upserts the worker's StepCompletion row for the job's current
+// attempt. When job-token auth is enabled the caller must present a valid job
+// token scoped to this job.
+func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.ReportStepCompletionRequest) (*emptypb.Empty, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetWorkerName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	if _, err := s.db.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{
+		JobId:      req.GetJobId(),
+		WorkerName: req.GetWorkerName(),
+		StepIndex:  req.GetStepIndex(),
+	}); err != nil {
+		return nil, err
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// CheckStepBarrier reports whether the barrier for a job's step is satisfied
+// (every worker alive at the step's start has completed it) or whether the job
+// has been cancelled. It forwards the check to the Database service. A worker
+// that is not alive is dropped from the barrier, so a worker that dies
+// mid-step cannot wedge the job. When job-token auth is enabled the caller
+// must present a valid job token scoped to this job.
+func (s *GRPCServer) CheckStepBarrier(ctx context.Context, req *apipb.CheckStepBarrierRequest) (*apipb.CheckStepBarrierResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	resp, err := s.db.CheckStepBarrier(ctx, &dbpb.CheckStepBarrierRequest{
+		JobId:     req.GetJobId(),
+		StepIndex: req.GetStepIndex(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &apipb.CheckStepBarrierResponse{
+		Satisfied: resp.GetSatisfied(),
+		Cancelled: resp.GetCancelled(),
+	}, nil
 }
 
 // StreamJobLogs is a client stream: an execution target (worker or agent)
@@ -1029,6 +1128,8 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		StepResults:  job.GetStepResults(),
 		Outputs:      job.GetOutputs(),
 		IgnoreFailed: job.GetIgnoreFailed(),
+		FailureMode:  job.GetFailureMode(),
+		StepBarrier:  job.GetStepBarrier(),
 	}
 }
 

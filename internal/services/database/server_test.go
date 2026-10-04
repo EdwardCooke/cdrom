@@ -1430,3 +1430,568 @@ func TestUpdateRun(t *testing.T) {
 		t.Errorf("persisted status = %v, want SUCCEEDED", fetched.GetStatus())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Job executions (fan-out)
+// ---------------------------------------------------------------------------
+
+// newGroupJob creates a pipeline and a pending job that targets a worker
+// group, returning the job.
+func newGroupJob(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, group string) *dbpb.Job {
+	t.Helper()
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name + "-pipeline"})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
+		PipelineId:  pipeline.GetId(),
+		Name:        name,
+		TargetGroup: group,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	return job
+}
+
+// TestStartJobExecution verifies that a worker starting a pending group job
+// records its execution and marks the job running (fan-out).
+func TestStartJobExecution(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+
+	// Two workers each start their own execution of the same job.
+	for _, worker := range []string{"w1", "w2"} {
+		resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: worker})
+		if err != nil {
+			t.Fatalf("StartJobExecution(%s): %v", worker, err)
+		}
+		if !resp.GetStarted() {
+			t.Fatalf("StartJobExecution(%s) started = false, want true", worker)
+		}
+		if resp.GetExecution().GetWorkerName() != worker {
+			t.Errorf("execution worker = %q, want %q", resp.GetExecution().GetWorkerName(), worker)
+		}
+		if resp.GetExecution().GetStatus() != dbpb.JobStatus_JOB_STATUS_RUNNING {
+			t.Errorf("execution status = %v, want RUNNING", resp.GetExecution().GetStatus())
+		}
+	}
+
+	// The job is now running.
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_RUNNING {
+		t.Errorf("job status = %v, want RUNNING", fetched.GetStatus())
+	}
+
+	// Both workers' executions are listed.
+	list, err := client.ListJobExecutions(ctx, &dbpb.ListJobExecutionsRequest{JobId: job.GetId()})
+	if err != nil {
+		t.Fatalf("ListJobExecutions: %v", err)
+	}
+	if got := len(list.GetExecutions()); got != 2 {
+		t.Fatalf("executions = %d, want 2", got)
+	}
+}
+
+// TestStartJobExecutionRejectsTerminalJob verifies that a job that has reached
+// a terminal state is not started (a late worker start is a no-op).
+func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+
+	// Mark the job succeeded (terminal).
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: job.GetId(), Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+
+	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"})
+	if err != nil {
+		t.Fatalf("StartJobExecution: %v", err)
+	}
+	if resp.GetStarted() {
+		t.Error("StartJobExecution started = true for a terminal job, want false")
+	}
+}
+
+// TestStartJobExecutionRejectsAgentJob verifies that a job with an empty
+// target group (an ephemeral agent) is not started by a worker.
+func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: "agent-pipeline"})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "agent-job"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"})
+	if err != nil {
+		t.Fatalf("StartJobExecution: %v", err)
+	}
+	if resp.GetStarted() {
+		t.Error("StartJobExecution started = true for an agent job, want false")
+	}
+}
+
+// TestUpdateJobExecution verifies that a worker's outcome is recorded on its
+// execution, and that a late report for an execution that already reached a
+// terminal status is a no-op (it cannot clobber the terminal status).
+func TestUpdateJobExecution(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+
+	if _, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"}); err != nil {
+		t.Fatalf("StartJobExecution: %v", err)
+	}
+
+	// The worker reports its execution succeeded (its final report carries the
+	// finish time).
+	updated, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
+		JobId:      job.GetId(),
+		WorkerName: "w1",
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		FinishedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpdateJobExecution: %v", err)
+	}
+	if updated.GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Errorf("execution status = %v, want SUCCEEDED", updated.GetStatus())
+	}
+	if updated.GetFinishedAt() == nil {
+		t.Error("execution finished_at = nil, want set")
+	}
+
+	// A late report for the now-terminal execution is a no-op: the status is
+	// not clobbered.
+	again, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
+		JobId:      job.GetId(),
+		WorkerName: "w1",
+		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
+		FinishedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("UpdateJobExecution (late): %v", err)
+	}
+	if again.GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Errorf("execution status after late report = %v, want SUCCEEDED (unchanged)", again.GetStatus())
+	}
+}
+
+// TestAbandonWorkerExecutions verifies that a worker's running executions are
+// marked failed when the worker re-registers after a restart (fan-out): the
+// stale in-progress executions do not block the job's overall status.
+func TestAbandonWorkerExecutions(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+
+	if _, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"}); err != nil {
+		t.Fatalf("StartJobExecution: %v", err)
+	}
+
+	// The worker restarts: its running execution is abandoned (marked failed).
+	if _, err := client.AbandonWorkerExecutions(ctx, &dbpb.AbandonWorkerExecutionsRequest{WorkerName: "w1"}); err != nil {
+		t.Fatalf("AbandonWorkerExecutions: %v", err)
+	}
+
+	list, err := client.ListJobExecutions(ctx, &dbpb.ListJobExecutionsRequest{JobId: job.GetId()})
+	if err != nil {
+		t.Fatalf("ListJobExecutions: %v", err)
+	}
+	if got := len(list.GetExecutions()); got != 1 {
+		t.Fatalf("executions = %d, want 1", got)
+	}
+	if list.GetExecutions()[0].GetStatus() != dbpb.JobStatus_JOB_STATUS_FAILED {
+		t.Errorf("abandoned execution status = %v, want FAILED", list.GetExecutions()[0].GetStatus())
+	}
+}
+
+// TestJobFailureModeRoundTrip verifies that a job's failure mode is persisted
+// and returned intact through the storage backend (fan-out).
+func TestJobFailureModeRoundTrip(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		FailureMode: dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT,
+		Steps:       []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", TargetGroup: "pool-a", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if created.GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT {
+		t.Errorf("job failure_mode = %v, want BEST_EFFORT", created.GetFailureMode())
+	}
+	if created.GetSpec().GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT {
+		t.Errorf("spec failure_mode = %v, want BEST_EFFORT", created.GetSpec().GetFailureMode())
+	}
+}
+
+// TestJobFailureModeDefaultsToAll verifies that a job created without a
+// failure mode defaults to ALL (the default).
+func TestJobFailureModeDefaultsToAll(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", TargetGroup: "pool-a"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if created.GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_ALL {
+		t.Errorf("job failure_mode = %v, want ALL (default)", created.GetFailureMode())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Leader-election lease (heartbeat)
+// ---------------------------------------------------------------------------
+
+// acquireLease is a helper that acquires (or renews) the named lease with the
+// given holder, TTL backstop, and heartbeat window.
+func acquireLease(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, holder string, ttl, heartbeatTTL time.Duration) bool {
+	t.Helper()
+	resp, err := client.AcquireLease(ctx, &dbpb.AcquireLeaseRequest{
+		Name:         name,
+		Holder:       holder,
+		Ttl:          durationpb.New(ttl),
+		HeartbeatTtl: durationpb.New(heartbeatTTL),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease(%s): %v", holder, err)
+	}
+	return resp.GetAcquired()
+}
+
+// TestLeaseAcquireAndRenew verifies that a replica acquires a free lease and
+// renews it (keeping ownership), and that the lease state (holder, TTL
+// backstop, heartbeat) is readable via GetLease.
+func TestLeaseAcquireAndRenew(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	if !acquireLease(t, client, ctx, "scheduler", "replica-a", time.Minute, 30*time.Second) {
+		t.Fatal("replica-a did not acquire a free lease")
+	}
+
+	// The holder renews (heartbeats) and keeps ownership.
+	if !acquireLease(t, client, ctx, "scheduler", "replica-a", time.Minute, 30*time.Second) {
+		t.Fatal("replica-a lost ownership on renewal")
+	}
+
+	lease, err := client.GetLease(ctx, &dbpb.GetLeaseRequest{Name: "scheduler"})
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if lease.GetHolder() != "replica-a" {
+		t.Errorf("holder = %q, want replica-a", lease.GetHolder())
+	}
+	if lease.GetExpiresAt() == nil {
+		t.Error("expires_at = nil, want set")
+	}
+	if lease.GetLastHeartbeat() == nil {
+		t.Error("last_heartbeat = nil, want set")
+	}
+}
+
+// TestLeaseLiveNotTakenOver verifies that a replica cannot take over a lease
+// held by another replica whose heartbeat is fresh (within the window) and
+// whose TTL backstop has not lapsed.
+func TestLeaseLiveNotTakenOver(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	if !acquireLease(t, client, ctx, "scheduler", "replica-a", time.Minute, 30*time.Second) {
+		t.Fatal("replica-a did not acquire the lease")
+	}
+
+	// replica-b cannot take over a live lease (fresh heartbeat, unexpired TTL).
+	if acquireLease(t, client, ctx, "scheduler", "replica-b", time.Minute, 30*time.Second) {
+		t.Error("replica-b took over a live lease, want it to be rejected")
+	}
+
+	lease, err := client.GetLease(ctx, &dbpb.GetLeaseRequest{Name: "scheduler"})
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if lease.GetHolder() != "replica-a" {
+		t.Errorf("holder = %q, want replica-a (unchanged)", lease.GetHolder())
+	}
+}
+
+// TestLeaseStaleHeartbeatTakenOver verifies that a replica can take over a
+// lease whose holder's heartbeat is stale (older than the heartbeat window)
+// even though the TTL backstop has not lapsed: this is what lets a follower
+// detect a restarted or wedged leader quickly.
+func TestLeaseStaleHeartbeatTakenOver(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// replica-a acquires with a short heartbeat window (100 ms) and a long TTL
+	// backstop (1 min), then stops heartbeating.
+	if !acquireLease(t, client, ctx, "scheduler", "replica-a", time.Minute, 100*time.Millisecond) {
+		t.Fatal("replica-a did not acquire the lease")
+	}
+
+	// replica-a stops heartbeating; wait for its heartbeat to go stale.
+	time.Sleep(150 * time.Millisecond)
+
+	// replica-b can now take over: the heartbeat is stale even though the TTL
+	// backstop (1 min) has not lapsed.
+	if !acquireLease(t, client, ctx, "scheduler", "replica-b", time.Minute, 100*time.Millisecond) {
+		t.Fatal("replica-b did not take over a lease with a stale heartbeat")
+	}
+
+	lease, err := client.GetLease(ctx, &dbpb.GetLeaseRequest{Name: "scheduler"})
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if lease.GetHolder() != "replica-b" {
+		t.Errorf("holder = %q, want replica-b", lease.GetHolder())
+	}
+}
+
+// TestLeaseRelease verifies that releasing a lease frees it so another
+// replica can acquire it, and that releasing a lease the caller does not hold
+// is a no-op.
+func TestLeaseRelease(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	if !acquireLease(t, client, ctx, "scheduler", "replica-a", time.Minute, 30*time.Second) {
+		t.Fatal("replica-a did not acquire the lease")
+	}
+
+	// replica-b releasing a lease it does not hold is a no-op.
+	if _, err := client.ReleaseLease(ctx, &dbpb.ReleaseLeaseRequest{Name: "scheduler", Holder: "replica-b"}); err != nil {
+		t.Fatalf("ReleaseLease (not held): %v", err)
+	}
+	lease, err := client.GetLease(ctx, &dbpb.GetLeaseRequest{Name: "scheduler"})
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if lease.GetHolder() != "replica-a" {
+		t.Errorf("holder after no-op release = %q, want replica-a", lease.GetHolder())
+	}
+
+	// replica-a releases the lease; replica-b can now acquire it.
+	if _, err := client.ReleaseLease(ctx, &dbpb.ReleaseLeaseRequest{Name: "scheduler", Holder: "replica-a"}); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if !acquireLease(t, client, ctx, "scheduler", "replica-b", time.Minute, 30*time.Second) {
+		t.Fatal("replica-b did not acquire the released lease")
+	}
+}
+
+// TestGetLeaseNotFound verifies that reading a lease that has never been
+// acquired is a NotFound.
+func TestGetLeaseNotFound(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	if _, err := client.GetLease(ctx, &dbpb.GetLeaseRequest{Name: "nonexistent"}); status.Code(err) != codes.NotFound {
+		t.Errorf("GetLease(nonexistent) = %v, want NotFound", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cross-worker step barrier
+// ---------------------------------------------------------------------------
+
+// registerWorker registers (or refreshes) a worker in the group, which sets
+// its last_seen_at to now (so it is alive).
+func registerWorker(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, group string) {
+	t.Helper()
+	if _, err := client.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{Name: name, Group: group}); err != nil {
+		t.Fatalf("RegisterWorker(%s): %v", name, err)
+	}
+}
+
+// reportStepCompletion reports that a worker completed a step of a job.
+func reportStepCompletion(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, worker string, step int32) {
+	t.Helper()
+	if _, err := client.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{JobId: jobID, WorkerName: worker, StepIndex: step}); err != nil {
+		t.Fatalf("ReportStepCompletion(%s, step %d): %v", worker, step, err)
+	}
+}
+
+// checkStepBarrier checks the barrier for a job's step and returns the
+// response.
+func checkStepBarrier(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, step int32) *dbpb.CheckStepBarrierResponse {
+	t.Helper()
+	resp, err := client.CheckStepBarrier(ctx, &dbpb.CheckStepBarrierRequest{JobId: jobID, StepIndex: step})
+	if err != nil {
+		t.Fatalf("CheckStepBarrier(step %d): %v", step, err)
+	}
+	return resp
+}
+
+// TestStepBarrierDenormalized verifies that a job's step-barrier flag is
+// denormalized from its spec onto the job row (and round-trips through the
+// spec).
+func TestStepBarrierDenormalized(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	spec := &dbpb.JobSpec{
+		StepBarrier: true,
+		Steps:       []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}}},
+	}
+	created, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "build", TargetGroup: "pool-a", Spec: spec})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if !created.GetStepBarrier() {
+		t.Errorf("job step_barrier = false, want true")
+	}
+	if !created.GetSpec().GetStepBarrier() {
+		t.Errorf("spec step_barrier = false, want true")
+	}
+
+	// A job created without the flag defaults to false.
+	plain, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "plain", TargetGroup: "pool-a"})
+	if err != nil {
+		t.Fatalf("CreateJob(plain): %v", err)
+	}
+	if plain.GetStepBarrier() {
+		t.Errorf("plain job step_barrier = true, want false (default)")
+	}
+}
+
+// TestCheckStepBarrierSatisfied verifies that the barrier is satisfied once
+// every alive worker in the group has completed the step.
+func TestCheckStepBarrierSatisfied(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+	registerWorker(t, client, ctx, "w1", "pool-a")
+	registerWorker(t, client, ctx, "w2", "pool-a")
+
+	// Neither worker has completed the step yet: not satisfied.
+	if resp := checkStepBarrier(t, client, ctx, job.GetId(), 0); resp.GetSatisfied() || resp.GetCancelled() {
+		t.Fatalf("before completions: satisfied=%v cancelled=%v, want both false", resp.GetSatisfied(), resp.GetCancelled())
+	}
+
+	// One worker completes: still not satisfied (the other is alive and
+	// outstanding).
+	reportStepCompletion(t, client, ctx, job.GetId(), "w1", 0)
+	if resp := checkStepBarrier(t, client, ctx, job.GetId(), 0); resp.GetSatisfied() {
+		t.Fatalf("after one completion: satisfied=true, want false")
+	}
+
+	// Both workers complete: satisfied.
+	reportStepCompletion(t, client, ctx, job.GetId(), "w2", 0)
+	if resp := checkStepBarrier(t, client, ctx, job.GetId(), 0); !resp.GetSatisfied() {
+		t.Fatalf("after both completions: satisfied=false, want true")
+	}
+}
+
+// TestCheckStepBarrierCancelled verifies that a cancelled job releases the
+// barrier (a waiting worker should stop and report the job cancelled).
+func TestCheckStepBarrierCancelled(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+	registerWorker(t, client, ctx, "w1", "pool-a")
+
+	// Cancel the job (it is pending, so the conditional cancel applies).
+	if _, err := client.CancelJob(ctx, &dbpb.CancelJobRequest{Id: job.GetId()}); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	if !resp.GetCancelled() {
+		t.Errorf("cancelled job: cancelled=false, want true")
+	}
+	if resp.GetSatisfied() {
+		t.Errorf("cancelled job: satisfied=true, want false")
+	}
+}
+
+// TestCheckStepBarrierAgentJob verifies that a job with an empty target group
+// (an ephemeral agent) has no barrier to wait on (it is vacuously satisfied).
+func TestCheckStepBarrierAgentJob(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: "agent-pipeline"})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "agent-job"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	if !resp.GetSatisfied() {
+		t.Errorf("agent job: satisfied=false, want true (no barrier)")
+	}
+	if resp.GetCancelled() {
+		t.Errorf("agent job: cancelled=true, want false")
+	}
+}
+
+// TestCheckStepBarrierDeadWorkerDropped verifies that a worker that is not
+// alive (it has not heartbeated within the liveness window) is dropped from
+// the barrier: its missing step completion does not block the job. This is
+// what lets a job complete when a worker in the group dies mid-step.
+func TestCheckStepBarrierDeadWorkerDropped(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+
+	// Shorten the liveness window so a worker that is not refreshed goes stale
+	// quickly; restore it afterwards.
+	original := workerAliveThreshold
+	workerAliveThreshold = 30 * time.Millisecond
+	t.Cleanup(func() { workerAliveThreshold = original })
+
+	// Register both workers (both alive, last_seen_at = now).
+	registerWorker(t, client, ctx, "w1", "pool-a")
+	registerWorker(t, client, ctx, "w2", "pool-a")
+
+	// w1 completes the step. w2 does not (it will be made dead below).
+	reportStepCompletion(t, client, ctx, job.GetId(), "w1", 0)
+
+	// Let both workers go stale, then refresh only w1: w1 is now alive and w2
+	// is dead.
+	time.Sleep(100 * time.Millisecond)
+	registerWorker(t, client, ctx, "w1", "pool-a")
+
+	// The barrier is satisfied: w1 (alive) has completed the step, and w2
+	// (dead) is dropped from the barrier.
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	if !resp.GetSatisfied() {
+		t.Errorf("dead worker dropped: satisfied=false, want true (w2 is dead and dropped)")
+	}
+	if resp.GetCancelled() {
+		t.Errorf("dead worker dropped: cancelled=true, want false")
+	}
+}
+
+// TestCheckStepBarrierMissingAliveWorkerBlocks verifies that an alive worker
+// that has not completed the step blocks the barrier (a dead worker is
+// dropped, but a live one is not).
+func TestCheckStepBarrierMissingAliveWorkerBlocks(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "build", "pool-a")
+	registerWorker(t, client, ctx, "w1", "pool-a")
+	registerWorker(t, client, ctx, "w2", "pool-a")
+
+	// Only w1 completes; w2 is alive and outstanding, so the barrier is not
+	// satisfied.
+	reportStepCompletion(t, client, ctx, job.GetId(), "w1", 0)
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	if resp.GetSatisfied() {
+		t.Errorf("alive worker outstanding: satisfied=true, want false")
+	}
+}

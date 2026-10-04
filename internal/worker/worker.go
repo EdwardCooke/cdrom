@@ -138,15 +138,16 @@ func (w *Worker) watch(ctx context.Context) error {
 		}
 		switch m := message.GetMessage().(type) {
 		case *apipb.WatchMessage_Assignment:
-			// A full assignment (legacy push). The worker still claims the job
-			// atomically (F-23) so a job delivered to several workers is run by
-			// exactly one of them; the claim returns the fresh spec + token.
-			w.claimAndExecute(ctx, m.Assignment.GetJob().GetId())
+			// A full assignment (legacy push). The worker starts its own
+			// execution of the job (fan-out): a job that targets the worker's
+			// group runs on every worker in the group, so the start is not
+			// exclusive. The start returns the fresh spec + token.
+			w.startAndExecute(ctx, m.Assignment.GetJob().GetId())
 		case *apipb.WatchMessage_Nudge:
 			// A nudge (F-23): the push carries only the job id. The worker
-			// fetches the job and claims it atomically, so a job delivered via
-			// both push and poll is run once.
-			w.claimAndExecute(ctx, m.Nudge.GetJobId())
+			// starts its own execution, so a job delivered via both push and
+			// poll is run once by this worker (its execution is created once).
+			w.startAndExecute(ctx, m.Nudge.GetJobId())
 		case *apipb.WatchMessage_Cancellation:
 			w.cancelJob(m.Cancellation.GetJobId())
 		}
@@ -177,7 +178,7 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 }
 
-// pollOnce lists the pending jobs in the worker's group and claims each one.
+// pollOnce lists the pending jobs in the worker's group and starts each one.
 func (w *Worker) pollOnce(ctx context.Context) {
 	resp, err := w.deps.API.ListPendingJobs(ctx, &apipb.ListPendingJobsRequest{Group: w.group})
 	if err != nil {
@@ -185,38 +186,46 @@ func (w *Worker) pollOnce(ctx context.Context) {
 		return
 	}
 	for _, job := range resp.GetJobs() {
-		w.claimAndExecute(ctx, job.GetId())
+		w.startAndExecute(ctx, job.GetId())
 	}
 }
 
-// claimAndExecute atomically claims a job (F-23) and, if this worker won the
-// claim, executes it. It is the single entry point for job acquisition, used
-// by both the push path (a nudge or full assignment on the WatchJobs stream)
-// and the pull path (the periodic poll). The claim is atomic in the database
-// (pending → running), so a job delivered to several workers — or via both
-// push and poll — is run by exactly one of them: the first to claim. The
-// others see claimed=false and skip.
+// startAndExecute starts this worker's execution of a job (fan-out) and, if
+// the job is still pending, executes it. It is the single entry point for job
+// acquisition, used by both the push path (a nudge or full assignment on the
+// WatchJobs stream) and the pull path (the periodic poll). A job that targets
+// the worker's group runs on every worker in the group, so the start is not
+// exclusive: this worker creates its own execution and runs the job. A job
+// that is no longer pending (it reached a terminal state, or it is not
+// targeted at the worker's group) is not started (started=false), so a job
+// delivered to several workers — or via both push and poll — is run once by
+// each of them, and a job that finished before a slow worker started it is not
+// run.
 //
 // The job runs in a goroutine (bounded by the worker's semaphore to one job
 // at a time) so the watch loop stays free to receive cancellations (F-05).
-func (w *Worker) claimAndExecute(ctx context.Context, jobID int64) {
+func (w *Worker) startAndExecute(ctx context.Context, jobID int64) {
 	w.sem <- struct{}{}
 	go func() {
 		defer func() { <-w.sem }()
-		w.doClaimAndExecute(ctx, jobID)
+		w.doStartAndExecute(ctx, jobID)
 	}()
 }
 
-// doClaimAndExecute performs the atomic claim and, on success, executes the
-// claimed job (which carries its spec, upstream jobs, and a fresh job token).
-func (w *Worker) doClaimAndExecute(ctx context.Context, jobID int64) {
-	resp, err := w.deps.API.ClaimJob(ctx, &apipb.ClaimJobRequest{JobId: jobID})
+// doStartAndExecute starts the worker's execution of the job and, on success,
+// executes it (which carries its spec, upstream jobs, and a fresh job token).
+func (w *Worker) doStartAndExecute(ctx context.Context, jobID int64) {
+	resp, err := w.deps.API.StartJobExecution(ctx, &apipb.StartJobExecutionRequest{
+		JobId:      jobID,
+		WorkerName: w.name,
+	})
 	if err != nil {
-		w.logger.Warn("worker: claim job", "job", jobID, "err", err)
+		w.logger.Warn("worker: start job execution", "job", jobID, "err", err)
 		return
 	}
-	if !resp.GetClaimed() {
-		// Another worker claimed it first, or it is no longer pending.
+	if !resp.GetStarted() {
+		// The job is no longer pending (it reached a terminal state, or it is
+		// not targeted at the worker's group).
 		return
 	}
 	job := resp.GetJob()
@@ -298,9 +307,10 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	}()
 
 	if _, err := w.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, token), &apipb.ReportJobStatusRequest{
-		JobId:     job.GetId(),
-		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
-		StartedAt: timestamppb.Now(),
+		JobId:      job.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_RUNNING,
+		StartedAt:  timestamppb.Now(),
+		WorkerName: w.name,
 	}); err != nil {
 		w.logger.Error("worker: report running", "job", job.GetId(), "err", err)
 	}
@@ -316,6 +326,14 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 		// reported as cancelled, distinct from a failure.
 		if userCancelled {
 			w.logger.Info("job cancelled", "job", jobID)
+			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
+			return
+		}
+		// A cancellation observed at a step barrier (the job was cancelled
+		// while this worker waited for its peers to finish a step) is also
+		// reported as cancelled, distinct from a failure.
+		if errors.Is(err, executor.ErrCancelled) {
+			w.logger.Info("job cancelled (step barrier)", "job", jobID)
 			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
 			return
 		}
@@ -362,11 +380,22 @@ func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string, colle
 		Name:   job.GetName(),
 		Status: "running",
 	})
+	// The cross-worker step barrier: when the job has the step-barrier flag set
+	// and targets a worker group, the workers synchronize at each step boundary
+	// (after a worker completes a step it waits until every worker alive at the
+	// step's start has completed it). A job on a single target (an ephemeral
+	// agent) runs its steps unbarriered.
+	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
+		ctx = executor.ContextWithStepBarrier(ctx, newStepBarrier(w.deps.API, w.name, job.GetId(), token, w.logger, 0))
+	}
 	return executor.Execute(ctx, job.GetSpec(), w.logger)
 }
 
-// report sets the finished timestamp and final status, presenting the job
-// token, and attaches the job's collected per-step outcomes (F-06).
+// report sets the finished timestamp and final status for the worker's
+// execution of the job, presenting the job token, and attaches the job's
+// collected per-step outcomes (F-06). The worker's name is included so the API
+// records the outcome against the worker's execution (fan-out); the job's
+// overall status is derived from the executions by the scheduler.
 func (w *Worker) report(ctx context.Context, jobID int64, token string, status dbpb.JobStatus, collector *executor.StepResultCollector) {
 	if _, err := w.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, token), &apipb.ReportJobStatusRequest{
 		JobId:       jobID,
@@ -374,6 +403,7 @@ func (w *Worker) report(ctx context.Context, jobID int64, token string, status d
 		FinishedAt:  timestamppb.Now(),
 		StepResults: collector.ToProto(),
 		Outputs:     collector.JobOutputs(),
+		WorkerName:  w.name,
 	}); err != nil {
 		w.logger.Error("worker: report status", "job", jobID, "status", status, "err", err)
 	}
