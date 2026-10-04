@@ -73,6 +73,9 @@ message Job {
   // run_id is the pipeline run this job is an instance of (F-07); 0 when the
   // job is not part of a run.
   int64 run_id = 16;
+  // key is the job's stable, pipeline-scoped identifier (F-08); empty when
+  // the job is not part of a pipeline.
+  string key = 17;
 }
 
 message SubmitJobRequest {
@@ -88,6 +91,12 @@ message SubmitJobRequest {
   // held pending until every dependency succeeds (then it is dispatched) or
   // any of them does not (then it is marked skipped instead of running).
   repeated int64 depends_on = 5;
+  // key is the job's stable, pipeline-scoped identifier (F-08); when the job
+  // belongs to a pipeline it must be unique within that pipeline.
+  string key = 6;
+  // needs lists the keys of the jobs this job depends on (F-08); see
+  // cdrom.db.v1.JobDefinition.needs for the gating/skip semantics.
+  repeated string needs = 7;
 }
 
 message GetJobRequest {

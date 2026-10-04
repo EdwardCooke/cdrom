@@ -46,9 +46,72 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		Description: req.GetDescription(),
 		FailureMode: failureModeFromProto(req.GetFailureMode()),
 	}
-	if err := s.db.WithContext(ctx).Create(pipeline).Error; err != nil {
+	// The pipeline's job definitions (F-08) are validated as a DAG before
+	// anything is persisted: a cycle or an unknown key rejects the whole
+	// create, so a pipeline is never saved in an unrunnable state.
+	defs := jobDefinitionsFromProto(req.GetJobs())
+	if err := validateJobDAG(req.GetJobs()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	// needsByIndex[i] carries the needs (keys) of defs[i] from the request, so
+	// they can be resolved to depends_on ids (F-08) once the jobs are created
+	// and their ids are known. The backend stores dependencies as ids; needs is
+	// only the authoring form.
+	needsByIndex := make([][]string, len(defs))
+	for i, def := range req.GetJobs() {
+		needsByIndex[i] = def.GetNeeds()
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(pipeline).Error; err != nil {
+			return err
+		}
+		for i := range defs {
+			def := &defs[i]
+			pipelineID := pipeline.ID
+			def.PipelineID = &pipelineID
+			def.Status = models.JobStatusPending
+			def.Attempt = 1
+			if def.Spec.Retry != nil {
+				def.MaxAttempts = def.Spec.Retry.MaxAttempts
+			}
+			def.IgnoreFailed = def.Spec.IgnoreFailed
+			def.StepBarrier = def.Spec.StepBarrier
+			def.FailureMode = def.Spec.FailureMode
+			if def.FailureMode == "" {
+				def.FailureMode = pipeline.FailureMode
+			}
+			if def.FailureMode == "" {
+				def.FailureMode = models.FailureModeAll
+			}
+			if err := tx.Create(def).Error; err != nil {
+				return err
+			}
+		}
+		// Pass 2: now that all job ids are known, resolve each definition's
+		// needs (keys) to the ids of the jobs they reference and store the
+		// result in depends_on (F-08).
+		keyToID := keyToIDMap(defs)
+		for i := range defs {
+			if len(needsByIndex[i]) == 0 {
+				continue
+			}
+			defs[i].DependsOn = resolveNeedsToDependsOn(needsByIndex[i], keyToID)
+			if err := tx.Model(&models.Job{}).
+				Where("id = ?", defs[i].ID).
+				Select("DependsOn").
+				Updates(&models.Job{DependsOn: defs[i].DependsOn}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, grpcErr(err)
 	}
+	// The definitions were created in the transaction; attach them so the
+	// response carries the pipeline's jobs (with their ids and denormalized
+	// fields) back to the caller. needs is reconstructed from the resolved
+	// depends_on so the response mirrors what the caller sent.
+	pipeline.Jobs = defs
 	return toProtoPipeline(pipeline), nil
 }
 
@@ -57,6 +120,13 @@ func (s *Server) GetPipeline(ctx context.Context, req *dbpb.GetPipelineRequest) 
 	if err := s.db.WithContext(ctx).First(&pipeline, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Load the pipeline's job definitions so the response carries them (with
+	// needs reconstructed from depends_on for display, F-08).
+	defs, err := s.loadPipelineJobDefinitions(ctx, pipeline.ID)
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	pipeline.Jobs = defs
 	return toProtoPipeline(&pipeline), nil
 }
 
@@ -67,6 +137,13 @@ func (s *Server) ListPipelines(ctx context.Context, _ *dbpb.ListPipelinesRequest
 	}
 	response := &dbpb.ListPipelinesResponse{}
 	for i := range pipelines {
+		// Load each pipeline's job definitions so the response carries them
+		// (with needs reconstructed from depends_on for display, F-08).
+		defs, err := s.loadPipelineJobDefinitions(ctx, pipelines[i].ID)
+		if err != nil {
+			return nil, grpcErr(err)
+		}
+		pipelines[i].Jobs = defs
 		response.Pipelines = append(response.Pipelines, toProtoPipeline(&pipelines[i]))
 	}
 	return response, nil
@@ -84,7 +161,73 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 	if req.GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_UNSPECIFIED {
 		pipeline.FailureMode = failureModeFromProto(req.GetFailureMode())
 	}
-	if err := s.db.WithContext(ctx).Save(&pipeline).Error; err != nil {
+	// When job definitions are supplied (F-08) they replace the pipeline's
+	// existing job definitions: the old definitions are removed and the new
+	// ones created, and the resulting DAG is validated for cycles and unknown
+	// keys before anything is persisted. When none are supplied the pipeline's
+	// job definitions are left unchanged.
+	if req.GetJobs() != nil {
+		defs := jobDefinitionsFromProto(req.GetJobs())
+		if err := validateJobDAG(req.GetJobs()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		// needsByIndex[i] carries the needs (keys) of defs[i] from the request,
+		// so they can be resolved to depends_on ids (F-08) once the jobs are
+		// created and their ids are known.
+		needsByIndex := make([][]string, len(defs))
+		for i, def := range req.GetJobs() {
+			needsByIndex[i] = def.GetNeeds()
+		}
+		if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(&pipeline).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("pipeline_id = ?", pipeline.ID).Delete(&models.Job{}).Error; err != nil {
+				return err
+			}
+			for i := range defs {
+				def := &defs[i]
+				pipelineID := pipeline.ID
+				def.PipelineID = &pipelineID
+				def.Status = models.JobStatusPending
+				def.Attempt = 1
+				if def.Spec.Retry != nil {
+					def.MaxAttempts = def.Spec.Retry.MaxAttempts
+				}
+				def.IgnoreFailed = def.Spec.IgnoreFailed
+				def.StepBarrier = def.Spec.StepBarrier
+				def.FailureMode = def.Spec.FailureMode
+				if def.FailureMode == "" {
+					def.FailureMode = pipeline.FailureMode
+				}
+				if def.FailureMode == "" {
+					def.FailureMode = models.FailureModeAll
+				}
+				if err := tx.Create(def).Error; err != nil {
+					return err
+				}
+			}
+			// Pass 2: resolve each definition's needs (keys) to the ids of the
+			// jobs they reference and store the result in depends_on (F-08).
+			keyToID := keyToIDMap(defs)
+			for i := range defs {
+				if len(needsByIndex[i]) == 0 {
+					continue
+				}
+				defs[i].DependsOn = resolveNeedsToDependsOn(needsByIndex[i], keyToID)
+				if err := tx.Model(&models.Job{}).
+					Where("id = ?", defs[i].ID).
+					Select("DependsOn").
+					Updates(&models.Job{DependsOn: defs[i].DependsOn}).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, grpcErr(err)
+		}
+		pipeline.Jobs = defs
+	} else if err := s.db.WithContext(ctx).Save(&pipeline).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	return toProtoPipeline(&pipeline), nil
@@ -152,14 +295,17 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 		response.Run = toProtoRun(run)
 
 		// Load the pipeline's job definitions (the run's job instances are
-		// created from these).
+		// created from these). Only the definitions (run_id IS NULL) are used;
+		// a pipeline's job instances from prior runs are excluded so they are
+		// not mistaken for definitions.
 		var defs []models.Job
-		if err := tx.Where("pipeline_id = ?", pipelineID).Order("id").Find(&defs).Error; err != nil {
+		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipelineID).Order("id").Find(&defs).Error; err != nil {
 			return err
 		}
 		// Pass 1: create every job instance (without depends_on yet) so all
 		// instance ids are known, and record the definition-id -> instance-id
-		// mapping used to remap each instance's dependencies.
+		// mapping used to remap each instance's depends_on to the run's own
+		// instance ids.
 		instances := make([]models.Job, 0, len(defs))
 		defToInstance := make(map[uint]uint, len(defs))
 		for i := range defs {
@@ -167,6 +313,7 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 			job := &models.Job{
 				PipelineID:  &pipelineID,
 				RunID:       &run.ID,
+				Key:         def.Key,
 				Name:        def.Name,
 				TargetGroup: def.TargetGroup,
 				Status:      models.JobStatusPending,
@@ -199,22 +346,24 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 			defToInstance[def.ID] = job.ID
 			instances = append(instances, *job)
 		}
-		// Pass 2: remap each instance's depends_on from the definition ids to
-		// the new instance ids. A dependency on a job outside this pipeline is
-		// left as-is (best-effort); in practice a pipeline's job dependencies
-		// reference other jobs in the same pipeline.
+		// Pass 2: remap each instance's depends_on to the run's own instance
+		// ids. A definition's depends_on (already resolved from its needs at
+		// save time, F-08) are remapped from the definition ids to the run's
+		// instance ids. A dependency that cannot be resolved (an id outside
+		// this pipeline) is left as-is (best-effort); in practice a pipeline's
+		// job dependencies reference other jobs in the same pipeline.
 		for i := range instances {
 			def := &defs[i]
-			if len(def.DependsOn) == 0 {
-				continue
-			}
-			remapped := make([]uint, len(def.DependsOn))
-			for j, defDepID := range def.DependsOn {
+			remapped := make([]uint, 0, len(def.DependsOn))
+			for _, defDepID := range def.DependsOn {
 				if instID, ok := defToInstance[defDepID]; ok {
-					remapped[j] = instID
+					remapped = append(remapped, instID)
 				} else {
-					remapped[j] = defDepID
+					remapped = append(remapped, defDepID)
 				}
+			}
+			if len(remapped) == 0 {
+				continue
 			}
 			if err := tx.Model(&models.Job{}).
 				Where("id = ?", instances[i].ID).
@@ -323,6 +472,7 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	}
 	spec := specFromProto(req.GetSpec())
 	job := &models.Job{
+		Key:         req.GetKey(),
 		Name:        req.GetName(),
 		TargetGroup: req.GetTargetGroup(),
 		Status:      models.JobStatusPending,
@@ -356,6 +506,44 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 		}
 		if job.FailureMode == "" {
 			job.FailureMode = pipeline.FailureMode
+		}
+		// Adding a job definition to a pipeline changes the pipeline's DAG
+		// (F-08): the new job's key must be unique and its needs must reference
+		// existing keys without forming a cycle. Validate the pipeline's
+		// existing job definitions together with the new job before persisting
+		// anything, so a pipeline is never left in an unrunnable state. A job
+		// created directly under a run (run_id set) is not a definition and is
+		// not part of the pipeline's DAG, so it is not validated here.
+		if req.GetRunId() == 0 {
+			var existing []models.Job
+			if err := s.db.WithContext(ctx).
+				Where("pipeline_id = ? AND run_id IS NULL", pipelineID).
+				Order("id").Find(&existing).Error; err != nil {
+				return nil, grpcErr(err)
+			}
+			// Reconstruct each existing definition's needs (keys) from its
+			// depends_on (ids) so the DAG can be validated (F-08): the backend
+			// stores dependencies as ids, and needs is only the authoring form.
+			idToKey := pipelineKeyMap(existing)
+			existingDefs := make([]*dbpb.JobDefinition, 0, len(existing)+1)
+			for i := range existing {
+				existingDefs = append(existingDefs, &dbpb.JobDefinition{
+					Key:   existing[i].Key,
+					Name:  existing[i].Name,
+					Needs: needsFromDependsOn(existing[i].DependsOn, idToKey),
+				})
+			}
+			newDef := &dbpb.JobDefinition{Key: job.Key, Name: job.Name, Needs: req.GetNeeds()}
+			if err := validateJobDAG(append(existingDefs, newDef)); err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+			// Resolve the new job's needs (keys) to the ids of the jobs they
+			// reference and append the result to depends_on (F-08). The job's
+			// raw depends_on (F-06, set from the request) is preserved: a job
+			// may carry both raw-id dependencies and key-based needs.
+			if resolved := resolveNeedsToDependsOn(req.GetNeeds(), keyToIDMap(existing)); len(resolved) > 0 {
+				job.DependsOn = append(job.DependsOn, resolved...)
+			}
 		}
 	}
 	if job.FailureMode == "" {
@@ -1591,6 +1779,195 @@ func toProtoEvent(event *models.Event) *dbpb.Event {
 // Conversions and helpers
 // ---------------------------------------------------------------------------
 
+// validateJobDAG checks a set of job definitions (F-08) for a well-formed DAG
+// over the jobs that participate in it (those with a non-empty key). A job
+// with a key must have a unique key, and its needs must reference keys that
+// are present; the keyed subgraph must have no cycle. A job with no key is
+// not part of the needs-based DAG and is ignored — except that a job that
+// declares needs must have a key (its needs reference other jobs by key, so a
+// keyless job could never be referenced). It returns a descriptive error
+// naming the offending jobs, or nil when the graph is valid.
+func validateJobDAG(defs []*dbpb.JobDefinition) error {
+	keyed := make(map[string]*dbpb.JobDefinition, len(defs))
+	for _, def := range defs {
+		if def.GetKey() == "" {
+			if len(def.GetNeeds()) > 0 {
+				return fmt.Errorf("job %q declares needs but has no key", def.GetName())
+			}
+			continue
+		}
+		if _, dup := keyed[def.GetKey()]; dup {
+			return fmt.Errorf("duplicate job key %q", def.GetKey())
+		}
+		keyed[def.GetKey()] = def
+	}
+	indeg := make(map[string]int, len(keyed))
+	adj := make(map[string][]string, len(keyed))
+	for key := range keyed {
+		indeg[key] = 0
+	}
+	for key, def := range keyed {
+		for _, need := range def.GetNeeds() {
+			if _, ok := keyed[need]; !ok {
+				return fmt.Errorf("job %q depends on unknown key %q", key, need)
+			}
+			indeg[key]++
+			adj[need] = append(adj[need], key)
+		}
+	}
+	// Kahn's algorithm: a cycle leaves at least one node with a non-zero
+	// in-degree, so the number of nodes drained is less than the total.
+	queue := make([]string, 0, len(keyed))
+	for key, d := range indeg {
+		if d == 0 {
+			queue = append(queue, key)
+		}
+	}
+	processed := 0
+	for len(queue) > 0 {
+		key := queue[0]
+		queue = queue[1:]
+		processed++
+		for _, next := range adj[key] {
+			indeg[next]--
+			if indeg[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+	if processed != len(keyed) {
+		cycle := make([]string, 0, len(keyed)-processed)
+		for key, d := range indeg {
+			if d > 0 {
+				cycle = append(cycle, key)
+			}
+		}
+		return fmt.Errorf("job dependencies contain a cycle involving: %v", cycle)
+	}
+	return nil
+}
+
+// jobDefinitionsFromProto converts a list of proto job definitions into the
+// model's job definitions (F-08). A definition's name defaults to its key when
+// empty, and its failure mode defaults to FailureModeAll. The definition's
+// needs (keys) are not carried on the model: the caller resolves them to
+// depends_on ids (see resolveNeedsToDependsOn) after the jobs are created.
+func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
+	jobs := make([]models.Job, 0, len(defs))
+	for _, def := range defs {
+		name := def.GetName()
+		if name == "" {
+			name = def.GetKey()
+		}
+		jobs = append(jobs, models.Job{
+			Key:         def.GetKey(),
+			Name:        name,
+			TargetGroup: def.GetTargetGroup(),
+			Spec:        specFromProto(def.GetSpec()),
+		})
+	}
+	return jobs
+}
+
+// loadPipelineJobDefinitions loads a pipeline's job definitions (the Job rows
+// with run_id IS NULL, F-08) in id order. A pipeline's run instances are
+// excluded so they are not mistaken for definitions.
+func (s *Server) loadPipelineJobDefinitions(ctx context.Context, pipelineID uint) ([]models.Job, error) {
+	var defs []models.Job
+	if err := s.db.WithContext(ctx).
+		Where("pipeline_id = ? AND run_id IS NULL", pipelineID).
+		Order("id").Find(&defs).Error; err != nil {
+		return nil, err
+	}
+	return defs, nil
+}
+
+// pipelineKeyMap builds a map from a job's id to its key for a set of job
+// definitions (F-08). It is used to resolve a job's needs (keys) to the ids
+// of the jobs they reference, and to reconstruct needs from depends_on for
+// display.
+func pipelineKeyMap(jobs []models.Job) map[uint]string {
+	m := make(map[uint]string, len(jobs))
+	for i := range jobs {
+		if jobs[i].Key != "" {
+			m[jobs[i].ID] = jobs[i].Key
+		}
+	}
+	return m
+}
+
+// keyToIDMap builds a map from a job's key to its id for a set of jobs (F-08).
+// It is used to resolve a job's needs (keys) to the ids of the jobs they
+// reference.
+func keyToIDMap(jobs []models.Job) map[string]uint {
+	m := make(map[string]uint, len(jobs))
+	for i := range jobs {
+		if jobs[i].Key != "" {
+			m[jobs[i].Key] = jobs[i].ID
+		}
+	}
+	return m
+}
+
+// resolveNeedsToDependsOn resolves a job's needs (the keys of the jobs it
+// depends on, F-08) to the ids of those jobs, using the key->id map. A need
+// that cannot be resolved is dropped (best-effort); in practice a pipeline's
+// needs reference other jobs in the same pipeline, so every need resolves.
+func resolveNeedsToDependsOn(needs []string, keyToID map[string]uint) []uint {
+	if len(needs) == 0 {
+		return nil
+	}
+	out := make([]uint, 0, len(needs))
+	for _, key := range needs {
+		if id, ok := keyToID[key]; ok {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// needsFromDependsOn reconstructs a job's needs (the keys of the jobs it
+// depends on) from its depends_on (ids), using the id->key map. It is used to
+// present a job's dependencies as keys (the authoring form, F-08) when the
+// backend stores them as ids. A dependency whose key is unknown is dropped.
+func needsFromDependsOn(dependsOn []uint, idToKey map[uint]string) []string {
+	if len(dependsOn) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(dependsOn))
+	for _, id := range dependsOn {
+		if key, ok := idToKey[id]; ok {
+			out = append(out, key)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// toProtoPipelineJobDefinitions converts a pipeline's job definitions into the
+// proto JobDefinition list carried on the Pipeline message (F-08). Each
+// definition's id is populated so a create/update response carries the ids of
+// the job rows that were created.
+func toProtoPipelineJobDefinitions(jobs []models.Job, keyMap map[uint]string) []*dbpb.JobDefinition {
+	defs := make([]*dbpb.JobDefinition, 0, len(jobs))
+	for i := range jobs {
+		defs = append(defs, &dbpb.JobDefinition{
+			Id:          int64(jobs[i].ID),
+			Key:         jobs[i].Key,
+			Name:        jobs[i].Name,
+			TargetGroup: jobs[i].TargetGroup,
+			Spec:        specToProto(jobs[i].Spec),
+			Needs:       needsFromDependsOn(jobs[i].DependsOn, keyMap),
+		})
+	}
+	return defs
+}
+
 func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 	return &dbpb.Pipeline{
 		Id:          int64(pipeline.ID),
@@ -1599,6 +1976,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		CreatedAt:   timestamppb.New(pipeline.CreatedAt),
 		UpdatedAt:   timestamppb.New(pipeline.UpdatedAt),
 		FailureMode: failureModeToProto(pipeline.FailureMode),
+		Jobs:        toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
 	}
 }
 
@@ -1638,6 +2016,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		IgnoreFailed: job.IgnoreFailed,
 		FailureMode:  failureModeToProto(job.FailureMode),
 		StepBarrier:  job.StepBarrier,
+		Key:          job.Key,
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)

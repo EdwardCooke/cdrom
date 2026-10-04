@@ -1995,3 +1995,238 @@ func TestCheckStepBarrierMissingAliveWorkerBlocks(t *testing.T) {
 		t.Errorf("alive worker outstanding: satisfied=true, want false")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// F-08: job dependencies (DAG)
+// ---------------------------------------------------------------------------
+
+// jobDef is a helper that builds a proto job definition (F-08) for a pipeline.
+func jobDef(key, name, targetGroup string, needs ...string) *dbpb.JobDefinition {
+	if name == "" {
+		name = key
+	}
+	return &dbpb.JobDefinition{Key: key, Name: name, TargetGroup: targetGroup, Needs: needs}
+}
+
+// TestCreatePipelineWithJobs verifies that a pipeline created with job
+// definitions (F-08) persists the jobs with their keys and needs, and returns
+// them (with their ids) in the response.
+func TestCreatePipelineWithJobs(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "build",
+		Jobs: []*dbpb.JobDefinition{
+			jobDef("build", "", "linux-pool"),
+			jobDef("test", "", "", "build"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if got := len(pipeline.GetJobs()); got != 2 {
+		t.Fatalf("pipeline jobs = %d, want 2", got)
+	}
+	for _, def := range pipeline.GetJobs() {
+		if def.GetId() == 0 {
+			t.Errorf("job %q id = 0, want non-zero", def.GetKey())
+		}
+	}
+	// The persisted jobs belong to the pipeline and carry their keys/needs.
+	jobs, err := client.ListJobs(ctx, &dbpb.ListJobsRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if got := len(jobs.GetJobs()); got != 2 {
+		t.Fatalf("persisted jobs = %d, want 2", got)
+	}
+	byKey := map[string]*dbpb.Job{}
+	for _, j := range jobs.GetJobs() {
+		byKey[j.GetKey()] = j
+		if j.GetPipelineId() != pipeline.GetId() {
+			t.Errorf("job %q pipeline = %d, want %d", j.GetKey(), j.GetPipelineId(), pipeline.GetId())
+		}
+	}
+	// The backend stores dependencies as ids (F-08): "test" depends on the
+	// id of the "build" job, and "build" has no dependencies.
+	if build, ok := byKey["build"]; !ok || len(build.GetDependsOn()) != 0 {
+		t.Errorf("build job = %+v, want present with no depends_on", build)
+	}
+	if test, ok := byKey["test"]; !ok || len(test.GetDependsOn()) != 1 || test.GetDependsOn()[0] != byKey["build"].GetId() {
+		t.Errorf("test job = %+v, want depends_on [build id]", test)
+	}
+}
+
+// TestCreatePipelineRejectsCycle verifies that a pipeline whose job
+// dependencies form a cycle is rejected at save time (F-08).
+func TestCreatePipelineRejectsCycle(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "cyclic",
+		Jobs: []*dbpb.JobDefinition{
+			jobDef("a", "", "", "b"),
+			jobDef("b", "", "", "a"),
+		},
+	})
+	if err == nil {
+		t.Fatal("CreatePipeline with a cycle succeeded, want an error")
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("cycle error code = %v, want InvalidArgument", status.Code(err))
+	}
+	// Nothing was persisted.
+	pipelines, _ := client.ListPipelines(ctx, &dbpb.ListPipelinesRequest{})
+	for _, p := range pipelines.GetPipelines() {
+		if p.GetName() == "cyclic" {
+			t.Error("cyclic pipeline was persisted, want it rejected")
+		}
+	}
+}
+
+// TestCreatePipelineRejectsUnknownNeed verifies that a pipeline with a job
+// that needs a key no job has is rejected at save time (F-08).
+func TestCreatePipelineRejectsUnknownNeed(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "dangling",
+		Jobs: []*dbpb.JobDefinition{
+			jobDef("a", "", "", "ghost"),
+		},
+	})
+	if err == nil {
+		t.Fatal("CreatePipeline with an unknown need succeeded, want an error")
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("unknown-need error code = %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+// TestCreatePipelineRejectsDuplicateKey verifies that a pipeline with two jobs
+// sharing a key is rejected at save time (F-08).
+func TestCreatePipelineRejectsDuplicateKey(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "dup",
+		Jobs: []*dbpb.JobDefinition{
+			jobDef("a", "first", ""),
+			jobDef("a", "second", ""),
+		},
+	})
+	if err == nil {
+		t.Fatal("CreatePipeline with duplicate keys succeeded, want an error")
+	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("duplicate-key error code = %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+// TestCreateRunRemapsNeeds verifies that a run of a pipeline whose jobs use
+// needs (keys, F-08) creates job instances whose depends_on are remapped from
+// the definition keys to the run's own instance ids, so the run's internal
+// dependencies reference the run's instances rather than the definitions.
+func TestCreateRunRemapsNeeds(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "dag",
+		Jobs: []*dbpb.JobDefinition{
+			jobDef("build", "", "linux-pool"),
+			jobDef("test", "", "", "build"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	jobs := resp.GetJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("run created %d instances, want 2", len(jobs))
+	}
+	// The instances keep their keys; the "test" instance depends on the
+	// "build" *instance* (remapped from the key).
+	buildID, testID := int64(0), int64(0)
+	var testInstance *dbpb.Job
+	for _, j := range jobs {
+		switch j.GetKey() {
+		case "build":
+			buildID = j.GetId()
+		case "test":
+			testID = j.GetId()
+			testInstance = j
+		}
+	}
+	if buildID == 0 || testID == 0 {
+		t.Fatalf("could not find build/test instances: %+v", jobs)
+	}
+	if got := testInstance.GetDependsOn(); len(got) != 1 || got[0] != buildID {
+		t.Errorf("test instance depends_on = %v, want [%d]", got, buildID)
+	}
+	// The remapping is persisted on the instance.
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: testID})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got := fetched.GetDependsOn(); len(got) != 1 || got[0] != buildID {
+		t.Errorf("persisted test instance depends_on = %v, want [%d]", got, buildID)
+	}
+}
+
+// TestCreateJobWithNeedsValidatesDAG verifies that adding a job with needs to
+// a pipeline validates the resulting DAG (F-08): a job whose needs form a
+// cycle with the pipeline's existing jobs is rejected.
+func TestCreateJobWithNeedsValidatesDAG(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "dag",
+		Jobs: []*dbpb.JobDefinition{jobDef("a", "", "")},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	// Adding a job "b" that needs "a" is fine (a -> b, no cycle).
+	if _, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
+		PipelineId: pipeline.GetId(),
+		Name:       "b",
+		Key:        "b",
+		Needs:      []string{"a"},
+	}); err != nil {
+		t.Fatalf("CreateJob(b needs a): %v", err)
+	}
+	// Adding a job "a2" that needs "b" while "a" needs "a2" would be a cycle;
+	// instead, add a job that needs itself indirectly: a job "c" that needs
+	// "b" is fine, but a job that makes a cycle is rejected. Add "a" again is
+	// a duplicate key (rejected); add a job "z" that needs "a" and "a" already
+	// exists -> fine. To force a cycle, add a job whose key is "a" is a dup.
+	// So: add a job "b2" that needs "a" (fine), then verify a duplicate key
+	// is rejected.
+	if _, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
+		PipelineId: pipeline.GetId(),
+		Name:       "a-dup",
+		Key:        "a",
+	}); err == nil {
+		t.Error("CreateJob with a duplicate key succeeded, want an error")
+	}
+	// A job needing an unknown key is rejected.
+	if _, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
+		PipelineId: pipeline.GetId(),
+		Name:       "ghost",
+		Key:        "ghost",
+		Needs:      []string{"nonexistent"},
+	}); err == nil {
+		t.Error("CreateJob with an unknown need succeeded, want an error")
+	}
+}

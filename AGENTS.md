@@ -310,14 +310,17 @@ never run — instead of failing, in two ways:
   `running` leaves the job untouched, to be reconsidered on the resolver's
   next tick.
 
-  **This is a deliberately minimal, single-level, polling-based stand-in for
-  F-08's full DAG/`needs` resolver**, introduced because F-06 is built ahead
-  of F-08 in the roadmap. `depends_on` is a flat list of raw job ids with no
-  cycle validation; F-08 is expected to replace it with a named `needs` (job
-  keys within a pipeline run), full parallel DAG resolution, and cycle
-  validation at save time — at which point this resolver's job-skip logic
-  should be folded into (or re-derived from) that larger DAG engine rather
-  than kept as a separate parallel mechanism.
+  **F-08 (now implemented) builds on this resolver rather than replacing it.**
+  F-06 landed ahead of F-08 in the roadmap, so `Job` gained a minimal
+  `depends_on` field (a flat list of raw job ids) resolved by this polling
+  loop. F-08 adds `needs` — dependencies expressed as the stable `key`s of
+  other jobs in the same pipeline — and cycle validation at pipeline save
+  time. The database service resolves a job's `needs` (keys) to `depends_on`
+  (ids) when the pipeline is saved, and `Database.CreateRun` remaps a run's
+  instances' `depends_on` (definition ids) onto the run's own instance ids,
+  so this same resolver dispatches ready jobs in parallel and skips
+  dependents of a failed job. See the "Job dependencies (F-08)" section
+  below.
 
 **Pipeline runs (F-07):** a **`PipelineRun`** is a first-class entity — one
 execution of a pipeline, owning a set of job instances. It carries
@@ -361,6 +364,50 @@ definitions, so the pipeline *definition* is separated from each *run* of it.
 - **New WebSocket event + snapshot entry.** A `run_status` event (run id +
   status) is published when a run is created and whenever its derived status
   changes; the connect snapshot now also carries the current runs.
+
+**Job dependencies (F-08):** jobs within a pipeline declare dependencies as
+`needs` — the stable `key`s of other jobs in the same pipeline — forming a
+DAG. A job starts only when all its dependencies have succeeded; the
+scheduler dispatches ready jobs in parallel where possible.
+
+- **`needs` are keys, not ids.** A job in a pipeline has a `key` (a short
+  name, e.g. `build`, `test`), unique within the pipeline. A job's `needs`
+  reference other jobs by their `key`, so a pipeline's DAG is stable across
+  runs and survives re-creation of a run's job instances. A job that is not
+  part of a pipeline (a standalone job) has no `key` and may still use the
+  raw-id `depends_on` (F-06).
+- **The DAG is validated at save time.** The database service validates a
+  pipeline's job graph whenever it is created, updated, or a job is added:
+  keys are unique, every `needs` entry references a key that is present, and
+  the keyed subgraph has no cycle (Kahn's algorithm). A cycle, an unknown
+  key, or a duplicate key rejects the whole save, so a pipeline is never
+  persisted in an unrunnable state.
+- **`needs` are resolved to `depends_on` at save time.** `needs` is the
+  authoring form (keys); the backend stores dependencies as `depends_on` (ids).
+  When a pipeline is created, updated, or a job is added, the database service
+  resolves each job's `needs` (keys) to the ids of the jobs they reference and
+  stores the result in `depends_on`. `Database.CreateRun` then creates one job
+  instance per definition and remaps each instance's `depends_on` (definition
+  ids) to the ids of the run's own instances. The F-06 dependency resolver
+  (which resolves `depends_on` by id) dispatches ready instances in parallel
+  and skips dependents of a failed job — so F-08 reuses the F-06 resolver
+  rather than introducing a parallel DAG engine. Two runs of the same pipeline
+  remain fully independent.
+- **Pipeline jobs are first-class definitions.** A pipeline carries its job
+  definitions (key, name, target group, spec, needs) — created via
+  `POST /api/pipelines` (with a `jobs` list) or `PUT /api/pipelines/{id}`, or
+  by submitting a job with a `pipeline_id` (`POST /api/jobs`), which persists
+  it as a definition on the pipeline (via the database service) rather than
+  dispatching it. A run of the pipeline instantiates those definitions.
+- **New fields / RPCs.** `Job` (db, scheduler, api) gains `key` (the stable
+  pipeline-scoped identifier); the authoring messages — `CreateJobRequest`
+  (db), `SubmitJobRequest` (scheduler), and the new `JobDefinition` message
+  (key, name, target_group, spec, needs, id) — carry `needs` (the keys), which
+  the database service resolves to `depends_on` (ids) at save time.
+  `JobDefinition` is carried on `Pipeline`, `CreatePipelineRequest`, and
+  `UpdatePipelineRequest` (a `jobs` field).
+  `POST /api/pipelines` and `PUT /api/pipelines/{id}` accept a `jobs` list;
+  `POST /api/jobs` with a `pipeline_id` persists a definition.
 
 **Fan-out (worker groups):** a job that targets a worker group runs on
 **every** worker in the group — not on a single worker that wins a claim.
@@ -563,7 +610,8 @@ internal/
               that reaps running jobs past their timeout (F-03) + a background
               retry loop that re-dispatches failed jobs per their retry policy
               (F-04) + a background dependency resolver that skips/dispatches
-              a pending job once its depends_on dependencies resolve (F-06) + a
+              a pending job once its depends_on dependencies resolve (F-06,
+              also the resolver F-08's `needs`-based DAG dispatch reuses) + a
               background job-status loop that re-derives each in-flight group
               job's overall status from its fan-out executions
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)

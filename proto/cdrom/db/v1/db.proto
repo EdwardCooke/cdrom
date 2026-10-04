@@ -233,6 +233,11 @@ message Pipeline {
   // failure_mode overrides the pipeline's; a job that sets none inherits this
   // value (defaulting to ALL when the pipeline sets none).
   FailureMode failure_mode = 6;
+  // jobs are the pipeline's job definitions (F-08): the declarative jobs the
+  // pipeline runs, each carrying a key, needs (dependencies, by key), target
+  // group, and spec. A run of the pipeline creates one job instance per
+  // definition (see CreateRun).
+  repeated JobDefinition jobs = 7;
 }
 
 message CreatePipelineRequest {
@@ -241,6 +246,11 @@ message CreatePipelineRequest {
   // failure_mode is the pipeline's default failure mode for its jobs (see
   // Pipeline.failure_mode); UNSPECIFIED means the default (ALL).
   FailureMode failure_mode = 3;
+  // jobs are the pipeline's job definitions (F-08); when present they are
+  // created alongside the pipeline and the pipeline's DAG (each job's needs,
+  // expressed as keys) is validated for cycles and unknown keys before
+  // anything is persisted.
+  repeated JobDefinition jobs = 4;
 }
 
 message GetPipelineRequest {
@@ -260,6 +270,12 @@ message UpdatePipelineRequest {
   // failure_mode, when set (not UNSPECIFIED), updates the pipeline's default
   // failure mode (see Pipeline.failure_mode).
   FailureMode failure_mode = 4;
+  // jobs, when present, replaces the pipeline's job definitions (F-08): the
+  // pipeline's existing job definitions are removed and these are created in
+  // their place, and the resulting DAG is validated for cycles and unknown
+  // keys before anything is persisted. When absent the pipeline's job
+  // definitions are left unchanged.
+  repeated JobDefinition jobs = 5;
 }
 
 message DeletePipelineRequest {
@@ -605,14 +621,17 @@ message Job {
   // the job was created (0 means the job is never retried). It is denormalized
   // onto the job so the UI can render "attempt N of M" without the spec.
   int32 max_attempts = 12;
-  // depends_on lists the ids of jobs this job depends on (F-06). A job with
-  // a non-empty depends_on is held pending (not dispatched) until every
+  // depends_on lists the ids of jobs this job depends on. A job with a
+  // non-empty depends_on is held pending (not dispatched) until every
   // dependency reaches a terminal state: if all of them succeed the job is
   // dispatched, but if any of them does not succeed (failed, cancelled,
   // timed_out, or itself skipped) the job is marked SKIPPED instead of
-  // running. This is a minimal, single-level dependency check; F-08 replaces
-  // it with a full parallel DAG resolver (named `needs`, cycle validation at
-  // save time).
+  // running. For jobs that belong to a pipeline, the user expresses
+  // dependencies as `needs` (the keys of other jobs, F-08); the database
+  // service resolves those keys to job ids and stores the result here when
+  // the pipeline is saved, and CreateRun remaps them to the run's own
+  // instance ids. For standalone jobs (no pipeline) depends_on is set
+  // directly. The scheduler's dependency resolver (F-06/F-08) resolves it.
   repeated int64 depends_on = 13;
   // step_results is the terminal outcome of each step that ran (or was
   // skipped by its condition) during the job's current attempt (F-06). It is
@@ -651,6 +670,46 @@ message Job {
   // proceeds to step N+1 until every worker alive at step N's start has
   // completed step N.
   bool step_barrier = 20;
+  // key is the job's stable, pipeline-scoped identifier (F-08): a short name
+  // (e.g. "build", "test") that is unique within the pipeline the job belongs
+  // to. Other jobs in the pipeline reference this job by its key (via their
+  // `needs`), so a pipeline's DAG is stable across runs and survives
+  // re-creation of the run's job instances. Empty when the job is not part of
+  // a pipeline.
+  string key = 21;
+}
+
+// JobDefinition is a job definition in a pipeline (F-08): the declarative
+// form of a job that a pipeline carries, from which a run's job instances are
+// created (see CreateRun). It carries everything a job instance copies from
+// its definition except the per-run identity (id, run_id, status, and the
+// remapped depends_on): the key (the job's stable name, F-08), the needs (the
+// job's dependencies, expressed as the keys of other jobs in the pipeline,
+// F-08), the target group, and the execution spec.
+message JobDefinition {
+  // key is the job's stable, pipeline-scoped identifier (F-08); it must be
+  // unique within the pipeline and is what other jobs' needs reference.
+  string key = 1;
+  // name is the job's display name; when empty the pipeline's key is used.
+  string name = 2;
+  // target_group selects a group of long-lived workers; empty means the job
+  // runs on an ephemeral Kubernetes agent.
+  string target_group = 3;
+  // spec is the execution spec to snapshot onto each of the job's run
+  // instances; when absent the job has no steps and succeeds without doing
+  // any work.
+  JobSpec spec = 4;
+  // needs lists the keys of the jobs this job depends on (F-08): the job is
+  // held pending until every dependency succeeds (then it is dispatched) or
+  // any of them does not (then it is marked skipped instead of running). An
+  // unknown key or a cycle in the graph is rejected when the pipeline is
+  // saved.
+  repeated string needs = 5;
+  // id is the job's id. It is ignored on input (a definition has no id before
+  // it is created) and is populated on output: when a pipeline is created or
+  // updated with job definitions, the returned definitions carry the ids of
+  // the job rows that were created, so a caller can reference them.
+  int64 id = 6;
 }
 
 message CreateJobRequest {
@@ -666,6 +725,12 @@ message CreateJobRequest {
   // run_id is the pipeline run this job is an instance of (F-07); 0 when the
   // job is not part of a run.
   int64 run_id = 6;
+  // key is the job's stable, pipeline-scoped identifier (F-08); when the job
+  // belongs to a pipeline it must be unique within that pipeline.
+  string key = 7;
+  // needs lists the keys of the jobs this job depends on (F-08); see
+  // JobDefinition.needs for the gating/skip semantics and validation.
+  repeated string needs = 8;
 }
 
 message GetJobRequest {

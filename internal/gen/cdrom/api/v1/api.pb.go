@@ -390,7 +390,10 @@ type Job struct {
 	// group synchronizes its workers at each step boundary: after a worker
 	// completes a step it waits until every worker alive at the step's start has
 	// completed it before starting the next step.
-	StepBarrier   bool `protobuf:"varint,19,opt,name=step_barrier,json=stepBarrier,proto3" json:"step_barrier,omitempty"`
+	StepBarrier bool `protobuf:"varint,19,opt,name=step_barrier,json=stepBarrier,proto3" json:"step_barrier,omitempty"`
+	// key is the job's stable, pipeline-scoped identifier (F-08); empty when
+	// the job is not part of a pipeline.
+	Key           string `protobuf:"bytes,20,opt,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -556,6 +559,13 @@ func (x *Job) GetStepBarrier() bool {
 		return x.StepBarrier
 	}
 	return false
+}
+
+func (x *Job) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
 }
 
 type JobAssignment struct {
@@ -1959,7 +1969,7 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x10HeartbeatRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"G\n" +
 	"\x11HeartbeatResponse\x122\n" +
-	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\xbe\x06\n" +
+	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\xd0\x06\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -1984,7 +1994,8 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\rignore_failed\x18\x10 \x01(\bR\fignoreFailed\x12\x15\n" +
 	"\x06run_id\x18\x11 \x01(\x03R\x05runId\x12;\n" +
 	"\ffailure_mode\x18\x12 \x01(\x0e2\x18.cdrom.db.v1.FailureModeR\vfailureMode\x12!\n" +
-	"\fstep_barrier\x18\x13 \x01(\bR\vstepBarrier\x1a:\n" +
+	"\fstep_barrier\x18\x13 \x01(\bR\vstepBarrier\x12\x10\n" +
+	"\x03key\x18\x14 \x01(\tR\x03key\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"k\n" +

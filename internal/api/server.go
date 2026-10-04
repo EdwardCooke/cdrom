@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	// Pipelines (via the database service).
 	mux.HandleFunc("POST /api/pipelines", s.createPipeline)
 	mux.HandleFunc("GET /api/pipelines", s.listPipelines)
+	mux.HandleFunc("PUT /api/pipelines/{id}", s.updatePipeline)
 
 	// Pipeline runs (F-07): triggering a pipeline creates a run and its job
 	// instances (via the scheduler); runs are listed and fetched via the
@@ -87,6 +88,24 @@ func (s *Server) Handler() http.Handler {
 type pipelineRequest struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Jobs are the pipeline's job definitions (F-08): each carries a key (the
+	// job's stable name), needs (dependencies, expressed as the keys of other
+	// jobs in the pipeline), a target group, and an execution spec. When
+	// present the pipeline's DAG is validated (unique keys, known needs, no
+	// cycle) before the pipeline is saved.
+	Jobs []pipelineJobRequest `json:"jobs,omitempty"`
+}
+
+// pipelineJobRequest is the JSON form of a single job definition in a
+// pipeline (F-08). Key is the job's stable, pipeline-scoped identifier; Needs
+// lists the keys of the jobs this job depends on; Spec is the execution spec
+// to snapshot onto each of the job's run instances.
+type pipelineJobRequest struct {
+	Key         string          `json:"key"`
+	Name        string          `json:"name,omitempty"`
+	TargetGroup string          `json:"target_group,omitempty"`
+	Needs       []string        `json:"needs,omitempty"`
+	Spec        *jobSpecRequest `json:"spec,omitempty"`
 }
 
 func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
@@ -95,15 +114,74 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
+	jobs, err := pipelineJobsToProto(req.Jobs)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid jobs: %v", err)
+		return
+	}
 	pipeline, err := s.clients.Database.CreatePipeline(r.Context(), &dbpb.CreatePipelineRequest{
 		Name:        req.Name,
 		Description: req.Description,
+		Jobs:        jobs,
 	})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, pipeline)
+}
+
+func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req pipelineRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	jobs, err := pipelineJobsToProto(req.Jobs)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid jobs: %v", err)
+		return
+	}
+	pipeline, err := s.clients.Database.UpdatePipeline(r.Context(), &dbpb.UpdatePipelineRequest{
+		Id:          pipelineID,
+		Name:        req.Name,
+		Description: req.Description,
+		Jobs:        jobs,
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pipeline)
+}
+
+// pipelineJobsToProto converts the JSON job definitions into the proto
+// JobDefinition list carried to the database service (F-08). It returns nil
+// when there are no jobs, so an update with no jobs leaves the pipeline's
+// definitions unchanged.
+func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	defs := make([]*dbpb.JobDefinition, 0, len(jobs))
+	for _, job := range jobs {
+		spec, err := job.Spec.toProtoSpec()
+		if err != nil {
+			return nil, fmt.Errorf("job %q: %w", job.Key, err)
+		}
+		defs = append(defs, &dbpb.JobDefinition{
+			Key:         job.Key,
+			Name:        job.Name,
+			TargetGroup: job.TargetGroup,
+			Needs:       job.Needs,
+			Spec:        spec,
+		})
+	}
+	return defs, nil
 }
 
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
@@ -225,11 +303,16 @@ type jobStepRequest struct {
 // job is held pending until every dependency succeeds — see
 // docs/Architecture.md.
 type jobRequest struct {
-	PipelineID  int64           `json:"pipeline_id"`
-	Name        string          `json:"name"`
-	TargetGroup string          `json:"target_group"`
-	DependsOn   []int64         `json:"depends_on,omitempty"`
-	Spec        *jobSpecRequest `json:"spec,omitempty"`
+	PipelineID  int64   `json:"pipeline_id"`
+	Name        string  `json:"name"`
+	TargetGroup string  `json:"target_group"`
+	DependsOn   []int64 `json:"depends_on,omitempty"`
+	// Key is the job's stable, pipeline-scoped identifier (F-08); required
+	// when the job belongs to a pipeline and is referenced by other jobs'
+	// needs.
+	Key   string          `json:"key,omitempty"`
+	Needs []string        `json:"needs,omitempty"`
+	Spec  *jobSpecRequest `json:"spec,omitempty"`
 }
 
 // jobSpecRequest is the JSON form of a job's execution spec. Timeout is a
@@ -342,11 +425,36 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid spec: %v", err)
 		return
 	}
+	// A job that belongs to a pipeline is a job *definition* (F-08): it is
+	// persisted on the pipeline (via the database service) and becomes part of
+	// the pipeline's DAG, from which runs create job instances. It is not
+	// dispatched on its own. A job with no pipeline is a standalone job and is
+	// created and dispatched by the scheduler.
+	if req.PipelineID > 0 {
+		created, err := s.clients.Database.CreateJob(r.Context(), &dbpb.CreateJobRequest{
+			PipelineId:  req.PipelineID,
+			Name:        req.Name,
+			TargetGroup: req.TargetGroup,
+			DependsOn:   req.DependsOn,
+			Key:         req.Key,
+			Needs:       req.Needs,
+			Spec:        spec,
+		})
+		if err != nil {
+			grpcError(w, err)
+			return
+		}
+		s.publish(Event{Type: EventJobStatus, JobID: created.GetId(), Status: jobStatusName(created.GetStatus())})
+		writeJSON(w, http.StatusCreated, created)
+		return
+	}
 	job, err := s.clients.Scheduler.SubmitJob(r.Context(), &schedpb.SubmitJobRequest{
 		PipelineId:  req.PipelineID,
 		Name:        req.Name,
 		TargetGroup: req.TargetGroup,
 		DependsOn:   req.DependsOn,
+		Key:         req.Key,
+		Needs:       req.Needs,
 		Spec:        spec,
 	})
 	if err != nil {

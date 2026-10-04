@@ -68,14 +68,22 @@ func (s *Server) SubmitJob(ctx context.Context, req *schedpb.SubmitJobRequest) (
 		TargetGroup: req.GetTargetGroup(),
 		Spec:        req.GetSpec(),
 		DependsOn:   req.GetDependsOn(),
+		Key:         req.GetKey(),
+		Needs:       req.GetNeeds(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	job := toProtoJob(created)
 
-	if len(req.GetDependsOn()) > 0 {
-		s.logger.Info("scheduler: job held pending dependencies", "job", created.GetId(), "depends_on", req.GetDependsOn())
+	// A job with dependencies (needs, F-08, or depends_on, F-06) is never
+	// dispatched here: it is left pending and the background dependency
+	// resolver (dependencies.go) dispatches it once every dependency has
+	// succeeded, or marks it skipped if any of them does not. The database
+	// service resolves needs to depends_on, so a job created with needs comes
+	// back with a non-empty depends_on.
+	if len(created.GetDependsOn()) > 0 {
+		s.logger.Info("scheduler: job held pending dependencies", "job", created.GetId(), "depends_on", created.GetDependsOn())
 		return job, nil
 	}
 	if req.GetTargetGroup() != "" {
@@ -263,11 +271,11 @@ func (s *Server) CreateRun(ctx context.Context, req *schedpb.CreateRunRequest) (
 }
 
 // dispatchRunInstance drives a single job instance of a run (F-07), mirroring
-// SubmitJob's dispatch logic: an instance with dependencies is left pending
-// for the dependency resolver; an instance with a target group has an
-// "assignment" event appended to the shared event log (F-23), which every API
-// pod tails and fans out to its local workers; an instance with an empty
-// target group is left pending for an ephemeral agent.
+// SubmitJob's dispatch logic: an instance with dependencies (needs, F-08, or
+// depends_on, F-06) is left pending for the dependency resolver; an instance
+// with a target group has an "assignment" event appended to the shared event
+// log (F-23), which every API pod tails and fans out to its local workers; an
+// instance with an empty target group is left pending for an ephemeral agent.
 func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
 	if len(job.GetDependsOn()) > 0 {
 		s.logger.Info("scheduler: run instance held pending dependencies", "job", job.GetId(), "run", job.GetRunId(), "depends_on", job.GetDependsOn())
@@ -302,6 +310,7 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		Outputs:      job.GetOutputs(),
 		UpstreamJobs: job.GetUpstreamJobs(),
 		IgnoreFailed: job.GetIgnoreFailed(),
+		Key:          job.GetKey(),
 	}
 }
 

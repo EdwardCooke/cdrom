@@ -341,3 +341,142 @@ func TestCreateRunEmptyBody(t *testing.T) {
 		t.Errorf("trigger = %q, want empty", fake.created.GetTrigger())
 	}
 }
+
+// fakeDatabase is a stub DatabaseClient for the API's pipeline/job handlers
+// (F-08): it records CreatePipeline and CreateJob calls and returns canned
+// results. Only the methods the handlers use are implemented.
+type fakeDatabase struct {
+	dbpb.DatabaseClient // nil
+	createdPipeline     *dbpb.CreatePipelineRequest
+	createdJob          *dbpb.CreateJobRequest
+	pipeline            *dbpb.Pipeline
+	job                 *dbpb.Job
+}
+
+func (f *fakeDatabase) CreatePipeline(ctx context.Context, in *dbpb.CreatePipelineRequest, opts ...grpc.CallOption) (*dbpb.Pipeline, error) {
+	f.createdPipeline = in
+	if f.pipeline != nil {
+		return f.pipeline, nil
+	}
+	return &dbpb.Pipeline{Id: 1, Name: in.GetName()}, nil
+}
+
+func (f *fakeDatabase) CreateJob(ctx context.Context, in *dbpb.CreateJobRequest, opts ...grpc.CallOption) (*dbpb.Job, error) {
+	f.createdJob = in
+	if f.job != nil {
+		return f.job, nil
+	}
+	return &dbpb.Job{Id: 1, Name: in.GetName(), Status: dbpb.JobStatus_JOB_STATUS_PENDING}, nil
+}
+
+// TestCreatePipelineWithJobs verifies that POST /api/pipelines with job
+// definitions (F-08) forwards the jobs (keys, needs, specs) to the database
+// service.
+func TestCreatePipelineWithJobs(t *testing.T) {
+	fake := &fakeDatabase{}
+	srv := New(Clients{Database: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{
+		"name": "build",
+		"jobs": [
+			{"key": "build", "target_group": "linux-pool", "spec": {"steps": [{"params": {"command": {"string": "go"}, "args": {"strings": ["build"]}}}]}}
+			,
+			{"key": "test", "needs": ["build"], "spec": {"steps": [{"params": {"command": {"string": "go"}, "args": {"strings": ["test"]}}}]}}
+		]
+	}`
+	resp, err := http.Post(ts.URL+"/api/pipelines", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fake.createdPipeline == nil {
+		t.Fatal("database.CreatePipeline was not called")
+	}
+	if got := len(fake.createdPipeline.GetJobs()); got != 2 {
+		t.Fatalf("jobs = %d, want 2", got)
+	}
+	build := fake.createdPipeline.GetJobs()[0]
+	if build.GetKey() != "build" || build.GetTargetGroup() != "linux-pool" {
+		t.Errorf("build job = %+v, want key build in linux-pool", build)
+	}
+	if len(build.GetNeeds()) != 0 {
+		t.Errorf("build needs = %v, want none", build.GetNeeds())
+	}
+	test := fake.createdPipeline.GetJobs()[1]
+	if test.GetKey() != "test" || len(test.GetNeeds()) != 1 || test.GetNeeds()[0] != "build" {
+		t.Errorf("test job = %+v, want key test needing build", test)
+	}
+	if test.GetSpec() == nil || len(test.GetSpec().GetSteps()) != 1 {
+		t.Errorf("test spec = %+v, want one step", test.GetSpec())
+	}
+}
+
+// TestSubmitPipelineJobGoesToDatabase verifies that a job submitted with a
+// pipeline_id (F-08) is persisted as a job definition via the database service
+// (not dispatched by the scheduler), carrying its key and needs.
+func TestSubmitPipelineJobGoesToDatabase(t *testing.T) {
+	fakeDB := &fakeDatabase{}
+	fakeSched := &fakeScheduler{}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"pipeline_id": 5, "name": "test", "key": "test", "needs": ["build"], "target_group": "linux-pool"}`
+	resp, err := http.Post(ts.URL+"/api/jobs", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fakeDB.createdJob == nil {
+		t.Fatal("database.CreateJob was not called for a pipeline job")
+	}
+	if fakeDB.createdJob.GetPipelineId() != 5 {
+		t.Errorf("pipeline id = %d, want 5", fakeDB.createdJob.GetPipelineId())
+	}
+	if fakeDB.createdJob.GetKey() != "test" {
+		t.Errorf("key = %q, want test", fakeDB.createdJob.GetKey())
+	}
+	if got := fakeDB.createdJob.GetNeeds(); len(got) != 1 || got[0] != "build" {
+		t.Errorf("needs = %v, want [build]", got)
+	}
+	if fakeSched.submitted != nil {
+		t.Error("scheduler.SubmitJob was called for a pipeline job, want it routed to the database")
+	}
+}
+
+// TestSubmitStandaloneJobGoesToScheduler verifies that a job submitted without
+// a pipeline_id is still created and dispatched by the scheduler (F-08 routing
+// leaves standalone jobs on the existing path).
+func TestSubmitStandaloneJobGoesToScheduler(t *testing.T) {
+	fakeDB := &fakeDatabase{}
+	fakeSched := &fakeScheduler{job: &schedpb.Job{Id: 9, Name: "standalone", Status: dbpb.JobStatus_JOB_STATUS_PENDING}}
+	srv := New(Clients{Database: fakeDB, Scheduler: fakeSched}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/jobs", "application/json", bytes.NewBufferString(`{"name": "standalone", "target_group": "linux-pool"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fakeSched.submitted == nil {
+		t.Fatal("scheduler.SubmitJob was not called for a standalone job")
+	}
+	if fakeDB.createdJob != nil {
+		t.Error("database.CreateJob was called for a standalone job, want it routed to the scheduler")
+	}
+}

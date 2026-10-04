@@ -296,13 +296,20 @@ type Job struct {
 	// A job is a per-run *instance* of the pipeline's job definition: each run
 	// of a pipeline creates its own set of job rows, so two runs of the same
 	// pipeline are independent and both queryable.
-	RunID       *uint        `gorm:"index" json:"run_id"`
-	Run         *PipelineRun `json:"run,omitempty"`
-	Name        string       `gorm:"not null" json:"name"`
-	Status      JobStatus    `gorm:"default:pending;index" json:"status"`
-	TargetGroup string       `gorm:"index" json:"target_group"`
-	StartedAt   *time.Time   `json:"started_at,omitempty"`
-	FinishedAt  *time.Time   `json:"finished_at,omitempty"`
+	RunID *uint        `gorm:"index" json:"run_id"`
+	Run   *PipelineRun `json:"run,omitempty"`
+	// Key is the job's stable, pipeline-scoped identifier (F-08): a short
+	// name (e.g. "build", "test") that is unique within the pipeline the job
+	// belongs to. A job's `needs` (its dependencies) reference other jobs by
+	// their Key, not by their id, so a pipeline's DAG is stable across runs
+	// and survives re-creation of the run's job instances. A job that is not
+	// part of a pipeline (a standalone job) may have an empty Key.
+	Key         string     `gorm:"index" json:"key"`
+	Name        string     `gorm:"not null" json:"name"`
+	Status      JobStatus  `gorm:"default:pending;index" json:"status"`
+	TargetGroup string     `gorm:"index" json:"target_group"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 	// Spec is the execution spec snapshot, serialized to a JSON document in a
 	// text column (portable across SQLite and PostgreSQL).
 	Spec JobSpec `gorm:"type:text;serializer:json" json:"spec,omitempty"`
@@ -316,13 +323,17 @@ type Job struct {
 	// denormalized onto the job so the UI can render "attempt N of M" without
 	// the spec.
 	MaxAttempts int `json:"max_attempts"`
-	// DependsOn lists the ids of jobs this job depends on (F-06). A job with
-	// a non-empty DependsOn is held pending (not dispatched) until every
+	// DependsOn lists the ids of jobs this job depends on. A job with a
+	// non-empty DependsOn is held pending (not dispatched) until every
 	// dependency reaches a terminal state: if all of them succeed the job is
 	// dispatched, but if any of them does not succeed (failed, cancelled,
 	// timed_out, or itself skipped) the job is marked Skipped instead of
-	// running. This is a minimal, single-level dependency check; F-08
-	// replaces it with a full parallel DAG resolver.
+	// running. For jobs that belong to a pipeline, the user expresses
+	// dependencies as `needs` (the keys of other jobs, F-08); the database
+	// service resolves those keys to job ids and stores the result here when
+	// the pipeline is saved, and CreateRun remaps them to the run's own
+	// instance ids. For standalone jobs (no pipeline) DependsOn is set
+	// directly. The scheduler's dependency resolver (F-06/F-08) resolves it.
 	DependsOn []uint `gorm:"type:text;serializer:json" json:"depends_on,omitempty"`
 	// StepResults is the terminal outcome of each step that ran (or was
 	// skipped by its condition) during the job's current attempt (F-06),

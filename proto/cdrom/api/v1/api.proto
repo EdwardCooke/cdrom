@@ -200,6 +200,9 @@ message Job {
   // completes a step it waits until every worker alive at the step's start has
   // completed it before starting the next step.
   bool step_barrier = 19;
+  // key is the job's stable, pipeline-scoped identifier (F-08); empty when
+  // the job is not part of a pipeline.
+  string key = 20;
 }
 
 message JobAssignment {

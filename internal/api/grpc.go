@@ -1130,6 +1130,7 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		IgnoreFailed: job.GetIgnoreFailed(),
 		FailureMode:  job.GetFailureMode(),
 		StepBarrier:  job.GetStepBarrier(),
+		Key:          job.GetKey(),
 	}
 }
 

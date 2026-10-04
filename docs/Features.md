@@ -20,10 +20,11 @@ Before adding features, note the baseline that is already built and working:
 
 | Area | Status |
 |------|--------|
-| Pipeline model | `Pipeline` (name, description, ordered `Jobs`) — CRUD via DB service |
-| Job model | `Job` (status, `target_group`, start/finish timestamps) |
-| Job lifecycle | `pending → running → succeeded / failed / cancelled` |
+| Pipeline model | `Pipeline` (name, description, job definitions with `key`/`needs`) — CRUD via DB service; a pipeline's jobs form a DAG (F-08) |
+| Job model | `Job` (status, `target_group`, `key`, `depends_on`, start/finish timestamps) |
+| Job lifecycle | `pending → running → succeeded / failed / cancelled / timed_out / skipped` |
 | Dispatch | `target_group` set → fan out to live workers; empty → ephemeral K8s agent |
+| DAG / dependencies | Jobs in a pipeline declare `needs` (other jobs' `key`s), forming a DAG (F-08); the graph is validated at save time (unique keys, known needs, no cycle), and a run's job instances are dispatched in parallel as their dependencies succeed (a failed dependency skips its dependents, F-06) |
 | Execution targets | Long-lived **workers** (register, `WatchJobs` stream, heartbeat) and ephemeral **agents** (`GetJob` → run → report) |
 | Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors. A job-level `timeout` bounds the whole job and a per-step `timeout` bounds a step; exceeding either terminates the job as `timed_out` (F-03), and a scheduler watchdog reaps jobs whose target goes silent |
 | Retry & re-run | A job's `JobSpec` may carry a `retry` policy (`max_attempts` retries after the initial attempt, `backoff` delay); a scheduler retry loop re-dispatches a failed job up to the limit (a new attempt on the same `Job` row, `attempt` counter, F-04). A user can re-run any finished job (`POST /api/jobs/{id}/rerun`) for a fresh attempt; attempts are visible to the UI ("attempt N of M") |
@@ -35,9 +36,10 @@ Before adding features, note the baseline that is already built and working:
 | Job logs | Streamed from the target to the API (`StreamJobLogs`), persisted to the artifacts service (one file per step + `job.log`), fanned out to the UI as `job_log` events, and retrievable via `GET /api/jobs/{id}/logs[/{name}]` |
 | Transport | gRPC everywhere, optional mutual TLS |
 
-The biggest remaining gap: **jobs are not orchestrated** (no runs, DAG, or
-triggers). Everything below builds toward orchestrating real jobs, then
-governing them.
+The biggest remaining gap: **jobs are not yet triggered automatically** (no
+cron / webhook / event triggers, F-09) and a pipeline's definition is not yet
+versioned (F-11). Runs and the job DAG (F-07, F-08) are in place; everything
+below builds toward governing and automating them.
 
 ---
 
@@ -456,17 +458,19 @@ condition context is what lets a step say "only run if the build step produced
       or skipped dependency always blocks (skip propagates).
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
-- **`depends_on` is a minimal stand-in for F-08's `needs`/DAG, not F-08
-  itself.** F-06 lands ahead of F-08 in the roadmap, and F-08 owns the full
-  DAG resolver (named `needs`, cycle validation at save time, parallel
-  dispatch). To implement F-06's "a downstream job of a failed job is
-  skipped" without that full engine, `Job` gained a minimal `depends_on`
-  field (`[]int64`/`[]uint`, F-06): a flat list of raw job ids, checked by a
-  simple single-level, polling background resolver
-  (`internal/services/scheduler/dependencies.go`) rather than a parallel DAG
-  engine. This is explicitly scoped to be replaced or subsumed by F-08's
-  resolver later (see AGENTS.md's "Skip propagation & step conditions
-  (F-06)" section for the full design note).
+- **`depends_on` was a minimal stand-in for F-08's `needs`/DAG; F-08 is now
+  built on it.** F-06 landed ahead of F-08 in the roadmap, so `Job` gained a
+  minimal `depends_on` field (`[]uint`): a flat list of raw job ids, checked
+  by a polling background resolver
+  (`internal/services/scheduler/dependencies.go`). F-08 (now implemented)
+  adds `needs` (dependencies expressed as the stable `key`s of other jobs in
+  the same pipeline) and cycle validation at save time. The database service
+  resolves a job's `needs` (keys) to `depends_on` (ids) when the pipeline is
+  saved, and `Database.CreateRun` remaps a run's instances' `depends_on`
+  (definition ids) onto the run's own instance ids, so the same resolver
+  dispatches ready jobs in parallel and skips dependents of a failed job. The
+  resolver is now the DAG resolver (see F-08 and AGENTS.md's "Skip
+  propagation & step conditions (F-06)" section).
 - **`SubmitJob` withholds dispatch for a job with dependencies.** A job
   submitted with a non-empty `depends_on` is created `pending` but, unlike a
   dependency-free job, is not dispatched immediately; the dependency resolver
@@ -636,10 +640,42 @@ lists. Parallelism and correct ordering come from the DAG.
 - Validation — reject cycles at pipeline save time.
 
 **Acceptance criteria.**
-- [ ] A job with `needs: [A]` does not start until A succeeds.
-- [ ] Independent jobs run in parallel.
-- [ ] A cycle in the graph is rejected when the pipeline is saved.
-- [ ] Failure of A skips its dependents (F-06).
+- [x] A job with `needs: [A]` does not start until A succeeds.
+- [x] Independent jobs run in parallel.
+- [x] A cycle in the graph is rejected when the pipeline is saved.
+- [x] Failure of A skips its dependents (F-06).
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **`needs` are keys, not ids.** A job in a pipeline has a stable,
+  pipeline-scoped `key` (a short name, e.g. `build`, `test`), unique within
+  the pipeline. A job's `needs` reference other jobs by their `key`, not by
+  their id, so a pipeline's DAG is stable across runs and survives re-creation
+  of a run's job instances. A job that is not part of a pipeline (a standalone
+  job) has no `key` and may still use the raw-id `depends_on` (F-06).
+- **The DAG is validated at save time.** The database service validates a
+  pipeline's job graph whenever it is created, updated, or a job is added:
+  keys are unique, every `needs` entry references a key that is present, and
+  the keyed subgraph has no cycle (Kahn's algorithm). A cycle, an unknown key,
+  or a duplicate key rejects the whole save, so a pipeline is never persisted
+  in an unrunnable state.
+- **`needs` are resolved to `depends_on` at save time.** `needs` is the
+  authoring form (keys); the backend stores dependencies as `depends_on`
+  (ids). When a pipeline is created, updated, or a job is added, the database
+  service resolves each job's `needs` (keys) to the ids of the jobs they
+  reference and stores the result in `depends_on`. `Database.CreateRun` then
+  creates one job instance per definition and remaps each instance's
+  `depends_on` (definition ids) to the ids of the run's own instances. The
+  existing F-06 dependency resolver (which resolves `depends_on` by id)
+  dispatches ready instances in parallel and skips dependents of a failed job
+  — so F-08 reuses the F-06 resolver rather than introducing a parallel DAG
+  engine. Two runs of the same pipeline remain fully independent (a run's
+  instances depend on each other, not on the other run's instances).
+- **Pipeline jobs are first-class definitions.** A pipeline carries its job
+  definitions (key, name, target group, spec, needs) — created via
+  `POST /api/pipelines` (with a `jobs` list) or `PUT /api/pipelines/{id}`, or
+  by submitting a job with a `pipeline_id` (`POST /api/jobs`), which persists
+  it as a definition on the pipeline (via the database service) rather than
+  dispatching it. A run of the pipeline instantiates those definitions.
 
 ### F-09 · Triggers
 
@@ -1082,7 +1118,7 @@ Tick each feature off as it lands.
 - [x] F-05 Cancellation propagation
 - [x] F-06 `skipped` job status
 - [x] F-07 Pipeline runs
-- [ ] F-08 Job dependencies (DAG)
+- [x] F-08 Job dependencies (DAG)
 - [ ] F-09 Triggers (cron / webhook / event)
 - [ ] F-10 Parameters & variables
 - [ ] F-11 Pipeline versioning

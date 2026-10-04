@@ -55,7 +55,10 @@ type Job struct {
 	IgnoreFailed bool `protobuf:"varint,15,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
 	// run_id is the pipeline run this job is an instance of (F-07); 0 when the
 	// job is not part of a run.
-	RunId         int64 `protobuf:"varint,16,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	RunId int64 `protobuf:"varint,16,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// key is the job's stable, pipeline-scoped identifier (F-08); empty when
+	// the job is not part of a pipeline.
+	Key           string `protobuf:"bytes,17,opt,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -202,6 +205,13 @@ func (x *Job) GetRunId() int64 {
 	return 0
 }
 
+func (x *Job) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
 type SubmitJobRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	PipelineId int64                  `protobuf:"varint,1,opt,name=pipeline_id,json=pipelineId,proto3" json:"pipeline_id,omitempty"`
@@ -215,7 +225,13 @@ type SubmitJobRequest struct {
 	// depends_on lists the ids of jobs this job depends on (F-06): the job is
 	// held pending until every dependency succeeds (then it is dispatched) or
 	// any of them does not (then it is marked skipped instead of running).
-	DependsOn     []int64 `protobuf:"varint,5,rep,packed,name=depends_on,json=dependsOn,proto3" json:"depends_on,omitempty"`
+	DependsOn []int64 `protobuf:"varint,5,rep,packed,name=depends_on,json=dependsOn,proto3" json:"depends_on,omitempty"`
+	// key is the job's stable, pipeline-scoped identifier (F-08); when the job
+	// belongs to a pipeline it must be unique within that pipeline.
+	Key string `protobuf:"bytes,6,opt,name=key,proto3" json:"key,omitempty"`
+	// needs lists the keys of the jobs this job depends on (F-08); see
+	// cdrom.db.v1.JobDefinition.needs for the gating/skip semantics.
+	Needs         []string `protobuf:"bytes,7,rep,name=needs,proto3" json:"needs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -281,6 +297,20 @@ func (x *SubmitJobRequest) GetSpec() *v1.JobSpec {
 func (x *SubmitJobRequest) GetDependsOn() []int64 {
 	if x != nil {
 		return x.DependsOn
+	}
+	return nil
+}
+
+func (x *SubmitJobRequest) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *SubmitJobRequest) GetNeeds() []string {
+	if x != nil {
+		return x.Needs
 	}
 	return nil
 }
@@ -699,7 +729,7 @@ var File_cdrom_scheduler_v1_scheduler_proto protoreflect.FileDescriptor
 
 const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\n" +
-	"\"cdrom/scheduler/v1/scheduler.proto\x12\x12cdrom.scheduler.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14cdrom/db/v1/db.proto\"\xce\x05\n" +
+	"\"cdrom/scheduler/v1/scheduler.proto\x12\x12cdrom.scheduler.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14cdrom/db/v1/db.proto\"\xe0\x05\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -721,10 +751,11 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\aoutputs\x18\r \x03(\v2$.cdrom.scheduler.v1.Job.OutputsEntryR\aoutputs\x12=\n" +
 	"\rupstream_jobs\x18\x0e \x03(\v2\x18.cdrom.db.v1.UpstreamJobR\fupstreamJobs\x12#\n" +
 	"\rignore_failed\x18\x0f \x01(\bR\fignoreFailed\x12\x15\n" +
-	"\x06run_id\x18\x10 \x01(\x03R\x05runId\x1a:\n" +
+	"\x06run_id\x18\x10 \x01(\x03R\x05runId\x12\x10\n" +
+	"\x03key\x18\x11 \x01(\tR\x03key\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb3\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xdb\x01\n" +
 	"\x10SubmitJobRequest\x12\x1f\n" +
 	"\vpipeline_id\x18\x01 \x01(\x03R\n" +
 	"pipelineId\x12\x12\n" +
@@ -732,7 +763,9 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\ftarget_group\x18\x03 \x01(\tR\vtargetGroup\x12(\n" +
 	"\x04spec\x18\x04 \x01(\v2\x14.cdrom.db.v1.JobSpecR\x04spec\x12\x1d\n" +
 	"\n" +
-	"depends_on\x18\x05 \x03(\x03R\tdependsOn\"\x1f\n" +
+	"depends_on\x18\x05 \x03(\x03R\tdependsOn\x12\x10\n" +
+	"\x03key\x18\x06 \x01(\tR\x03key\x12\x14\n" +
+	"\x05needs\x18\a \x03(\tR\x05needs\"\x1f\n" +
 	"\rGetJobRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"b\n" +
 	"\x0fListJobsRequest\x12\x1f\n" +
