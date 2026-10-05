@@ -153,6 +153,26 @@ type GRPCAuthConfig struct {
 	// Audiences are the audience values accepted on job tokens. A token is
 	// valid for the API when its aud contains any of these.
 	Audiences []string
+	// ExchangedTokenLifetime is the default lifetime of an exchanged job token
+	// (one a job requests for a different audience via the API's
+	// ExchangeJobToken RPC). Unlike the main job token, an exchanged token is a
+	// scoped credential for an outside resource and SHOULD expire. When zero the
+	// API uses its default (15 minutes); a job may override it per request via
+	// the request's expires_in.
+	ExchangedTokenLifetime time.Duration
+}
+
+// defaultExchangedTokenLifetime is the lifetime of an exchanged job token when
+// GRPCAuthConfig.ExchangedTokenLifetime is zero.
+const defaultExchangedTokenLifetime = 15 * time.Minute
+
+// EffectiveExchangedTokenLifetime returns the configured exchanged-token
+// lifetime, or the default (15 minutes) when unset.
+func (g GRPCAuthConfig) EffectiveExchangedTokenLifetime() time.Duration {
+	if g.ExchangedTokenLifetime <= 0 {
+		return defaultExchangedTokenLifetime
+	}
+	return g.ExchangedTokenLifetime
 }
 
 // Validate checks that the gRPC auth configuration is complete when enabled.
@@ -382,9 +402,10 @@ type fileConfig struct {
 		Audiences     *[]string `yaml:"audiences"`
 	} `yaml:"idp"`
 	GRPCAuth *struct {
-		Enabled    *bool    `yaml:"enabled"`
-		IdPAddress *string  `yaml:"idp_address"`
-		Audiences  []string `yaml:"audiences"`
+		Enabled                *bool    `yaml:"enabled"`
+		IdPAddress             *string  `yaml:"idp_address"`
+		Audiences              []string `yaml:"audiences"`
+		ExchangedTokenLifetime *string  `yaml:"exchanged_token_lifetime"`
 	} `yaml:"grpc_auth"`
 }
 
@@ -519,6 +540,13 @@ func applyFile(cfg *Config, path string) error {
 		if f.GRPCAuth.Audiences != nil {
 			cfg.GRPCAuth.Audiences = f.GRPCAuth.Audiences
 		}
+		if f.GRPCAuth.ExchangedTokenLifetime != nil {
+			if d, err := time.ParseDuration(*f.GRPCAuth.ExchangedTokenLifetime); err == nil {
+				cfg.GRPCAuth.ExchangedTokenLifetime = d
+			} else {
+				return fmt.Errorf("config: parse grpc_auth.exchanged_token_lifetime %q: %w", *f.GRPCAuth.ExchangedTokenLifetime, err)
+			}
+		}
 	}
 	return nil
 }
@@ -576,6 +604,11 @@ func applyEnv(cfg *Config) {
 	cfg.GRPCAuth.IdPAddress = envOr("CDROM_GRPC_AUTH_IDP_ADDR", cfg.GRPCAuth.IdPAddress)
 	if v := os.Getenv("CDROM_GRPC_AUTH_AUDIENCES"); v != "" {
 		cfg.GRPCAuth.Audiences = splitAndTrim(v)
+	}
+	if v := envOr("CDROM_GRPC_AUTH_EXCHANGED_TOKEN_LIFETIME", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.GRPCAuth.ExchangedTokenLifetime = d
+		}
 	}
 }
 

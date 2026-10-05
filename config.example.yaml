@@ -112,8 +112,11 @@ db:
 # job stops running. A job can also request a new token for a different
 # audience (e.g. an outside resource it must call) via the ExchangeJobToken
 # RPC; an exchanged token has a short lifetime (the request's expires_in, or
-# a default of 15 minutes).
+# the default below when unset).
 #grpc_auth:
 #  enabled: true
 #  idp_address: http://127.0.0.1:7104
 #  audiences: [cdrom-api]
+#  # Default lifetime of an exchanged job token (a job may override it per
+#  # request via the step's expires_in). Defaults to 15m when unset.
+#  exchanged_token_lifetime: 15m

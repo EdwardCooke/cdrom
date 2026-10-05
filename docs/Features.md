@@ -94,6 +94,11 @@ missing piece.
       by default, a target can register new types via
       `executor.RegisterStepType`, and an unregistered type fails the job with
       a clear error.
+- [x] The built-in `token_exchange` step handler requests a new job token for
+      a different audience (via the target's `TokenExchange`, which calls the
+      API's `ExchangeJobToken` RPC) and writes the exchanged token to the step's
+      output directory so that, when the step declares the output name, later
+      steps and jobs can read it.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
@@ -108,9 +113,11 @@ missing piece.
   dispatch engine; a step's `type` selects an `executor.StepHandler` (empty →
   the handler registered under `executor.DefaultType`). The concrete handlers
   live in `internal/stephandlers`; the built-in `shell` handler registers
-  itself under `executor.DefaultType` at package init. A target or plugin adds
-  new types with `executor.RegisterStepType(name, handler)` (e.g. `ansible`,
-  `terraform`, `argo`). An unregistered type fails the job with a clear error.
+  itself under `executor.DefaultType` at package init, and the built-in
+  `token_exchange` handler registers itself under `token_exchange` (see the
+  Token exchange handler below). A target or plugin adds new types with
+  `executor.RegisterStepType(name, handler)` (e.g. `ansible`, `terraform`,
+  `argo`). An unregistered type fails the job with a clear error.
   `params` carries handler-specific configuration so a new type needs no
   spec-schema change. The worker and agent blank-import `internal/stephandlers`
   so the built-in handlers are registered before any job runs. This is the
@@ -126,6 +133,24 @@ missing piece.
   (e.g. `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,
   `command: "Get-ChildItem"`). When `shell` is empty the step runs `command`
   directly, preserving the no-implicit-shell contract.
+- **Token exchange handler:** the built-in `token_exchange` step handler
+  (`internal/stephandlers/token_exchange.go`) lets a running job request a new
+  job token for a different audience (e.g. an outside resource the job needs to
+  call) and hand the exchanged token to later steps and jobs. It reads
+  `audience` (string, required), `expires_in` (string, a Go duration; empty
+  means the API's default exchanged-token lifetime), and `output` (string, the
+  step-output name the token is written under, default `token`) from the step's
+  `params`. It obtains the exchanged token from the execution target through the
+  executor's `TokenExchange` (set via `executor.ContextWithTokenExchange`): the
+  worker and agent implement it by calling the API's `ExchangeJobToken` RPC,
+  presenting the job's own token. The executor gives every step a per-step
+  output directory (the step's env carries `executor.StepOutputDirEnv`), so the
+  handler always writes the token into it under the output name; the executor
+  records it as the step's output only when the step declares that name, so
+  downstream steps and jobs read it through the condition context
+  (`.steps`/`.jobs` `.Outputs`). A step with no `audience`, an invalid
+  `expires_in`, or a target with no
+  `TokenExchange` fails the job.
 - Per-step `timeout` is enforced by the target via a derived context; a
   job-level `timeout` bounds the whole job (F-03), and a scheduler-side
   watchdog reaps jobs whose target goes silent (F-03).

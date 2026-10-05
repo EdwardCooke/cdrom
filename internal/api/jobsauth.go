@@ -28,7 +28,7 @@ import (
 // the token is meant to live as long as the job runs, so the API never
 // enforces exp — it gates a token's validity on the job's live status in the
 // database (see GRPCServer.checkJobToken). An exchanged token (a different
-// audience) instead carries a short lifetime (exchangedTokenLifetime, or the
+// audience) instead carries a short lifetime (the configured default, or the
 // request's expires_in).
 //
 // It is nil when gRPC job-token auth is disabled, in which case the API's
@@ -39,6 +39,13 @@ type JobTokenAuth struct {
 	idpURL    string // base URL of the IdP, e.g. http://127.0.0.1:7104
 	logger    *slog.Logger
 	http      *http.Client
+	// exchangedTokenLifetime is the default lifetime of an exchanged job token
+	// (one a job requests for a different audience, e.g. an outside resource).
+	// Unlike the main job token, an exchanged token is a scoped credential for
+	// an outside resource and SHOULD expire. It is set from the config's
+	// grpc_auth.exchanged_token_lifetime (defaulting to 15 minutes); a job may
+	// override it per request via ExchangeJobToken's expires_in.
+	exchangedTokenLifetime time.Duration
 }
 
 // jobTokenLifetime is how long the main job token is valid for. It is a long
@@ -48,13 +55,6 @@ type JobTokenAuth struct {
 // checks. A week is long enough that a job running for days is not rejected
 // for an "expired" token.
 const jobTokenLifetime = 7 * 24 * time.Hour
-
-// exchangedTokenLifetime is the default lifetime of an exchanged job token
-// (one a job requests for a different audience, e.g. an outside resource).
-// Unlike the main job token, an exchanged token is a scoped credential for an
-// outside resource and SHOULD expire: the default is a short window. A job
-// may override it per request via ExchangeJobToken's expires_in.
-const exchangedTokenLifetime = 15 * time.Minute
 
 // NewJobTokenAuth builds the job-token verifier (via OIDC discovery against
 // the IdP) and the mint client. It performs a network call to the IdP. The
@@ -83,11 +83,12 @@ func NewJobTokenAuth(ctx context.Context, cfg config.GRPCAuthConfig, client *htt
 	// exp.
 	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true})
 	return &JobTokenAuth{
-		verifier:  verifier,
-		audiences: cfg.Audiences,
-		idpURL:    base,
-		logger:    logger,
-		http:      client,
+		verifier:               verifier,
+		audiences:              cfg.Audiences,
+		idpURL:                 base,
+		logger:                 logger,
+		http:                   client,
+		exchangedTokenLifetime: cfg.EffectiveExchangedTokenLifetime(),
 	}, nil
 }
 
@@ -151,12 +152,12 @@ func (a *JobTokenAuth) Mint(ctx context.Context, jobID, pipelineID int64, target
 // audience (e.g. an outside resource the job needs to call). The API
 // authenticates to the IdP with its mTLS client certificate. The token carries
 // the same trigger and upstream claims as the job's original token. Unlike the
-// main job token, an exchanged token has a short lifetime: expiresIn (or
-// exchangedTokenLifetime when zero), since it is a scoped credential for an
+// main job token, an exchanged token has a short lifetime: expiresIn (or the
+// configured default when zero), since it is a scoped credential for an
 // outside resource rather than the job's own long-lived token.
 func (a *JobTokenAuth) Exchange(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType, audience string, upstreamClaims map[string]any, expiresIn time.Duration) (string, error) {
 	if expiresIn <= 0 {
-		expiresIn = exchangedTokenLifetime
+		expiresIn = a.exchangedTokenLifetime
 	}
 	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, audience, expiresIn)
 }

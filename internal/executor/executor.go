@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"text/template"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -48,12 +49,14 @@ var ErrTimeout = errors.New("executor: timed out")
 // the job's context cancellation instead (see the worker's user-cancel path).
 var ErrCancelled = errors.New("executor: cancelled")
 
-// StepOutputDirEnv is the environment variable the executor sets on a step
-// that declares outputs (F-06): it names the per-step directory the step
-// writes its output files into (one file per declared output name). After the
-// step runs the executor reads those files and records their (trimmed)
-// contents as the step's outputs. A step that declares no outputs does not
-// get the variable set.
+// StepOutputDirEnv is the environment variable the executor sets on every
+// step: it names the per-step directory the step writes its output files into
+// (one file per declared output name). After the step runs the executor reads
+// the step's declared outputs from that directory and records their (trimmed)
+// contents as the step's outputs. The directory is created for every step —
+// even one that declares no outputs — so a step handler that always produces
+// output (e.g. the token_exchange handler) can write to it; a declared name
+// the step did not write is recorded as an empty value.
 const StepOutputDirEnv = "CDROM_STEP_OUTPUT_DIR"
 
 // Execute runs the steps of spec in order. A nil or empty spec succeeds
@@ -119,22 +122,20 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(StepStatusSkipped)})
 			continue
 		}
-		// A step that declares outputs (F-06) gets a per-step output directory,
-		// exposed to it via StepOutputDirEnv; the step writes one file per
-		// declared output name into it, and the executor reads them back after
-		// the step runs.
+		// Every step gets a per-step output directory, exposed to it via
+		// StepOutputDirEnv (F-06): the step writes one file per declared output
+		// name into it, and the executor reads them back after the step runs.
+		// The directory is created even for a step that declares no outputs, so
+		// a step handler that always produces output (e.g. token_exchange) can
+		// write to it.
 		stepToRun := step
-		var outDir string
-		if len(step.GetOutputs()) > 0 {
-			dir, err := os.MkdirTemp("", "cdrom-step-outputs-")
-			if err != nil {
-				err := fmt.Errorf("executor: step %d: create output dir: %w", i, err)
-				reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
-				return err
-			}
-			outDir = dir
-			stepToRun = withEnv(step, map[string]string{StepOutputDirEnv: dir})
+		outDir, err := os.MkdirTemp("", "cdrom-step-outputs-")
+		if err != nil {
+			err := fmt.Errorf("executor: step %d: create output dir: %w", i, err)
+			reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
+			return err
 		}
+		stepToRun = withEnv(step, map[string]string{StepOutputDirEnv: outDir})
 		stepErr := runStep(jobCtx, i, stepToRun, logger)
 		stepStatus := StepStatusSucceeded
 		if stepErr != nil {
@@ -292,6 +293,44 @@ func ContextWithStepBarrier(ctx context.Context, barrier StepBarrier) context.Co
 func StepBarrierFromContext(ctx context.Context) StepBarrier {
 	barrier, _ := ctx.Value(stepBarrierKey{}).(StepBarrier)
 	return barrier
+}
+
+// TokenExchange lets a step handler request a new job token for a different
+// audience (e.g. an outside resource the job needs to call) while the job is
+// running. The execution target (worker or agent) implements it by calling the
+// API's ExchangeJobToken RPC, presenting the job's own token and returning the
+// exchanged token. A step handler that needs a token for an outside resource
+// (the built-in "token_exchange" handler) obtains one from the context (via
+// TokenExchangeFromContext) and hands it to the step's command (e.g. as an
+// environment variable) so the command can authenticate to that resource.
+//
+// Implementations must be safe for concurrent use. Exchange is called with the
+// step's context (already bounded by the step's per-step timeout, when set) and
+// must return promptly when that context is done.
+type TokenExchange interface {
+	// Exchange returns a new job token scoped to the same job but the given
+	// audience. expiresIn is how long the exchanged token should be valid for;
+	// a zero value means the API's default exchanged-token lifetime.
+	Exchange(ctx context.Context, audience string, expiresIn time.Duration) (string, error)
+}
+
+type tokenExchangeKey struct{}
+
+// ContextWithTokenExchange returns a context that carries exchanger, so step
+// handlers can request a job token for a different audience. A nil exchanger
+// returns ctx unchanged.
+func ContextWithTokenExchange(ctx context.Context, exchanger TokenExchange) context.Context {
+	if exchanger == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, tokenExchangeKey{}, exchanger)
+}
+
+// TokenExchangeFromContext returns the TokenExchange carried by ctx, or nil
+// when none is set. Step handlers call this to request an exchanged token.
+func TokenExchangeFromContext(ctx context.Context) TokenExchange {
+	exchanger, _ := ctx.Value(tokenExchangeKey{}).(TokenExchange)
+	return exchanger
 }
 
 // ---------------------------------------------------------------------------

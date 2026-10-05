@@ -34,6 +34,9 @@ type fakeAgentAPI struct {
 	statuses        []dbpb.JobStatus
 	job             *apipb.Job
 	start           time.Time
+	// exchanges records the audiences the token_exchange step handler
+	// requested a new job token for.
+	exchanges []string
 }
 
 func (f *fakeAgentAPI) GetJob(ctx context.Context, in *apipb.GetJobRequest, opts ...grpc.CallOption) (*apipb.Job, error) {
@@ -55,6 +58,7 @@ func (f *fakeAgentAPI) GetJob(ctx context.Context, in *apipb.GetJobRequest, opts
 		Status:      status,
 		TargetGroup: f.job.GetTargetGroup(),
 		Spec:        f.job.GetSpec(),
+		Token:       f.job.GetToken(),
 	}, nil
 }
 
@@ -67,6 +71,17 @@ func (f *fakeAgentAPI) ReportJobStatus(ctx context.Context, in *apipb.ReportJobS
 
 func (f *fakeAgentAPI) StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[apipb.JobLogChunk, apipb.StreamJobLogsResponse], error) {
 	return nil, status.Error(codes.Unavailable, "streaming disabled in test")
+}
+
+// ExchangeJobToken mints a new job token for a different audience (the
+// token_exchange step handler). The fake records the (job, audience) and
+// returns a token derived from the audience so a test can assert the exchange
+// happened.
+func (f *fakeAgentAPI) ExchangeJobToken(ctx context.Context, in *apipb.ExchangeJobTokenRequest, opts ...grpc.CallOption) (*apipb.ExchangeJobTokenResponse, error) {
+	f.mu.Lock()
+	f.exchanges = append(f.exchanges, in.GetAudience())
+	f.mu.Unlock()
+	return &apipb.ExchangeJobTokenResponse{Token: "token-for-" + in.GetAudience()}, nil
 }
 
 // TestAgentCancelInterruptsRunningJob verifies cancellation propagation for an
@@ -122,5 +137,44 @@ func TestAgentCancelInterruptsRunningJob(t *testing.T) {
 	}
 	if !sawCancelled {
 		t.Errorf("agent did not report CANCELLED (reported %v)", got)
+	}
+}
+
+// TestAgentTokenExchangeStep verifies that an agent running a job with a
+// token_exchange step calls the API's ExchangeJobToken RPC (presenting the
+// job's own token) for the step's audience and reports the job succeeded.
+func TestAgentTokenExchangeStep(t *testing.T) {
+	// The job completes (the token_exchange step is fast) well before the fake
+	// API's 100ms cancellation delay, so it reports succeeded.
+	api := &fakeAgentAPI{job: &apipb.Job{
+		Id:    9,
+		Name:  "exchange",
+		Token: "job-token-9",
+		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+			{
+				Type:    "token_exchange",
+				Params:  map[string]*dbpb.ParamValue{"audience": {String_: "outside-svc"}},
+				Outputs: []string{"token"},
+			},
+		}},
+	}}
+	a := New(9, Dependencies{API: api}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	status, err := a.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if status != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Errorf("status = %v, want SUCCEEDED", status)
+	}
+
+	// The agent exchanged a token for the step's audience.
+	api.mu.Lock()
+	got := append([]string(nil), api.exchanges...)
+	api.mu.Unlock()
+	if len(got) != 1 || got[0] != "outside-svc" {
+		t.Errorf("exchanges = %v, want [outside-svc]", got)
 	}
 }

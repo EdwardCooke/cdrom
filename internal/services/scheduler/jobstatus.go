@@ -217,13 +217,16 @@ func latestExecutionPerWorker(executions []*dbpb.JobExecution, alive map[string]
 func deriveJobStatus(executions []*dbpb.JobExecution, mode models.FailureMode) models.JobStatus {
 	anySucceeded := false
 	anyFailed := false
+	anyTimedOut := false
 	anyRunning := false
 	for _, execution := range executions {
 		switch execution.GetStatus() {
 		case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
 			anySucceeded = true
-		case dbpb.JobStatus_JOB_STATUS_FAILED, dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+		case dbpb.JobStatus_JOB_STATUS_FAILED:
 			anyFailed = true
+		case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+			anyTimedOut = true
 		case dbpb.JobStatus_JOB_STATUS_PENDING, dbpb.JobStatus_JOB_STATUS_RUNNING:
 			anyRunning = true
 		}
@@ -241,10 +244,23 @@ func deriveJobStatus(executions []*dbpb.JobExecution, mode models.FailureMode) m
 		if anyRunning {
 			return models.JobStatusRunning
 		}
+		// No worker succeeded and none is running: the job is a failure. A
+		// concrete failure takes precedence over a timeout; a job that only
+		// timed out is reported as timed_out (distinct from failed) so the UI
+		// can tell a hung job apart from one that ran and errored.
+		if anyFailed {
+			return models.JobStatusFailed
+		}
+		if anyTimedOut {
+			return models.JobStatusTimedOut
+		}
 		return models.JobStatusFailed
 	default: // FailureModeAll (and the empty/unset default)
 		if anyFailed {
 			return models.JobStatusFailed
+		}
+		if anyTimedOut {
+			return models.JobStatusTimedOut
 		}
 		if anyRunning {
 			return models.JobStatusRunning

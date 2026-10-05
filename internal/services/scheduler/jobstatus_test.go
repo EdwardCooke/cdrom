@@ -30,7 +30,8 @@ func TestDeriveJobStatus(t *testing.T) {
 		// ALL (default)
 		{"all: all succeeded", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_SUCCEEDED)}, models.FailureModeAll, models.JobStatusSucceeded},
 		{"all: one failed", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_FAILED)}, models.FailureModeAll, models.JobStatusFailed},
-		{"all: one timed out", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_TIMED_OUT)}, models.FailureModeAll, models.JobStatusFailed},
+		{"all: one timed out", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_TIMED_OUT)}, models.FailureModeAll, models.JobStatusTimedOut},
+		{"all: one failed one timed out", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_FAILED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_TIMED_OUT)}, models.FailureModeAll, models.JobStatusFailed},
 		{"all: one running", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_RUNNING)}, models.FailureModeAll, models.JobStatusRunning},
 		{"all: all running", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_RUNNING)}, models.FailureModeAll, models.JobStatusRunning},
 		{"all: empty mode defaults to all", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_FAILED)}, "", models.JobStatusFailed},
@@ -45,6 +46,7 @@ func TestDeriveJobStatus(t *testing.T) {
 		{"any: one succeeded", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_FAILED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_SUCCEEDED)}, models.FailureModeAny, models.JobStatusSucceeded},
 		{"any: none succeeded some running", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_FAILED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_RUNNING)}, models.FailureModeAny, models.JobStatusRunning},
 		{"any: all failed", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_FAILED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_TIMED_OUT)}, models.FailureModeAny, models.JobStatusFailed},
+		{"any: all timed out", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_TIMED_OUT), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_TIMED_OUT)}, models.FailureModeAny, models.JobStatusTimedOut},
 		{"any: all succeeded", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED), execWithStatus(1, 2, "w2", dbpb.JobStatus_JOB_STATUS_SUCCEEDED)}, models.FailureModeAny, models.JobStatusSucceeded},
 	}
 	for _, tc := range cases {

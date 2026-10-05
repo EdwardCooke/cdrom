@@ -20,7 +20,10 @@
 #
 # It also exercises F-03 (a job-level timeout terminates a job as timed_out)
 # and F-04 (a failing job with a retry policy is re-dispatched up to its
-# limit, and a finished job can be re-run for a fresh execution).
+# limit, and a finished job can be re-run for a fresh execution), and the
+# token_exchange step handler (a step that asks the API, via the worker's
+# TokenExchange, for a new job token for a different audience and hands it to
+# a later step as a step output; the API mints it from the local IdP).
 #
 # Usage: scripts/e2e.sh
 #
@@ -108,7 +111,27 @@ log ">> booting stack in $WORK"
 start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db" CDROM_LOG_FORMAT=text -- "$BIN/db"
 start scheduler "$WORK/scheduler.log" 'serving'    CDROM_LOG_FORMAT=text -- "$BIN/scheduler"
 start artifacts "$WORK/artifacts.log" 'serving'    CDROM_ARTIFACTS_ROOT="$WORK/artifacts" CDROM_LOG_FORMAT=text -- "$BIN/artifacts"
-start api       "$WORK/api.log"       'serving'    CDROM_LOG_FORMAT=text -- "$BIN/api"
+# The IdP mints the job tokens the API hands to the worker (and the exchanged
+# tokens a token_exchange step requests). It is started before the API so the
+# API's job-token auth (OIDC discovery against the IdP) can initialize.
+start idp       "$WORK/idp.log"       'idp starting' CDROM_LOG_FORMAT=text -- "$BIN/idp"
+# The IdP logs "starting" before its HTTP server is listening, so poll its
+# discovery endpoint until it responds; the API's job-token auth performs OIDC
+# discovery against the IdP at startup and would fail if the IdP is not up.
+log ">> waiting for the IdP to serve"
+for i in $(seq 1 100); do
+  if curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.2
+done
+curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
+  || { echo ">> IdP did not start serving" >&2; exit 1; }
+# Enable job-token auth on the API's gRPC surface: the API mints a job token
+# for the worker (audience cdrom-api, the IdP's default) and verifies it on
+# the worker's job-scoped calls, including the token_exchange step's
+# ExchangeJobToken RPC.
+start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_LOG_FORMAT=text -- "$BIN/api"
 start worker    "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
 
 # Gate on the API having the worker's WatchJobs stream open before dispatching.
@@ -131,7 +154,9 @@ BODY=$(cat <<EOF
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step1: plain command"]}}},
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step2: env=\$MY_VAR"]}}, "env": {"MY_VAR": "from-spec"}},
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step3: pwd=\$(pwd)"]}}, "workdir": "$WORKDIR"},
-      {"type": "shell", "params": {"shell": {"string": "sh"}, "args": {"strings": ["-c"]}, "command": {"string": "echo step4: shell override"}}}
+      {"type": "shell", "params": {"shell": {"string": "sh"}, "args": {"strings": ["-c"]}, "command": {"string": "echo step4: shell override"}}},
+      {"type": "token_exchange", "params": {"audience": {"string": "outside-svc"}}, "outputs": ["token"]},
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step6: token exchange flowed to a later step"]}}, "condition": "{{ if (index .steps 4).Outputs.token }}true{{ else }}false{{ end }}"}
     ]
   }
 }
@@ -152,6 +177,13 @@ wait_for "$WORK/worker.log" 'step1: plain command' 'step 1 output'
 wait_for "$WORK/worker.log" 'step2: env=from-spec' 'step 2 env var'
 wait_for "$WORK/worker.log" "step3: pwd=$WORKDIR" 'step 3 workdir'
 wait_for "$WORK/worker.log" 'step4: shell override' 'step 4 shell override'
+# The token_exchange step (step 5) asks the API for a new job token for
+# audience outside-svc and writes it to its "token" output; the worker logs
+# the exchange.
+wait_for "$WORK/worker.log" 'executor: exchanged job token' 'worker exchanged the job token'
+# Step 6's condition reads the exchanged token from step 5's outputs; it runs
+# only if the token was captured and flowed to the condition context.
+wait_for "$WORK/worker.log" 'step6: token exchange flowed to a later step' 'step 6 consumed the exchanged token'
 wait_for "$WORK/worker.log" 'job succeeded' 'job success'
 
 # --- verify the API persisted the job as succeeded -------------------------
@@ -168,6 +200,18 @@ log "   $FINAL"
 printf '%s' "$FINAL" | grep -q '"status":3' \
   || { echo ">> job did not reach status=succeeded" >&2; exit 1; }
 
+# --- verify the token exchange went through the API and IdP ---------------
+# The token_exchange step asked the API (ExchangeJobToken) for a new job token
+# for audience outside-svc; the API minted it from the IdP. Verify both the
+# API and the IdP recorded the exchange for the outside-svc audience.
+log ">> verifying the token exchange (API + IdP)"
+wait_for "$WORK/api.log" 'api: job token exchanged' 'api exchanged the job token'
+wait_for "$WORK/idp.log" 'idp: minted job token' 'idp minted a job token'
+grep -q 'audience=outside-svc' "$WORK/api.log" \
+  || { echo ">> api did not exchange a token for audience outside-svc" >&2; exit 1; }
+grep -q 'audience=outside-svc' "$WORK/idp.log" \
+  || { echo ">> idp did not mint a token for audience outside-svc" >&2; exit 1; }
+
 # --- verify job logs were streamed, persisted, and are retrievable (F-02) ---
 # The API persists streamed output to the artifacts service (one file per step
 # plus a combined job.log) and exposes it over HTTP. The worker reports
@@ -175,7 +219,9 @@ printf '%s' "$FINAL" | grep -q '"status":3' \
 # so poll until the logs are complete.
 log ">> verifying job logs (F-02)"
 
-# Poll the log listing until all four step logs plus job.log are present.
+# Poll the log listing until the step logs plus job.log are present. The
+# token_exchange step (the 5th step, index 4) produces no output, so it has no
+# step-4.log; the other steps each have one (step-0..3 and step-5).
 LOG_LISTING=""
 for i in $(seq 1 100); do
   LOG_LISTING=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs")
@@ -183,6 +229,7 @@ for i in $(seq 1 100); do
     && printf '%s' "$LOG_LISTING" | grep -q 'step-1.log' \
     && printf '%s' "$LOG_LISTING" | grep -q 'step-2.log' \
     && printf '%s' "$LOG_LISTING" | grep -q 'step-3.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step-5.log' \
     && printf '%s' "$LOG_LISTING" | grep -q 'job.log'; then
     break
   fi
@@ -191,6 +238,8 @@ done
 log "   log listing: $LOG_LISTING"
 printf '%s' "$LOG_LISTING" | grep -q 'step-0.log' \
   || { echo ">> step-0.log missing from log listing" >&2; exit 1; }
+printf '%s' "$LOG_LISTING" | grep -q 'step-5.log' \
+  || { echo ">> step-5.log missing from log listing" >&2; exit 1; }
 printf '%s' "$LOG_LISTING" | grep -q 'job.log' \
   || { echo ">> job.log missing from log listing" >&2; exit 1; }
 
@@ -201,7 +250,8 @@ for i in $(seq 1 100); do
   if printf '%s' "$JOB_LOG" | grep -q 'step1: plain command' \
     && printf '%s' "$JOB_LOG" | grep -q 'step2: env=from-spec' \
     && printf '%s' "$JOB_LOG" | grep -q "step3: pwd=$WORKDIR" \
-    && printf '%s' "$JOB_LOG" | grep -q 'step4: shell override'; then
+    && printf '%s' "$JOB_LOG" | grep -q 'step4: shell override' \
+    && printf '%s' "$JOB_LOG" | grep -q 'step6: token exchange flowed to a later step'; then
     break
   fi
   sleep 0.2
@@ -216,6 +266,8 @@ printf '%s' "$JOB_LOG" | grep -q "step3: pwd=$WORKDIR" \
   || { echo ">> step3 output missing from job.log" >&2; exit 1; }
 printf '%s' "$JOB_LOG" | grep -q 'step4: shell override' \
   || { echo ">> step4 output missing from job.log" >&2; exit 1; }
+printf '%s' "$JOB_LOG" | grep -q 'step6: token exchange flowed to a later step' \
+  || { echo ">> step6 output missing from job.log" >&2; exit 1; }
 
 # Verify a per-step log is retrievable and contains only that step's output.
 STEP0_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs/step-0.log")
@@ -355,4 +407,4 @@ log "   $RERUN_FINAL"
 printf '%s' "$RERUN_FINAL" | grep -q '"status":3' \
   || { echo ">> re-run did not reach status=succeeded" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps, persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, and a finished job can be re-run for a fresh execution"
+log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, and a finished job can be re-run for a fresh execution"

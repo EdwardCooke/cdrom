@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -133,6 +134,57 @@ func TestLoadWithFileInvalidYAML(t *testing.T) {
 	}
 	if _, err := LoadWithFile(path); err == nil {
 		t.Fatal("LoadWithFile: expected error for invalid YAML")
+	}
+}
+
+func TestGRPCAuthExchangedTokenLifetime(t *testing.T) {
+	// Zero value falls back to the default (15 minutes).
+	var zero GRPCAuthConfig
+	if got := zero.EffectiveExchangedTokenLifetime(); got != defaultExchangedTokenLifetime {
+		t.Errorf("EffectiveExchangedTokenLifetime (unset) = %v, want %v", got, defaultExchangedTokenLifetime)
+	}
+	// A configured value is used as-is.
+	if got := (GRPCAuthConfig{ExchangedTokenLifetime: 30 * time.Minute}).EffectiveExchangedTokenLifetime(); got != 30*time.Minute {
+		t.Errorf("EffectiveExchangedTokenLifetime (30m) = %v, want 30m", got)
+	}
+
+	// The file value is parsed from a duration string.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+grpc_auth:
+  enabled: true
+  idp_address: 127.0.0.1:7104
+  audiences: [cdrom-api]
+  exchanged_token_lifetime: 20m
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.GRPCAuth.ExchangedTokenLifetime != 20*time.Minute {
+		t.Errorf("GRPCAuth.ExchangedTokenLifetime = %v, want 20m", cfg.GRPCAuth.ExchangedTokenLifetime)
+	}
+
+	// The environment variable overrides the file value.
+	t.Setenv("CDROM_GRPC_AUTH_EXCHANGED_TOKEN_LIFETIME", "45m")
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.GRPCAuth.ExchangedTokenLifetime != 45*time.Minute {
+		t.Errorf("GRPCAuth.ExchangedTokenLifetime = %v, want 45m (env must override file)", cfg.GRPCAuth.ExchangedTokenLifetime)
+	}
+
+	// An unparseable duration in the file is a hard error.
+	badPath := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(badPath, []byte("grpc_auth:\n  exchanged_token_lifetime: not-a-duration\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadWithFile(badPath); err == nil {
+		t.Error("LoadWithFile: expected error for invalid exchanged_token_lifetime")
 	}
 }
 

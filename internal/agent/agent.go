@@ -22,6 +22,7 @@ import (
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logstream"
+	"cdrom/internal/tokenexchange"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
 	// executor. A target or plugin adds more step types the same way.
@@ -169,6 +170,11 @@ func (a *Agent) runJob(ctx context.Context, job *apipb.Job, collector *executor.
 		Name:   job.GetName(),
 		Status: "running",
 	})
+	// A step handler (the built-in "token_exchange" handler) can request a new
+	// job token for a different audience (e.g. an outside resource the job
+	// needs to call) while the job runs; the exchanger calls the API's
+	// ExchangeJobToken RPC, presenting the job's own token.
+	ctx = executor.ContextWithTokenExchange(ctx, tokenexchange.New(a.deps.API, a.jobID, a.token))
 	return executor.Execute(ctx, job.GetSpec(), a.logger)
 }
 

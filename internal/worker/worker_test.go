@@ -80,6 +80,9 @@ type fakeAPIClient struct {
 	// barrierOutcomes configures the CheckStepBarrier response per (job, step);
 	// a (job, step) with no entry is treated as satisfied.
 	barrierOutcomes map[barrierKey]barrierOutcome
+	// exchanges records the ExchangeJobToken calls the token_exchange step
+	// handler made (the job's token exchange).
+	exchanges []exchangeRequest
 }
 
 func (f *fakeAPIClient) RegisterWorker(ctx context.Context, in *apipb.RegisterWorkerRequest, opts ...grpc.CallOption) (*apipb.Worker, error) {
@@ -143,6 +146,34 @@ func (f *fakeAPIClient) CheckStepBarrier(ctx context.Context, in *apipb.CheckSte
 		return &apipb.CheckStepBarrierResponse{Satisfied: true}, nil
 	}
 	return &apipb.CheckStepBarrierResponse{Satisfied: outcome.satisfied, Cancelled: outcome.cancelled}, nil
+}
+
+// exchangeRequest is a recorded ExchangeJobToken call (the token_exchange step
+// handler).
+type exchangeRequest struct {
+	jobID    int64
+	audience string
+}
+
+// ExchangeJobToken mints a new job token for a different audience (the
+// token_exchange step handler). The fake records the (job, audience) and
+// returns a token derived from the audience so a test can assert the exchange
+// happened.
+func (f *fakeAPIClient) ExchangeJobToken(ctx context.Context, in *apipb.ExchangeJobTokenRequest, opts ...grpc.CallOption) (*apipb.ExchangeJobTokenResponse, error) {
+	f.mu.Lock()
+	f.exchanges = append(f.exchanges, exchangeRequest{jobID: in.GetJobId(), audience: in.GetAudience()})
+	f.mu.Unlock()
+	return &apipb.ExchangeJobTokenResponse{Token: "token-for-" + in.GetAudience()}, nil
+}
+
+// exchangesSnapshot returns a copy of the ExchangeJobToken calls the fake
+// recorded.
+func (f *fakeAPIClient) exchangesSnapshot() []exchangeRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]exchangeRequest, len(f.exchanges))
+	copy(out, f.exchanges)
+	return out
 }
 
 // stepCompletionsSnapshot returns a copy of the (job, step) pairs the worker
@@ -369,4 +400,55 @@ func TestWorkerStepBarrierCancelled(t *testing.T) {
 	// The worker runs step 0, then at the barrier the API reports the job was
 	// cancelled: the worker reports the job cancelled.
 	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_CANCELLED)
+}
+
+// TestWorkerTokenExchangeStep verifies that a worker running a job with a
+// token_exchange step calls the API's ExchangeJobToken RPC (presenting the
+// job's own token) for the step's audience and reports the job succeeded.
+func TestWorkerTokenExchangeStep(t *testing.T) {
+	watchCh := make(chan *apipb.WatchMessage, 8)
+	t.Cleanup(func() { close(watchCh) })
+
+	// A job with a token_exchange step that requests a token for an outside
+	// resource. The worker's token exchanger calls the API's ExchangeJobToken.
+	job := &apipb.Job{
+		Id:   55,
+		Name: "exchange",
+		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+			{
+				Type:    "token_exchange",
+				Params:  map[string]*dbpb.ParamValue{"audience": {String_: "outside-svc"}},
+				Outputs: []string{"token"},
+			},
+		}},
+	}
+	api := &fakeAPIClient{
+		watchCh:   watchCh,
+		jobs:      map[int64]*apipb.Job{55: job},
+		startable: map[int64]bool{55: true},
+	}
+	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+
+	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: job, WorkerName: "w1"},
+	}}
+
+	// The worker runs the token_exchange step and reports the job succeeded.
+	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_SUCCEEDED)
+
+	// The worker exchanged a token for the step's audience, scoped to the job.
+	exchanges := api.exchangesSnapshot()
+	if len(exchanges) != 1 {
+		t.Fatalf("exchanges = %+v, want one exchange", exchanges)
+	}
+	if exchanges[0].jobID != 55 {
+		t.Errorf("exchange job_id = %d, want 55", exchanges[0].jobID)
+	}
+	if exchanges[0].audience != "outside-svc" {
+		t.Errorf("exchange audience = %q, want %q", exchanges[0].audience, "outside-svc")
+	}
 }

@@ -646,10 +646,10 @@ func jobLogStreamName(stream apipb.JobLogStream) string {
 // mints a replacement scoped to the same job but the requested audience. This
 // mirrors how a GitHub Actions runner requests a new token for a different
 // audience mid-job. The exchanged token has a short lifetime (the request's
-// expires_in, or the default exchangedTokenLifetime when unset) — unlike the
-// job's own long-lived token, an exchanged token is a scoped credential for an
-// outside resource. When job-token auth is disabled the RPC is a no-op that
-// returns an empty token.
+// expires_in, or the configured default — 15 minutes when unset — when unset)
+// — unlike the job's own long-lived token, an exchanged token is a scoped
+// credential for an outside resource. When job-token auth is disabled the RPC
+// is a no-op that returns an empty token.
 func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJobTokenRequest) (*apipb.ExchangeJobTokenResponse, error) {
 	if !s.jobAuth.Enabled() {
 		return &apipb.ExchangeJobTokenResponse{}, nil
@@ -682,7 +682,7 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		upstreamClaims = upstreamClaimsFromStruct(job.GetUpstreamClaims())
 	}
 	// The exchanged token's lifetime: the request's expires_in when set, else
-	// the default (Exchange falls back to exchangedTokenLifetime when zero).
+	// the configured default (Exchange falls back to it when zero).
 	var expiresIn time.Duration
 	if d := req.GetExpiresIn(); d != nil {
 		expiresIn = d.AsDuration()

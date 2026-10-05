@@ -721,7 +721,12 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   audience. Any audience is accepted — the IdP stamps whatever is requested.
   Unlike the main job token, an exchanged token has a **short lifetime** (a
   scoped credential for an outside resource): the request's `expires_in` when
-  set, else a default of 15 minutes.
+  set, else the configured default (`grpc_auth.exchanged_token_lifetime`,
+  defaulting to 15 minutes). The built-in **`token_exchange`** step
+  handler is the in-job way to do this: a step of type `token_exchange` asks
+  the execution target (worker/agent) for an exchanged token through the
+  executor's `TokenExchange` (which calls `ExchangeJobToken`) and writes it to
+  the step's outputs so later steps and jobs can use it.
 - **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs
   (`UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts` with a
   `namespace`, `DeleteArtifact`) require a `Bearer <token>` in the gRPC

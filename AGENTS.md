@@ -151,7 +151,9 @@ dispatch engine: it selects an `executor.StepHandler` by the step's `type`
 (empty → the handler registered under `executor.DefaultType`) and runs it. The
 concrete handlers live in `internal/stephandlers`; the built-in **`shell`**
 handler registers itself under `executor.DefaultType` at package init, so a
-step with no type runs through it. A target or plugin adds new step types with
+step with no type runs through it, and the built-in **`token_exchange`**
+handler registers itself under `token_exchange` (see the Token exchange
+handler below). A target or plugin adds new step types with
 `executor.RegisterStepType(name, handler)` (e.g. `ansible`, `terraform`,
 `argo`). A step whose type is not registered on the target fails the job with
 a clear error. `params` carries handler-specific configuration so a new step
@@ -280,11 +282,12 @@ never run — instead of failing, in two ways:
   `skipped` dependency is **never** overridden by `ignore_failed` (a
   cancellation is not a failure a job can opt out of) — it always blocks.
 - **Step & job `outputs`:** a step may declare `outputs` — a list of names.
-  The executor gives such a step a fresh per-step directory, exposed to it via
-  the `CDROM_STEP_OUTPUT_DIR` env var; the step's command writes one file per
-  declared name into it, and the executor reads them back (trimmed) after the
-  step runs. A declared name that was never written is recorded as an empty
-  string. The job's `outputs` are the union of its steps' outputs (a later
+  The executor gives every step a fresh per-step directory, exposed to it via
+  the `CDROM_STEP_OUTPUT_DIR` env var (created even for a step that declares no
+  outputs, so a step handler that always produces output can write to it); the
+  step's command writes one file per declared name into it, and the executor
+  reads them back (trimmed) after the step runs. A declared name that was never
+  written is recorded as an empty string. The job's `outputs` are the union of its steps' outputs (a later
   step overrides an earlier one on a name collision), aggregated by the
   `StepResultCollector` and reported on the job's final `ReportJobStatus`
   call, where `Database.UpdateJob` persists them (via the same
@@ -599,6 +602,31 @@ behavior with a specific shell rather than a platform default. When `shell` is
 empty the step runs `command` directly, preserving the no-implicit-shell
 contract.
 
+**Token exchange handler:** the built-in **`token_exchange`** step handler
+(`internal/stephandlers/token_exchange.go`, registered under `token_exchange`)
+lets a running job request a new job token for a different audience — e.g. an
+outside resource the job needs to call — and hand the exchanged token to later
+steps and jobs. The handler reads its settings from the step's `params`:
+`audience` (string, required — the audience the new token should be valid
+for), `expires_in` (string, a Go duration such as `15m`; empty means the API's
+default exchanged-token lifetime), and `output` (string, the name of the step
+output the token is written under, default `token`). It obtains the exchanged
+token from the execution target through the executor's `TokenExchange`
+(`executor.TokenExchange`, set in the context via
+`executor.ContextWithTokenExchange`): the worker and agent set the shared
+`internal/tokenexchange` implementation, which calls the API's
+`ExchangeJobToken` RPC presenting the job's own token. The executor gives every
+step a per-step output directory (carried in the step's env as
+`executor.StepOutputDirEnv`), so the handler always writes the exchanged token
+into it under the output name; the executor records it as the step's output
+only when the step declares that name in its `outputs` list, which is how
+downstream steps and jobs read it through the condition context (`.steps`/
+`.jobs` `.Outputs`). A step that declares no outputs still performs the
+exchange (and writes the token to its output directory) but does not capture
+it as a step output. A `token_exchange` step whose `audience` is missing, whose
+`expires_in` is not a valid duration, or whose target provides no
+`TokenExchange` fails the job.
+
 **Step barrier (cross-worker step synchronization):** a job that fans out to a
 worker group can be given the `step_barrier` flag (on its `JobSpec`,
 denormalized onto the `Job` row at creation). When set, the job's workers
@@ -702,19 +730,27 @@ internal/
   logging/    centralized logging (stdout or CDROM_LOG_FILE)
   logstream/  executor.LogSink that streams a job's step output to the API's
               StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
+  tokenexchange/ executor.TokenExchange backed by the API's ExchangeJobToken
+              RPC (presents the job's own token); the single shared
+              implementation used by worker + agent so a step handler can
+              request a job token for a different audience
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
-              LogSink, an optional StepStatusReporter, and an optional
-              StepBarrier in the context — evaluating each step's `condition`
-              (F-06) to skip it when false, reporting each step's terminal
-              status for a caller's StepResultCollector to attach to its final
-              status report, and synchronizing a job's workers at each step
-              boundary via the StepBarrier (cross-worker step barrier); used
-              by worker + agent)
+              LogSink, an optional StepStatusReporter, an optional StepBarrier,
+              and an optional TokenExchange in the context — evaluating each
+              step's `condition` (F-06) to skip it when false, reporting each
+              step's terminal status for a caller's StepResultCollector to
+              attach to its final status report, synchronizing a job's workers
+              at each step boundary via the StepBarrier (cross-worker step
+              barrier), and letting a step handler request a job token for a
+              different audience via the TokenExchange; used by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
-              executor.DefaultType, tees step output to a LogSink when present);
-              a target or plugin adds more via executor.RegisterStepType
+              executor.DefaultType, tees step output to a LogSink when present;
+              the "token_exchange" handler, registered under token_exchange,
+              requests a job token for a different audience via the executor's
+              TokenExchange and writes it to the step's outputs); a target or
+              plugin adds more via executor.RegisterStepType
   services/
     data/     pipeline/job data service
     artifacts/ general namespaced file store (artifacts + job logs; gRPC
@@ -738,8 +774,12 @@ internal/
   worker/     long-lived worker implementation (implements the executor's
               StepBarrier via the API's ReportStepCompletion/CheckStepBarrier
               RPCs, so a job that fans out to a worker group synchronizes its
-              workers at each step boundary)
-  agent/      ephemeral agent implementation
+              workers at each step boundary; sets the shared
+              internal/tokenexchange TokenExchange so a step handler can
+              request a job token for a different audience)
+  agent/      ephemeral agent implementation (sets the shared
+              internal/tokenexchange TokenExchange so a step handler can
+              request a job token for a different audience)
   idp/        local OIDC identity provider (JWT issuer, auto key rotation;
               signing keys + auth codes persisted through the Database service)
 proto/        protobuf definitions (proto/cdrom/<service>/v1/)
@@ -801,8 +841,10 @@ and the auth variables `CDROM_AUTH_ENABLED` (`true`/`1`),
 `CDROM_IDP_TOKEN_LIFETIME`, `CDROM_IDP_CHECK_INTERVAL` (equivalents of the
 `idp` section in the config file), and the job-token auth variables
 `CDROM_GRPC_AUTH_ENABLED` (`true`/`1`), `CDROM_GRPC_AUTH_IDP_ADDR`,
-`CDROM_GRPC_AUTH_AUDIENCES` (comma-separated; equivalents of the
-`grpc_auth` section in the config file).
+`CDROM_GRPC_AUTH_AUDIENCES` (comma-separated), and
+`CDROM_GRPC_AUTH_EXCHANGED_TOKEN_LIFETIME` (a duration, e.g. `15m`; the
+default lifetime of an exchanged job token, defaulting to 15 minutes;
+equivalents of the `grpc_auth` section in the config file).
 
 Logging is centralized in `internal/logging`: every binary calls
 `logging.New()`. `CDROM_LOG_FORMAT` selects the handler — `json` (default)
@@ -941,7 +983,8 @@ The exchanged token re-stamps the job's trigger context (`trigger_name`,
 `trigger_type`, and `upstream_*` claims) so the downstream audience sees the
 same identity that triggered the run. Unlike the main job token, an exchanged
 token has a **short lifetime** (a scoped credential for an outside resource):
-the request's `expires_in` when set, else a default of 15 minutes.
+the request's `expires_in` when set, else the configured default
+(`grpc_auth.exchanged_token_lifetime`, defaulting to 15 minutes).
 - **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs
 (`UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts` with a
 `namespace`, `DeleteArtifact`) require a `Bearer <token>` in the gRPC

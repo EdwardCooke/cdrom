@@ -23,6 +23,7 @@ import (
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logstream"
+	"cdrom/internal/tokenexchange"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
 	// executor. A target or plugin adds more step types the same way.
@@ -380,6 +381,11 @@ func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string, colle
 		Name:   job.GetName(),
 		Status: "running",
 	})
+	// A step handler (the built-in "token_exchange" handler) can request a new
+	// job token for a different audience (e.g. an outside resource the job
+	// needs to call) while the job runs; the exchanger calls the API's
+	// ExchangeJobToken RPC, presenting the job's own token.
+	ctx = executor.ContextWithTokenExchange(ctx, tokenexchange.New(w.deps.API, job.GetId(), token))
 	// The cross-worker step barrier: when the job has the step-barrier flag set
 	// and targets a worker group, the workers synchronize at each step boundary
 	// (after a worker completes a step it waits until every worker alive at the
