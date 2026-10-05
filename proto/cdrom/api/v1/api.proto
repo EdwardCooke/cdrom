@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package cdrom.api.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
@@ -432,6 +433,12 @@ message ExchangeJobTokenRequest {
   // audience is the audience the new token should be valid for (e.g. an
   // outside resource the job needs to authenticate to).
   string audience = 2;
+  // expires_in is how long the exchanged token should be valid for. When set,
+  // the IdP stamps the token's exp to now + expires_in; when empty the API
+  // uses its default exchanged-token lifetime (a short window, since an
+  // exchanged token is a scoped credential for an outside resource, not the
+  // job's own long-lived token).
+  google.protobuf.Duration expires_in = 3;
 }
 
 message ExchangeJobTokenResponse {

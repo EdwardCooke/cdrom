@@ -347,6 +347,12 @@ func (s *Server) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) err
 // present it back to the API and to outside resources for the duration of the
 // job. An optional audience overrides the IdP's default job-token audiences —
 // this is how a job exchanges its token for one with a different audience.
+//
+// The token's lifetime comes from the request's expires_in (a duration
+// string) when present, else the IdP's configured token lifetime. The API
+// passes a long placeholder (a week) for the main job token — so it
+// effectively never expires, its validity being gated on the job's live
+// status in the database — and a short lifetime for an exchanged token.
 func (s *Server) handleJobTokenGrant(w http.ResponseWriter, r *http.Request) {
 	// When the IdP serves TLS, job-token minting requires the caller to have
 	// presented a client certificate (the API's). The listener uses
@@ -377,11 +383,23 @@ func (s *Server) handleJobTokenGrant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	// The token's lifetime. The API passes expires_in explicitly: the main job
+	// token carries a long placeholder (a week) so it effectively never
+	// expires — the API gates its validity on the job's live status in the
+	// database, not the exp claim — while an exchanged token carries a short
+	// lifetime. When expires_in is absent the IdP falls back to its configured
+	// token lifetime.
+	lifetime := s.cfg.TokenLifetime
+	if v := r.FormValue("expires_in"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			lifetime = d
+		}
+	}
 	claims := map[string]any{
 		"iss":          s.issuerFor(r),
 		"sub":          "job:" + jobID,
 		"aud":          aud,
-		"exp":          now.Add(s.cfg.TokenLifetime).Unix(),
+		"exp":          now.Add(lifetime).Unix(),
 		"iat":          now.Unix(),
 		"job_id":       jobID,
 		"pipeline_id":  pipelineID,
@@ -415,11 +433,11 @@ func (s *Server) handleJobTokenGrant(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.logger.Info("idp: minted job token", "job", jobID, "pipeline", pipelineID, "group", targetGroup, "audience", audience, "trigger", triggerName, "trigger_type", triggerType)
+	s.logger.Info("idp: minted job token", "job", jobID, "pipeline", pipelineID, "group", targetGroup, "audience", audience, "trigger", triggerName, "trigger_type", triggerType, "lifetime", lifetime)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token": token,
 		"token_type":   "Bearer",
-		"expires_in":   int(s.cfg.TokenLifetime.Seconds()),
+		"expires_in":   int(lifetime.Seconds()),
 	})
 }
 

@@ -705,16 +705,23 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   secret. When the IdP serves TLS, the `job_token` grant rejects any TLS
   client that did not present a client certificate, so only a CA-signed client
   (the API) can mint; in plaintext mode the grant is open. The API mints one
-  short-lived RS256 token per job: on dispatch it is delivered to workers
-  inside the `JobAssignment` (gRPC field `token`), and on `GetJob` it is
-  returned in the `Job` for ephemeral agents. Claims: `iss`,
-  `sub: "job:<jobID>"`, `aud` (the configured audiences), `exp`, `iat`,
-  `job_id`, `pipeline_id`, `target_group`, `token_type: "job"`.
+  RS256 token per job: on dispatch it is delivered to workers inside the
+  `JobAssignment` (gRPC field `token`), and on `GetJob` it is returned in the
+  `Job` for ephemeral agents. Claims: `iss`, `sub: "job:<jobID>"`, `aud` (the
+  configured audiences), `exp`, `iat`, `job_id`, `pipeline_id`,
+  `target_group`, `token_type: "job"`. The main job token's `exp` is a **long
+  placeholder (a week)**: the token is meant to live as long as the job runs
+  (which can be days), so it effectively never expires — its validity is
+  gated on the job's live status in the database (see Verification), not on
+  `exp`.
 - **Exchange:** a job can request a **new token for a different audience**
   (e.g. an outside resource it must call) via the `ExchangeJobToken` RPC. The
   caller presents its existing job token (scoped to the job) and a target
   `audience`; the API mints a fresh token from the IdP stamped for that
   audience. Any audience is accepted — the IdP stamps whatever is requested.
+  Unlike the main job token, an exchanged token has a **short lifetime** (a
+  scoped credential for an outside resource): the request's `expires_in` when
+  set, else a default of 15 minutes.
 - **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs
   (`UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts` with a
   `namespace`, `DeleteArtifact`) require a `Bearer <token>` in the gRPC
@@ -723,8 +730,13 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   configured audiences is present, and rejects the call unless the token's
   `job_id` matches the job the call targets — for artifact RPCs the namespace
   is parsed back to a job id (a job's artifacts and logs use the job's id as
-  the namespace) before the check (missing/invalid token →
-  `Unauthenticated`, wrong job → `PermissionDenied`). Workers and agents
+  the namespace) before the check. The API **skips the token's `exp` check**
+  (the main job token's `exp` is a long placeholder) and instead gates the
+  token's validity on the job's **live status in the database**: a token for a
+  job that has reached a terminal state (`succeeded`, `failed`, `cancelled`,
+  `timed_out`, or `skipped`) is rejected, so a job's token is invalidated the
+  moment the job stops running (missing/invalid token → `Unauthenticated`,
+  wrong job or a finished job → `PermissionDenied`). Workers and agents
   present the token via `grpcutil.WithBearerToken`.
 
 ```mermaid

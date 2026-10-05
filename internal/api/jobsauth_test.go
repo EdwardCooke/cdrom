@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -12,12 +13,15 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"cdrom/internal/config"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/idp"
 )
 
@@ -190,5 +194,164 @@ func TestExchangeJobTokenDisabled(t *testing.T) {
 	}
 	if resp.GetToken() != "" {
 		t.Errorf("disabled: token = %q, want empty", resp.GetToken())
+	}
+}
+// fakeDB is a dbpb.DatabaseClient that returns a fixed job from GetJob and
+// fails every other call. It backs the job-status gate in checkJobToken: the
+// gate only ever calls GetJob.
+type fakeDB struct {
+	dbpb.DatabaseClient
+	job *dbpb.Job
+}
+
+func (f *fakeDB) GetJob(ctx context.Context, in *dbpb.GetJobRequest, opts ...grpc.CallOption) (*dbpb.Job, error) {
+	if f.job != nil && f.job.GetId() == in.GetId() {
+		return f.job, nil
+	}
+	return nil, status.Errorf(codes.NotFound, "job %d not found", in.GetId())
+}
+
+// jobTokenExpSeconds decodes a compact JWT's payload and returns its exp claim
+// (unix seconds). It is used to assert the lifetime stamped on a minted token.
+func jobTokenExpSeconds(t *testing.T, token string) int64 {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token is not a compact JWT: %q", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	return claims.Exp
+}
+
+// TestCheckJobTokenStatusGate confirms that a job token is only accepted while
+// its job is still active (pending or running): once the job reaches a
+// terminal state in the database, the token is rejected even though its exp
+// claim (a long placeholder) has not passed. This is what invalidates a job's
+// token when the job is no longer running.
+func TestCheckJobTokenStatusGate(t *testing.T) {
+	base := startTestIDP(t)
+	cfg := config.GRPCAuthConfig{
+		Enabled:    true,
+		IdPAddress: base,
+		Audiences:  []string{"cdrom-api"},
+	}
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewJobTokenAuth: %v", err)
+	}
+	token := mintTestJobToken(t, base, "42")
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+
+	cases := []struct {
+		name    string
+		status  dbpb.JobStatus
+		wantErr codes.Code
+	}{
+		{"running", dbpb.JobStatus_JOB_STATUS_RUNNING, codes.OK},
+		{"pending", dbpb.JobStatus_JOB_STATUS_PENDING, codes.OK},
+		{"succeeded", dbpb.JobStatus_JOB_STATUS_SUCCEEDED, codes.PermissionDenied},
+		{"failed", dbpb.JobStatus_JOB_STATUS_FAILED, codes.PermissionDenied},
+		{"cancelled", dbpb.JobStatus_JOB_STATUS_CANCELLED, codes.PermissionDenied},
+		{"timed_out", dbpb.JobStatus_JOB_STATUS_TIMED_OUT, codes.PermissionDenied},
+		{"skipped", dbpb.JobStatus_JOB_STATUS_SKIPPED, codes.PermissionDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeDB{job: &dbpb.Job{Id: 42, Status: tc.status}}
+			s := NewGRPCServer(db, nil, nil, jta, slog.Default())
+			err := s.checkJobToken(ctx, 42)
+			if tc.wantErr == codes.OK {
+				if err != nil {
+					t.Fatalf("checkJobToken: %v, want ok", err)
+				}
+				return
+			}
+			if status.Code(err) != tc.wantErr {
+				t.Fatalf("checkJobToken: got %v, want %v", status.Code(err), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestExchangeJobTokenExpiresIn confirms the exchanged token's lifetime is the
+// request's expires_in when set, and the default (a short window) when unset.
+// The main job token is unaffected (it keeps its long placeholder lifetime).
+func TestExchangeJobTokenExpiresIn(t *testing.T) {
+	base := startTestIDP(t)
+	cfg := config.GRPCAuthConfig{
+		Enabled:    true,
+		IdPAddress: base,
+		Audiences:  []string{"cdrom-api"},
+	}
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewJobTokenAuth: %v", err)
+	}
+	// A running job so the status gate in checkJobToken passes.
+	db := &fakeDB{job: &dbpb.Job{Id: 42, Status: dbpb.JobStatus_JOB_STATUS_RUNNING}}
+	s := NewGRPCServer(db, nil, nil, jta, slog.Default())
+
+	token := mintTestJobToken(t, base, "42")
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+	now := time.Now().Unix()
+
+	// A custom lifetime is honored.
+	resp, err := s.ExchangeJobToken(ctx, &apipb.ExchangeJobTokenRequest{
+		JobId:     42,
+		Audience:  "outside-svc",
+		ExpiresIn: durationpb.New(30 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("exchange (custom): %v", err)
+	}
+	exp := jobTokenExpSeconds(t, resp.GetToken())
+	if exp < now+29*60 || exp > now+31*60 {
+		t.Errorf("custom lifetime: exp = %d, want ~%d (now+30m)", exp, now+30*60)
+	}
+
+	// An unset lifetime falls back to the default (a short window, not the
+	// main token's long placeholder).
+	resp, err = s.ExchangeJobToken(ctx, &apipb.ExchangeJobTokenRequest{JobId: 42, Audience: "outside-svc"})
+	if err != nil {
+		t.Fatalf("exchange (default): %v", err)
+	}
+	exp = jobTokenExpSeconds(t, resp.GetToken())
+	if exp < now+14*60 || exp > now+16*60 {
+		t.Errorf("default lifetime: exp = %d, want ~%d (now+15m)", exp, now+15*60)
+	}
+}
+
+// TestMainJobTokenLongLifetime confirms the main job token (minted on
+// dispatch) carries a long placeholder exp (a week), so it effectively never
+// expires for the duration of a long-running job.
+func TestMainJobTokenLongLifetime(t *testing.T) {
+	base := startTestIDP(t)
+	cfg := config.GRPCAuthConfig{
+		Enabled:    true,
+		IdPAddress: base,
+		Audiences:  []string{"cdrom-api"},
+	}
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewJobTokenAuth: %v", err)
+	}
+	token, err := jta.Mint(context.Background(), 42, 0, "default", "", "", nil)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	exp := jobTokenExpSeconds(t, token)
+	now := time.Now().Unix()
+	// A week out (allow a small margin for the time between mint and check).
+	if exp < now+(7*24*60*60-60) || exp > now+(7*24*60*60+60) {
+		t.Errorf("main token exp = %d, want ~%d (now+7d)", exp, now+7*24*60*60)
 	}
 }

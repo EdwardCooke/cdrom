@@ -645,7 +645,10 @@ func jobLogStreamName(stream apipb.JobLogStream) string {
 // The caller presents its current job token (scoped to the job); the API
 // mints a replacement scoped to the same job but the requested audience. This
 // mirrors how a GitHub Actions runner requests a new token for a different
-// audience mid-job. When job-token auth is disabled the RPC is a no-op that
+// audience mid-job. The exchanged token has a short lifetime (the request's
+// expires_in, or the default exchangedTokenLifetime when unset) — unlike the
+// job's own long-lived token, an exchanged token is a scoped credential for an
+// outside resource. When job-token auth is disabled the RPC is a no-op that
 // returns an empty token.
 func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJobTokenRequest) (*apipb.ExchangeJobTokenResponse, error) {
 	if !s.jobAuth.Enabled() {
@@ -678,11 +681,17 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		triggerType = job.GetTriggerType()
 		upstreamClaims = upstreamClaimsFromStruct(job.GetUpstreamClaims())
 	}
-	token, err := s.jobAuth.Exchange(ctx, req.GetJobId(), pipelineID, targetGroup, triggerName, triggerType, req.GetAudience(), upstreamClaims)
+	// The exchanged token's lifetime: the request's expires_in when set, else
+	// the default (Exchange falls back to exchangedTokenLifetime when zero).
+	var expiresIn time.Duration
+	if d := req.GetExpiresIn(); d != nil {
+		expiresIn = d.AsDuration()
+	}
+	token, err := s.jobAuth.Exchange(ctx, req.GetJobId(), pipelineID, targetGroup, triggerName, triggerType, req.GetAudience(), upstreamClaims, expiresIn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "api: exchange job token: %v", err)
 	}
-	s.logger.Info("api: job token exchanged", "job", req.GetJobId(), "audience", req.GetAudience())
+	s.logger.Info("api: job token exchanged", "job", req.GetJobId(), "audience", req.GetAudience(), "expires_in", expiresIn)
 	return &apipb.ExchangeJobTokenResponse{Token: token}, nil
 }
 
@@ -1083,8 +1092,15 @@ func (s *GRPCServer) removeLive(name string) {
 }
 
 // checkJobToken, when job-token auth is enabled, verifies that the caller
-// presented a valid job token scoped to jobID. It is a no-op when job-token
-// auth is disabled.
+// presented a valid job token scoped to jobID and that the job is still
+// active (pending or running). A job token's exp claim is a long placeholder
+// (the token is meant to live as long as the job runs), so the API gates the
+// token's validity on the job's live status in the database: once the job
+// reaches a terminal state (succeeded, failed, cancelled, timed_out, or
+// skipped) its token is invalid, so a token for a finished job cannot be
+// reused. A job that is still pending or running is active, so its token is
+// valid. A nil db client (e.g. in tests) cannot check the status, so the
+// status check is skipped. It is a no-op when job-token auth is disabled.
 func (s *GRPCServer) checkJobToken(ctx context.Context, jobID int64) error {
 	if !s.jobAuth.Enabled() {
 		return nil
@@ -1100,7 +1116,37 @@ func (s *GRPCServer) checkJobToken(ctx context.Context, jobID int64) error {
 	if tokenJobID != jobID {
 		return status.Error(codes.PermissionDenied, "job token is not scoped to this job")
 	}
+	// The token's exp claim is a long placeholder, so the API gates the token's
+	// validity on the job's live status: a token for a job that has reached a
+	// terminal state is invalid (the job is no longer running). A nil db client
+	// (e.g. in tests) cannot check the status, so the check is skipped.
+	if s.db != nil {
+		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: jobID})
+		if err != nil {
+			return status.Error(codes.Unauthenticated, "job token could not be validated")
+		}
+		if jobStatusIsTerminal(job.GetStatus()) {
+			return status.Error(codes.PermissionDenied, "job is no longer running; its token is invalid")
+		}
+	}
 	return nil
+}
+
+// jobStatusIsTerminal reports whether a job's status is a terminal state (the
+// job has finished and will not run again): a job in a terminal state has no
+// active work, so its job token is invalid. A job that is pending or running
+// is not terminal.
+func jobStatusIsTerminal(status dbpb.JobStatus) bool {
+	switch status {
+	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		dbpb.JobStatus_JOB_STATUS_FAILED,
+		dbpb.JobStatus_JOB_STATUS_CANCELLED,
+		dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
+		dbpb.JobStatus_JOB_STATUS_SKIPPED:
+		return true
+	default:
+		return false
+	}
 }
 
 // bearerToken returns the bearer token from the request's authorization

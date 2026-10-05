@@ -101,14 +101,18 @@ db:
 
 # Job-token authentication on the API's gRPC surface (used by workers and
 # agents). Disabled by default: when enabled is false (or unset) the API
-# accepts gRPC calls without a job token. When enabled, the API mints a
-# short-lived job token from the IdP (via the job_token grant, authenticating
-# with its mTLS client certificate) for every job it dispatches or hands to an
-# agent, and requires callers to present it as a Bearer token on
-# ReportJobStatus and artifact operations. The token is scoped to a single
-# job; a token for one job is rejected on another. A job can also request a
-# new token for a different audience (e.g. an outside resource it must call)
-# via the ExchangeJobToken RPC.
+# accepts gRPC calls without a job token. When enabled, the API mints a job
+# token from the IdP (via the job_token grant, authenticating with its mTLS
+# client certificate) for every job it dispatches or hands to an agent, and
+# requires callers to present it as a Bearer token on ReportJobStatus and
+# artifact operations. The token is scoped to a single job; a token for one
+# job is rejected on another. The main job token's exp is a long placeholder
+# (a week) so it effectively never expires: the API gates its validity on the
+# job's live status in the database, so a token is invalidated the moment the
+# job stops running. A job can also request a new token for a different
+# audience (e.g. an outside resource it must call) via the ExchangeJobToken
+# RPC; an exchanged token has a short lifetime (the request's expires_in, or
+# a default of 15 minutes).
 #grpc_auth:
 #  enabled: true
 #  idp_address: http://127.0.0.1:7104

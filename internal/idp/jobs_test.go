@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"math/big"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -361,4 +363,95 @@ func containsString(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// jobTokenExpSeconds decodes a compact JWT's payload and returns its exp claim
+// (unix seconds).
+func jobTokenExpSeconds(t *testing.T, token string) int64 {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token is not a compact JWT: %q", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	return claims.Exp
+}
+
+// TestJobTokenExpiresIn confirms the job_token grant honors the request's
+// expires_in (a duration string): the token's exp is stamped to now +
+// expires_in. This is how the API gives the main job token a long placeholder
+// lifetime (a week) and an exchanged token a short one.
+func TestJobTokenExpiresIn(t *testing.T) {
+	cfg := jobTestConfig()
+	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
+	if err != nil {
+		t.Fatalf("NewKeyManager: %v", err)
+	}
+	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	now := time.Now().Unix()
+
+	// A custom lifetime is honored.
+	form := url.Values{
+		"grant_type": {"job_token"},
+		"job_id":     {"42"},
+		"expires_in": {time.Hour.String()},
+	}
+	resp, err := http.DefaultClient.PostForm(ts.URL+"/token", form)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (body %s), want 200", resp.StatusCode, body)
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	exp := jobTokenExpSeconds(t, out.AccessToken)
+	if exp < now+3590 || exp > now+3610 {
+		t.Errorf("custom lifetime: exp = %d, want ~%d (now+1h)", exp, now+3600)
+	}
+	if out.ExpiresIn != 3600 {
+		t.Errorf("response expires_in = %d, want 3600", out.ExpiresIn)
+	}
+
+	// Without expires_in the IdP falls back to its configured token lifetime.
+	form = url.Values{"grant_type": {"job_token"}, "job_id": {"43"}}
+	resp, err = http.DefaultClient.PostForm(ts.URL+"/token", form)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d (body %s), want 200", resp.StatusCode, body)
+	}
+	var out2 struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	exp = jobTokenExpSeconds(t, out2.AccessToken)
+	// jobTestConfig sets TokenLifetime to an hour.
+	if exp < now+3590 || exp > now+3610 {
+		t.Errorf("default lifetime: exp = %d, want ~%d (now+1h)", exp, now+3600)
+	}
 }
