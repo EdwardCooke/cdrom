@@ -98,9 +98,24 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		jobCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// The run's parameters (F-10) are interpolated into the job's spec before
+	// it runs: each step's workdir, env values, and params are rendered as Go
+	// templates against the run's parameter values (and the run's identity),
+	// so the same spec can be reused across runs with different inputs. A
+	// field that references a parameter with no value (no supplied value and
+	// no default) is a spec error that fails the job, so an undefined
+	// parameter never silently renders to an empty string. A job that is not
+	// part of a run (or whose run carries no parameters) is left unchanged.
+	run := RunInfoFromContext(ctx)
+	spec, err := interpolateSpec(spec, run)
+	if err != nil {
+		return err
+	}
 	// The condition context is built up as the job runs: priorSteps accumulates
 	// each step's status/outputs, while the upstream jobs and the job's
-	// identity come from the context (set by the execution target, F-06).
+	// identity come from the context (set by the execution target, F-06), and
+	// the run's parameters and identity (F-10) are available to a step's
+	// condition.
 	upstreamJobs := UpstreamJobsFromContext(ctx)
 	identity := JobIdentityFromContext(ctx)
 	priorSteps := make([]StepConditionInfo, 0, len(spec.GetSteps()))
@@ -109,7 +124,7 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		// renders to false the step is skipped (it does not run and does not
 		// fail the job); when it fails to parse or render, that is a spec
 		// error and fails the job.
-		condCtx := conditionContext(step, priorSteps, upstreamJobs, identity)
+		condCtx := conditionContext(step, priorSteps, upstreamJobs, identity, run)
 		skip, condErr := evaluateCondition(step, condCtx)
 		if condErr != nil {
 			err := fmt.Errorf("executor: step %d: condition: %w", i, condErr)
@@ -405,20 +420,68 @@ func JobIdentityFromContext(ctx context.Context) JobIdentity {
 	return identity
 }
 
+// RunInfo is the run-scoped context a job's spec is interpolated against
+// (F-10): the run's concrete parameter values (Params) and the run's own
+// identity (ID, PipelineID, Trigger, TriggerName). The execution target sets
+// it in the context (via ContextWithRunInfo) before calling Execute, so the
+// executor can render a job's spec fields (env, command, workdir) and a step's
+// condition against the run's parameters. A job that is not part of a run (or
+// whose run has no parameters) carries an empty RunInfo, and interpolation is
+// a no-op for it.
+type RunInfo struct {
+	// Params are the run's concrete parameter values (a parameter not supplied
+	// falls back to its default); empty when the run has no parameters.
+	Params map[string]string
+	// ID is the run's id; 0 when the job is not part of a run.
+	ID int64
+	// PipelineID is the pipeline the run executed; 0 when the job is not part
+	// of a run.
+	PipelineID int64
+	// Trigger is how the run was started (e.g. "manual", "cron", "webhook", or
+	// "event"); empty when the job is not part of a run.
+	Trigger string
+	// TriggerName is the name of the trigger that started the run; empty for a
+	// manual run or a job not part of a run.
+	TriggerName string
+}
+
+type runInfoKey struct{}
+
+// ContextWithRunInfo returns a context that carries run, so Execute can
+// interpolate the job's spec (and a step's condition) against the run's
+// parameters. A RunInfo that carries no parameters and no run identity returns
+// ctx unchanged.
+func ContextWithRunInfo(ctx context.Context, run RunInfo) context.Context {
+	if len(run.Params) == 0 && run.ID == 0 && run.PipelineID == 0 && run.Trigger == "" && run.TriggerName == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, runInfoKey{}, run)
+}
+
+// RunInfoFromContext returns the RunInfo carried by ctx, or the zero value
+// when none is set.
+func RunInfoFromContext(ctx context.Context) RunInfo {
+	run, _ := ctx.Value(runInfoKey{}).(RunInfo)
+	return run
+}
+
 // conditionContext builds the data a step's condition template is rendered
 // against (F-06): the step's own env (so `{{ .NAME }}` still works as before),
 // plus the structured keys "steps" (the prior steps' status/outputs), "jobs"
-// (the upstream jobs' status/outputs), and "job" (the current job's
-// identity). The structured keys are set after the env so they win over any
+// (the upstream jobs' status/outputs), "job" (the current job's identity),
+// "params" (the run's parameter values, F-10), and "run" (the run's identity,
+// F-10). The structured keys are set after the env so they win over any
 // same-named env var.
-func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity) map[string]any {
-	data := make(map[string]any, len(step.GetEnv())+3)
+func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity, run RunInfo) map[string]any {
+	data := make(map[string]any, len(step.GetEnv())+5)
 	for k, v := range step.GetEnv() {
 		data[k] = v
 	}
 	data["steps"] = priorSteps
 	data["jobs"] = toUpstreamJobInfos(upstreamJobs)
 	data["job"] = identity
+	data["params"] = run.Params
+	data["run"] = run
 	return data
 }
 
@@ -509,6 +572,146 @@ func withEnv(step *dbpb.JobStep, extra map[string]string) *dbpb.JobStep {
 	}
 	clone.Env = env
 	return clone
+}
+
+// ---------------------------------------------------------------------------
+// Parameter interpolation (F-10)
+// ---------------------------------------------------------------------------
+
+// interpolateSpec returns a copy of spec with each step's workdir, env values,
+// and params rendered as Go templates against the run's parameters (F-10), so
+// the same spec can be reused across runs with different inputs. A field that
+// references a parameter with no value (no supplied value and no default) is a
+// spec error that fails the job, so an undefined parameter never silently
+// renders to an empty string. A nil or empty spec, or a run with no
+// parameters, is returned unchanged (a field with no template action renders
+// to itself).
+func interpolateSpec(spec *dbpb.JobSpec, run RunInfo) (*dbpb.JobSpec, error) {
+	if spec == nil || len(spec.GetSteps()) == 0 {
+		return spec, nil
+	}
+	data := interpolateData(run)
+	steps := make([]*dbpb.JobStep, len(spec.GetSteps()))
+	for i, step := range spec.GetSteps() {
+		rendered, err := interpolateStep(step, data)
+		if err != nil {
+			return nil, fmt.Errorf("executor: step %d: %w", i, err)
+		}
+		steps[i] = rendered
+	}
+	clone := proto.Clone(spec).(*dbpb.JobSpec)
+	clone.Steps = steps
+	return clone, nil
+}
+
+// interpolateStep returns a copy of step with its workdir, env values, and
+// params rendered as Go templates against data (F-10). A field that fails to
+// render (e.g. it references a parameter with no value) is a spec error.
+func interpolateStep(step *dbpb.JobStep, data map[string]any) (*dbpb.JobStep, error) {
+	clone := proto.Clone(step).(*dbpb.JobStep)
+	if step.GetWorkdir() != "" {
+		rendered, err := renderTemplate(step.GetWorkdir(), data)
+		if err != nil {
+			return nil, fmt.Errorf("workdir: %w", err)
+		}
+		clone.Workdir = rendered
+	}
+	if len(step.GetEnv()) > 0 {
+		env := make(map[string]string, len(step.GetEnv()))
+		for k, v := range step.GetEnv() {
+			if v == "" {
+				env[k] = v
+				continue
+			}
+			rendered, err := renderTemplate(v, data)
+			if err != nil {
+				return nil, fmt.Errorf("env %q: %w", k, err)
+			}
+			env[k] = rendered
+		}
+		clone.Env = env
+	}
+	if len(step.GetParams()) > 0 {
+		params := make(map[string]*dbpb.ParamValue, len(step.GetParams()))
+		for k, v := range step.GetParams() {
+			rendered, err := interpolateParamValue(v, data)
+			if err != nil {
+				return nil, fmt.Errorf("param %q: %w", k, err)
+			}
+			params[k] = rendered
+		}
+		clone.Params = params
+	}
+	return clone, nil
+}
+
+// interpolateParamValue returns a copy of value with its string and string
+// list values rendered as Go templates against data (F-10). A nil value is
+// returned unchanged.
+func interpolateParamValue(value *dbpb.ParamValue, data map[string]any) (*dbpb.ParamValue, error) {
+	if value == nil {
+		return nil, nil
+	}
+	rendered := &dbpb.ParamValue{}
+	if value.GetString_() != "" {
+		s, err := renderTemplate(value.GetString_(), data)
+		if err != nil {
+			return nil, err
+		}
+		rendered.String_ = s
+	}
+	if len(value.GetStrings()) > 0 {
+		strs := make([]string, len(value.GetStrings()))
+		for i, s := range value.GetStrings() {
+			if s == "" {
+				strs[i] = s
+				continue
+			}
+			r, err := renderTemplate(s, data)
+			if err != nil {
+				return nil, err
+			}
+			strs[i] = r
+		}
+		rendered.Strings = strs
+	}
+	return rendered, nil
+}
+
+// interpolateData builds the data a spec field is interpolated against (F-10):
+// the run's parameter values (top-level, so `{{ .name }}` works) plus the
+// structured keys "params" (the run's parameter values) and "run" (the run's
+// identity). The structured keys are set after the params so they win over any
+// same-named parameter.
+func interpolateData(run RunInfo) map[string]any {
+	params := run.Params
+	if params == nil {
+		params = map[string]string{}
+	}
+	data := make(map[string]any, len(params)+2)
+	for k, v := range params {
+		data[k] = v
+	}
+	data["params"] = params
+	data["run"] = run
+	return data
+}
+
+// renderTemplate renders s (a Go template, F-10) against data and returns the
+// rendered string. It uses missingkey=error, so a reference to a parameter
+// with no value (no supplied value and no default) fails rather than silently
+// rendering to an empty string — an undefined reference is a spec error. A
+// template that fails to parse or render is likewise a spec error.
+func renderTemplate(s string, data map[string]any) (string, error) {
+	tmpl, err := template.New("interpolation").Option("missingkey=error").Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("parse template %q: %w", s, err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("render template %q: %w", s, err)
+	}
+	return buf.String(), nil
 }
 
 // readStepOutputs reads every file in dir (the step's output directory, F-06)

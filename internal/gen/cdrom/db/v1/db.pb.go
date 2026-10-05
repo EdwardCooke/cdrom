@@ -342,6 +342,81 @@ func (StepStatus) EnumDescriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{4}
 }
 
+// Parameter is a named, typed input a pipeline declares (F-10): a name, an
+// optional default value, and an optional description. A run supplies
+// concrete values for the pipeline's parameters (e.g. at trigger time or via
+// a webhook); a parameter not supplied falls back to its default. A run's
+// concrete parameter values are recorded on the run (its Params) and are
+// interpolated into a job's spec (env, command, workdir) by the execution
+// target before the job runs, using Go templates (text/template) like a
+// step's condition: `{{ .params.name }}` (or `{{ .name }}`) renders the
+// parameter's value. A reference to a parameter that has no value (no
+// supplied value and no default) is a spec error that fails the job.
+type Parameter struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the parameter's name; it must be unique within the pipeline.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// default is the value used when a run does not supply a value for the
+	// parameter; empty means the parameter has no default (a run that does not
+	// supply it leaves it unset).
+	Default string `protobuf:"bytes,2,opt,name=default,proto3" json:"default,omitempty"`
+	// description is a human-readable description of the parameter.
+	Description   string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Parameter) Reset() {
+	*x = Parameter{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Parameter) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Parameter) ProtoMessage() {}
+
+func (x *Parameter) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Parameter.ProtoReflect.Descriptor instead.
+func (*Parameter) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *Parameter) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Parameter) GetDefault() string {
+	if x != nil {
+		return x.Default
+	}
+	return ""
+}
+
+func (x *Parameter) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
 type Pipeline struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Id          int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -362,14 +437,19 @@ type Pipeline struct {
 	// triggers are the ways a run of the pipeline can be started other than a
 	// manual click (F-09): a cron schedule, a webhook, or an event (another
 	// pipeline's run reaching a state).
-	Triggers      []*Trigger `protobuf:"bytes,8,rep,name=triggers,proto3" json:"triggers,omitempty"`
+	Triggers []*Trigger `protobuf:"bytes,8,rep,name=triggers,proto3" json:"triggers,omitempty"`
+	// params are the pipeline's parameter declarations (F-10): the named,
+	// typed inputs a run can supply. A run's concrete values for them are
+	// recorded on the run and interpolated into its jobs' specs by the
+	// execution target.
+	Params        []*Parameter `protobuf:"bytes,9,rep,name=params,proto3" json:"params,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Pipeline) Reset() {
 	*x = Pipeline{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[0]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -381,7 +461,7 @@ func (x *Pipeline) String() string {
 func (*Pipeline) ProtoMessage() {}
 
 func (x *Pipeline) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[0]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -394,7 +474,7 @@ func (x *Pipeline) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pipeline.ProtoReflect.Descriptor instead.
 func (*Pipeline) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{0}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Pipeline) GetId() int64 {
@@ -449,6 +529,13 @@ func (x *Pipeline) GetJobs() []*JobDefinition {
 func (x *Pipeline) GetTriggers() []*Trigger {
 	if x != nil {
 		return x.Triggers
+	}
+	return nil
+}
+
+func (x *Pipeline) GetParams() []*Parameter {
+	if x != nil {
+		return x.Params
 	}
 	return nil
 }
@@ -512,7 +599,7 @@ type Trigger struct {
 
 func (x *Trigger) Reset() {
 	*x = Trigger{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[1]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -524,7 +611,7 @@ func (x *Trigger) String() string {
 func (*Trigger) ProtoMessage() {}
 
 func (x *Trigger) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[1]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -537,7 +624,7 @@ func (x *Trigger) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Trigger.ProtoReflect.Descriptor instead.
 func (*Trigger) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{1}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Trigger) GetName() string {
@@ -618,14 +705,18 @@ type CreatePipelineRequest struct {
 	// triggers are the pipeline's trigger definitions (F-09); when present
 	// they are validated (unique names, kind-specific fields present) and
 	// persisted alongside the pipeline.
-	Triggers      []*Trigger `protobuf:"bytes,5,rep,name=triggers,proto3" json:"triggers,omitempty"`
+	Triggers []*Trigger `protobuf:"bytes,5,rep,name=triggers,proto3" json:"triggers,omitempty"`
+	// params are the pipeline's parameter declarations (F-10); when present
+	// they are validated (unique, non-empty names) and persisted alongside the
+	// pipeline.
+	Params        []*Parameter `protobuf:"bytes,6,rep,name=params,proto3" json:"params,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreatePipelineRequest) Reset() {
 	*x = CreatePipelineRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[2]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -637,7 +728,7 @@ func (x *CreatePipelineRequest) String() string {
 func (*CreatePipelineRequest) ProtoMessage() {}
 
 func (x *CreatePipelineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[2]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -650,7 +741,7 @@ func (x *CreatePipelineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePipelineRequest.ProtoReflect.Descriptor instead.
 func (*CreatePipelineRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{2}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CreatePipelineRequest) GetName() string {
@@ -688,6 +779,13 @@ func (x *CreatePipelineRequest) GetTriggers() []*Trigger {
 	return nil
 }
 
+func (x *CreatePipelineRequest) GetParams() []*Parameter {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
 type GetPipelineRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -697,7 +795,7 @@ type GetPipelineRequest struct {
 
 func (x *GetPipelineRequest) Reset() {
 	*x = GetPipelineRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[3]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -709,7 +807,7 @@ func (x *GetPipelineRequest) String() string {
 func (*GetPipelineRequest) ProtoMessage() {}
 
 func (x *GetPipelineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[3]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -722,7 +820,7 @@ func (x *GetPipelineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPipelineRequest.ProtoReflect.Descriptor instead.
 func (*GetPipelineRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{3}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *GetPipelineRequest) GetId() int64 {
@@ -745,7 +843,7 @@ type ListPipelinesRequest struct {
 
 func (x *ListPipelinesRequest) Reset() {
 	*x = ListPipelinesRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[4]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -757,7 +855,7 @@ func (x *ListPipelinesRequest) String() string {
 func (*ListPipelinesRequest) ProtoMessage() {}
 
 func (x *ListPipelinesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[4]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -770,7 +868,7 @@ func (x *ListPipelinesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPipelinesRequest.ProtoReflect.Descriptor instead.
 func (*ListPipelinesRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{4}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ListPipelinesRequest) GetTriggerType() TriggerType {
@@ -789,7 +887,7 @@ type ListPipelinesResponse struct {
 
 func (x *ListPipelinesResponse) Reset() {
 	*x = ListPipelinesResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[5]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -801,7 +899,7 @@ func (x *ListPipelinesResponse) String() string {
 func (*ListPipelinesResponse) ProtoMessage() {}
 
 func (x *ListPipelinesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[5]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -814,7 +912,7 @@ func (x *ListPipelinesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPipelinesResponse.ProtoReflect.Descriptor instead.
 func (*ListPipelinesResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{5}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ListPipelinesResponse) GetPipelines() []*Pipeline {
@@ -843,14 +941,20 @@ type UpdatePipelineRequest struct {
 	// created in their place, and they are validated (unique names,
 	// kind-specific fields present) before anything is persisted. When absent
 	// the pipeline's triggers are left unchanged.
-	Triggers      []*Trigger `protobuf:"bytes,6,rep,name=triggers,proto3" json:"triggers,omitempty"`
+	Triggers []*Trigger `protobuf:"bytes,6,rep,name=triggers,proto3" json:"triggers,omitempty"`
+	// params, when present, replaces the pipeline's parameter declarations
+	// (F-10): the pipeline's existing parameters are removed and these are
+	// created in their place, and they are validated (unique, non-empty names)
+	// before anything is persisted. When absent the pipeline's parameters are
+	// left unchanged.
+	Params        []*Parameter `protobuf:"bytes,7,rep,name=params,proto3" json:"params,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdatePipelineRequest) Reset() {
 	*x = UpdatePipelineRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[6]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -862,7 +966,7 @@ func (x *UpdatePipelineRequest) String() string {
 func (*UpdatePipelineRequest) ProtoMessage() {}
 
 func (x *UpdatePipelineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[6]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -875,7 +979,7 @@ func (x *UpdatePipelineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdatePipelineRequest.ProtoReflect.Descriptor instead.
 func (*UpdatePipelineRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{6}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *UpdatePipelineRequest) GetId() int64 {
@@ -920,6 +1024,13 @@ func (x *UpdatePipelineRequest) GetTriggers() []*Trigger {
 	return nil
 }
 
+func (x *UpdatePipelineRequest) GetParams() []*Parameter {
+	if x != nil {
+		return x.Params
+	}
+	return nil
+}
+
 type DeletePipelineRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -929,7 +1040,7 @@ type DeletePipelineRequest struct {
 
 func (x *DeletePipelineRequest) Reset() {
 	*x = DeletePipelineRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[7]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -941,7 +1052,7 @@ func (x *DeletePipelineRequest) String() string {
 func (*DeletePipelineRequest) ProtoMessage() {}
 
 func (x *DeletePipelineRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[7]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -954,7 +1065,7 @@ func (x *DeletePipelineRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeletePipelineRequest.ProtoReflect.Descriptor instead.
 func (*DeletePipelineRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{7}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DeletePipelineRequest) GetId() int64 {
@@ -1018,7 +1129,7 @@ type PipelineRun struct {
 
 func (x *PipelineRun) Reset() {
 	*x = PipelineRun{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[8]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1030,7 +1141,7 @@ func (x *PipelineRun) String() string {
 func (*PipelineRun) ProtoMessage() {}
 
 func (x *PipelineRun) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[8]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1043,7 +1154,7 @@ func (x *PipelineRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PipelineRun.ProtoReflect.Descriptor instead.
 func (*PipelineRun) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{8}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PipelineRun) GetId() int64 {
@@ -1151,7 +1262,7 @@ type CreateRunRequest struct {
 
 func (x *CreateRunRequest) Reset() {
 	*x = CreateRunRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[9]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1163,7 +1274,7 @@ func (x *CreateRunRequest) String() string {
 func (*CreateRunRequest) ProtoMessage() {}
 
 func (x *CreateRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[9]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1176,7 +1287,7 @@ func (x *CreateRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRunRequest.ProtoReflect.Descriptor instead.
 func (*CreateRunRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{9}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CreateRunRequest) GetPipelineId() int64 {
@@ -1214,7 +1325,7 @@ type CreateRunResponse struct {
 
 func (x *CreateRunResponse) Reset() {
 	*x = CreateRunResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[10]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1226,7 +1337,7 @@ func (x *CreateRunResponse) String() string {
 func (*CreateRunResponse) ProtoMessage() {}
 
 func (x *CreateRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[10]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1239,7 +1350,7 @@ func (x *CreateRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateRunResponse.ProtoReflect.Descriptor instead.
 func (*CreateRunResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{10}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CreateRunResponse) GetRun() *PipelineRun {
@@ -1297,7 +1408,7 @@ type TriggerRunRequest struct {
 
 func (x *TriggerRunRequest) Reset() {
 	*x = TriggerRunRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[11]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1309,7 +1420,7 @@ func (x *TriggerRunRequest) String() string {
 func (*TriggerRunRequest) ProtoMessage() {}
 
 func (x *TriggerRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[11]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1322,7 +1433,7 @@ func (x *TriggerRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerRunRequest.ProtoReflect.Descriptor instead.
 func (*TriggerRunRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{11}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *TriggerRunRequest) GetPipelineId() int64 {
@@ -1384,7 +1495,7 @@ type TriggerRunResponse struct {
 
 func (x *TriggerRunResponse) Reset() {
 	*x = TriggerRunResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[12]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1396,7 +1507,7 @@ func (x *TriggerRunResponse) String() string {
 func (*TriggerRunResponse) ProtoMessage() {}
 
 func (x *TriggerRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[12]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1409,7 +1520,7 @@ func (x *TriggerRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TriggerRunResponse.ProtoReflect.Descriptor instead.
 func (*TriggerRunResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{12}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *TriggerRunResponse) GetRun() *PipelineRun {
@@ -1442,7 +1553,7 @@ type GetRunRequest struct {
 
 func (x *GetRunRequest) Reset() {
 	*x = GetRunRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[13]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1454,7 +1565,7 @@ func (x *GetRunRequest) String() string {
 func (*GetRunRequest) ProtoMessage() {}
 
 func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[13]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1467,7 +1578,7 @@ func (x *GetRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunRequest.ProtoReflect.Descriptor instead.
 func (*GetRunRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{13}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetRunRequest) GetId() int64 {
@@ -1493,7 +1604,7 @@ type ListRunsRequest struct {
 
 func (x *ListRunsRequest) Reset() {
 	*x = ListRunsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[14]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1505,7 +1616,7 @@ func (x *ListRunsRequest) String() string {
 func (*ListRunsRequest) ProtoMessage() {}
 
 func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[14]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1518,7 +1629,7 @@ func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsRequest.ProtoReflect.Descriptor instead.
 func (*ListRunsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{14}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ListRunsRequest) GetPipelineId() int64 {
@@ -1551,7 +1662,7 @@ type ListRunsResponse struct {
 
 func (x *ListRunsResponse) Reset() {
 	*x = ListRunsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[15]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1563,7 +1674,7 @@ func (x *ListRunsResponse) String() string {
 func (*ListRunsResponse) ProtoMessage() {}
 
 func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[15]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1576,7 +1687,7 @@ func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsResponse.ProtoReflect.Descriptor instead.
 func (*ListRunsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{15}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListRunsResponse) GetRuns() []*PipelineRun {
@@ -1601,7 +1712,7 @@ type UpdateRunRequest struct {
 
 func (x *UpdateRunRequest) Reset() {
 	*x = UpdateRunRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[16]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1613,7 +1724,7 @@ func (x *UpdateRunRequest) String() string {
 func (*UpdateRunRequest) ProtoMessage() {}
 
 func (x *UpdateRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[16]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1626,7 +1737,7 @@ func (x *UpdateRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateRunRequest.ProtoReflect.Descriptor instead.
 func (*UpdateRunRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{16}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *UpdateRunRequest) GetId() int64 {
@@ -1679,7 +1790,7 @@ type StepResult struct {
 
 func (x *StepResult) Reset() {
 	*x = StepResult{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[17]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1691,7 +1802,7 @@ func (x *StepResult) String() string {
 func (*StepResult) ProtoMessage() {}
 
 func (x *StepResult) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[17]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1704,7 +1815,7 @@ func (x *StepResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepResult.ProtoReflect.Descriptor instead.
 func (*StepResult) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{17}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *StepResult) GetIndex() int32 {
@@ -1752,7 +1863,7 @@ type UpstreamJob struct {
 
 func (x *UpstreamJob) Reset() {
 	*x = UpstreamJob{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[18]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1764,7 +1875,7 @@ func (x *UpstreamJob) String() string {
 func (*UpstreamJob) ProtoMessage() {}
 
 func (x *UpstreamJob) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[18]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1777,7 +1888,7 @@ func (x *UpstreamJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpstreamJob.ProtoReflect.Descriptor instead.
 func (*UpstreamJob) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{18}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *UpstreamJob) GetId() int64 {
@@ -1824,7 +1935,7 @@ type ParamValue struct {
 
 func (x *ParamValue) Reset() {
 	*x = ParamValue{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[19]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1836,7 +1947,7 @@ func (x *ParamValue) String() string {
 func (*ParamValue) ProtoMessage() {}
 
 func (x *ParamValue) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[19]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1849,7 +1960,7 @@ func (x *ParamValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParamValue.ProtoReflect.Descriptor instead.
 func (*ParamValue) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{19}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ParamValue) GetString_() string {
@@ -1940,7 +2051,7 @@ type JobStep struct {
 
 func (x *JobStep) Reset() {
 	*x = JobStep{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[20]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1952,7 +2063,7 @@ func (x *JobStep) String() string {
 func (*JobStep) ProtoMessage() {}
 
 func (x *JobStep) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[20]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1965,7 +2076,7 @@ func (x *JobStep) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobStep.ProtoReflect.Descriptor instead.
 func (*JobStep) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{20}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *JobStep) GetType() string {
@@ -2034,7 +2145,7 @@ type RetryPolicy struct {
 
 func (x *RetryPolicy) Reset() {
 	*x = RetryPolicy{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[21]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2046,7 +2157,7 @@ func (x *RetryPolicy) String() string {
 func (*RetryPolicy) ProtoMessage() {}
 
 func (x *RetryPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[21]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2059,7 +2170,7 @@ func (x *RetryPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryPolicy.ProtoReflect.Descriptor instead.
 func (*RetryPolicy) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{21}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RetryPolicy) GetMaxAttempts() int32 {
@@ -2126,7 +2237,7 @@ type JobSpec struct {
 
 func (x *JobSpec) Reset() {
 	*x = JobSpec{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[22]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2138,7 +2249,7 @@ func (x *JobSpec) String() string {
 func (*JobSpec) ProtoMessage() {}
 
 func (x *JobSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[22]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2151,7 +2262,7 @@ func (x *JobSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobSpec.ProtoReflect.Descriptor instead.
 func (*JobSpec) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{22}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *JobSpec) GetSteps() []*JobStep {
@@ -2297,13 +2408,20 @@ type Job struct {
 	// (prefixed with upstream_) onto the job token it hands to the execution
 	// target.
 	UpstreamClaims *structpb.Struct `protobuf:"bytes,24,opt,name=upstream_claims,json=upstreamClaims,proto3" json:"upstream_claims,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// run_params are the run's concrete parameter values (F-10): the values
+	// supplied for the pipeline's parameters (a parameter not supplied falls
+	// back to its default), denormalized from the run onto the job instance.
+	// The execution target interpolates them into the job's spec (env,
+	// command, workdir) using Go templates before the job runs. Empty for a
+	// job not part of a run (or a run with no parameters).
+	RunParams     map[string]string `protobuf:"bytes,25,rep,name=run_params,json=runParams,proto3" json:"run_params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Job) Reset() {
 	*x = Job{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[23]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2315,7 +2433,7 @@ func (x *Job) String() string {
 func (*Job) ProtoMessage() {}
 
 func (x *Job) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[23]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2328,7 +2446,7 @@ func (x *Job) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Job.ProtoReflect.Descriptor instead.
 func (*Job) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{23}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Job) GetId() int64 {
@@ -2499,6 +2617,13 @@ func (x *Job) GetUpstreamClaims() *structpb.Struct {
 	return nil
 }
 
+func (x *Job) GetRunParams() map[string]string {
+	if x != nil {
+		return x.RunParams
+	}
+	return nil
+}
+
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
 // form of a job that a pipeline carries, from which a run's job instances are
 // created (see CreateRun). It carries everything a job instance copies from
@@ -2537,7 +2662,7 @@ type JobDefinition struct {
 
 func (x *JobDefinition) Reset() {
 	*x = JobDefinition{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[24]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2549,7 +2674,7 @@ func (x *JobDefinition) String() string {
 func (*JobDefinition) ProtoMessage() {}
 
 func (x *JobDefinition) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[24]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2562,7 +2687,7 @@ func (x *JobDefinition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobDefinition.ProtoReflect.Descriptor instead.
 func (*JobDefinition) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{24}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *JobDefinition) GetKey() string {
@@ -2633,7 +2758,7 @@ type CreateJobRequest struct {
 
 func (x *CreateJobRequest) Reset() {
 	*x = CreateJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[25]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2645,7 +2770,7 @@ func (x *CreateJobRequest) String() string {
 func (*CreateJobRequest) ProtoMessage() {}
 
 func (x *CreateJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[25]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2658,7 +2783,7 @@ func (x *CreateJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateJobRequest.ProtoReflect.Descriptor instead.
 func (*CreateJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{25}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *CreateJobRequest) GetPipelineId() int64 {
@@ -2726,7 +2851,7 @@ type GetJobRequest struct {
 
 func (x *GetJobRequest) Reset() {
 	*x = GetJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[26]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2738,7 +2863,7 @@ func (x *GetJobRequest) String() string {
 func (*GetJobRequest) ProtoMessage() {}
 
 func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[26]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2751,7 +2876,7 @@ func (x *GetJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetJobRequest.ProtoReflect.Descriptor instead.
 func (*GetJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{26}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GetJobRequest) GetId() int64 {
@@ -2775,7 +2900,7 @@ type ListJobsRequest struct {
 
 func (x *ListJobsRequest) Reset() {
 	*x = ListJobsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[27]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2787,7 +2912,7 @@ func (x *ListJobsRequest) String() string {
 func (*ListJobsRequest) ProtoMessage() {}
 
 func (x *ListJobsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[27]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2800,7 +2925,7 @@ func (x *ListJobsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListJobsRequest.ProtoReflect.Descriptor instead.
 func (*ListJobsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{27}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ListJobsRequest) GetPipelineId() int64 {
@@ -2833,7 +2958,7 @@ type ListJobsResponse struct {
 
 func (x *ListJobsResponse) Reset() {
 	*x = ListJobsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[28]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2845,7 +2970,7 @@ func (x *ListJobsResponse) String() string {
 func (*ListJobsResponse) ProtoMessage() {}
 
 func (x *ListJobsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[28]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2858,7 +2983,7 @@ func (x *ListJobsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListJobsResponse.ProtoReflect.Descriptor instead.
 func (*ListJobsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{28}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ListJobsResponse) GetJobs() []*Job {
@@ -2878,7 +3003,7 @@ type ListRetriableJobsRequest struct {
 
 func (x *ListRetriableJobsRequest) Reset() {
 	*x = ListRetriableJobsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[29]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2890,7 +3015,7 @@ func (x *ListRetriableJobsRequest) String() string {
 func (*ListRetriableJobsRequest) ProtoMessage() {}
 
 func (x *ListRetriableJobsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[29]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2903,7 +3028,7 @@ func (x *ListRetriableJobsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRetriableJobsRequest.ProtoReflect.Descriptor instead.
 func (*ListRetriableJobsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{29}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{30}
 }
 
 type UpdateJobRequest struct {
@@ -2932,7 +3057,7 @@ type UpdateJobRequest struct {
 
 func (x *UpdateJobRequest) Reset() {
 	*x = UpdateJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[30]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2944,7 +3069,7 @@ func (x *UpdateJobRequest) String() string {
 func (*UpdateJobRequest) ProtoMessage() {}
 
 func (x *UpdateJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[30]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2957,7 +3082,7 @@ func (x *UpdateJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateJobRequest.ProtoReflect.Descriptor instead.
 func (*UpdateJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{30}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *UpdateJobRequest) GetId() int64 {
@@ -3021,7 +3146,7 @@ type ReapJobRequest struct {
 
 func (x *ReapJobRequest) Reset() {
 	*x = ReapJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[31]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3033,7 +3158,7 @@ func (x *ReapJobRequest) String() string {
 func (*ReapJobRequest) ProtoMessage() {}
 
 func (x *ReapJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[31]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3046,7 +3171,7 @@ func (x *ReapJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReapJobRequest.ProtoReflect.Descriptor instead.
 func (*ReapJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{31}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReapJobRequest) GetId() int64 {
@@ -3074,7 +3199,7 @@ type ReapJobResponse struct {
 
 func (x *ReapJobResponse) Reset() {
 	*x = ReapJobResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[32]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3086,7 +3211,7 @@ func (x *ReapJobResponse) String() string {
 func (*ReapJobResponse) ProtoMessage() {}
 
 func (x *ReapJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[32]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3099,7 +3224,7 @@ func (x *ReapJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReapJobResponse.ProtoReflect.Descriptor instead.
 func (*ReapJobResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{32}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ReapJobResponse) GetReaped() bool {
@@ -3121,7 +3246,7 @@ type CancelJobRequest struct {
 
 func (x *CancelJobRequest) Reset() {
 	*x = CancelJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[33]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3133,7 +3258,7 @@ func (x *CancelJobRequest) String() string {
 func (*CancelJobRequest) ProtoMessage() {}
 
 func (x *CancelJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[33]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3146,7 +3271,7 @@ func (x *CancelJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelJobRequest.ProtoReflect.Descriptor instead.
 func (*CancelJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{33}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CancelJobRequest) GetId() int64 {
@@ -3174,7 +3299,7 @@ type CancelJobResponse struct {
 
 func (x *CancelJobResponse) Reset() {
 	*x = CancelJobResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[34]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3186,7 +3311,7 @@ func (x *CancelJobResponse) String() string {
 func (*CancelJobResponse) ProtoMessage() {}
 
 func (x *CancelJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[34]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3199,7 +3324,7 @@ func (x *CancelJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelJobResponse.ProtoReflect.Descriptor instead.
 func (*CancelJobResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{34}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *CancelJobResponse) GetCancelled() bool {
@@ -3221,7 +3346,7 @@ type SkipJobRequest struct {
 
 func (x *SkipJobRequest) Reset() {
 	*x = SkipJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[35]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3233,7 +3358,7 @@ func (x *SkipJobRequest) String() string {
 func (*SkipJobRequest) ProtoMessage() {}
 
 func (x *SkipJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[35]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3246,7 +3371,7 @@ func (x *SkipJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkipJobRequest.ProtoReflect.Descriptor instead.
 func (*SkipJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{35}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *SkipJobRequest) GetId() int64 {
@@ -3274,7 +3399,7 @@ type SkipJobResponse struct {
 
 func (x *SkipJobResponse) Reset() {
 	*x = SkipJobResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[36]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3286,7 +3411,7 @@ func (x *SkipJobResponse) String() string {
 func (*SkipJobResponse) ProtoMessage() {}
 
 func (x *SkipJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[36]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3299,7 +3424,7 @@ func (x *SkipJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkipJobResponse.ProtoReflect.Descriptor instead.
 func (*SkipJobResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{36}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *SkipJobResponse) GetSkipped() bool {
@@ -3321,7 +3446,7 @@ type ClaimJobRequest struct {
 
 func (x *ClaimJobRequest) Reset() {
 	*x = ClaimJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[37]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3333,7 +3458,7 @@ func (x *ClaimJobRequest) String() string {
 func (*ClaimJobRequest) ProtoMessage() {}
 
 func (x *ClaimJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[37]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3346,7 +3471,7 @@ func (x *ClaimJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimJobRequest.ProtoReflect.Descriptor instead.
 func (*ClaimJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{37}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ClaimJobRequest) GetId() int64 {
@@ -3374,7 +3499,7 @@ type ClaimJobResponse struct {
 
 func (x *ClaimJobResponse) Reset() {
 	*x = ClaimJobResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[38]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3386,7 +3511,7 @@ func (x *ClaimJobResponse) String() string {
 func (*ClaimJobResponse) ProtoMessage() {}
 
 func (x *ClaimJobResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[38]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3399,7 +3524,7 @@ func (x *ClaimJobResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimJobResponse.ProtoReflect.Descriptor instead.
 func (*ClaimJobResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{38}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ClaimJobResponse) GetClaimed() bool {
@@ -3419,7 +3544,7 @@ type ListPendingByGroupRequest struct {
 
 func (x *ListPendingByGroupRequest) Reset() {
 	*x = ListPendingByGroupRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[39]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3431,7 +3556,7 @@ func (x *ListPendingByGroupRequest) String() string {
 func (*ListPendingByGroupRequest) ProtoMessage() {}
 
 func (x *ListPendingByGroupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[39]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3444,7 +3569,7 @@ func (x *ListPendingByGroupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPendingByGroupRequest.ProtoReflect.Descriptor instead.
 func (*ListPendingByGroupRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{39}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ListPendingByGroupRequest) GetGroup() string {
@@ -3489,7 +3614,7 @@ type JobExecution struct {
 
 func (x *JobExecution) Reset() {
 	*x = JobExecution{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[40]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3501,7 +3626,7 @@ func (x *JobExecution) String() string {
 func (*JobExecution) ProtoMessage() {}
 
 func (x *JobExecution) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[40]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3514,7 +3639,7 @@ func (x *JobExecution) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobExecution.ProtoReflect.Descriptor instead.
 func (*JobExecution) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{40}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *JobExecution) GetId() int64 {
@@ -3612,7 +3737,7 @@ type StartJobExecutionRequest struct {
 
 func (x *StartJobExecutionRequest) Reset() {
 	*x = StartJobExecutionRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[41]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3624,7 +3749,7 @@ func (x *StartJobExecutionRequest) String() string {
 func (*StartJobExecutionRequest) ProtoMessage() {}
 
 func (x *StartJobExecutionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[41]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3637,7 +3762,7 @@ func (x *StartJobExecutionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartJobExecutionRequest.ProtoReflect.Descriptor instead.
 func (*StartJobExecutionRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{41}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *StartJobExecutionRequest) GetJobId() int64 {
@@ -3678,7 +3803,7 @@ type StartJobExecutionResponse struct {
 
 func (x *StartJobExecutionResponse) Reset() {
 	*x = StartJobExecutionResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[42]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3690,7 +3815,7 @@ func (x *StartJobExecutionResponse) String() string {
 func (*StartJobExecutionResponse) ProtoMessage() {}
 
 func (x *StartJobExecutionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[42]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3703,7 +3828,7 @@ func (x *StartJobExecutionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartJobExecutionResponse.ProtoReflect.Descriptor instead.
 func (*StartJobExecutionResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{42}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *StartJobExecutionResponse) GetStarted() bool {
@@ -3732,7 +3857,7 @@ type ListJobExecutionsRequest struct {
 
 func (x *ListJobExecutionsRequest) Reset() {
 	*x = ListJobExecutionsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[43]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3744,7 +3869,7 @@ func (x *ListJobExecutionsRequest) String() string {
 func (*ListJobExecutionsRequest) ProtoMessage() {}
 
 func (x *ListJobExecutionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[43]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3757,7 +3882,7 @@ func (x *ListJobExecutionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListJobExecutionsRequest.ProtoReflect.Descriptor instead.
 func (*ListJobExecutionsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{43}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ListJobExecutionsRequest) GetJobId() int64 {
@@ -3776,7 +3901,7 @@ type ListJobExecutionsResponse struct {
 
 func (x *ListJobExecutionsResponse) Reset() {
 	*x = ListJobExecutionsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[44]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3788,7 +3913,7 @@ func (x *ListJobExecutionsResponse) String() string {
 func (*ListJobExecutionsResponse) ProtoMessage() {}
 
 func (x *ListJobExecutionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[44]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3801,7 +3926,7 @@ func (x *ListJobExecutionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListJobExecutionsResponse.ProtoReflect.Descriptor instead.
 func (*ListJobExecutionsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{44}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ListJobExecutionsResponse) GetExecutions() []*JobExecution {
@@ -3837,7 +3962,7 @@ type UpdateJobExecutionRequest struct {
 
 func (x *UpdateJobExecutionRequest) Reset() {
 	*x = UpdateJobExecutionRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[45]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3849,7 +3974,7 @@ func (x *UpdateJobExecutionRequest) String() string {
 func (*UpdateJobExecutionRequest) ProtoMessage() {}
 
 func (x *UpdateJobExecutionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[45]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3862,7 +3987,7 @@ func (x *UpdateJobExecutionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateJobExecutionRequest.ProtoReflect.Descriptor instead.
 func (*UpdateJobExecutionRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{45}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *UpdateJobExecutionRequest) GetJobId() int64 {
@@ -3919,7 +4044,7 @@ type AbandonWorkerExecutionsRequest struct {
 
 func (x *AbandonWorkerExecutionsRequest) Reset() {
 	*x = AbandonWorkerExecutionsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[46]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3931,7 +4056,7 @@ func (x *AbandonWorkerExecutionsRequest) String() string {
 func (*AbandonWorkerExecutionsRequest) ProtoMessage() {}
 
 func (x *AbandonWorkerExecutionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[46]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3944,7 +4069,7 @@ func (x *AbandonWorkerExecutionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AbandonWorkerExecutionsRequest.ProtoReflect.Descriptor instead.
 func (*AbandonWorkerExecutionsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{46}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *AbandonWorkerExecutionsRequest) GetWorkerName() string {
@@ -3981,7 +4106,7 @@ type StepCompletion struct {
 
 func (x *StepCompletion) Reset() {
 	*x = StepCompletion{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[47]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3993,7 +4118,7 @@ func (x *StepCompletion) String() string {
 func (*StepCompletion) ProtoMessage() {}
 
 func (x *StepCompletion) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[47]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4006,7 +4131,7 @@ func (x *StepCompletion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepCompletion.ProtoReflect.Descriptor instead.
 func (*StepCompletion) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{47}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *StepCompletion) GetId() int64 {
@@ -4074,7 +4199,7 @@ type ReportStepCompletionRequest struct {
 
 func (x *ReportStepCompletionRequest) Reset() {
 	*x = ReportStepCompletionRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[48]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4086,7 +4211,7 @@ func (x *ReportStepCompletionRequest) String() string {
 func (*ReportStepCompletionRequest) ProtoMessage() {}
 
 func (x *ReportStepCompletionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[48]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4099,7 +4224,7 @@ func (x *ReportStepCompletionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportStepCompletionRequest.ProtoReflect.Descriptor instead.
 func (*ReportStepCompletionRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{48}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ReportStepCompletionRequest) GetJobId() int64 {
@@ -4138,7 +4263,7 @@ type CheckStepBarrierRequest struct {
 
 func (x *CheckStepBarrierRequest) Reset() {
 	*x = CheckStepBarrierRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[49]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4150,7 +4275,7 @@ func (x *CheckStepBarrierRequest) String() string {
 func (*CheckStepBarrierRequest) ProtoMessage() {}
 
 func (x *CheckStepBarrierRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[49]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4163,7 +4288,7 @@ func (x *CheckStepBarrierRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckStepBarrierRequest.ProtoReflect.Descriptor instead.
 func (*CheckStepBarrierRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{49}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *CheckStepBarrierRequest) GetJobId() int64 {
@@ -4195,7 +4320,7 @@ type CheckStepBarrierResponse struct {
 
 func (x *CheckStepBarrierResponse) Reset() {
 	*x = CheckStepBarrierResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[50]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4207,7 +4332,7 @@ func (x *CheckStepBarrierResponse) String() string {
 func (*CheckStepBarrierResponse) ProtoMessage() {}
 
 func (x *CheckStepBarrierResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[50]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4220,7 +4345,7 @@ func (x *CheckStepBarrierResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckStepBarrierResponse.ProtoReflect.Descriptor instead.
 func (*CheckStepBarrierResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{50}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *CheckStepBarrierResponse) GetSatisfied() bool {
@@ -4261,7 +4386,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[51]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4273,7 +4398,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[51]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4286,7 +4411,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{51}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *Event) GetId() int64 {
@@ -4336,7 +4461,7 @@ type PublishAssignmentRequest struct {
 
 func (x *PublishAssignmentRequest) Reset() {
 	*x = PublishAssignmentRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[52]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4348,7 +4473,7 @@ func (x *PublishAssignmentRequest) String() string {
 func (*PublishAssignmentRequest) ProtoMessage() {}
 
 func (x *PublishAssignmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[52]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4361,7 +4486,7 @@ func (x *PublishAssignmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishAssignmentRequest.ProtoReflect.Descriptor instead.
 func (*PublishAssignmentRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{52}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *PublishAssignmentRequest) GetJobId() int64 {
@@ -4388,7 +4513,7 @@ type PublishCancelRequest struct {
 
 func (x *PublishCancelRequest) Reset() {
 	*x = PublishCancelRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[53]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4400,7 +4525,7 @@ func (x *PublishCancelRequest) String() string {
 func (*PublishCancelRequest) ProtoMessage() {}
 
 func (x *PublishCancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[53]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4413,7 +4538,7 @@ func (x *PublishCancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishCancelRequest.ProtoReflect.Descriptor instead.
 func (*PublishCancelRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{53}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *PublishCancelRequest) GetJobId() int64 {
@@ -4435,7 +4560,7 @@ type PublishJobStatusRequest struct {
 
 func (x *PublishJobStatusRequest) Reset() {
 	*x = PublishJobStatusRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[54]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4447,7 +4572,7 @@ func (x *PublishJobStatusRequest) String() string {
 func (*PublishJobStatusRequest) ProtoMessage() {}
 
 func (x *PublishJobStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[54]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4460,7 +4585,7 @@ func (x *PublishJobStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishJobStatusRequest.ProtoReflect.Descriptor instead.
 func (*PublishJobStatusRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{54}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *PublishJobStatusRequest) GetJobId() int64 {
@@ -4501,7 +4626,7 @@ type PublishRunStatusRequest struct {
 
 func (x *PublishRunStatusRequest) Reset() {
 	*x = PublishRunStatusRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[55]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4513,7 +4638,7 @@ func (x *PublishRunStatusRequest) String() string {
 func (*PublishRunStatusRequest) ProtoMessage() {}
 
 func (x *PublishRunStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[55]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4526,7 +4651,7 @@ func (x *PublishRunStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishRunStatusRequest.ProtoReflect.Descriptor instead.
 func (*PublishRunStatusRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{55}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *PublishRunStatusRequest) GetRunId() int64 {
@@ -4556,7 +4681,7 @@ type PublishWorkerEventRequest struct {
 
 func (x *PublishWorkerEventRequest) Reset() {
 	*x = PublishWorkerEventRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[56]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4568,7 +4693,7 @@ func (x *PublishWorkerEventRequest) String() string {
 func (*PublishWorkerEventRequest) ProtoMessage() {}
 
 func (x *PublishWorkerEventRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[56]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4581,7 +4706,7 @@ func (x *PublishWorkerEventRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishWorkerEventRequest.ProtoReflect.Descriptor instead.
 func (*PublishWorkerEventRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{56}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *PublishWorkerEventRequest) GetName() string {
@@ -4622,7 +4747,7 @@ type PublishLogUpdatedRequest struct {
 
 func (x *PublishLogUpdatedRequest) Reset() {
 	*x = PublishLogUpdatedRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[57]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4634,7 +4759,7 @@ func (x *PublishLogUpdatedRequest) String() string {
 func (*PublishLogUpdatedRequest) ProtoMessage() {}
 
 func (x *PublishLogUpdatedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[57]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4647,7 +4772,7 @@ func (x *PublishLogUpdatedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishLogUpdatedRequest.ProtoReflect.Descriptor instead.
 func (*PublishLogUpdatedRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{57}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *PublishLogUpdatedRequest) GetJobId() int64 {
@@ -4695,7 +4820,7 @@ type PublishEventResponse struct {
 
 func (x *PublishEventResponse) Reset() {
 	*x = PublishEventResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[58]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4707,7 +4832,7 @@ func (x *PublishEventResponse) String() string {
 func (*PublishEventResponse) ProtoMessage() {}
 
 func (x *PublishEventResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[58]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4720,7 +4845,7 @@ func (x *PublishEventResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishEventResponse.ProtoReflect.Descriptor instead.
 func (*PublishEventResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{58}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *PublishEventResponse) GetId() int64 {
@@ -4744,7 +4869,7 @@ type TailEventsRequest struct {
 
 func (x *TailEventsRequest) Reset() {
 	*x = TailEventsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[59]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4756,7 +4881,7 @@ func (x *TailEventsRequest) String() string {
 func (*TailEventsRequest) ProtoMessage() {}
 
 func (x *TailEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[59]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4769,7 +4894,7 @@ func (x *TailEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TailEventsRequest.ProtoReflect.Descriptor instead.
 func (*TailEventsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{59}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *TailEventsRequest) GetCursor() int64 {
@@ -4799,7 +4924,7 @@ type TailEventsResponse struct {
 
 func (x *TailEventsResponse) Reset() {
 	*x = TailEventsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[60]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4811,7 +4936,7 @@ func (x *TailEventsResponse) String() string {
 func (*TailEventsResponse) ProtoMessage() {}
 
 func (x *TailEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[60]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4824,7 +4949,7 @@ func (x *TailEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TailEventsResponse.ProtoReflect.Descriptor instead.
 func (*TailEventsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{60}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *TailEventsResponse) GetEvents() []*Event {
@@ -4863,7 +4988,7 @@ type AcquireLeaseRequest struct {
 
 func (x *AcquireLeaseRequest) Reset() {
 	*x = AcquireLeaseRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[61]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4875,7 +5000,7 @@ func (x *AcquireLeaseRequest) String() string {
 func (*AcquireLeaseRequest) ProtoMessage() {}
 
 func (x *AcquireLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[61]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4888,7 +5013,7 @@ func (x *AcquireLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquireLeaseRequest.ProtoReflect.Descriptor instead.
 func (*AcquireLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{61}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *AcquireLeaseRequest) GetName() string {
@@ -4931,7 +5056,7 @@ type AcquireLeaseResponse struct {
 
 func (x *AcquireLeaseResponse) Reset() {
 	*x = AcquireLeaseResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[62]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4943,7 +5068,7 @@ func (x *AcquireLeaseResponse) String() string {
 func (*AcquireLeaseResponse) ProtoMessage() {}
 
 func (x *AcquireLeaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[62]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4956,7 +5081,7 @@ func (x *AcquireLeaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquireLeaseResponse.ProtoReflect.Descriptor instead.
 func (*AcquireLeaseResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{62}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *AcquireLeaseResponse) GetAcquired() bool {
@@ -4979,7 +5104,7 @@ type ReleaseLeaseRequest struct {
 
 func (x *ReleaseLeaseRequest) Reset() {
 	*x = ReleaseLeaseRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[63]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4991,7 +5116,7 @@ func (x *ReleaseLeaseRequest) String() string {
 func (*ReleaseLeaseRequest) ProtoMessage() {}
 
 func (x *ReleaseLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[63]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5004,7 +5129,7 @@ func (x *ReleaseLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseLeaseRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{63}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ReleaseLeaseRequest) GetName() string {
@@ -5031,7 +5156,7 @@ type GetLeaseRequest struct {
 
 func (x *GetLeaseRequest) Reset() {
 	*x = GetLeaseRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[64]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5043,7 +5168,7 @@ func (x *GetLeaseRequest) String() string {
 func (*GetLeaseRequest) ProtoMessage() {}
 
 func (x *GetLeaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[64]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5056,7 +5181,7 @@ func (x *GetLeaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLeaseRequest.ProtoReflect.Descriptor instead.
 func (*GetLeaseRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{64}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *GetLeaseRequest) GetName() string {
@@ -5085,7 +5210,7 @@ type Lease struct {
 
 func (x *Lease) Reset() {
 	*x = Lease{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[65]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5097,7 +5222,7 @@ func (x *Lease) String() string {
 func (*Lease) ProtoMessage() {}
 
 func (x *Lease) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[65]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5110,7 +5235,7 @@ func (x *Lease) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lease.ProtoReflect.Descriptor instead.
 func (*Lease) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{65}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *Lease) GetName() string {
@@ -5150,7 +5275,7 @@ type ClaimJobRetryRequest struct {
 
 func (x *ClaimJobRetryRequest) Reset() {
 	*x = ClaimJobRetryRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[66]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5162,7 +5287,7 @@ func (x *ClaimJobRetryRequest) String() string {
 func (*ClaimJobRetryRequest) ProtoMessage() {}
 
 func (x *ClaimJobRetryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[66]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5175,7 +5300,7 @@ func (x *ClaimJobRetryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimJobRetryRequest.ProtoReflect.Descriptor instead.
 func (*ClaimJobRetryRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{66}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *ClaimJobRetryRequest) GetId() int64 {
@@ -5194,7 +5319,7 @@ type RerunJobRequest struct {
 
 func (x *RerunJobRequest) Reset() {
 	*x = RerunJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[67]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5206,7 +5331,7 @@ func (x *RerunJobRequest) String() string {
 func (*RerunJobRequest) ProtoMessage() {}
 
 func (x *RerunJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[67]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5219,7 +5344,7 @@ func (x *RerunJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RerunJobRequest.ProtoReflect.Descriptor instead.
 func (*RerunJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{67}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *RerunJobRequest) GetId() int64 {
@@ -5245,7 +5370,7 @@ type ClaimJobRetryResponse struct {
 
 func (x *ClaimJobRetryResponse) Reset() {
 	*x = ClaimJobRetryResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[68]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5257,7 +5382,7 @@ func (x *ClaimJobRetryResponse) String() string {
 func (*ClaimJobRetryResponse) ProtoMessage() {}
 
 func (x *ClaimJobRetryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[68]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5270,7 +5395,7 @@ func (x *ClaimJobRetryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimJobRetryResponse.ProtoReflect.Descriptor instead.
 func (*ClaimJobRetryResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{68}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *ClaimJobRetryResponse) GetClaimed() bool {
@@ -5296,7 +5421,7 @@ type DeleteJobRequest struct {
 
 func (x *DeleteJobRequest) Reset() {
 	*x = DeleteJobRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[69]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5308,7 +5433,7 @@ func (x *DeleteJobRequest) String() string {
 func (*DeleteJobRequest) ProtoMessage() {}
 
 func (x *DeleteJobRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[69]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5321,7 +5446,7 @@ func (x *DeleteJobRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteJobRequest.ProtoReflect.Descriptor instead.
 func (*DeleteJobRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{69}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *DeleteJobRequest) GetId() int64 {
@@ -5344,7 +5469,7 @@ type Worker struct {
 
 func (x *Worker) Reset() {
 	*x = Worker{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[70]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5356,7 +5481,7 @@ func (x *Worker) String() string {
 func (*Worker) ProtoMessage() {}
 
 func (x *Worker) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[70]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5369,7 +5494,7 @@ func (x *Worker) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Worker.ProtoReflect.Descriptor instead.
 func (*Worker) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{70}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *Worker) GetId() int64 {
@@ -5418,7 +5543,7 @@ type RegisterWorkerRequest struct {
 
 func (x *RegisterWorkerRequest) Reset() {
 	*x = RegisterWorkerRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[71]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5430,7 +5555,7 @@ func (x *RegisterWorkerRequest) String() string {
 func (*RegisterWorkerRequest) ProtoMessage() {}
 
 func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[71]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5443,7 +5568,7 @@ func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkerRequest.ProtoReflect.Descriptor instead.
 func (*RegisterWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{71}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *RegisterWorkerRequest) GetName() string {
@@ -5476,7 +5601,7 @@ type GetWorkerRequest struct {
 
 func (x *GetWorkerRequest) Reset() {
 	*x = GetWorkerRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[72]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5488,7 +5613,7 @@ func (x *GetWorkerRequest) String() string {
 func (*GetWorkerRequest) ProtoMessage() {}
 
 func (x *GetWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[72]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5501,7 +5626,7 @@ func (x *GetWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetWorkerRequest.ProtoReflect.Descriptor instead.
 func (*GetWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{72}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *GetWorkerRequest) GetName() string {
@@ -5521,7 +5646,7 @@ type ListWorkersRequest struct {
 
 func (x *ListWorkersRequest) Reset() {
 	*x = ListWorkersRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[73]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5533,7 +5658,7 @@ func (x *ListWorkersRequest) String() string {
 func (*ListWorkersRequest) ProtoMessage() {}
 
 func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[73]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5546,7 +5671,7 @@ func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{73}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *ListWorkersRequest) GetGroup() string {
@@ -5565,7 +5690,7 @@ type ListWorkersResponse struct {
 
 func (x *ListWorkersResponse) Reset() {
 	*x = ListWorkersResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[74]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5577,7 +5702,7 @@ func (x *ListWorkersResponse) String() string {
 func (*ListWorkersResponse) ProtoMessage() {}
 
 func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[74]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5590,7 +5715,7 @@ func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkersResponse.ProtoReflect.Descriptor instead.
 func (*ListWorkersResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{74}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *ListWorkersResponse) GetWorkers() []*Worker {
@@ -5609,7 +5734,7 @@ type HeartbeatWorkerRequest struct {
 
 func (x *HeartbeatWorkerRequest) Reset() {
 	*x = HeartbeatWorkerRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[75]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5621,7 +5746,7 @@ func (x *HeartbeatWorkerRequest) String() string {
 func (*HeartbeatWorkerRequest) ProtoMessage() {}
 
 func (x *HeartbeatWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[75]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5634,7 +5759,7 @@ func (x *HeartbeatWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatWorkerRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{75}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *HeartbeatWorkerRequest) GetName() string {
@@ -5653,7 +5778,7 @@ type DeleteWorkerRequest struct {
 
 func (x *DeleteWorkerRequest) Reset() {
 	*x = DeleteWorkerRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[76]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5665,7 +5790,7 @@ func (x *DeleteWorkerRequest) String() string {
 func (*DeleteWorkerRequest) ProtoMessage() {}
 
 func (x *DeleteWorkerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[76]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5678,7 +5803,7 @@ func (x *DeleteWorkerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteWorkerRequest.ProtoReflect.Descriptor instead.
 func (*DeleteWorkerRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{76}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *DeleteWorkerRequest) GetName() string {
@@ -5704,7 +5829,7 @@ type IDPSigningKey struct {
 
 func (x *IDPSigningKey) Reset() {
 	*x = IDPSigningKey{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[77]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5716,7 +5841,7 @@ func (x *IDPSigningKey) String() string {
 func (*IDPSigningKey) ProtoMessage() {}
 
 func (x *IDPSigningKey) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[77]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5729,7 +5854,7 @@ func (x *IDPSigningKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IDPSigningKey.ProtoReflect.Descriptor instead.
 func (*IDPSigningKey) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{77}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *IDPSigningKey) GetKid() string {
@@ -5775,7 +5900,7 @@ type ListIDPSigningKeysRequest struct {
 
 func (x *ListIDPSigningKeysRequest) Reset() {
 	*x = ListIDPSigningKeysRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[78]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5787,7 +5912,7 @@ func (x *ListIDPSigningKeysRequest) String() string {
 func (*ListIDPSigningKeysRequest) ProtoMessage() {}
 
 func (x *ListIDPSigningKeysRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[78]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5800,7 +5925,7 @@ func (x *ListIDPSigningKeysRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListIDPSigningKeysRequest.ProtoReflect.Descriptor instead.
 func (*ListIDPSigningKeysRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{78}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{79}
 }
 
 type ListIDPSigningKeysResponse struct {
@@ -5812,7 +5937,7 @@ type ListIDPSigningKeysResponse struct {
 
 func (x *ListIDPSigningKeysResponse) Reset() {
 	*x = ListIDPSigningKeysResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[79]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5824,7 +5949,7 @@ func (x *ListIDPSigningKeysResponse) String() string {
 func (*ListIDPSigningKeysResponse) ProtoMessage() {}
 
 func (x *ListIDPSigningKeysResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[79]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5837,7 +5962,7 @@ func (x *ListIDPSigningKeysResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListIDPSigningKeysResponse.ProtoReflect.Descriptor instead.
 func (*ListIDPSigningKeysResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{79}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *ListIDPSigningKeysResponse) GetKeys() []*IDPSigningKey {
@@ -5856,7 +5981,7 @@ type SetIDPSigningKeysRequest struct {
 
 func (x *SetIDPSigningKeysRequest) Reset() {
 	*x = SetIDPSigningKeysRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[80]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5868,7 +5993,7 @@ func (x *SetIDPSigningKeysRequest) String() string {
 func (*SetIDPSigningKeysRequest) ProtoMessage() {}
 
 func (x *SetIDPSigningKeysRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[80]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5881,7 +6006,7 @@ func (x *SetIDPSigningKeysRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetIDPSigningKeysRequest.ProtoReflect.Descriptor instead.
 func (*SetIDPSigningKeysRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{80}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *SetIDPSigningKeysRequest) GetKeys() []*IDPSigningKey {
@@ -5910,7 +6035,7 @@ type IDPAuthCode struct {
 
 func (x *IDPAuthCode) Reset() {
 	*x = IDPAuthCode{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[81]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5922,7 +6047,7 @@ func (x *IDPAuthCode) String() string {
 func (*IDPAuthCode) ProtoMessage() {}
 
 func (x *IDPAuthCode) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[81]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5935,7 +6060,7 @@ func (x *IDPAuthCode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IDPAuthCode.ProtoReflect.Descriptor instead.
 func (*IDPAuthCode) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{81}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *IDPAuthCode) GetCode() string {
@@ -6003,7 +6128,7 @@ type StoreIDPAuthCodeRequest struct {
 
 func (x *StoreIDPAuthCodeRequest) Reset() {
 	*x = StoreIDPAuthCodeRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[82]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6015,7 +6140,7 @@ func (x *StoreIDPAuthCodeRequest) String() string {
 func (*StoreIDPAuthCodeRequest) ProtoMessage() {}
 
 func (x *StoreIDPAuthCodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[82]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6028,7 +6153,7 @@ func (x *StoreIDPAuthCodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoreIDPAuthCodeRequest.ProtoReflect.Descriptor instead.
 func (*StoreIDPAuthCodeRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{82}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *StoreIDPAuthCodeRequest) GetCode() *IDPAuthCode {
@@ -6047,7 +6172,7 @@ type ConsumeIDPAuthCodeRequest struct {
 
 func (x *ConsumeIDPAuthCodeRequest) Reset() {
 	*x = ConsumeIDPAuthCodeRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[83]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6059,7 +6184,7 @@ func (x *ConsumeIDPAuthCodeRequest) String() string {
 func (*ConsumeIDPAuthCodeRequest) ProtoMessage() {}
 
 func (x *ConsumeIDPAuthCodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[83]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6072,7 +6197,7 @@ func (x *ConsumeIDPAuthCodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConsumeIDPAuthCodeRequest.ProtoReflect.Descriptor instead.
 func (*ConsumeIDPAuthCodeRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{83}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *ConsumeIDPAuthCodeRequest) GetCode() string {
@@ -6093,7 +6218,7 @@ type PruneIDPAuthCodesRequest struct {
 
 func (x *PruneIDPAuthCodesRequest) Reset() {
 	*x = PruneIDPAuthCodesRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[84]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6105,7 +6230,7 @@ func (x *PruneIDPAuthCodesRequest) String() string {
 func (*PruneIDPAuthCodesRequest) ProtoMessage() {}
 
 func (x *PruneIDPAuthCodesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[84]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6118,7 +6243,7 @@ func (x *PruneIDPAuthCodesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PruneIDPAuthCodesRequest.ProtoReflect.Descriptor instead.
 func (*PruneIDPAuthCodesRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{84}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *PruneIDPAuthCodesRequest) GetCreatedBefore() *timestamppb.Timestamp {
@@ -6132,7 +6257,11 @@ var File_cdrom_db_v1_db_proto protoreflect.FileDescriptor
 
 const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\n" +
-	"\x14cdrom/db/v1/db.proto\x12\vcdrom.db.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe5\x02\n" +
+	"\x14cdrom/db/v1/db.proto\x12\vcdrom.db.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"[\n" +
+	"\tParameter\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
+	"\adefault\x18\x02 \x01(\tR\adefault\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\"\x95\x03\n" +
 	"\bPipeline\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
@@ -6143,7 +6272,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"updated_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12;\n" +
 	"\ffailure_mode\x18\x06 \x01(\x0e2\x18.cdrom.db.v1.FailureModeR\vfailureMode\x12.\n" +
 	"\x04jobs\x18\a \x03(\v2\x1a.cdrom.db.v1.JobDefinitionR\x04jobs\x120\n" +
-	"\btriggers\x18\b \x03(\v2\x14.cdrom.db.v1.TriggerR\btriggers\"\xf5\x03\n" +
+	"\btriggers\x18\b \x03(\v2\x14.cdrom.db.v1.TriggerR\btriggers\x12.\n" +
+	"\x06params\x18\t \x03(\v2\x16.cdrom.db.v1.ParameterR\x06params\"\xf5\x03\n" +
 	"\aTrigger\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12,\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x18.cdrom.db.v1.TriggerTypeR\x04type\x12\x12\n" +
@@ -6161,26 +6291,28 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a=\n" +
 	"\x0fOidcClaimsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xec\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9c\x02\n" +
 	"\x15CreatePipelineRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12;\n" +
 	"\ffailure_mode\x18\x03 \x01(\x0e2\x18.cdrom.db.v1.FailureModeR\vfailureMode\x12.\n" +
 	"\x04jobs\x18\x04 \x03(\v2\x1a.cdrom.db.v1.JobDefinitionR\x04jobs\x120\n" +
-	"\btriggers\x18\x05 \x03(\v2\x14.cdrom.db.v1.TriggerR\btriggers\"$\n" +
+	"\btriggers\x18\x05 \x03(\v2\x14.cdrom.db.v1.TriggerR\btriggers\x12.\n" +
+	"\x06params\x18\x06 \x03(\v2\x16.cdrom.db.v1.ParameterR\x06params\"$\n" +
 	"\x12GetPipelineRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"S\n" +
 	"\x14ListPipelinesRequest\x12;\n" +
 	"\ftrigger_type\x18\x01 \x01(\x0e2\x18.cdrom.db.v1.TriggerTypeR\vtriggerType\"L\n" +
 	"\x15ListPipelinesResponse\x123\n" +
-	"\tpipelines\x18\x01 \x03(\v2\x15.cdrom.db.v1.PipelineR\tpipelines\"\xfc\x01\n" +
+	"\tpipelines\x18\x01 \x03(\v2\x15.cdrom.db.v1.PipelineR\tpipelines\"\xac\x02\n" +
 	"\x15UpdatePipelineRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12;\n" +
 	"\ffailure_mode\x18\x04 \x01(\x0e2\x18.cdrom.db.v1.FailureModeR\vfailureMode\x12.\n" +
 	"\x04jobs\x18\x05 \x03(\v2\x1a.cdrom.db.v1.JobDefinitionR\x04jobs\x120\n" +
-	"\btriggers\x18\x06 \x03(\v2\x14.cdrom.db.v1.TriggerR\btriggers\"'\n" +
+	"\btriggers\x18\x06 \x03(\v2\x14.cdrom.db.v1.TriggerR\btriggers\x12.\n" +
+	"\x06params\x18\a \x03(\v2\x16.cdrom.db.v1.ParameterR\x06params\"'\n" +
 	"\x15DeletePipelineRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"\x9d\x05\n" +
 	"\vPipelineRun\x12\x0e\n" +
@@ -6293,7 +6425,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05retry\x18\x03 \x01(\v2\x18.cdrom.db.v1.RetryPolicyR\x05retry\x12#\n" +
 	"\rignore_failed\x18\x04 \x01(\bR\fignoreFailed\x12;\n" +
 	"\ffailure_mode\x18\x05 \x01(\x0e2\x18.cdrom.db.v1.FailureModeR\vfailureMode\x12!\n" +
-	"\fstep_barrier\x18\x06 \x01(\bR\vstepBarrier\"\xb7\b\n" +
+	"\fstep_barrier\x18\x06 \x01(\bR\vstepBarrier\"\xb5\t\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -6325,8 +6457,13 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x03key\x18\x15 \x01(\tR\x03key\x12!\n" +
 	"\ftrigger_name\x18\x16 \x01(\tR\vtriggerName\x12!\n" +
 	"\ftrigger_type\x18\x17 \x01(\tR\vtriggerType\x12@\n" +
-	"\x0fupstream_claims\x18\x18 \x01(\v2\x17.google.protobuf.StructR\x0eupstreamClaims\x1a:\n" +
+	"\x0fupstream_claims\x18\x18 \x01(\v2\x17.google.protobuf.StructR\x0eupstreamClaims\x12>\n" +
+	"\n" +
+	"run_params\x18\x19 \x03(\v2\x1f.cdrom.db.v1.Job.RunParamsEntryR\trunParams\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +
+	"\x0eRunParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x01\n" +
 	"\rJobDefinition\x12\x10\n" +
@@ -6688,329 +6825,335 @@ func file_cdrom_db_v1_db_proto_rawDescGZIP() []byte {
 }
 
 var file_cdrom_db_v1_db_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_cdrom_db_v1_db_proto_msgTypes = make([]protoimpl.MessageInfo, 98)
+var file_cdrom_db_v1_db_proto_msgTypes = make([]protoimpl.MessageInfo, 100)
 var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(TriggerType)(0),                       // 0: cdrom.db.v1.TriggerType
 	(RunStatus)(0),                         // 1: cdrom.db.v1.RunStatus
 	(JobStatus)(0),                         // 2: cdrom.db.v1.JobStatus
 	(FailureMode)(0),                       // 3: cdrom.db.v1.FailureMode
 	(StepStatus)(0),                        // 4: cdrom.db.v1.StepStatus
-	(*Pipeline)(nil),                       // 5: cdrom.db.v1.Pipeline
-	(*Trigger)(nil),                        // 6: cdrom.db.v1.Trigger
-	(*CreatePipelineRequest)(nil),          // 7: cdrom.db.v1.CreatePipelineRequest
-	(*GetPipelineRequest)(nil),             // 8: cdrom.db.v1.GetPipelineRequest
-	(*ListPipelinesRequest)(nil),           // 9: cdrom.db.v1.ListPipelinesRequest
-	(*ListPipelinesResponse)(nil),          // 10: cdrom.db.v1.ListPipelinesResponse
-	(*UpdatePipelineRequest)(nil),          // 11: cdrom.db.v1.UpdatePipelineRequest
-	(*DeletePipelineRequest)(nil),          // 12: cdrom.db.v1.DeletePipelineRequest
-	(*PipelineRun)(nil),                    // 13: cdrom.db.v1.PipelineRun
-	(*CreateRunRequest)(nil),               // 14: cdrom.db.v1.CreateRunRequest
-	(*CreateRunResponse)(nil),              // 15: cdrom.db.v1.CreateRunResponse
-	(*TriggerRunRequest)(nil),              // 16: cdrom.db.v1.TriggerRunRequest
-	(*TriggerRunResponse)(nil),             // 17: cdrom.db.v1.TriggerRunResponse
-	(*GetRunRequest)(nil),                  // 18: cdrom.db.v1.GetRunRequest
-	(*ListRunsRequest)(nil),                // 19: cdrom.db.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),               // 20: cdrom.db.v1.ListRunsResponse
-	(*UpdateRunRequest)(nil),               // 21: cdrom.db.v1.UpdateRunRequest
-	(*StepResult)(nil),                     // 22: cdrom.db.v1.StepResult
-	(*UpstreamJob)(nil),                    // 23: cdrom.db.v1.UpstreamJob
-	(*ParamValue)(nil),                     // 24: cdrom.db.v1.ParamValue
-	(*JobStep)(nil),                        // 25: cdrom.db.v1.JobStep
-	(*RetryPolicy)(nil),                    // 26: cdrom.db.v1.RetryPolicy
-	(*JobSpec)(nil),                        // 27: cdrom.db.v1.JobSpec
-	(*Job)(nil),                            // 28: cdrom.db.v1.Job
-	(*JobDefinition)(nil),                  // 29: cdrom.db.v1.JobDefinition
-	(*CreateJobRequest)(nil),               // 30: cdrom.db.v1.CreateJobRequest
-	(*GetJobRequest)(nil),                  // 31: cdrom.db.v1.GetJobRequest
-	(*ListJobsRequest)(nil),                // 32: cdrom.db.v1.ListJobsRequest
-	(*ListJobsResponse)(nil),               // 33: cdrom.db.v1.ListJobsResponse
-	(*ListRetriableJobsRequest)(nil),       // 34: cdrom.db.v1.ListRetriableJobsRequest
-	(*UpdateJobRequest)(nil),               // 35: cdrom.db.v1.UpdateJobRequest
-	(*ReapJobRequest)(nil),                 // 36: cdrom.db.v1.ReapJobRequest
-	(*ReapJobResponse)(nil),                // 37: cdrom.db.v1.ReapJobResponse
-	(*CancelJobRequest)(nil),               // 38: cdrom.db.v1.CancelJobRequest
-	(*CancelJobResponse)(nil),              // 39: cdrom.db.v1.CancelJobResponse
-	(*SkipJobRequest)(nil),                 // 40: cdrom.db.v1.SkipJobRequest
-	(*SkipJobResponse)(nil),                // 41: cdrom.db.v1.SkipJobResponse
-	(*ClaimJobRequest)(nil),                // 42: cdrom.db.v1.ClaimJobRequest
-	(*ClaimJobResponse)(nil),               // 43: cdrom.db.v1.ClaimJobResponse
-	(*ListPendingByGroupRequest)(nil),      // 44: cdrom.db.v1.ListPendingByGroupRequest
-	(*JobExecution)(nil),                   // 45: cdrom.db.v1.JobExecution
-	(*StartJobExecutionRequest)(nil),       // 46: cdrom.db.v1.StartJobExecutionRequest
-	(*StartJobExecutionResponse)(nil),      // 47: cdrom.db.v1.StartJobExecutionResponse
-	(*ListJobExecutionsRequest)(nil),       // 48: cdrom.db.v1.ListJobExecutionsRequest
-	(*ListJobExecutionsResponse)(nil),      // 49: cdrom.db.v1.ListJobExecutionsResponse
-	(*UpdateJobExecutionRequest)(nil),      // 50: cdrom.db.v1.UpdateJobExecutionRequest
-	(*AbandonWorkerExecutionsRequest)(nil), // 51: cdrom.db.v1.AbandonWorkerExecutionsRequest
-	(*StepCompletion)(nil),                 // 52: cdrom.db.v1.StepCompletion
-	(*ReportStepCompletionRequest)(nil),    // 53: cdrom.db.v1.ReportStepCompletionRequest
-	(*CheckStepBarrierRequest)(nil),        // 54: cdrom.db.v1.CheckStepBarrierRequest
-	(*CheckStepBarrierResponse)(nil),       // 55: cdrom.db.v1.CheckStepBarrierResponse
-	(*Event)(nil),                          // 56: cdrom.db.v1.Event
-	(*PublishAssignmentRequest)(nil),       // 57: cdrom.db.v1.PublishAssignmentRequest
-	(*PublishCancelRequest)(nil),           // 58: cdrom.db.v1.PublishCancelRequest
-	(*PublishJobStatusRequest)(nil),        // 59: cdrom.db.v1.PublishJobStatusRequest
-	(*PublishRunStatusRequest)(nil),        // 60: cdrom.db.v1.PublishRunStatusRequest
-	(*PublishWorkerEventRequest)(nil),      // 61: cdrom.db.v1.PublishWorkerEventRequest
-	(*PublishLogUpdatedRequest)(nil),       // 62: cdrom.db.v1.PublishLogUpdatedRequest
-	(*PublishEventResponse)(nil),           // 63: cdrom.db.v1.PublishEventResponse
-	(*TailEventsRequest)(nil),              // 64: cdrom.db.v1.TailEventsRequest
-	(*TailEventsResponse)(nil),             // 65: cdrom.db.v1.TailEventsResponse
-	(*AcquireLeaseRequest)(nil),            // 66: cdrom.db.v1.AcquireLeaseRequest
-	(*AcquireLeaseResponse)(nil),           // 67: cdrom.db.v1.AcquireLeaseResponse
-	(*ReleaseLeaseRequest)(nil),            // 68: cdrom.db.v1.ReleaseLeaseRequest
-	(*GetLeaseRequest)(nil),                // 69: cdrom.db.v1.GetLeaseRequest
-	(*Lease)(nil),                          // 70: cdrom.db.v1.Lease
-	(*ClaimJobRetryRequest)(nil),           // 71: cdrom.db.v1.ClaimJobRetryRequest
-	(*RerunJobRequest)(nil),                // 72: cdrom.db.v1.RerunJobRequest
-	(*ClaimJobRetryResponse)(nil),          // 73: cdrom.db.v1.ClaimJobRetryResponse
-	(*DeleteJobRequest)(nil),               // 74: cdrom.db.v1.DeleteJobRequest
-	(*Worker)(nil),                         // 75: cdrom.db.v1.Worker
-	(*RegisterWorkerRequest)(nil),          // 76: cdrom.db.v1.RegisterWorkerRequest
-	(*GetWorkerRequest)(nil),               // 77: cdrom.db.v1.GetWorkerRequest
-	(*ListWorkersRequest)(nil),             // 78: cdrom.db.v1.ListWorkersRequest
-	(*ListWorkersResponse)(nil),            // 79: cdrom.db.v1.ListWorkersResponse
-	(*HeartbeatWorkerRequest)(nil),         // 80: cdrom.db.v1.HeartbeatWorkerRequest
-	(*DeleteWorkerRequest)(nil),            // 81: cdrom.db.v1.DeleteWorkerRequest
-	(*IDPSigningKey)(nil),                  // 82: cdrom.db.v1.IDPSigningKey
-	(*ListIDPSigningKeysRequest)(nil),      // 83: cdrom.db.v1.ListIDPSigningKeysRequest
-	(*ListIDPSigningKeysResponse)(nil),     // 84: cdrom.db.v1.ListIDPSigningKeysResponse
-	(*SetIDPSigningKeysRequest)(nil),       // 85: cdrom.db.v1.SetIDPSigningKeysRequest
-	(*IDPAuthCode)(nil),                    // 86: cdrom.db.v1.IDPAuthCode
-	(*StoreIDPAuthCodeRequest)(nil),        // 87: cdrom.db.v1.StoreIDPAuthCodeRequest
-	(*ConsumeIDPAuthCodeRequest)(nil),      // 88: cdrom.db.v1.ConsumeIDPAuthCodeRequest
-	(*PruneIDPAuthCodesRequest)(nil),       // 89: cdrom.db.v1.PruneIDPAuthCodesRequest
-	nil,                                    // 90: cdrom.db.v1.Trigger.ParamsEntry
-	nil,                                    // 91: cdrom.db.v1.Trigger.OidcClaimsEntry
-	nil,                                    // 92: cdrom.db.v1.PipelineRun.ParamsEntry
-	nil,                                    // 93: cdrom.db.v1.CreateRunRequest.ParamsEntry
-	nil,                                    // 94: cdrom.db.v1.TriggerRunRequest.ParamsEntry
-	nil,                                    // 95: cdrom.db.v1.StepResult.OutputsEntry
-	nil,                                    // 96: cdrom.db.v1.UpstreamJob.OutputsEntry
-	nil,                                    // 97: cdrom.db.v1.JobStep.EnvEntry
-	nil,                                    // 98: cdrom.db.v1.JobStep.ParamsEntry
-	nil,                                    // 99: cdrom.db.v1.Job.OutputsEntry
-	nil,                                    // 100: cdrom.db.v1.UpdateJobRequest.OutputsEntry
-	nil,                                    // 101: cdrom.db.v1.JobExecution.OutputsEntry
-	nil,                                    // 102: cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
-	(*timestamppb.Timestamp)(nil),          // 103: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                // 104: google.protobuf.Struct
-	(*durationpb.Duration)(nil),            // 105: google.protobuf.Duration
-	(*emptypb.Empty)(nil),                  // 106: google.protobuf.Empty
+	(*Parameter)(nil),                      // 5: cdrom.db.v1.Parameter
+	(*Pipeline)(nil),                       // 6: cdrom.db.v1.Pipeline
+	(*Trigger)(nil),                        // 7: cdrom.db.v1.Trigger
+	(*CreatePipelineRequest)(nil),          // 8: cdrom.db.v1.CreatePipelineRequest
+	(*GetPipelineRequest)(nil),             // 9: cdrom.db.v1.GetPipelineRequest
+	(*ListPipelinesRequest)(nil),           // 10: cdrom.db.v1.ListPipelinesRequest
+	(*ListPipelinesResponse)(nil),          // 11: cdrom.db.v1.ListPipelinesResponse
+	(*UpdatePipelineRequest)(nil),          // 12: cdrom.db.v1.UpdatePipelineRequest
+	(*DeletePipelineRequest)(nil),          // 13: cdrom.db.v1.DeletePipelineRequest
+	(*PipelineRun)(nil),                    // 14: cdrom.db.v1.PipelineRun
+	(*CreateRunRequest)(nil),               // 15: cdrom.db.v1.CreateRunRequest
+	(*CreateRunResponse)(nil),              // 16: cdrom.db.v1.CreateRunResponse
+	(*TriggerRunRequest)(nil),              // 17: cdrom.db.v1.TriggerRunRequest
+	(*TriggerRunResponse)(nil),             // 18: cdrom.db.v1.TriggerRunResponse
+	(*GetRunRequest)(nil),                  // 19: cdrom.db.v1.GetRunRequest
+	(*ListRunsRequest)(nil),                // 20: cdrom.db.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),               // 21: cdrom.db.v1.ListRunsResponse
+	(*UpdateRunRequest)(nil),               // 22: cdrom.db.v1.UpdateRunRequest
+	(*StepResult)(nil),                     // 23: cdrom.db.v1.StepResult
+	(*UpstreamJob)(nil),                    // 24: cdrom.db.v1.UpstreamJob
+	(*ParamValue)(nil),                     // 25: cdrom.db.v1.ParamValue
+	(*JobStep)(nil),                        // 26: cdrom.db.v1.JobStep
+	(*RetryPolicy)(nil),                    // 27: cdrom.db.v1.RetryPolicy
+	(*JobSpec)(nil),                        // 28: cdrom.db.v1.JobSpec
+	(*Job)(nil),                            // 29: cdrom.db.v1.Job
+	(*JobDefinition)(nil),                  // 30: cdrom.db.v1.JobDefinition
+	(*CreateJobRequest)(nil),               // 31: cdrom.db.v1.CreateJobRequest
+	(*GetJobRequest)(nil),                  // 32: cdrom.db.v1.GetJobRequest
+	(*ListJobsRequest)(nil),                // 33: cdrom.db.v1.ListJobsRequest
+	(*ListJobsResponse)(nil),               // 34: cdrom.db.v1.ListJobsResponse
+	(*ListRetriableJobsRequest)(nil),       // 35: cdrom.db.v1.ListRetriableJobsRequest
+	(*UpdateJobRequest)(nil),               // 36: cdrom.db.v1.UpdateJobRequest
+	(*ReapJobRequest)(nil),                 // 37: cdrom.db.v1.ReapJobRequest
+	(*ReapJobResponse)(nil),                // 38: cdrom.db.v1.ReapJobResponse
+	(*CancelJobRequest)(nil),               // 39: cdrom.db.v1.CancelJobRequest
+	(*CancelJobResponse)(nil),              // 40: cdrom.db.v1.CancelJobResponse
+	(*SkipJobRequest)(nil),                 // 41: cdrom.db.v1.SkipJobRequest
+	(*SkipJobResponse)(nil),                // 42: cdrom.db.v1.SkipJobResponse
+	(*ClaimJobRequest)(nil),                // 43: cdrom.db.v1.ClaimJobRequest
+	(*ClaimJobResponse)(nil),               // 44: cdrom.db.v1.ClaimJobResponse
+	(*ListPendingByGroupRequest)(nil),      // 45: cdrom.db.v1.ListPendingByGroupRequest
+	(*JobExecution)(nil),                   // 46: cdrom.db.v1.JobExecution
+	(*StartJobExecutionRequest)(nil),       // 47: cdrom.db.v1.StartJobExecutionRequest
+	(*StartJobExecutionResponse)(nil),      // 48: cdrom.db.v1.StartJobExecutionResponse
+	(*ListJobExecutionsRequest)(nil),       // 49: cdrom.db.v1.ListJobExecutionsRequest
+	(*ListJobExecutionsResponse)(nil),      // 50: cdrom.db.v1.ListJobExecutionsResponse
+	(*UpdateJobExecutionRequest)(nil),      // 51: cdrom.db.v1.UpdateJobExecutionRequest
+	(*AbandonWorkerExecutionsRequest)(nil), // 52: cdrom.db.v1.AbandonWorkerExecutionsRequest
+	(*StepCompletion)(nil),                 // 53: cdrom.db.v1.StepCompletion
+	(*ReportStepCompletionRequest)(nil),    // 54: cdrom.db.v1.ReportStepCompletionRequest
+	(*CheckStepBarrierRequest)(nil),        // 55: cdrom.db.v1.CheckStepBarrierRequest
+	(*CheckStepBarrierResponse)(nil),       // 56: cdrom.db.v1.CheckStepBarrierResponse
+	(*Event)(nil),                          // 57: cdrom.db.v1.Event
+	(*PublishAssignmentRequest)(nil),       // 58: cdrom.db.v1.PublishAssignmentRequest
+	(*PublishCancelRequest)(nil),           // 59: cdrom.db.v1.PublishCancelRequest
+	(*PublishJobStatusRequest)(nil),        // 60: cdrom.db.v1.PublishJobStatusRequest
+	(*PublishRunStatusRequest)(nil),        // 61: cdrom.db.v1.PublishRunStatusRequest
+	(*PublishWorkerEventRequest)(nil),      // 62: cdrom.db.v1.PublishWorkerEventRequest
+	(*PublishLogUpdatedRequest)(nil),       // 63: cdrom.db.v1.PublishLogUpdatedRequest
+	(*PublishEventResponse)(nil),           // 64: cdrom.db.v1.PublishEventResponse
+	(*TailEventsRequest)(nil),              // 65: cdrom.db.v1.TailEventsRequest
+	(*TailEventsResponse)(nil),             // 66: cdrom.db.v1.TailEventsResponse
+	(*AcquireLeaseRequest)(nil),            // 67: cdrom.db.v1.AcquireLeaseRequest
+	(*AcquireLeaseResponse)(nil),           // 68: cdrom.db.v1.AcquireLeaseResponse
+	(*ReleaseLeaseRequest)(nil),            // 69: cdrom.db.v1.ReleaseLeaseRequest
+	(*GetLeaseRequest)(nil),                // 70: cdrom.db.v1.GetLeaseRequest
+	(*Lease)(nil),                          // 71: cdrom.db.v1.Lease
+	(*ClaimJobRetryRequest)(nil),           // 72: cdrom.db.v1.ClaimJobRetryRequest
+	(*RerunJobRequest)(nil),                // 73: cdrom.db.v1.RerunJobRequest
+	(*ClaimJobRetryResponse)(nil),          // 74: cdrom.db.v1.ClaimJobRetryResponse
+	(*DeleteJobRequest)(nil),               // 75: cdrom.db.v1.DeleteJobRequest
+	(*Worker)(nil),                         // 76: cdrom.db.v1.Worker
+	(*RegisterWorkerRequest)(nil),          // 77: cdrom.db.v1.RegisterWorkerRequest
+	(*GetWorkerRequest)(nil),               // 78: cdrom.db.v1.GetWorkerRequest
+	(*ListWorkersRequest)(nil),             // 79: cdrom.db.v1.ListWorkersRequest
+	(*ListWorkersResponse)(nil),            // 80: cdrom.db.v1.ListWorkersResponse
+	(*HeartbeatWorkerRequest)(nil),         // 81: cdrom.db.v1.HeartbeatWorkerRequest
+	(*DeleteWorkerRequest)(nil),            // 82: cdrom.db.v1.DeleteWorkerRequest
+	(*IDPSigningKey)(nil),                  // 83: cdrom.db.v1.IDPSigningKey
+	(*ListIDPSigningKeysRequest)(nil),      // 84: cdrom.db.v1.ListIDPSigningKeysRequest
+	(*ListIDPSigningKeysResponse)(nil),     // 85: cdrom.db.v1.ListIDPSigningKeysResponse
+	(*SetIDPSigningKeysRequest)(nil),       // 86: cdrom.db.v1.SetIDPSigningKeysRequest
+	(*IDPAuthCode)(nil),                    // 87: cdrom.db.v1.IDPAuthCode
+	(*StoreIDPAuthCodeRequest)(nil),        // 88: cdrom.db.v1.StoreIDPAuthCodeRequest
+	(*ConsumeIDPAuthCodeRequest)(nil),      // 89: cdrom.db.v1.ConsumeIDPAuthCodeRequest
+	(*PruneIDPAuthCodesRequest)(nil),       // 90: cdrom.db.v1.PruneIDPAuthCodesRequest
+	nil,                                    // 91: cdrom.db.v1.Trigger.ParamsEntry
+	nil,                                    // 92: cdrom.db.v1.Trigger.OidcClaimsEntry
+	nil,                                    // 93: cdrom.db.v1.PipelineRun.ParamsEntry
+	nil,                                    // 94: cdrom.db.v1.CreateRunRequest.ParamsEntry
+	nil,                                    // 95: cdrom.db.v1.TriggerRunRequest.ParamsEntry
+	nil,                                    // 96: cdrom.db.v1.StepResult.OutputsEntry
+	nil,                                    // 97: cdrom.db.v1.UpstreamJob.OutputsEntry
+	nil,                                    // 98: cdrom.db.v1.JobStep.EnvEntry
+	nil,                                    // 99: cdrom.db.v1.JobStep.ParamsEntry
+	nil,                                    // 100: cdrom.db.v1.Job.OutputsEntry
+	nil,                                    // 101: cdrom.db.v1.Job.RunParamsEntry
+	nil,                                    // 102: cdrom.db.v1.UpdateJobRequest.OutputsEntry
+	nil,                                    // 103: cdrom.db.v1.JobExecution.OutputsEntry
+	nil,                                    // 104: cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
+	(*timestamppb.Timestamp)(nil),          // 105: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                // 106: google.protobuf.Struct
+	(*durationpb.Duration)(nil),            // 107: google.protobuf.Duration
+	(*emptypb.Empty)(nil),                  // 108: google.protobuf.Empty
 }
 var file_cdrom_db_v1_db_proto_depIdxs = []int32{
-	103, // 0: cdrom.db.v1.Pipeline.created_at:type_name -> google.protobuf.Timestamp
-	103, // 1: cdrom.db.v1.Pipeline.updated_at:type_name -> google.protobuf.Timestamp
+	105, // 0: cdrom.db.v1.Pipeline.created_at:type_name -> google.protobuf.Timestamp
+	105, // 1: cdrom.db.v1.Pipeline.updated_at:type_name -> google.protobuf.Timestamp
 	3,   // 2: cdrom.db.v1.Pipeline.failure_mode:type_name -> cdrom.db.v1.FailureMode
-	29,  // 3: cdrom.db.v1.Pipeline.jobs:type_name -> cdrom.db.v1.JobDefinition
-	6,   // 4: cdrom.db.v1.Pipeline.triggers:type_name -> cdrom.db.v1.Trigger
-	0,   // 5: cdrom.db.v1.Trigger.type:type_name -> cdrom.db.v1.TriggerType
-	1,   // 6: cdrom.db.v1.Trigger.event_status:type_name -> cdrom.db.v1.RunStatus
-	90,  // 7: cdrom.db.v1.Trigger.params:type_name -> cdrom.db.v1.Trigger.ParamsEntry
-	91,  // 8: cdrom.db.v1.Trigger.oidc_claims:type_name -> cdrom.db.v1.Trigger.OidcClaimsEntry
-	3,   // 9: cdrom.db.v1.CreatePipelineRequest.failure_mode:type_name -> cdrom.db.v1.FailureMode
-	29,  // 10: cdrom.db.v1.CreatePipelineRequest.jobs:type_name -> cdrom.db.v1.JobDefinition
-	6,   // 11: cdrom.db.v1.CreatePipelineRequest.triggers:type_name -> cdrom.db.v1.Trigger
-	0,   // 12: cdrom.db.v1.ListPipelinesRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
-	5,   // 13: cdrom.db.v1.ListPipelinesResponse.pipelines:type_name -> cdrom.db.v1.Pipeline
-	3,   // 14: cdrom.db.v1.UpdatePipelineRequest.failure_mode:type_name -> cdrom.db.v1.FailureMode
-	29,  // 15: cdrom.db.v1.UpdatePipelineRequest.jobs:type_name -> cdrom.db.v1.JobDefinition
-	6,   // 16: cdrom.db.v1.UpdatePipelineRequest.triggers:type_name -> cdrom.db.v1.Trigger
-	1,   // 17: cdrom.db.v1.PipelineRun.status:type_name -> cdrom.db.v1.RunStatus
-	92,  // 18: cdrom.db.v1.PipelineRun.params:type_name -> cdrom.db.v1.PipelineRun.ParamsEntry
-	103, // 19: cdrom.db.v1.PipelineRun.started_at:type_name -> google.protobuf.Timestamp
-	103, // 20: cdrom.db.v1.PipelineRun.finished_at:type_name -> google.protobuf.Timestamp
-	103, // 21: cdrom.db.v1.PipelineRun.created_at:type_name -> google.protobuf.Timestamp
-	103, // 22: cdrom.db.v1.PipelineRun.updated_at:type_name -> google.protobuf.Timestamp
-	104, // 23: cdrom.db.v1.PipelineRun.upstream_claims:type_name -> google.protobuf.Struct
-	93,  // 24: cdrom.db.v1.CreateRunRequest.params:type_name -> cdrom.db.v1.CreateRunRequest.ParamsEntry
-	13,  // 25: cdrom.db.v1.CreateRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
-	28,  // 26: cdrom.db.v1.CreateRunResponse.jobs:type_name -> cdrom.db.v1.Job
-	0,   // 27: cdrom.db.v1.TriggerRunRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
-	94,  // 28: cdrom.db.v1.TriggerRunRequest.params:type_name -> cdrom.db.v1.TriggerRunRequest.ParamsEntry
-	105, // 29: cdrom.db.v1.TriggerRunRequest.dedup_window:type_name -> google.protobuf.Duration
-	104, // 30: cdrom.db.v1.TriggerRunRequest.upstream_claims:type_name -> google.protobuf.Struct
-	13,  // 31: cdrom.db.v1.TriggerRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
-	28,  // 32: cdrom.db.v1.TriggerRunResponse.jobs:type_name -> cdrom.db.v1.Job
-	1,   // 33: cdrom.db.v1.ListRunsRequest.status:type_name -> cdrom.db.v1.RunStatus
-	103, // 34: cdrom.db.v1.ListRunsRequest.finished_after:type_name -> google.protobuf.Timestamp
-	13,  // 35: cdrom.db.v1.ListRunsResponse.runs:type_name -> cdrom.db.v1.PipelineRun
-	1,   // 36: cdrom.db.v1.UpdateRunRequest.status:type_name -> cdrom.db.v1.RunStatus
-	103, // 37: cdrom.db.v1.UpdateRunRequest.started_at:type_name -> google.protobuf.Timestamp
-	103, // 38: cdrom.db.v1.UpdateRunRequest.finished_at:type_name -> google.protobuf.Timestamp
-	4,   // 39: cdrom.db.v1.StepResult.status:type_name -> cdrom.db.v1.StepStatus
-	95,  // 40: cdrom.db.v1.StepResult.outputs:type_name -> cdrom.db.v1.StepResult.OutputsEntry
-	2,   // 41: cdrom.db.v1.UpstreamJob.status:type_name -> cdrom.db.v1.JobStatus
-	96,  // 42: cdrom.db.v1.UpstreamJob.outputs:type_name -> cdrom.db.v1.UpstreamJob.OutputsEntry
-	97,  // 43: cdrom.db.v1.JobStep.env:type_name -> cdrom.db.v1.JobStep.EnvEntry
-	105, // 44: cdrom.db.v1.JobStep.timeout:type_name -> google.protobuf.Duration
-	98,  // 45: cdrom.db.v1.JobStep.params:type_name -> cdrom.db.v1.JobStep.ParamsEntry
-	105, // 46: cdrom.db.v1.RetryPolicy.backoff:type_name -> google.protobuf.Duration
-	25,  // 47: cdrom.db.v1.JobSpec.steps:type_name -> cdrom.db.v1.JobStep
-	105, // 48: cdrom.db.v1.JobSpec.timeout:type_name -> google.protobuf.Duration
-	26,  // 49: cdrom.db.v1.JobSpec.retry:type_name -> cdrom.db.v1.RetryPolicy
-	3,   // 50: cdrom.db.v1.JobSpec.failure_mode:type_name -> cdrom.db.v1.FailureMode
-	2,   // 51: cdrom.db.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
-	103, // 52: cdrom.db.v1.Job.started_at:type_name -> google.protobuf.Timestamp
-	103, // 53: cdrom.db.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
-	103, // 54: cdrom.db.v1.Job.created_at:type_name -> google.protobuf.Timestamp
-	103, // 55: cdrom.db.v1.Job.updated_at:type_name -> google.protobuf.Timestamp
-	27,  // 56: cdrom.db.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
-	22,  // 57: cdrom.db.v1.Job.step_results:type_name -> cdrom.db.v1.StepResult
-	99,  // 58: cdrom.db.v1.Job.outputs:type_name -> cdrom.db.v1.Job.OutputsEntry
-	23,  // 59: cdrom.db.v1.Job.upstream_jobs:type_name -> cdrom.db.v1.UpstreamJob
-	3,   // 60: cdrom.db.v1.Job.failure_mode:type_name -> cdrom.db.v1.FailureMode
-	104, // 61: cdrom.db.v1.Job.upstream_claims:type_name -> google.protobuf.Struct
-	27,  // 62: cdrom.db.v1.JobDefinition.spec:type_name -> cdrom.db.v1.JobSpec
-	27,  // 63: cdrom.db.v1.CreateJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
-	2,   // 64: cdrom.db.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
-	28,  // 65: cdrom.db.v1.ListJobsResponse.jobs:type_name -> cdrom.db.v1.Job
-	2,   // 66: cdrom.db.v1.UpdateJobRequest.status:type_name -> cdrom.db.v1.JobStatus
-	103, // 67: cdrom.db.v1.UpdateJobRequest.started_at:type_name -> google.protobuf.Timestamp
-	103, // 68: cdrom.db.v1.UpdateJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	22,  // 69: cdrom.db.v1.UpdateJobRequest.step_results:type_name -> cdrom.db.v1.StepResult
-	100, // 70: cdrom.db.v1.UpdateJobRequest.outputs:type_name -> cdrom.db.v1.UpdateJobRequest.OutputsEntry
-	103, // 71: cdrom.db.v1.ReapJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	103, // 72: cdrom.db.v1.CancelJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	103, // 73: cdrom.db.v1.SkipJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	103, // 74: cdrom.db.v1.ClaimJobRequest.started_at:type_name -> google.protobuf.Timestamp
-	2,   // 75: cdrom.db.v1.JobExecution.status:type_name -> cdrom.db.v1.JobStatus
-	103, // 76: cdrom.db.v1.JobExecution.started_at:type_name -> google.protobuf.Timestamp
-	103, // 77: cdrom.db.v1.JobExecution.finished_at:type_name -> google.protobuf.Timestamp
-	103, // 78: cdrom.db.v1.JobExecution.created_at:type_name -> google.protobuf.Timestamp
-	103, // 79: cdrom.db.v1.JobExecution.updated_at:type_name -> google.protobuf.Timestamp
-	22,  // 80: cdrom.db.v1.JobExecution.step_results:type_name -> cdrom.db.v1.StepResult
-	101, // 81: cdrom.db.v1.JobExecution.outputs:type_name -> cdrom.db.v1.JobExecution.OutputsEntry
-	103, // 82: cdrom.db.v1.StartJobExecutionRequest.started_at:type_name -> google.protobuf.Timestamp
-	45,  // 83: cdrom.db.v1.StartJobExecutionResponse.execution:type_name -> cdrom.db.v1.JobExecution
-	45,  // 84: cdrom.db.v1.ListJobExecutionsResponse.executions:type_name -> cdrom.db.v1.JobExecution
-	2,   // 85: cdrom.db.v1.UpdateJobExecutionRequest.status:type_name -> cdrom.db.v1.JobStatus
-	103, // 86: cdrom.db.v1.UpdateJobExecutionRequest.finished_at:type_name -> google.protobuf.Timestamp
-	22,  // 87: cdrom.db.v1.UpdateJobExecutionRequest.step_results:type_name -> cdrom.db.v1.StepResult
-	102, // 88: cdrom.db.v1.UpdateJobExecutionRequest.outputs:type_name -> cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
-	103, // 89: cdrom.db.v1.StepCompletion.created_at:type_name -> google.protobuf.Timestamp
-	103, // 90: cdrom.db.v1.StepCompletion.updated_at:type_name -> google.protobuf.Timestamp
-	103, // 91: cdrom.db.v1.Event.created_at:type_name -> google.protobuf.Timestamp
-	2,   // 92: cdrom.db.v1.PublishJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
-	1,   // 93: cdrom.db.v1.PublishRunStatusRequest.status:type_name -> cdrom.db.v1.RunStatus
-	56,  // 94: cdrom.db.v1.TailEventsResponse.events:type_name -> cdrom.db.v1.Event
-	105, // 95: cdrom.db.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	105, // 96: cdrom.db.v1.AcquireLeaseRequest.heartbeat_ttl:type_name -> google.protobuf.Duration
-	103, // 97: cdrom.db.v1.Lease.expires_at:type_name -> google.protobuf.Timestamp
-	103, // 98: cdrom.db.v1.Lease.last_heartbeat:type_name -> google.protobuf.Timestamp
-	103, // 99: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
-	75,  // 100: cdrom.db.v1.ListWorkersResponse.workers:type_name -> cdrom.db.v1.Worker
-	103, // 101: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
-	103, // 102: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
-	82,  // 103: cdrom.db.v1.ListIDPSigningKeysResponse.keys:type_name -> cdrom.db.v1.IDPSigningKey
-	82,  // 104: cdrom.db.v1.SetIDPSigningKeysRequest.keys:type_name -> cdrom.db.v1.IDPSigningKey
-	103, // 105: cdrom.db.v1.IDPAuthCode.created_at:type_name -> google.protobuf.Timestamp
-	86,  // 106: cdrom.db.v1.StoreIDPAuthCodeRequest.code:type_name -> cdrom.db.v1.IDPAuthCode
-	103, // 107: cdrom.db.v1.PruneIDPAuthCodesRequest.created_before:type_name -> google.protobuf.Timestamp
-	24,  // 108: cdrom.db.v1.JobStep.ParamsEntry.value:type_name -> cdrom.db.v1.ParamValue
-	7,   // 109: cdrom.db.v1.Database.CreatePipeline:input_type -> cdrom.db.v1.CreatePipelineRequest
-	8,   // 110: cdrom.db.v1.Database.GetPipeline:input_type -> cdrom.db.v1.GetPipelineRequest
-	9,   // 111: cdrom.db.v1.Database.ListPipelines:input_type -> cdrom.db.v1.ListPipelinesRequest
-	11,  // 112: cdrom.db.v1.Database.UpdatePipeline:input_type -> cdrom.db.v1.UpdatePipelineRequest
-	12,  // 113: cdrom.db.v1.Database.DeletePipeline:input_type -> cdrom.db.v1.DeletePipelineRequest
-	16,  // 114: cdrom.db.v1.Database.TriggerRun:input_type -> cdrom.db.v1.TriggerRunRequest
-	14,  // 115: cdrom.db.v1.Database.CreateRun:input_type -> cdrom.db.v1.CreateRunRequest
-	18,  // 116: cdrom.db.v1.Database.GetRun:input_type -> cdrom.db.v1.GetRunRequest
-	19,  // 117: cdrom.db.v1.Database.ListRuns:input_type -> cdrom.db.v1.ListRunsRequest
-	21,  // 118: cdrom.db.v1.Database.UpdateRun:input_type -> cdrom.db.v1.UpdateRunRequest
-	30,  // 119: cdrom.db.v1.Database.CreateJob:input_type -> cdrom.db.v1.CreateJobRequest
-	31,  // 120: cdrom.db.v1.Database.GetJob:input_type -> cdrom.db.v1.GetJobRequest
-	32,  // 121: cdrom.db.v1.Database.ListJobs:input_type -> cdrom.db.v1.ListJobsRequest
-	34,  // 122: cdrom.db.v1.Database.ListRetriableJobs:input_type -> cdrom.db.v1.ListRetriableJobsRequest
-	35,  // 123: cdrom.db.v1.Database.UpdateJob:input_type -> cdrom.db.v1.UpdateJobRequest
-	74,  // 124: cdrom.db.v1.Database.DeleteJob:input_type -> cdrom.db.v1.DeleteJobRequest
-	71,  // 125: cdrom.db.v1.Database.ClaimJobRetry:input_type -> cdrom.db.v1.ClaimJobRetryRequest
-	72,  // 126: cdrom.db.v1.Database.RerunJob:input_type -> cdrom.db.v1.RerunJobRequest
-	36,  // 127: cdrom.db.v1.Database.ReapJob:input_type -> cdrom.db.v1.ReapJobRequest
-	38,  // 128: cdrom.db.v1.Database.CancelJob:input_type -> cdrom.db.v1.CancelJobRequest
-	40,  // 129: cdrom.db.v1.Database.SkipJob:input_type -> cdrom.db.v1.SkipJobRequest
-	42,  // 130: cdrom.db.v1.Database.ClaimJob:input_type -> cdrom.db.v1.ClaimJobRequest
-	44,  // 131: cdrom.db.v1.Database.ListPendingByGroup:input_type -> cdrom.db.v1.ListPendingByGroupRequest
-	46,  // 132: cdrom.db.v1.Database.StartJobExecution:input_type -> cdrom.db.v1.StartJobExecutionRequest
-	48,  // 133: cdrom.db.v1.Database.ListJobExecutions:input_type -> cdrom.db.v1.ListJobExecutionsRequest
-	50,  // 134: cdrom.db.v1.Database.UpdateJobExecution:input_type -> cdrom.db.v1.UpdateJobExecutionRequest
-	51,  // 135: cdrom.db.v1.Database.AbandonWorkerExecutions:input_type -> cdrom.db.v1.AbandonWorkerExecutionsRequest
-	53,  // 136: cdrom.db.v1.Database.ReportStepCompletion:input_type -> cdrom.db.v1.ReportStepCompletionRequest
-	54,  // 137: cdrom.db.v1.Database.CheckStepBarrier:input_type -> cdrom.db.v1.CheckStepBarrierRequest
-	57,  // 138: cdrom.db.v1.Database.PublishAssignment:input_type -> cdrom.db.v1.PublishAssignmentRequest
-	58,  // 139: cdrom.db.v1.Database.PublishCancel:input_type -> cdrom.db.v1.PublishCancelRequest
-	59,  // 140: cdrom.db.v1.Database.PublishJobStatus:input_type -> cdrom.db.v1.PublishJobStatusRequest
-	60,  // 141: cdrom.db.v1.Database.PublishRunStatus:input_type -> cdrom.db.v1.PublishRunStatusRequest
-	61,  // 142: cdrom.db.v1.Database.PublishWorkerEvent:input_type -> cdrom.db.v1.PublishWorkerEventRequest
-	62,  // 143: cdrom.db.v1.Database.PublishLogUpdated:input_type -> cdrom.db.v1.PublishLogUpdatedRequest
-	64,  // 144: cdrom.db.v1.Database.TailEvents:input_type -> cdrom.db.v1.TailEventsRequest
-	66,  // 145: cdrom.db.v1.Database.AcquireLease:input_type -> cdrom.db.v1.AcquireLeaseRequest
-	68,  // 146: cdrom.db.v1.Database.ReleaseLease:input_type -> cdrom.db.v1.ReleaseLeaseRequest
-	69,  // 147: cdrom.db.v1.Database.GetLease:input_type -> cdrom.db.v1.GetLeaseRequest
-	76,  // 148: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
-	77,  // 149: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
-	78,  // 150: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
-	80,  // 151: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
-	81,  // 152: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
-	83,  // 153: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
-	85,  // 154: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
-	87,  // 155: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
-	88,  // 156: cdrom.db.v1.Database.ConsumeIDPAuthCode:input_type -> cdrom.db.v1.ConsumeIDPAuthCodeRequest
-	89,  // 157: cdrom.db.v1.Database.PruneIDPAuthCodes:input_type -> cdrom.db.v1.PruneIDPAuthCodesRequest
-	5,   // 158: cdrom.db.v1.Database.CreatePipeline:output_type -> cdrom.db.v1.Pipeline
-	5,   // 159: cdrom.db.v1.Database.GetPipeline:output_type -> cdrom.db.v1.Pipeline
-	10,  // 160: cdrom.db.v1.Database.ListPipelines:output_type -> cdrom.db.v1.ListPipelinesResponse
-	5,   // 161: cdrom.db.v1.Database.UpdatePipeline:output_type -> cdrom.db.v1.Pipeline
-	106, // 162: cdrom.db.v1.Database.DeletePipeline:output_type -> google.protobuf.Empty
-	17,  // 163: cdrom.db.v1.Database.TriggerRun:output_type -> cdrom.db.v1.TriggerRunResponse
-	15,  // 164: cdrom.db.v1.Database.CreateRun:output_type -> cdrom.db.v1.CreateRunResponse
-	13,  // 165: cdrom.db.v1.Database.GetRun:output_type -> cdrom.db.v1.PipelineRun
-	20,  // 166: cdrom.db.v1.Database.ListRuns:output_type -> cdrom.db.v1.ListRunsResponse
-	13,  // 167: cdrom.db.v1.Database.UpdateRun:output_type -> cdrom.db.v1.PipelineRun
-	28,  // 168: cdrom.db.v1.Database.CreateJob:output_type -> cdrom.db.v1.Job
-	28,  // 169: cdrom.db.v1.Database.GetJob:output_type -> cdrom.db.v1.Job
-	33,  // 170: cdrom.db.v1.Database.ListJobs:output_type -> cdrom.db.v1.ListJobsResponse
-	33,  // 171: cdrom.db.v1.Database.ListRetriableJobs:output_type -> cdrom.db.v1.ListJobsResponse
-	28,  // 172: cdrom.db.v1.Database.UpdateJob:output_type -> cdrom.db.v1.Job
-	106, // 173: cdrom.db.v1.Database.DeleteJob:output_type -> google.protobuf.Empty
-	73,  // 174: cdrom.db.v1.Database.ClaimJobRetry:output_type -> cdrom.db.v1.ClaimJobRetryResponse
-	28,  // 175: cdrom.db.v1.Database.RerunJob:output_type -> cdrom.db.v1.Job
-	37,  // 176: cdrom.db.v1.Database.ReapJob:output_type -> cdrom.db.v1.ReapJobResponse
-	39,  // 177: cdrom.db.v1.Database.CancelJob:output_type -> cdrom.db.v1.CancelJobResponse
-	41,  // 178: cdrom.db.v1.Database.SkipJob:output_type -> cdrom.db.v1.SkipJobResponse
-	43,  // 179: cdrom.db.v1.Database.ClaimJob:output_type -> cdrom.db.v1.ClaimJobResponse
-	33,  // 180: cdrom.db.v1.Database.ListPendingByGroup:output_type -> cdrom.db.v1.ListJobsResponse
-	47,  // 181: cdrom.db.v1.Database.StartJobExecution:output_type -> cdrom.db.v1.StartJobExecutionResponse
-	49,  // 182: cdrom.db.v1.Database.ListJobExecutions:output_type -> cdrom.db.v1.ListJobExecutionsResponse
-	45,  // 183: cdrom.db.v1.Database.UpdateJobExecution:output_type -> cdrom.db.v1.JobExecution
-	106, // 184: cdrom.db.v1.Database.AbandonWorkerExecutions:output_type -> google.protobuf.Empty
-	106, // 185: cdrom.db.v1.Database.ReportStepCompletion:output_type -> google.protobuf.Empty
-	55,  // 186: cdrom.db.v1.Database.CheckStepBarrier:output_type -> cdrom.db.v1.CheckStepBarrierResponse
-	63,  // 187: cdrom.db.v1.Database.PublishAssignment:output_type -> cdrom.db.v1.PublishEventResponse
-	63,  // 188: cdrom.db.v1.Database.PublishCancel:output_type -> cdrom.db.v1.PublishEventResponse
-	63,  // 189: cdrom.db.v1.Database.PublishJobStatus:output_type -> cdrom.db.v1.PublishEventResponse
-	63,  // 190: cdrom.db.v1.Database.PublishRunStatus:output_type -> cdrom.db.v1.PublishEventResponse
-	63,  // 191: cdrom.db.v1.Database.PublishWorkerEvent:output_type -> cdrom.db.v1.PublishEventResponse
-	63,  // 192: cdrom.db.v1.Database.PublishLogUpdated:output_type -> cdrom.db.v1.PublishEventResponse
-	65,  // 193: cdrom.db.v1.Database.TailEvents:output_type -> cdrom.db.v1.TailEventsResponse
-	67,  // 194: cdrom.db.v1.Database.AcquireLease:output_type -> cdrom.db.v1.AcquireLeaseResponse
-	106, // 195: cdrom.db.v1.Database.ReleaseLease:output_type -> google.protobuf.Empty
-	70,  // 196: cdrom.db.v1.Database.GetLease:output_type -> cdrom.db.v1.Lease
-	75,  // 197: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
-	75,  // 198: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
-	79,  // 199: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
-	75,  // 200: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
-	106, // 201: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
-	84,  // 202: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
-	106, // 203: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
-	106, // 204: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
-	86,  // 205: cdrom.db.v1.Database.ConsumeIDPAuthCode:output_type -> cdrom.db.v1.IDPAuthCode
-	106, // 206: cdrom.db.v1.Database.PruneIDPAuthCodes:output_type -> google.protobuf.Empty
-	158, // [158:207] is the sub-list for method output_type
-	109, // [109:158] is the sub-list for method input_type
-	109, // [109:109] is the sub-list for extension type_name
-	109, // [109:109] is the sub-list for extension extendee
-	0,   // [0:109] is the sub-list for field type_name
+	30,  // 3: cdrom.db.v1.Pipeline.jobs:type_name -> cdrom.db.v1.JobDefinition
+	7,   // 4: cdrom.db.v1.Pipeline.triggers:type_name -> cdrom.db.v1.Trigger
+	5,   // 5: cdrom.db.v1.Pipeline.params:type_name -> cdrom.db.v1.Parameter
+	0,   // 6: cdrom.db.v1.Trigger.type:type_name -> cdrom.db.v1.TriggerType
+	1,   // 7: cdrom.db.v1.Trigger.event_status:type_name -> cdrom.db.v1.RunStatus
+	91,  // 8: cdrom.db.v1.Trigger.params:type_name -> cdrom.db.v1.Trigger.ParamsEntry
+	92,  // 9: cdrom.db.v1.Trigger.oidc_claims:type_name -> cdrom.db.v1.Trigger.OidcClaimsEntry
+	3,   // 10: cdrom.db.v1.CreatePipelineRequest.failure_mode:type_name -> cdrom.db.v1.FailureMode
+	30,  // 11: cdrom.db.v1.CreatePipelineRequest.jobs:type_name -> cdrom.db.v1.JobDefinition
+	7,   // 12: cdrom.db.v1.CreatePipelineRequest.triggers:type_name -> cdrom.db.v1.Trigger
+	5,   // 13: cdrom.db.v1.CreatePipelineRequest.params:type_name -> cdrom.db.v1.Parameter
+	0,   // 14: cdrom.db.v1.ListPipelinesRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
+	6,   // 15: cdrom.db.v1.ListPipelinesResponse.pipelines:type_name -> cdrom.db.v1.Pipeline
+	3,   // 16: cdrom.db.v1.UpdatePipelineRequest.failure_mode:type_name -> cdrom.db.v1.FailureMode
+	30,  // 17: cdrom.db.v1.UpdatePipelineRequest.jobs:type_name -> cdrom.db.v1.JobDefinition
+	7,   // 18: cdrom.db.v1.UpdatePipelineRequest.triggers:type_name -> cdrom.db.v1.Trigger
+	5,   // 19: cdrom.db.v1.UpdatePipelineRequest.params:type_name -> cdrom.db.v1.Parameter
+	1,   // 20: cdrom.db.v1.PipelineRun.status:type_name -> cdrom.db.v1.RunStatus
+	93,  // 21: cdrom.db.v1.PipelineRun.params:type_name -> cdrom.db.v1.PipelineRun.ParamsEntry
+	105, // 22: cdrom.db.v1.PipelineRun.started_at:type_name -> google.protobuf.Timestamp
+	105, // 23: cdrom.db.v1.PipelineRun.finished_at:type_name -> google.protobuf.Timestamp
+	105, // 24: cdrom.db.v1.PipelineRun.created_at:type_name -> google.protobuf.Timestamp
+	105, // 25: cdrom.db.v1.PipelineRun.updated_at:type_name -> google.protobuf.Timestamp
+	106, // 26: cdrom.db.v1.PipelineRun.upstream_claims:type_name -> google.protobuf.Struct
+	94,  // 27: cdrom.db.v1.CreateRunRequest.params:type_name -> cdrom.db.v1.CreateRunRequest.ParamsEntry
+	14,  // 28: cdrom.db.v1.CreateRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
+	29,  // 29: cdrom.db.v1.CreateRunResponse.jobs:type_name -> cdrom.db.v1.Job
+	0,   // 30: cdrom.db.v1.TriggerRunRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
+	95,  // 31: cdrom.db.v1.TriggerRunRequest.params:type_name -> cdrom.db.v1.TriggerRunRequest.ParamsEntry
+	107, // 32: cdrom.db.v1.TriggerRunRequest.dedup_window:type_name -> google.protobuf.Duration
+	106, // 33: cdrom.db.v1.TriggerRunRequest.upstream_claims:type_name -> google.protobuf.Struct
+	14,  // 34: cdrom.db.v1.TriggerRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
+	29,  // 35: cdrom.db.v1.TriggerRunResponse.jobs:type_name -> cdrom.db.v1.Job
+	1,   // 36: cdrom.db.v1.ListRunsRequest.status:type_name -> cdrom.db.v1.RunStatus
+	105, // 37: cdrom.db.v1.ListRunsRequest.finished_after:type_name -> google.protobuf.Timestamp
+	14,  // 38: cdrom.db.v1.ListRunsResponse.runs:type_name -> cdrom.db.v1.PipelineRun
+	1,   // 39: cdrom.db.v1.UpdateRunRequest.status:type_name -> cdrom.db.v1.RunStatus
+	105, // 40: cdrom.db.v1.UpdateRunRequest.started_at:type_name -> google.protobuf.Timestamp
+	105, // 41: cdrom.db.v1.UpdateRunRequest.finished_at:type_name -> google.protobuf.Timestamp
+	4,   // 42: cdrom.db.v1.StepResult.status:type_name -> cdrom.db.v1.StepStatus
+	96,  // 43: cdrom.db.v1.StepResult.outputs:type_name -> cdrom.db.v1.StepResult.OutputsEntry
+	2,   // 44: cdrom.db.v1.UpstreamJob.status:type_name -> cdrom.db.v1.JobStatus
+	97,  // 45: cdrom.db.v1.UpstreamJob.outputs:type_name -> cdrom.db.v1.UpstreamJob.OutputsEntry
+	98,  // 46: cdrom.db.v1.JobStep.env:type_name -> cdrom.db.v1.JobStep.EnvEntry
+	107, // 47: cdrom.db.v1.JobStep.timeout:type_name -> google.protobuf.Duration
+	99,  // 48: cdrom.db.v1.JobStep.params:type_name -> cdrom.db.v1.JobStep.ParamsEntry
+	107, // 49: cdrom.db.v1.RetryPolicy.backoff:type_name -> google.protobuf.Duration
+	26,  // 50: cdrom.db.v1.JobSpec.steps:type_name -> cdrom.db.v1.JobStep
+	107, // 51: cdrom.db.v1.JobSpec.timeout:type_name -> google.protobuf.Duration
+	27,  // 52: cdrom.db.v1.JobSpec.retry:type_name -> cdrom.db.v1.RetryPolicy
+	3,   // 53: cdrom.db.v1.JobSpec.failure_mode:type_name -> cdrom.db.v1.FailureMode
+	2,   // 54: cdrom.db.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
+	105, // 55: cdrom.db.v1.Job.started_at:type_name -> google.protobuf.Timestamp
+	105, // 56: cdrom.db.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
+	105, // 57: cdrom.db.v1.Job.created_at:type_name -> google.protobuf.Timestamp
+	105, // 58: cdrom.db.v1.Job.updated_at:type_name -> google.protobuf.Timestamp
+	28,  // 59: cdrom.db.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
+	23,  // 60: cdrom.db.v1.Job.step_results:type_name -> cdrom.db.v1.StepResult
+	100, // 61: cdrom.db.v1.Job.outputs:type_name -> cdrom.db.v1.Job.OutputsEntry
+	24,  // 62: cdrom.db.v1.Job.upstream_jobs:type_name -> cdrom.db.v1.UpstreamJob
+	3,   // 63: cdrom.db.v1.Job.failure_mode:type_name -> cdrom.db.v1.FailureMode
+	106, // 64: cdrom.db.v1.Job.upstream_claims:type_name -> google.protobuf.Struct
+	101, // 65: cdrom.db.v1.Job.run_params:type_name -> cdrom.db.v1.Job.RunParamsEntry
+	28,  // 66: cdrom.db.v1.JobDefinition.spec:type_name -> cdrom.db.v1.JobSpec
+	28,  // 67: cdrom.db.v1.CreateJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
+	2,   // 68: cdrom.db.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
+	29,  // 69: cdrom.db.v1.ListJobsResponse.jobs:type_name -> cdrom.db.v1.Job
+	2,   // 70: cdrom.db.v1.UpdateJobRequest.status:type_name -> cdrom.db.v1.JobStatus
+	105, // 71: cdrom.db.v1.UpdateJobRequest.started_at:type_name -> google.protobuf.Timestamp
+	105, // 72: cdrom.db.v1.UpdateJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	23,  // 73: cdrom.db.v1.UpdateJobRequest.step_results:type_name -> cdrom.db.v1.StepResult
+	102, // 74: cdrom.db.v1.UpdateJobRequest.outputs:type_name -> cdrom.db.v1.UpdateJobRequest.OutputsEntry
+	105, // 75: cdrom.db.v1.ReapJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	105, // 76: cdrom.db.v1.CancelJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	105, // 77: cdrom.db.v1.SkipJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	105, // 78: cdrom.db.v1.ClaimJobRequest.started_at:type_name -> google.protobuf.Timestamp
+	2,   // 79: cdrom.db.v1.JobExecution.status:type_name -> cdrom.db.v1.JobStatus
+	105, // 80: cdrom.db.v1.JobExecution.started_at:type_name -> google.protobuf.Timestamp
+	105, // 81: cdrom.db.v1.JobExecution.finished_at:type_name -> google.protobuf.Timestamp
+	105, // 82: cdrom.db.v1.JobExecution.created_at:type_name -> google.protobuf.Timestamp
+	105, // 83: cdrom.db.v1.JobExecution.updated_at:type_name -> google.protobuf.Timestamp
+	23,  // 84: cdrom.db.v1.JobExecution.step_results:type_name -> cdrom.db.v1.StepResult
+	103, // 85: cdrom.db.v1.JobExecution.outputs:type_name -> cdrom.db.v1.JobExecution.OutputsEntry
+	105, // 86: cdrom.db.v1.StartJobExecutionRequest.started_at:type_name -> google.protobuf.Timestamp
+	46,  // 87: cdrom.db.v1.StartJobExecutionResponse.execution:type_name -> cdrom.db.v1.JobExecution
+	46,  // 88: cdrom.db.v1.ListJobExecutionsResponse.executions:type_name -> cdrom.db.v1.JobExecution
+	2,   // 89: cdrom.db.v1.UpdateJobExecutionRequest.status:type_name -> cdrom.db.v1.JobStatus
+	105, // 90: cdrom.db.v1.UpdateJobExecutionRequest.finished_at:type_name -> google.protobuf.Timestamp
+	23,  // 91: cdrom.db.v1.UpdateJobExecutionRequest.step_results:type_name -> cdrom.db.v1.StepResult
+	104, // 92: cdrom.db.v1.UpdateJobExecutionRequest.outputs:type_name -> cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
+	105, // 93: cdrom.db.v1.StepCompletion.created_at:type_name -> google.protobuf.Timestamp
+	105, // 94: cdrom.db.v1.StepCompletion.updated_at:type_name -> google.protobuf.Timestamp
+	105, // 95: cdrom.db.v1.Event.created_at:type_name -> google.protobuf.Timestamp
+	2,   // 96: cdrom.db.v1.PublishJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
+	1,   // 97: cdrom.db.v1.PublishRunStatusRequest.status:type_name -> cdrom.db.v1.RunStatus
+	57,  // 98: cdrom.db.v1.TailEventsResponse.events:type_name -> cdrom.db.v1.Event
+	107, // 99: cdrom.db.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	107, // 100: cdrom.db.v1.AcquireLeaseRequest.heartbeat_ttl:type_name -> google.protobuf.Duration
+	105, // 101: cdrom.db.v1.Lease.expires_at:type_name -> google.protobuf.Timestamp
+	105, // 102: cdrom.db.v1.Lease.last_heartbeat:type_name -> google.protobuf.Timestamp
+	105, // 103: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
+	76,  // 104: cdrom.db.v1.ListWorkersResponse.workers:type_name -> cdrom.db.v1.Worker
+	105, // 105: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
+	105, // 106: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
+	83,  // 107: cdrom.db.v1.ListIDPSigningKeysResponse.keys:type_name -> cdrom.db.v1.IDPSigningKey
+	83,  // 108: cdrom.db.v1.SetIDPSigningKeysRequest.keys:type_name -> cdrom.db.v1.IDPSigningKey
+	105, // 109: cdrom.db.v1.IDPAuthCode.created_at:type_name -> google.protobuf.Timestamp
+	87,  // 110: cdrom.db.v1.StoreIDPAuthCodeRequest.code:type_name -> cdrom.db.v1.IDPAuthCode
+	105, // 111: cdrom.db.v1.PruneIDPAuthCodesRequest.created_before:type_name -> google.protobuf.Timestamp
+	25,  // 112: cdrom.db.v1.JobStep.ParamsEntry.value:type_name -> cdrom.db.v1.ParamValue
+	8,   // 113: cdrom.db.v1.Database.CreatePipeline:input_type -> cdrom.db.v1.CreatePipelineRequest
+	9,   // 114: cdrom.db.v1.Database.GetPipeline:input_type -> cdrom.db.v1.GetPipelineRequest
+	10,  // 115: cdrom.db.v1.Database.ListPipelines:input_type -> cdrom.db.v1.ListPipelinesRequest
+	12,  // 116: cdrom.db.v1.Database.UpdatePipeline:input_type -> cdrom.db.v1.UpdatePipelineRequest
+	13,  // 117: cdrom.db.v1.Database.DeletePipeline:input_type -> cdrom.db.v1.DeletePipelineRequest
+	17,  // 118: cdrom.db.v1.Database.TriggerRun:input_type -> cdrom.db.v1.TriggerRunRequest
+	15,  // 119: cdrom.db.v1.Database.CreateRun:input_type -> cdrom.db.v1.CreateRunRequest
+	19,  // 120: cdrom.db.v1.Database.GetRun:input_type -> cdrom.db.v1.GetRunRequest
+	20,  // 121: cdrom.db.v1.Database.ListRuns:input_type -> cdrom.db.v1.ListRunsRequest
+	22,  // 122: cdrom.db.v1.Database.UpdateRun:input_type -> cdrom.db.v1.UpdateRunRequest
+	31,  // 123: cdrom.db.v1.Database.CreateJob:input_type -> cdrom.db.v1.CreateJobRequest
+	32,  // 124: cdrom.db.v1.Database.GetJob:input_type -> cdrom.db.v1.GetJobRequest
+	33,  // 125: cdrom.db.v1.Database.ListJobs:input_type -> cdrom.db.v1.ListJobsRequest
+	35,  // 126: cdrom.db.v1.Database.ListRetriableJobs:input_type -> cdrom.db.v1.ListRetriableJobsRequest
+	36,  // 127: cdrom.db.v1.Database.UpdateJob:input_type -> cdrom.db.v1.UpdateJobRequest
+	75,  // 128: cdrom.db.v1.Database.DeleteJob:input_type -> cdrom.db.v1.DeleteJobRequest
+	72,  // 129: cdrom.db.v1.Database.ClaimJobRetry:input_type -> cdrom.db.v1.ClaimJobRetryRequest
+	73,  // 130: cdrom.db.v1.Database.RerunJob:input_type -> cdrom.db.v1.RerunJobRequest
+	37,  // 131: cdrom.db.v1.Database.ReapJob:input_type -> cdrom.db.v1.ReapJobRequest
+	39,  // 132: cdrom.db.v1.Database.CancelJob:input_type -> cdrom.db.v1.CancelJobRequest
+	41,  // 133: cdrom.db.v1.Database.SkipJob:input_type -> cdrom.db.v1.SkipJobRequest
+	43,  // 134: cdrom.db.v1.Database.ClaimJob:input_type -> cdrom.db.v1.ClaimJobRequest
+	45,  // 135: cdrom.db.v1.Database.ListPendingByGroup:input_type -> cdrom.db.v1.ListPendingByGroupRequest
+	47,  // 136: cdrom.db.v1.Database.StartJobExecution:input_type -> cdrom.db.v1.StartJobExecutionRequest
+	49,  // 137: cdrom.db.v1.Database.ListJobExecutions:input_type -> cdrom.db.v1.ListJobExecutionsRequest
+	51,  // 138: cdrom.db.v1.Database.UpdateJobExecution:input_type -> cdrom.db.v1.UpdateJobExecutionRequest
+	52,  // 139: cdrom.db.v1.Database.AbandonWorkerExecutions:input_type -> cdrom.db.v1.AbandonWorkerExecutionsRequest
+	54,  // 140: cdrom.db.v1.Database.ReportStepCompletion:input_type -> cdrom.db.v1.ReportStepCompletionRequest
+	55,  // 141: cdrom.db.v1.Database.CheckStepBarrier:input_type -> cdrom.db.v1.CheckStepBarrierRequest
+	58,  // 142: cdrom.db.v1.Database.PublishAssignment:input_type -> cdrom.db.v1.PublishAssignmentRequest
+	59,  // 143: cdrom.db.v1.Database.PublishCancel:input_type -> cdrom.db.v1.PublishCancelRequest
+	60,  // 144: cdrom.db.v1.Database.PublishJobStatus:input_type -> cdrom.db.v1.PublishJobStatusRequest
+	61,  // 145: cdrom.db.v1.Database.PublishRunStatus:input_type -> cdrom.db.v1.PublishRunStatusRequest
+	62,  // 146: cdrom.db.v1.Database.PublishWorkerEvent:input_type -> cdrom.db.v1.PublishWorkerEventRequest
+	63,  // 147: cdrom.db.v1.Database.PublishLogUpdated:input_type -> cdrom.db.v1.PublishLogUpdatedRequest
+	65,  // 148: cdrom.db.v1.Database.TailEvents:input_type -> cdrom.db.v1.TailEventsRequest
+	67,  // 149: cdrom.db.v1.Database.AcquireLease:input_type -> cdrom.db.v1.AcquireLeaseRequest
+	69,  // 150: cdrom.db.v1.Database.ReleaseLease:input_type -> cdrom.db.v1.ReleaseLeaseRequest
+	70,  // 151: cdrom.db.v1.Database.GetLease:input_type -> cdrom.db.v1.GetLeaseRequest
+	77,  // 152: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
+	78,  // 153: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
+	79,  // 154: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
+	81,  // 155: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
+	82,  // 156: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
+	84,  // 157: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
+	86,  // 158: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
+	88,  // 159: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
+	89,  // 160: cdrom.db.v1.Database.ConsumeIDPAuthCode:input_type -> cdrom.db.v1.ConsumeIDPAuthCodeRequest
+	90,  // 161: cdrom.db.v1.Database.PruneIDPAuthCodes:input_type -> cdrom.db.v1.PruneIDPAuthCodesRequest
+	6,   // 162: cdrom.db.v1.Database.CreatePipeline:output_type -> cdrom.db.v1.Pipeline
+	6,   // 163: cdrom.db.v1.Database.GetPipeline:output_type -> cdrom.db.v1.Pipeline
+	11,  // 164: cdrom.db.v1.Database.ListPipelines:output_type -> cdrom.db.v1.ListPipelinesResponse
+	6,   // 165: cdrom.db.v1.Database.UpdatePipeline:output_type -> cdrom.db.v1.Pipeline
+	108, // 166: cdrom.db.v1.Database.DeletePipeline:output_type -> google.protobuf.Empty
+	18,  // 167: cdrom.db.v1.Database.TriggerRun:output_type -> cdrom.db.v1.TriggerRunResponse
+	16,  // 168: cdrom.db.v1.Database.CreateRun:output_type -> cdrom.db.v1.CreateRunResponse
+	14,  // 169: cdrom.db.v1.Database.GetRun:output_type -> cdrom.db.v1.PipelineRun
+	21,  // 170: cdrom.db.v1.Database.ListRuns:output_type -> cdrom.db.v1.ListRunsResponse
+	14,  // 171: cdrom.db.v1.Database.UpdateRun:output_type -> cdrom.db.v1.PipelineRun
+	29,  // 172: cdrom.db.v1.Database.CreateJob:output_type -> cdrom.db.v1.Job
+	29,  // 173: cdrom.db.v1.Database.GetJob:output_type -> cdrom.db.v1.Job
+	34,  // 174: cdrom.db.v1.Database.ListJobs:output_type -> cdrom.db.v1.ListJobsResponse
+	34,  // 175: cdrom.db.v1.Database.ListRetriableJobs:output_type -> cdrom.db.v1.ListJobsResponse
+	29,  // 176: cdrom.db.v1.Database.UpdateJob:output_type -> cdrom.db.v1.Job
+	108, // 177: cdrom.db.v1.Database.DeleteJob:output_type -> google.protobuf.Empty
+	74,  // 178: cdrom.db.v1.Database.ClaimJobRetry:output_type -> cdrom.db.v1.ClaimJobRetryResponse
+	29,  // 179: cdrom.db.v1.Database.RerunJob:output_type -> cdrom.db.v1.Job
+	38,  // 180: cdrom.db.v1.Database.ReapJob:output_type -> cdrom.db.v1.ReapJobResponse
+	40,  // 181: cdrom.db.v1.Database.CancelJob:output_type -> cdrom.db.v1.CancelJobResponse
+	42,  // 182: cdrom.db.v1.Database.SkipJob:output_type -> cdrom.db.v1.SkipJobResponse
+	44,  // 183: cdrom.db.v1.Database.ClaimJob:output_type -> cdrom.db.v1.ClaimJobResponse
+	34,  // 184: cdrom.db.v1.Database.ListPendingByGroup:output_type -> cdrom.db.v1.ListJobsResponse
+	48,  // 185: cdrom.db.v1.Database.StartJobExecution:output_type -> cdrom.db.v1.StartJobExecutionResponse
+	50,  // 186: cdrom.db.v1.Database.ListJobExecutions:output_type -> cdrom.db.v1.ListJobExecutionsResponse
+	46,  // 187: cdrom.db.v1.Database.UpdateJobExecution:output_type -> cdrom.db.v1.JobExecution
+	108, // 188: cdrom.db.v1.Database.AbandonWorkerExecutions:output_type -> google.protobuf.Empty
+	108, // 189: cdrom.db.v1.Database.ReportStepCompletion:output_type -> google.protobuf.Empty
+	56,  // 190: cdrom.db.v1.Database.CheckStepBarrier:output_type -> cdrom.db.v1.CheckStepBarrierResponse
+	64,  // 191: cdrom.db.v1.Database.PublishAssignment:output_type -> cdrom.db.v1.PublishEventResponse
+	64,  // 192: cdrom.db.v1.Database.PublishCancel:output_type -> cdrom.db.v1.PublishEventResponse
+	64,  // 193: cdrom.db.v1.Database.PublishJobStatus:output_type -> cdrom.db.v1.PublishEventResponse
+	64,  // 194: cdrom.db.v1.Database.PublishRunStatus:output_type -> cdrom.db.v1.PublishEventResponse
+	64,  // 195: cdrom.db.v1.Database.PublishWorkerEvent:output_type -> cdrom.db.v1.PublishEventResponse
+	64,  // 196: cdrom.db.v1.Database.PublishLogUpdated:output_type -> cdrom.db.v1.PublishEventResponse
+	66,  // 197: cdrom.db.v1.Database.TailEvents:output_type -> cdrom.db.v1.TailEventsResponse
+	68,  // 198: cdrom.db.v1.Database.AcquireLease:output_type -> cdrom.db.v1.AcquireLeaseResponse
+	108, // 199: cdrom.db.v1.Database.ReleaseLease:output_type -> google.protobuf.Empty
+	71,  // 200: cdrom.db.v1.Database.GetLease:output_type -> cdrom.db.v1.Lease
+	76,  // 201: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
+	76,  // 202: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
+	80,  // 203: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
+	76,  // 204: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
+	108, // 205: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
+	85,  // 206: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
+	108, // 207: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
+	108, // 208: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
+	87,  // 209: cdrom.db.v1.Database.ConsumeIDPAuthCode:output_type -> cdrom.db.v1.IDPAuthCode
+	108, // 210: cdrom.db.v1.Database.PruneIDPAuthCodes:output_type -> google.protobuf.Empty
+	162, // [162:211] is the sub-list for method output_type
+	113, // [113:162] is the sub-list for method input_type
+	113, // [113:113] is the sub-list for extension type_name
+	113, // [113:113] is the sub-list for extension extendee
+	0,   // [0:113] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_db_v1_db_proto_init() }
@@ -7024,7 +7167,7 @@ func file_cdrom_db_v1_db_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_db_v1_db_proto_rawDesc), len(file_cdrom_db_v1_db_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   98,
+			NumMessages:   100,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

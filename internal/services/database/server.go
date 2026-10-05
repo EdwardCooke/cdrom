@@ -53,8 +53,16 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// with no secret, a duplicate name) rejects the whole create, so a
 		// pipeline is never saved with a trigger that could never fire.
 		Triggers: triggersFromProto(req.GetTriggers()),
+		// The pipeline's parameter declarations (F-10) are validated before
+		// anything is persisted: a parameter with an empty or duplicate name
+		// rejects the whole create, so a pipeline is never saved with a
+		// parameter that could never be referenced unambiguously.
+		Params: pipelineParamsFromProto(req.GetParams()),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateParams(req.GetParams()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	// The pipeline's job definitions (F-08) are validated as a DAG before
@@ -208,6 +216,16 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		pipeline.Triggers = triggersFromProto(req.GetTriggers())
+	}
+	// When parameters are supplied (F-10) they replace the pipeline's existing
+	// parameter declarations: they are validated (unique, non-empty names)
+	// before anything is persisted. When none are supplied the pipeline's
+	// parameters are left unchanged.
+	if req.GetParams() != nil {
+		if err := validateParams(req.GetParams()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		pipeline.Params = pipelineParamsFromProto(req.GetParams())
 	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
@@ -377,6 +395,12 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 	if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipelineID).Order("id").Find(&defs).Error; err != nil {
 		return nil, nil, err
 	}
+	// The run's concrete parameter values (F-10): the values supplied for the
+	// pipeline's parameters, a parameter not supplied falling back to its
+	// default. They are denormalized onto every job instance so the execution
+	// target can interpolate them into the job's spec (env, command, workdir)
+	// before the job runs.
+	runParams := runParamsFor(pipeline.Params, run.Params)
 	// Pass 1: create every job instance (without depends_on yet) so all
 	// instance ids are known, and record the definition-id -> instance-id
 	// mapping used to remap each instance's depends_on to the run's own
@@ -396,7 +420,8 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			// A new instance starts on its first attempt (F-04); the retry
 			// budget and ignore-failed flag are denormalized from the
 			// definition's spec, mirroring CreateJob.
-			Attempt: 1,
+			Attempt:   1,
+			RunParams: runParams,
 		}
 		if def.Spec.Retry != nil {
 			job.MaxAttempts = def.Spec.Retry.MaxAttempts
@@ -2194,6 +2219,87 @@ func triggerTypeToProto(t models.TriggerType) dbpb.TriggerType {
 	}
 }
 
+// validateParams checks a set of parameter declarations (F-10) for
+// well-formed parameters: names are non-empty and unique within the pipeline.
+// A parameter's default is optional (an empty default means the parameter has
+// no default). It returns a descriptive error naming the offending parameter,
+// or nil when the set is valid.
+func validateParams(params []*dbpb.Parameter) error {
+	seen := make(map[string]struct{}, len(params))
+	for _, param := range params {
+		name := param.GetName()
+		if name == "" {
+			return fmt.Errorf("parameter has an empty name")
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("duplicate parameter name %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+// pipelineParamsFromProto converts a list of proto parameter declarations into
+// the model's parameters (F-10). An empty list yields nil, so an update with
+// no params leaves the pipeline's parameters unchanged.
+func pipelineParamsFromProto(params []*dbpb.Parameter) []models.Parameter {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make([]models.Parameter, 0, len(params))
+	for _, param := range params {
+		out = append(out, models.Parameter{
+			Name:        param.GetName(),
+			Default:     param.GetDefault(),
+			Description: param.GetDescription(),
+		})
+	}
+	return out
+}
+
+// pipelineParamsToProto converts the model's parameter declarations into a
+// list of proto parameters (F-10). An empty slice yields nil.
+func pipelineParamsToProto(params []models.Parameter) []*dbpb.Parameter {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.Parameter, 0, len(params))
+	for i := range params {
+		out = append(out, &dbpb.Parameter{
+			Name:        params[i].Name,
+			Default:     params[i].Default,
+			Description: params[i].Description,
+		})
+	}
+	return out
+}
+
+// runParamsFor merges a run's supplied parameter values over a pipeline's
+// parameter declarations (F-10): a parameter not supplied falls back to its
+// default, and a parameter with no supplied value and no default is omitted
+// (so a spec field that references it fails to interpolate, rather than
+// silently rendering to an empty string). It returns nil when the result is
+// empty.
+func runParamsFor(params []models.Parameter, supplied map[string]string) map[string]string {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(params))
+	for _, param := range params {
+		if value, ok := supplied[param.Name]; ok {
+			out[param.Name] = value
+			continue
+		}
+		if param.Default != "" {
+			out[param.Name] = param.Default
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // jobDefinitionsFromProto converts a list of proto job definitions into the
 // model's job definitions (F-08). A definition's name defaults to its key when
 // empty, and its failure mode defaults to FailureModeAll. The definition's
@@ -2325,6 +2431,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		FailureMode: failureModeToProto(pipeline.FailureMode),
 		Jobs:        toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
 		Triggers:    triggersToProto(pipeline.Triggers),
+		Params:      pipelineParamsToProto(pipeline.Params),
 	}
 }
 
@@ -2413,6 +2520,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		TriggerName:    job.TriggerName,
 		TriggerType:    job.TriggerType,
 		UpstreamClaims: upstreamClaimsToStruct(job.UpstreamClaims),
+		RunParams:      job.RunParams,
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)

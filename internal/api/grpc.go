@@ -1189,6 +1189,7 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		TriggerName:    job.GetTriggerName(),
 		TriggerType:    job.GetTriggerType(),
 		UpstreamClaims: job.GetUpstreamClaims(),
+		RunParams:      job.GetRunParams(),
 	}
 }
 

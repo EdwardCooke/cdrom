@@ -549,3 +549,148 @@ func TestExecuteStepBarrierCancelledStopsJob(t *testing.T) {
 		t.Errorf("error = %v, want it to wrap ErrCancelled", err)
 	}
 }
+
+// TestExecuteInterpolatesEnvFromRunParams verifies that a step's env values
+// are rendered as Go templates against the run's parameters (F-10): a value
+// like `{{ .params.version }}` (or `{{ .version }}`) is replaced with the
+// parameter's value before the step runs.
+func TestExecuteInterpolatesEnvFromRunParams(t *testing.T) {
+	var gotEnv map[string]string
+	RegisterStepType("env-interp", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gotEnv = step.GetEnv()
+		return nil
+	})
+
+	ctx := ContextWithRunInfo(context.Background(), RunInfo{Params: map[string]string{"version": "2.0.0"}})
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "env-interp", Env: map[string]string{"DEST": "{{ .params.version }}", "PLAIN": "static"}},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotEnv["DEST"] != "2.0.0" {
+		t.Errorf("env[DEST] = %q, want 2.0.0 (interpolated from run params)", gotEnv["DEST"])
+	}
+	if gotEnv["PLAIN"] != "static" {
+		t.Errorf("env[PLAIN] = %q, want static (unchanged)", gotEnv["PLAIN"])
+	}
+}
+
+// TestExecuteInterpolatesCommandFromRunParams verifies that a step's params
+// (e.g. the shell handler's command) are rendered as Go templates against the
+// run's parameters (F-10), so the same spec can be reused across runs with
+// different inputs.
+func TestExecuteInterpolatesCommandFromRunParams(t *testing.T) {
+	var gotCommand string
+	RegisterStepType("cmd-interp", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gotCommand = step.GetParams()["command"].GetString_()
+		return nil
+	})
+
+	ctx := ContextWithRunInfo(context.Background(), RunInfo{Params: map[string]string{"version": "2.0.0", "env": "prod"}})
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "cmd-interp", Params: map[string]*dbpb.ParamValue{
+			"command": {String_: "deploy --version {{ .params.version }} --env {{ .env }}"},
+		}},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotCommand != "deploy --version 2.0.0 --env prod" {
+		t.Errorf("command = %q, want %q", gotCommand, "deploy --version 2.0.0 --env prod")
+	}
+}
+
+// TestExecuteInterpolatesWorkdirFromRunParams verifies that a step's workdir
+// is rendered as a Go template against the run's parameters (F-10).
+func TestExecuteInterpolatesWorkdirFromRunParams(t *testing.T) {
+	var gotWorkdir string
+	RegisterStepType("workdir-interp", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gotWorkdir = step.GetWorkdir()
+		return nil
+	})
+
+	ctx := ContextWithRunInfo(context.Background(), RunInfo{Params: map[string]string{"dir": "/build/2.0.0"}})
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "workdir-interp", Workdir: "{{ .params.dir }}"},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotWorkdir != "/build/2.0.0" {
+		t.Errorf("workdir = %q, want /build/2.0.0 (interpolated from run params)", gotWorkdir)
+	}
+}
+
+// TestExecuteConditionReferencesRunParams verifies that a step's condition can
+// reference the run's parameters (F-10), via the "params" key or the
+// top-level parameter name.
+func TestExecuteConditionReferencesRunParams(t *testing.T) {
+	var gatedRan bool
+	RegisterStepType("gated-params", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gatedRan = true
+		return nil
+	})
+
+	ctx := ContextWithRunInfo(context.Background(), RunInfo{Params: map[string]string{"environment": "prod"}})
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		// Runs only if the run's environment parameter is "prod".
+		{Type: "gated-params", Condition: `{{ if eq .params.environment "prod" }}true{{ else }}false{{ end }}`},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !gatedRan {
+		t.Error("gated step did not run although the run's environment param is prod")
+	}
+}
+
+// TestExecuteInterpolationUndefinedParamFailsJob verifies that a spec field
+// that references a parameter with no value (no supplied value and no
+// default) is a spec error that fails the job (F-10): an undefined reference
+// never silently renders to an empty string.
+func TestExecuteInterpolationUndefinedParamFailsJob(t *testing.T) {
+	var laterRan bool
+	RegisterStepType("interp-undefined", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		return nil
+	})
+	RegisterStepType("interp-later", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		laterRan = true
+		return nil
+	})
+
+	// "missing" has no value in the run's params, so the env reference fails.
+	ctx := ContextWithRunInfo(context.Background(), RunInfo{Params: map[string]string{"present": "x"}})
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "interp-undefined", Env: map[string]string{"X": "{{ .params.missing }}"}},
+		{Type: "interp-later"},
+	}}
+	err := Execute(ctx, spec, testLogger())
+	if err == nil {
+		t.Fatal("expected an error for an undefined parameter reference, got nil")
+	}
+	if laterRan {
+		t.Error("a later step ran after an undefined parameter reference failed the job")
+	}
+}
+
+// TestExecuteNoRunParamsLeavesSpecUnchanged verifies that a job that is not
+// part of a run (no run info in the context) runs its spec unchanged (F-10):
+// a field with no template action renders to itself.
+func TestExecuteNoRunParamsLeavesSpecUnchanged(t *testing.T) {
+	var gotCommand string
+	RegisterStepType("no-run-params", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gotCommand = step.GetParams()["command"].GetString_()
+		return nil
+	})
+
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Type: "no-run-params", Params: map[string]*dbpb.ParamValue{"command": {String_: "echo hello"}}},
+	}}
+	if err := Execute(context.Background(), spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if gotCommand != "echo hello" {
+		t.Errorf("command = %q, want echo hello (unchanged with no run params)", gotCommand)
+	}
+}

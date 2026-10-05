@@ -170,6 +170,16 @@ func (a *Agent) runJob(ctx context.Context, job *apipb.Job, collector *executor.
 		Name:   job.GetName(),
 		Status: "running",
 	})
+	// The run's parameters (F-10) are interpolated into the job's spec (env,
+	// command, workdir) and are available to a step's condition. They are
+	// denormalized from the run onto the job by the API.
+	ctx = executor.ContextWithRunInfo(ctx, executor.RunInfo{
+		Params:      job.GetRunParams(),
+		ID:          job.GetRunId(),
+		PipelineID:  job.GetPipelineId(),
+		Trigger:     job.GetTriggerType(),
+		TriggerName: job.GetTriggerName(),
+	})
 	// A step handler (the built-in "token_exchange" handler) can request a new
 	// job token for a different audience (e.g. an outside resource the job
 	// needs to call) while the job runs; the exchanger calls the API's

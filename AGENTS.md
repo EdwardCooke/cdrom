@@ -529,6 +529,46 @@ have non-empty claim names).
   `ListRunsRequest` (db, so the event loop can scan recently-finished runs).
   `POST /api/pipelines/{id}/webhook` (API).
 
+**Parameters & variables (F-10):** a pipeline declares **parameters** — a
+`Parameter` (a `name`, an optional `default`, and an optional `description`)
+— and a run supplies concrete values for them. Those values are interpolated
+into a job's spec (env, command, workdir) using Go templates
+(`text/template`), the same mechanism a step's `condition` uses.
+
+- **Parameters are declared on the pipeline.** A `Parameter` is a first-class
+  message on `Pipeline` (and on `CreatePipelineRequest` /
+  `UpdatePipelineRequest`), stored as a JSON column on the `Pipeline` row.
+  Names must be non-empty and unique within the pipeline; the database service
+  validates this at create and update time.
+- **A run supplies concrete values; defaults fill the gaps.** A run's
+  concrete parameter values are stored on the run (`PipelineRun.Params`, a
+  `map<string,string>`). At run creation the database service merges them
+  against the pipeline's declared parameters (`runParamsFor`): a supplied
+  value wins, else a non-empty default is used, else the parameter is omitted
+  (left unset). The resulting map is **denormalized onto each of the run's
+  job instances** as `run_params` (a JSON column on the `Job` row), so the
+  execution target can interpolate it without a round-trip to the run row —
+  the same denormalization pattern the trigger context uses.
+- **The executor interpolates the spec with Go templates.** Before running a
+  job, the execution target (worker or agent) sets the run's parameter values
+  (plus the run's identity: id, pipeline id, trigger, trigger name) on the
+  executor's context via `executor.ContextWithRunInfo`. The executor then
+  renders each step's `workdir`, each `env` value, and each `params` value
+  (string and string-list) as a `text/template` against a data context that
+  exposes the top-level parameter values (so `{{ .name }}` works) plus
+  `params` (the whole map, so `{{ .params.name }}` works) and `run` (the run
+  identity, so `{{ .run.<field> }}` works). The same `params` / `run` keys are
+  also available to a step's `condition` template.
+- **Undefined references fail the job.** The interpolation template is parsed
+  with `Option("missingkey=error")`, so a reference to a parameter that has no
+  value (no supplied value and no default) is a spec error that fails the job
+  — there are no silent empty strings. This is the documented fallback policy.
+- **New fields / RPCs.** `Parameter` message (db); `params` on `Pipeline`,
+  `CreatePipelineRequest`, and `UpdatePipelineRequest` (db); `run_params` on
+  `Job` (db, scheduler, api). The API's pipeline create/update requests accept
+  a `params` list, and the run-creation path (manual trigger, cron, webhook,
+  event) already carries the run's `params`.
+
 **Fan-out (worker groups):** a job that targets a worker group runs on
 **every** worker in the group — not on a single worker that wins a claim.
 Each worker's run is a separate **`JobExecution`** (one row per
@@ -738,13 +778,16 @@ internal/
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
               LogSink, an optional StepStatusReporter, an optional StepBarrier,
-              and an optional TokenExchange in the context — evaluating each
-              step's `condition` (F-06) to skip it when false, reporting each
-              step's terminal status for a caller's StepResultCollector to
-              attach to its final status report, synchronizing a job's workers
-              at each step boundary via the StepBarrier (cross-worker step
-              barrier), and letting a step handler request a job token for a
-              different audience via the TokenExchange; used by worker + agent)
+              an optional TokenExchange, and an optional RunInfo (the run's
+              parameter values + identity, F-10) in the context — interpolating
+              the job spec's workdir/env/params from the run's parameter values
+              via Go templates (F-10), evaluating each step's `condition` (F-06)
+              to skip it when false, reporting each step's terminal status for a
+              caller's StepResultCollector to attach to its final status report,
+              synchronizing a job's workers at each step boundary via the
+              StepBarrier (cross-worker step barrier), and letting a step handler
+              request a job token for a different audience via the TokenExchange;
+              used by worker + agent)
   stephandlers/ built-in step handlers (the "shell" handler, registered under
               executor.DefaultType, tees step output to a LogSink when present;
               the "token_exchange" handler, registered under token_exchange,

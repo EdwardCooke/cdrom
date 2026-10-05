@@ -220,6 +220,12 @@ message Job {
   // stamps them (prefixed with upstream_) onto the job token it hands to the
   // execution target.
   google.protobuf.Struct upstream_claims = 23;
+  // run_params are the run's concrete parameter values (F-10), denormalized
+  // from the run onto the job instance. The execution target interpolates
+  // them into the job's spec (env, command, workdir) using Go templates
+  // before the job runs. Empty for a job not part of a run (or a run with no
+  // parameters).
+  map<string, string> run_params = 24;
 }
 
 message JobAssignment {

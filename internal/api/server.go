@@ -112,6 +112,20 @@ type pipelineRequest struct {
 	// (unique names, kind-specific fields present) before the pipeline is
 	// saved.
 	Triggers []triggerRequest `json:"triggers,omitempty"`
+	// Params are the pipeline's parameter declarations (F-10): the named,
+	// typed inputs a run can supply. When present they are validated (unique,
+	// non-empty names) before the pipeline is saved.
+	Params []parameterRequest `json:"params,omitempty"`
+}
+
+// parameterRequest is the JSON form of a single pipeline parameter (F-10): a
+// name, an optional default value, and an optional description. A run
+// supplies concrete values for the pipeline's parameters; a parameter not
+// supplied falls back to its default.
+type parameterRequest struct {
+	Name        string `json:"name"`
+	Default     string `json:"default,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // triggerRequest is the JSON form of a single pipeline trigger (F-09). Type
@@ -164,6 +178,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Jobs:        jobs,
 		Triggers:    triggersToProto(req.Triggers),
+		Params:      pipelineParamsToProto(req.Params),
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -193,6 +208,7 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		Jobs:        jobs,
 		Triggers:    triggersToProto(req.Triggers),
+		Params:      pipelineParamsToProto(req.Params),
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -221,6 +237,25 @@ func triggersToProto(triggers []triggerRequest) []*dbpb.Trigger {
 			Params:        trigger.Params,
 			OidcIssuer:    trigger.OIDCIssuer,
 			OidcClaims:    trigger.OIDCClaims,
+		})
+	}
+	return out
+}
+
+// pipelineParamsToProto converts the JSON parameter declarations into the
+// proto Parameter list carried to the database service (F-10). It returns nil
+// when there are no params, so an update with no params leaves the pipeline's
+// parameters unchanged.
+func pipelineParamsToProto(params []parameterRequest) []*dbpb.Parameter {
+	if len(params) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.Parameter, 0, len(params))
+	for _, param := range params {
+		out = append(out, &dbpb.Parameter{
+			Name:        param.Name,
+			Default:     param.Default,
+			Description: param.Description,
 		})
 	}
 	return out

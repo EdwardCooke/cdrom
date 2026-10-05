@@ -11,6 +11,27 @@ import (
 	"gorm.io/gorm"
 )
 
+// Parameter is a named, typed input a pipeline declares (F-10): a name, an
+// optional default value, and an optional description. A run supplies
+// concrete values for the pipeline's parameters (e.g. at trigger time or via
+// a webhook); a parameter not supplied falls back to its default. A run's
+// concrete parameter values are recorded on the run (its Params) and are
+// interpolated into a job's spec (env, command, workdir) by the execution
+// target before the job runs, using Go templates (text/template) like a
+// step's condition: `{{ .params.name }}` (or `{{ .name }}`) renders the
+// parameter's value. A reference to a parameter that has no value (no
+// supplied value and no default) is a spec error that fails the job.
+type Parameter struct {
+	// Name is the parameter's name; it must be unique within the pipeline.
+	Name string `json:"name"`
+	// Default is the value used when a run does not supply a value for the
+	// parameter; empty means the parameter has no default (a run that does
+	// not supply it leaves it unset).
+	Default string `json:"default,omitempty"`
+	// Description is a human-readable description of the parameter.
+	Description string `json:"description,omitempty"`
+}
+
 // Pipeline is a named, ordered definition of work to be executed.
 type Pipeline struct {
 	gorm.Model
@@ -27,6 +48,12 @@ type Pipeline struct {
 	// pipeline's run reaching a state). They are stored as a JSON document in
 	// a text column (portable across SQLite and PostgreSQL).
 	Triggers []Trigger `gorm:"type:text;serializer:json" json:"triggers,omitempty"`
+	// Params are the pipeline's parameter declarations (F-10): the named,
+	// typed inputs a run can supply. They are stored as a JSON document in a
+	// text column (portable across SQLite and PostgreSQL). A run's concrete
+	// values for them are recorded on the run and interpolated into its jobs'
+	// specs by the execution target.
+	Params []Parameter `gorm:"type:text;serializer:json" json:"params,omitempty"`
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -491,6 +518,13 @@ type Job struct {
 	// (prefixed with upstream_) onto the job token it hands to the execution
 	// target.
 	UpstreamClaims map[string]any `gorm:"type:text;serializer:json" json:"upstream_claims,omitempty"`
+	// RunParams are the run's concrete parameter values (F-10): the values
+	// supplied for the pipeline's parameters (a parameter not supplied falls
+	// back to its default), denormalized from the run onto the job instance.
+	// The execution target interpolates them into the job's spec (env,
+	// command, workdir) using Go templates before the job runs. Empty for a
+	// job not part of a run (or a run with no parameters).
+	RunParams map[string]string `gorm:"type:text;serializer:json" json:"run_params,omitempty"`
 }
 
 // StepCompletion records that one worker completed one step of a job's

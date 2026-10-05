@@ -235,6 +235,27 @@ service Database {
   rpc PruneIDPAuthCodes(PruneIDPAuthCodesRequest) returns (google.protobuf.Empty);
 }
 
+// Parameter is a named, typed input a pipeline declares (F-10): a name, an
+// optional default value, and an optional description. A run supplies
+// concrete values for the pipeline's parameters (e.g. at trigger time or via
+// a webhook); a parameter not supplied falls back to its default. A run's
+// concrete parameter values are recorded on the run (its Params) and are
+// interpolated into a job's spec (env, command, workdir) by the execution
+// target before the job runs, using Go templates (text/template) like a
+// step's condition: `{{ .params.name }}` (or `{{ .name }}`) renders the
+// parameter's value. A reference to a parameter that has no value (no
+// supplied value and no default) is a spec error that fails the job.
+message Parameter {
+  // name is the parameter's name; it must be unique within the pipeline.
+  string name = 1;
+  // default is the value used when a run does not supply a value for the
+  // parameter; empty means the parameter has no default (a run that does not
+  // supply it leaves it unset).
+  string default = 2;
+  // description is a human-readable description of the parameter.
+  string description = 3;
+}
+
 message Pipeline {
   int64 id = 1;
   string name = 2;
@@ -255,6 +276,11 @@ message Pipeline {
   // manual click (F-09): a cron schedule, a webhook, or an event (another
   // pipeline's run reaching a state).
   repeated Trigger triggers = 8;
+  // params are the pipeline's parameter declarations (F-10): the named,
+  // typed inputs a run can supply. A run's concrete values for them are
+  // recorded on the run and interpolated into its jobs' specs by the
+  // execution target.
+  repeated Parameter params = 9;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -338,6 +364,10 @@ message CreatePipelineRequest {
   // they are validated (unique names, kind-specific fields present) and
   // persisted alongside the pipeline.
   repeated Trigger triggers = 5;
+  // params are the pipeline's parameter declarations (F-10); when present
+  // they are validated (unique, non-empty names) and persisted alongside the
+  // pipeline.
+  repeated Parameter params = 6;
 }
 
 message GetPipelineRequest {
@@ -375,6 +405,12 @@ message UpdatePipelineRequest {
   // kind-specific fields present) before anything is persisted. When absent
   // the pipeline's triggers are left unchanged.
   repeated Trigger triggers = 6;
+  // params, when present, replaces the pipeline's parameter declarations
+  // (F-10): the pipeline's existing parameters are removed and these are
+  // created in their place, and they are validated (unique, non-empty names)
+  // before anything is persisted. When absent the pipeline's parameters are
+  // left unchanged.
+  repeated Parameter params = 7;
 }
 
 message DeletePipelineRequest {
@@ -862,6 +898,13 @@ message Job {
   // (prefixed with upstream_) onto the job token it hands to the execution
   // target.
   google.protobuf.Struct upstream_claims = 24;
+  // run_params are the run's concrete parameter values (F-10): the values
+  // supplied for the pipeline's parameters (a parameter not supplied falls
+  // back to its default), denormalized from the run onto the job instance.
+  // The execution target interpolates them into the job's spec (env,
+  // command, workdir) using Go templates before the job runs. Empty for a
+  // job not part of a run (or a run with no parameters).
+  map<string, string> run_params = 25;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative

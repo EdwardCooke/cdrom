@@ -84,6 +84,10 @@ message Job {
   // key is the job's stable, pipeline-scoped identifier (F-08); empty when
   // the job is not part of a pipeline.
   string key = 17;
+  // run_params are the run's concrete parameter values (F-10), denormalized
+  // from the run onto the job instance. The execution target interpolates
+  // them into the job's spec using Go templates before the job runs.
+  map<string, string> run_params = 18;
 }
 
 message SubmitJobRequest {

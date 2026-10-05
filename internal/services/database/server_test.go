@@ -2639,3 +2639,186 @@ func TestListPipelinesFilterByTriggerType(t *testing.T) {
 		t.Errorf("ListPipelines (webhook) = %d pipelines, want 0", got)
 	}
 }
+
+// TestCreatePipelineWithParams verifies that a pipeline's parameter
+// declarations (F-10) are persisted and round-trip through GetPipeline.
+func TestCreatePipelineWithParams(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Params: []*dbpb.Parameter{
+			{Name: "version", Default: "1.0.0", Description: "the version to deploy"},
+			{Name: "environment"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if got := len(pipeline.GetParams()); got != 2 {
+		t.Fatalf("pipeline params = %d, want 2", got)
+	}
+
+	fetched, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	byName := map[string]*dbpb.Parameter{}
+	for _, param := range fetched.GetParams() {
+		byName[param.GetName()] = param
+	}
+	if version := byName["version"]; version == nil || version.GetDefault() != "1.0.0" || version.GetDescription() != "the version to deploy" {
+		t.Errorf("version param = %+v, want default and description", version)
+	}
+	if env := byName["environment"]; env == nil || env.GetDefault() != "" {
+		t.Errorf("environment param = %+v, want no default", env)
+	}
+}
+
+// TestCreatePipelineRejectsDuplicateParam verifies that a pipeline with two
+// parameters of the same name is rejected (F-10): a parameter must be
+// referenceable unambiguously.
+func TestCreatePipelineRejectsDuplicateParam(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "dup",
+		Params: []*dbpb.Parameter{
+			{Name: "version"},
+			{Name: "version"},
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreatePipeline with duplicate param = %v, want InvalidArgument", err)
+	}
+}
+
+// TestCreatePipelineRejectsEmptyParamName verifies that a pipeline with a
+// parameter that has an empty name is rejected (F-10).
+func TestCreatePipelineRejectsEmptyParamName(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:   "empty",
+		Params: []*dbpb.Parameter{{Name: ""}},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreatePipeline with empty param name = %v, want InvalidArgument", err)
+	}
+}
+
+// TestUpdatePipelineReplacesParams verifies that updating a pipeline with a
+// non-nil params list replaces its parameter declarations (F-10), and that an
+// update with no params leaves them unchanged.
+func TestUpdatePipelineReplacesParams(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:   "p",
+		Params: []*dbpb.Parameter{{Name: "old", Default: "a"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	updated, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:     pipeline.GetId(),
+		Params: []*dbpb.Parameter{{Name: "new", Default: "b"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+	if got := len(updated.GetParams()); got != 1 {
+		t.Fatalf("updated params = %d, want 1", got)
+	}
+	if updated.GetParams()[0].GetName() != "new" || updated.GetParams()[0].GetDefault() != "b" {
+		t.Errorf("updated param = %+v, want new/b", updated.GetParams()[0])
+	}
+
+	// An update with no params leaves the pipeline's params unchanged.
+	unchanged, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("UpdatePipeline (no params): %v", err)
+	}
+	if got := len(unchanged.GetParams()); got != 1 {
+		t.Fatalf("params after no-param update = %d, want 1 (unchanged)", got)
+	}
+	if unchanged.GetParams()[0].GetName() != "new" {
+		t.Errorf("param after no-param update = %q, want new", unchanged.GetParams()[0].GetName())
+	}
+}
+
+// TestCreateRunDenormalizesRunParams verifies that a run's concrete parameter
+// values (F-10) are denormalized onto each of its job instances: a parameter
+// supplied by the run uses the supplied value, a parameter not supplied falls
+// back to its default, and a parameter with neither a supplied value nor a
+// default is omitted (so a spec field that references it fails to
+// interpolate).
+func TestCreateRunDenormalizesRunParams(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Params: []*dbpb.Parameter{
+			{Name: "version", Default: "1.0.0"},       // supplied by the run
+			{Name: "environment", Default: "staging"}, // not supplied: falls back to default
+			{Name: "token"}, // not supplied, no default: omitted
+		},
+		Jobs: []*dbpb.JobDefinition{
+			{Key: "build", Name: "build", TargetGroup: "linux-pool"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{
+		PipelineId: pipeline.GetId(),
+		Trigger:    "manual",
+		Params:     map[string]string{"version": "2.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := len(resp.GetJobs()); got != 1 {
+		t.Fatalf("run created %d job instances, want 1", got)
+	}
+	instance := resp.GetJobs()[0]
+	runParams := instance.GetRunParams()
+	if runParams["version"] != "2.0.0" {
+		t.Errorf("run_params[version] = %q, want supplied value 2.0.0", runParams["version"])
+	}
+	if runParams["environment"] != "staging" {
+		t.Errorf("run_params[environment] = %q, want default staging", runParams["environment"])
+	}
+	if _, present := runParams["token"]; present {
+		t.Errorf("run_params[token] = %q, want omitted (no supplied value, no default)", runParams["token"])
+	}
+}
+
+// TestCreateRunNoParamsLeavesRunParamsEmpty verifies that a run of a pipeline
+// with no parameters (or a run that supplies none) leaves its job instances'
+// run_params empty (F-10).
+func TestCreateRunNoParamsLeavesRunParamsEmpty(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "plain",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := len(resp.GetJobs()[0].GetRunParams()); got != 0 {
+		t.Errorf("run_params = %v, want empty for a pipeline with no params", resp.GetJobs()[0].GetRunParams())
+	}
+}

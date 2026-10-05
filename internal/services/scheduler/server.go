@@ -350,6 +350,7 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		UpstreamJobs: job.GetUpstreamJobs(),
 		IgnoreFailed: job.GetIgnoreFailed(),
 		Key:          job.GetKey(),
+		RunParams:    job.GetRunParams(),
 	}
 }
 
