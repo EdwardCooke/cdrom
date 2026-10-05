@@ -32,7 +32,7 @@ func (f *fakeExchanger) Exchange(ctx context.Context, audience string, expiresIn
 
 // tokenExchangeStep builds a token_exchange step with the given audience,
 // optional expires_in, and optional output name.
-func tokenExchangeStep(t *testing.T, audience, expiresIn, output string, outputs []string) *dbpb.JobStep {
+func tokenExchangeStep(t *testing.T, audience, expiresIn, output string) *dbpb.JobStep {
 	t.Helper()
 	params := map[string]*dbpb.ParamValue{}
 	if audience != "" {
@@ -44,20 +44,20 @@ func tokenExchangeStep(t *testing.T, audience, expiresIn, output string, outputs
 	if output != "" {
 		params[ParamOutput] = stringParam(output)
 	}
-	return &dbpb.JobStep{Type: TypeTokenExchange, Params: params, Outputs: outputs}
+	return &dbpb.JobStep{Type: TypeTokenExchange, Params: params}
 }
 
 // TestTokenExchangeStepExchangesAndWritesOutput verifies that a token_exchange
 // step requests a token for its audience (via the target's TokenExchange) and
-// writes the exchanged token into its declared output, so the executor records
-// it as the step's output (and the job's aggregated output).
+// writes the exchanged token into its output file, so the executor records it
+// as the step's output (and the job's aggregated output).
 func TestTokenExchangeStepExchangesAndWritesOutput(t *testing.T) {
 	exchanger := &fakeExchanger{}
 	collector := &executor.StepResultCollector{}
 	ctx := executor.ContextWithTokenExchange(context.Background(), exchanger)
 	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
 
-	step := tokenExchangeStep(t, "outside-svc", "", "", []string{"token"})
+	step := tokenExchangeStep(t, "outside-svc", "", "")
 	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestTokenExchangeStepCustomOutputName(t *testing.T) {
 	ctx := executor.ContextWithTokenExchange(context.Background(), exchanger)
 	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
 
-	step := tokenExchangeStep(t, "outside-svc", "", "my_token", []string{"my_token"})
+	step := tokenExchangeStep(t, "outside-svc", "", "my_token")
 	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestTokenExchangeStepPassesExpiresIn(t *testing.T) {
 	exchanger := &fakeExchanger{}
 	ctx := executor.ContextWithTokenExchange(context.Background(), exchanger)
 
-	step := tokenExchangeStep(t, "outside-svc", "15m", "", nil)
+	step := tokenExchangeStep(t, "outside-svc", "15m", "")
 	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestTokenExchangeStepRequiresAudience(t *testing.T) {
 	exchanger := &fakeExchanger{}
 	ctx := executor.ContextWithTokenExchange(context.Background(), exchanger)
 
-	step := tokenExchangeStep(t, "", "", "", nil)
+	step := tokenExchangeStep(t, "", "", "")
 	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err == nil {
 		t.Fatal("expected an error for a token_exchange step with no audience, got nil")
 	}
@@ -132,7 +132,7 @@ func TestTokenExchangeStepRequiresAudience(t *testing.T) {
 // mint a token on the target's behalf).
 func TestTokenExchangeStepRequiresExchanger(t *testing.T) {
 	// No TokenExchange in the context.
-	step := tokenExchangeStep(t, "outside-svc", "", "", nil)
+	step := tokenExchangeStep(t, "outside-svc", "", "")
 	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err == nil {
 		t.Fatal("expected an error when no TokenExchange is set, got nil")
 	}
@@ -144,7 +144,7 @@ func TestTokenExchangeStepInvalidExpiresIn(t *testing.T) {
 	exchanger := &fakeExchanger{}
 	ctx := executor.ContextWithTokenExchange(context.Background(), exchanger)
 
-	step := tokenExchangeStep(t, "outside-svc", "not-a-duration", "", nil)
+	step := tokenExchangeStep(t, "outside-svc", "not-a-duration", "")
 	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err == nil {
 		t.Fatal("expected an error for an invalid expires_in, got nil")
 	}
@@ -159,7 +159,7 @@ func TestTokenExchangeStepExchangeError(t *testing.T) {
 	exchanger := &failingExchanger{}
 	ctx := executor.ContextWithTokenExchange(context.Background(), exchanger)
 
-	step := tokenExchangeStep(t, "outside-svc", "", "", nil)
+	step := tokenExchangeStep(t, "outside-svc", "", "")
 	if err := executor.Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err == nil {
 		t.Fatal("expected an error when the exchange fails, got nil")
 	}

@@ -529,7 +529,6 @@ type jobStepRequest struct {
 	Timeout      string                        `json:"timeout,omitempty"`
 	Condition    string                        `json:"condition,omitempty"`
 	IgnoreFailed bool                          `json:"ignore_failed,omitempty"`
-	Outputs      []string                      `json:"outputs,omitempty"`
 	Params       map[string]*paramValueRequest `json:"params,omitempty"`
 }
 
@@ -612,7 +611,6 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 			Env:          step.Env,
 			Condition:    step.Condition,
 			IgnoreFailed: step.IgnoreFailed,
-			Outputs:      step.Outputs,
 			Params:       paramsToProto(step.Params),
 		}
 		if step.Timeout != "" {

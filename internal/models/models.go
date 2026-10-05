@@ -257,10 +257,10 @@ type StepResult struct {
 	// Error is a descriptive error message; empty when Status is Succeeded or
 	// Skipped.
 	Error string `json:"error,omitempty"`
-	// Outputs are the named values the step produced (F-06): each key is a
-	// name declared in the step's Outputs list, and each value is the content
-	// of the file the step wrote for that name (trimmed). Empty when the step
-	// declared no outputs or did not run.
+	// Outputs are the named values the step produced (F-06): each key is the
+	// name of a file the step wrote into its per-step output directory, and
+	// each value is that file's content (trimmed). Empty when the step wrote
+	// no output files or did not run.
 	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
@@ -338,13 +338,6 @@ type JobStep struct {
 	// the job continues to the next step. A step that fails without
 	// IgnoreFailed stops the job.
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
-	// Outputs are the names of the values this step produces (F-06). For each
-	// name the step writes a file named after it into its per-step output
-	// directory (exposed to the step as the CDROM_STEP_OUTPUT_DIR environment
-	// variable); after the step runs the executor reads those files and records
-	// their (trimmed) contents as the step's outputs. A declared name the step
-	// did not write is recorded as an empty value.
-	Outputs []string `json:"outputs,omitempty"`
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is

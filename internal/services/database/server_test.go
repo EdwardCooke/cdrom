@@ -1038,17 +1038,17 @@ func TestUpdateJobStepResultsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestJobSpecIgnoreFailedAndOutputsRoundTrip verifies that a job's
-// ignore_failed (job-level and per-step) and per-step output names are
-// persisted and returned intact through the storage backend (F-06).
-func TestJobSpecIgnoreFailedAndOutputsRoundTrip(t *testing.T) {
+// TestJobSpecIgnoreFailedRoundTrip verifies that a job's ignore_failed
+// (job-level and per-step) is persisted and returned intact through the
+// storage backend (F-06).
+func TestJobSpecIgnoreFailedRoundTrip(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
 	spec := &dbpb.JobSpec{
 		IgnoreFailed: true,
 		Steps: []*dbpb.JobStep{
-			{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}, IgnoreFailed: true, Outputs: []string{"version", "commit"}},
+			{Params: map[string]*dbpb.ParamValue{"command": {String_: "go"}}, IgnoreFailed: true},
 			{Params: map[string]*dbpb.ParamValue{"command": {String_: "make"}}},
 		},
 	}
@@ -1070,9 +1070,6 @@ func TestJobSpecIgnoreFailedAndOutputsRoundTrip(t *testing.T) {
 	step0 := got.GetSteps()[0]
 	if !step0.GetIgnoreFailed() {
 		t.Error("step 0 ignore_failed = false, want true")
-	}
-	if len(step0.GetOutputs()) != 2 || step0.GetOutputs()[0] != "version" || step0.GetOutputs()[1] != "commit" {
-		t.Errorf("step 0 outputs = %v, want [version commit]", step0.GetOutputs())
 	}
 	if got.GetSteps()[1].GetIgnoreFailed() {
 		t.Error("step 1 ignore_failed = true, want false")

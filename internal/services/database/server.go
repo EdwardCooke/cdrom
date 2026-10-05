@@ -2533,7 +2533,6 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 			Params:       paramsFromProto(step.GetParams()),
 			Condition:    step.GetCondition(),
 			IgnoreFailed: step.GetIgnoreFailed(),
-			Outputs:      step.GetOutputs(),
 		})
 	}
 	return models.JobSpec{
@@ -2563,7 +2562,6 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 			Params:       paramsToProto(step.Params),
 			Condition:    step.Condition,
 			IgnoreFailed: step.IgnoreFailed,
-			Outputs:      step.Outputs,
 		})
 	}
 	return &dbpb.JobSpec{

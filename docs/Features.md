@@ -97,8 +97,8 @@ missing piece.
 - [x] The built-in `token_exchange` step handler requests a new job token for
       a different audience (via the target's `TokenExchange`, which calls the
       API's `ExchangeJobToken` RPC) and writes the exchanged token to the step's
-      output directory so that, when the step declares the output name, later
-      steps and jobs can read it.
+      output directory, so later steps and jobs can read it through the
+      condition context.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
@@ -146,8 +146,8 @@ missing piece.
   presenting the job's own token. The executor gives every step a per-step
   output directory (the step's env carries `executor.StepOutputDirEnv`), so the
   handler always writes the token into it under the output name; the executor
-  records it as the step's output only when the step declares that name, so
-  downstream steps and jobs read it through the condition context
+  reads every file in that directory back as a step output (file name = output
+  name), so downstream steps and jobs read it through the condition context
   (`.steps`/`.jobs` `.Outputs`). A step with no `audience`, an invalid
   `expires_in`, or a target with no
   `TokenExchange` fails the job.
@@ -468,10 +468,10 @@ condition context is what lets a step say "only run if the build step produced
 - [x] A steps condition is not met is marked `skipped`.
 - [x] A step with `ignore_failed` that fails (or times out) is recorded as
       failed but does not stop the job — the next step still runs.
-- [x] A step that declares `outputs` writes one file per name into a per-step
-      output directory (exposed via `CDROM_STEP_OUTPUT_DIR`); the executor
-      reads them back (trimmed) and a declared-but-unwritten name is recorded
-      as an empty string.
+- [x] A step that writes files into its per-step output directory (exposed via
+      `CDROM_STEP_OUTPUT_DIR`) has them read back by the executor (trimmed) —
+      each file's name is the output's name, and a step needs to declare
+      nothing.
 - [x] A job's `outputs` are the union of its steps' outputs (a later step
       overrides an earlier one on a name collision) and are persisted on the
       job row.
@@ -539,12 +539,15 @@ condition context is what lets a step say "only run if the build step produced
   as satisfied, so dependents are dispatched rather than skipped. A
   `cancelled` or `skipped` dependency is never overridden by `ignore_failed`
   (a cancellation is not a failure a job can opt out of).
-- **Step outputs use a per-step temp directory.** A step that declares
-  `outputs` (a list of names) is given a fresh per-step directory, exposed to
-  it via the `CDROM_STEP_OUTPUT_DIR` env var; the step's command writes one
-  file per declared name into it, and the executor reads them back (trimmed)
-  after the step runs. A declared name that was never written is recorded as
-  an empty string. The job's `outputs` are the union of its steps' outputs
+- **Step outputs use a per-step temp directory.** Every step is given a fresh
+  per-step directory, exposed to it via the `CDROM_STEP_OUTPUT_DIR` env var
+  (created even for a step that produces no output, so a step handler that
+  always produces output can write to it); the step's command writes one file
+  per output it produces into it, and the executor reads **every file** in the
+  directory back (trimmed) after the step runs — each file's name is the
+  output's name, so a step produces an output simply by writing a file and
+  needs to declare nothing. A file that is never written simply does not
+  appear as an output. The job's `outputs` are the union of its steps' outputs
   (a later step overrides an earlier one on a name collision), aggregated by
   the `StepResultCollector` and reported on the job's final `ReportJobStatus`
   call, where `Database.UpdateJob` persists them (via the same

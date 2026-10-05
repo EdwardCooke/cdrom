@@ -281,13 +281,15 @@ never run — instead of failing, in two ways:
   satisfied: dependents are dispatched rather than skipped. A `cancelled` or
   `skipped` dependency is **never** overridden by `ignore_failed` (a
   cancellation is not a failure a job can opt out of) — it always blocks.
-- **Step & job `outputs`:** a step may declare `outputs` — a list of names.
-  The executor gives every step a fresh per-step directory, exposed to it via
-  the `CDROM_STEP_OUTPUT_DIR` env var (created even for a step that declares no
-  outputs, so a step handler that always produces output can write to it); the
-  step's command writes one file per declared name into it, and the executor
-  reads them back (trimmed) after the step runs. A declared name that was never
-  written is recorded as an empty string. The job's `outputs` are the union of its steps' outputs (a later
+- **Step & job `outputs`:** a step produces outputs simply by writing files
+  into its per-step output directory — no declaration needed. The executor
+  gives every step a fresh per-step directory, exposed to it via the
+  `CDROM_STEP_OUTPUT_DIR` env var (created even for a step that produces no
+  output, so a step handler that always produces output can write to it); the
+  step's command writes one file per output it produces into it, and the
+  executor reads **every file** in the directory back (trimmed) after the step
+  runs — each file's name is the output's name. A file that is never written
+  simply does not appear as an output. The job's `outputs` are the union of its steps' outputs (a later
   step overrides an earlier one on a name collision), aggregated by the
   `StepResultCollector` and reported on the job's final `ReportJobStatus`
   call, where `Database.UpdateJob` persists them (via the same
@@ -618,12 +620,10 @@ token from the execution target through the executor's `TokenExchange`
 `ExchangeJobToken` RPC presenting the job's own token. The executor gives every
 step a per-step output directory (carried in the step's env as
 `executor.StepOutputDirEnv`), so the handler always writes the exchanged token
-into it under the output name; the executor records it as the step's output
-only when the step declares that name in its `outputs` list, which is how
-downstream steps and jobs read it through the condition context (`.steps`/
-`.jobs` `.Outputs`). A step that declares no outputs still performs the
-exchange (and writes the token to its output directory) but does not capture
-it as a step output. A `token_exchange` step whose `audience` is missing, whose
+into it under the output name; the executor reads every file in that directory
+back as a step output (file name = output name), which is how downstream steps
+and jobs read it through the condition context (`.steps`/`.jobs` `.Outputs`).
+A `token_exchange` step whose `audience` is missing, whose
 `expires_in` is not a valid duration, or whose target provides no
 `TokenExchange` fails the job.
 

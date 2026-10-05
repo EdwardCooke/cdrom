@@ -25,18 +25,16 @@ import (
 //     (a Go duration, e.g. "15m"); empty means the API's default
 //     exchanged-token lifetime.
 //   - "output" (string) — the name of the step output the exchanged token is
-//     written under (default "token"). The step must declare this name in its
-//     outputs list for the token to be captured and handed to later steps and
-//     jobs.
+//     written under (default "token").
 //
 // The handler obtains the exchanged token from the execution target through
 // the executor's TokenExchange (set in the context by the worker or agent,
 // which calls the API's ExchangeJobToken RPC). The executor gives every step a
 // per-step output directory (carried in the step's env as
 // executor.StepOutputDirEnv), so the handler always writes the token into it
-// under the output name. The executor records it as the step's output only
-// when the step declares that name in its outputs list, which is how the token
-// is handed to downstream steps and jobs through the condition context.
+// under the output name. The executor reads every file in that directory back
+// as a step output (file name = output name), which is how the token is
+// handed to downstream steps and jobs through the condition context.
 const TypeTokenExchange = "token_exchange"
 
 // Param keys the token-exchange handler reads from a step's Params map.
@@ -57,9 +55,8 @@ func init() {
 // runTokenExchangeStep is the built-in "token_exchange" step handler. It
 // requests a new job token for a different audience (via the execution
 // target's TokenExchange) and writes the exchanged token into the step's
-// output directory (which the executor always creates) so that, when the step
-// declares the output name, later steps and jobs can read it through the
-// condition context.
+// output directory (which the executor always creates), so later steps and
+// jobs can read it through the condition context.
 func runTokenExchangeStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
 	audience := paramString(step, ParamAudience)
 	if audience == "" {

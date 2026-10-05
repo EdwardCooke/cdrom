@@ -50,13 +50,13 @@ var ErrTimeout = errors.New("executor: timed out")
 var ErrCancelled = errors.New("executor: cancelled")
 
 // StepOutputDirEnv is the environment variable the executor sets on every
-// step: it names the per-step directory the step writes its output files into
-// (one file per declared output name). After the step runs the executor reads
-// the step's declared outputs from that directory and records their (trimmed)
-// contents as the step's outputs. The directory is created for every step —
-// even one that declares no outputs — so a step handler that always produces
-// output (e.g. the token_exchange handler) can write to it; a declared name
-// the step did not write is recorded as an empty value.
+// step: it names the per-step directory the step writes its output files into.
+// After the step runs the executor reads every file in that directory and
+// records each file's (trimmed) contents as a step output keyed by the file
+// name — so a step produces an output simply by writing a file, and does not
+// have to declare its outputs. The directory is created for every step, so a
+// step handler that always produces output (e.g. the token_exchange handler)
+// can write to it.
 const StepOutputDirEnv = "CDROM_STEP_OUTPUT_DIR"
 
 // Execute runs the steps of spec in order. A nil or empty spec succeeds
@@ -123,11 +123,11 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			continue
 		}
 		// Every step gets a per-step output directory, exposed to it via
-		// StepOutputDirEnv (F-06): the step writes one file per declared output
-		// name into it, and the executor reads them back after the step runs.
-		// The directory is created even for a step that declares no outputs, so
-		// a step handler that always produces output (e.g. token_exchange) can
-		// write to it.
+		// StepOutputDirEnv (F-06): the step writes one file per output it
+		// produces into it, and the executor reads them all back after the
+		// step runs (each file's name is the output's name). The directory is
+		// created even for a step that produces no output, so a step handler
+		// that always produces output (e.g. token_exchange) can write to it.
 		stepToRun := step
 		outDir, err := os.MkdirTemp("", "cdrom-step-outputs-")
 		if err != nil {
@@ -144,11 +144,11 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 				stepStatus = StepStatusTimedOut
 			}
 		}
-		// Read the step's declared outputs from its output directory (a declared
-		// name the step did not write is recorded as an empty value).
+		// Read the step's outputs from its output directory: every file the
+		// step wrote into it becomes an output keyed by its file name.
 		var outputs map[string]string
 		if outDir != "" {
-			outputs = readStepOutputs(outDir, step.GetOutputs())
+			outputs = readStepOutputs(outDir)
 			_ = os.RemoveAll(outDir)
 		}
 		errMsg := ""
@@ -346,8 +346,9 @@ type StepConditionInfo struct {
 	// Status is the step's terminal status (succeeded, failed, skipped, or
 	// timed_out).
 	Status string
-	// Outputs are the named values the step produced; empty when the step
-	// declared no outputs or did not run.
+	// Outputs are the named values the step produced (each file it wrote into
+	// its per-step output directory, keyed by file name); empty when the step
+	// wrote no output files or did not run.
 	Outputs map[string]string
 }
 
@@ -510,23 +511,33 @@ func withEnv(step *dbpb.JobStep, extra map[string]string) *dbpb.JobStep {
 	return clone
 }
 
-// readStepOutputs reads each of the step's declared output names from dir
-// (the step's output directory, F-06), trimming each file's contents. A
-// declared name whose file is missing (the step did not write it) is recorded
-// as an empty value. It returns nil when dir is empty or the step declared no
-// outputs.
-func readStepOutputs(dir string, names []string) map[string]string {
-	if dir == "" || len(names) == 0 {
+// readStepOutputs reads every file in dir (the step's output directory, F-06)
+// and records each file's (trimmed) contents as an output keyed by its file
+// name. A step produces an output simply by writing a file into its output
+// directory; it does not have to declare its outputs. Only regular files are
+// read (subdirectories are ignored). It returns nil when dir is empty or
+// contains no files.
+func readStepOutputs(dir string) map[string]string {
+	if dir == "" {
 		return nil
 	}
-	out := make(map[string]string, len(names))
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			out[name] = ""
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out map[string]string
+	for _, entry := range entries {
+		if entry.IsDir() {
 			continue
 		}
-		out[name] = strings.TrimSpace(string(data))
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[entry.Name()] = strings.TrimSpace(string(data))
 	}
 	return out
 }
@@ -558,8 +569,9 @@ type StepResult struct {
 	// Error is a descriptive error message; empty when Status is Succeeded or
 	// Skipped.
 	Error string
-	// Outputs are the named values the step produced (F-06); empty when the
-	// step declared no outputs or did not run.
+	// Outputs are the named values the step produced (F-06, each file it wrote
+	// into its per-step output directory, keyed by file name); empty when the
+	// step wrote no output files or did not run.
 	Outputs map[string]string
 }
 
@@ -575,7 +587,7 @@ type StepStatusReporter interface {
 	// ReportStepStatus records stepIndex's terminal status. errMsg is a
 	// descriptive error message, empty when status is StepStatusSucceeded or
 	// StepStatusSkipped; outputs are the named values the step produced
-	// (nil/empty when it declared none or did not run).
+	// (nil/empty when it wrote no output files or did not run).
 	ReportStepStatus(stepIndex int, status StepStatus, errMsg string, outputs map[string]string)
 }
 

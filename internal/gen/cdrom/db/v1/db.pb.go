@@ -1668,10 +1668,10 @@ type StepResult struct {
 	// error is a descriptive error message; empty when status is SUCCEEDED or
 	// SKIPPED.
 	Error string `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
-	// outputs are the named values the step produced (F-06): each key is a name
-	// declared in the step's `outputs` list, and each value is the content of
-	// the file the step wrote for that name (trimmed). Empty when the step
-	// declared no outputs or did not run.
+	// outputs are the named values the step produced (F-06): each key is the
+	// name of a file the step wrote into its per-step output directory, and
+	// each value is that file's content (trimmed). Empty when the step wrote
+	// no output files or did not run.
 	Outputs       map[string]string `protobuf:"bytes,4,rep,name=outputs,proto3" json:"outputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1933,14 +1933,7 @@ type JobStep struct {
 	// not fail the job (F-06): the step is recorded as failed/timed_out and the
 	// job continues to the next step. A step that fails without ignore_failed
 	// stops the job.
-	IgnoreFailed bool `protobuf:"varint,10,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
-	// outputs are the names of the values this step produces (F-06). For each
-	// name the step writes a file named after it into its per-step output
-	// directory (exposed to the step as the CDROM_STEP_OUTPUT_DIR environment
-	// variable); after the step runs the executor reads those files and records
-	// their (trimmed) contents as the step's outputs. A declared name the step
-	// did not write is recorded as an empty value.
-	Outputs       []string `protobuf:"bytes,11,rep,name=outputs,proto3" json:"outputs,omitempty"`
+	IgnoreFailed  bool `protobuf:"varint,10,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2022,13 +2015,6 @@ func (x *JobStep) GetIgnoreFailed() bool {
 		return x.IgnoreFailed
 	}
 	return false
-}
-
-func (x *JobStep) GetOutputs() []string {
-	if x != nil {
-		return x.Outputs
-	}
-	return nil
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -6282,7 +6268,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\n" +
 	"ParamValue\x12\x16\n" +
 	"\x06string\x18\x01 \x01(\tR\x06string\x12\x18\n" +
-	"\astrings\x18\x02 \x03(\tR\astrings\"\xd2\x03\n" +
+	"\astrings\x18\x02 \x03(\tR\astrings\"\xbe\x03\n" +
 	"\aJobStep\x12\x12\n" +
 	"\x04type\x18\a \x01(\tR\x04type\x12\x18\n" +
 	"\aworkdir\x18\x03 \x01(\tR\aworkdir\x12/\n" +
@@ -6291,14 +6277,13 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x06params\x18\b \x03(\v2 .cdrom.db.v1.JobStep.ParamsEntryR\x06params\x12\x1c\n" +
 	"\tcondition\x18\t \x01(\tR\tcondition\x12#\n" +
 	"\rignore_failed\x18\n" +
-	" \x01(\bR\fignoreFailed\x12\x18\n" +
-	"\aoutputs\x18\v \x03(\tR\aoutputs\x1a6\n" +
+	" \x01(\bR\fignoreFailed\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aR\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12-\n" +
-	"\x05value\x18\x02 \x01(\v2\x17.cdrom.db.v1.ParamValueR\x05value:\x028\x01J\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x06\x10\a\"e\n" +
+	"\x05value\x18\x02 \x01(\v2\x17.cdrom.db.v1.ParamValueR\x05value:\x028\x01J\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x06\x10\aJ\x04\b\v\x10\f\"e\n" +
 	"\vRetryPolicy\x12!\n" +
 	"\fmax_attempts\x18\x01 \x01(\x05R\vmaxAttempts\x123\n" +
 	"\abackoff\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\abackoff\"\x9f\x02\n" +

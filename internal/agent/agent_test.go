@@ -152,9 +152,8 @@ func TestAgentTokenExchangeStep(t *testing.T) {
 		Token: "job-token-9",
 		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{
 			{
-				Type:    "token_exchange",
-				Params:  map[string]*dbpb.ParamValue{"audience": {String_: "outside-svc"}},
-				Outputs: []string{"token"},
+				Type:   "token_exchange",
+				Params: map[string]*dbpb.ParamValue{"audience": {String_: "outside-svc"}},
 			},
 		}},
 	}}

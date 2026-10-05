@@ -338,10 +338,11 @@ func TestExecuteFailedWithoutIgnoreFailedStopsJob(t *testing.T) {
 	}
 }
 
-// TestExecuteStepOutputs verifies that a step that declares outputs writes its
-// output files into the per-step output directory (exposed via
-// StepOutputDirEnv) and that the executor reads them back into the step's
-// results and the job's aggregated outputs (F-06).
+// TestExecuteStepOutputs verifies that a step that writes output files into
+// the per-step output directory (exposed via StepOutputDirEnv) has them read
+// back by the executor into the step's results and the job's aggregated
+// outputs (F-06) — each file's name is the output's name, and a step needs
+// to declare nothing.
 func TestExecuteStepOutputs(t *testing.T) {
 	RegisterStepType("producer", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
 		dir := step.GetEnv()[StepOutputDirEnv]
@@ -351,13 +352,15 @@ func TestExecuteStepOutputs(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "version"), []byte("1.2.3\n"), 0o644); err != nil {
 			return err
 		}
-		// "missing" is declared but never written: it must be recorded as "".
+		if err := os.WriteFile(filepath.Join(dir, "commit"), []byte("abc123"), 0o644); err != nil {
+			return err
+		}
 		return nil
 	})
 
 	collector := &StepResultCollector{}
 	ctx := ContextWithStepStatusReporter(context.Background(), collector)
-	step := &dbpb.JobStep{Type: "producer", Outputs: []string{"version", "missing"}}
+	step := &dbpb.JobStep{Type: "producer"}
 	if err := Execute(ctx, &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -369,12 +372,15 @@ func TestExecuteStepOutputs(t *testing.T) {
 	if outputs["version"] != "1.2.3" {
 		t.Errorf("outputs[version] = %q, want %q (trimmed)", outputs["version"], "1.2.3")
 	}
-	if outputs["missing"] != "" {
-		t.Errorf("outputs[missing] = %q, want empty (declared but not written)", outputs["missing"])
+	if outputs["commit"] != "abc123" {
+		t.Errorf("outputs[commit] = %q, want %q", outputs["commit"], "abc123")
 	}
 	jobOutputs := collector.JobOutputs()
 	if jobOutputs["version"] != "1.2.3" {
 		t.Errorf("jobOutputs[version] = %q, want %q", jobOutputs["version"], "1.2.3")
+	}
+	if jobOutputs["commit"] != "abc123" {
+		t.Errorf("jobOutputs[commit] = %q, want %q", jobOutputs["commit"], "abc123")
 	}
 }
 
@@ -397,7 +403,7 @@ func TestExecuteConditionReferencesPriorStep(t *testing.T) {
 	collector := &StepResultCollector{}
 	ctx := ContextWithStepStatusReporter(context.Background(), collector)
 	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
-		{Type: "emit", Outputs: []string{"ready"}},
+		{Type: "emit"},
 		// Runs only if the prior step succeeded and produced ready == "true".
 		{Type: "gated", Condition: `{{ if and (eq (index .steps 0).Status "succeeded") (eq (index .steps 0).Outputs.ready "true") }}true{{ else }}false{{ end }}`},
 	}}

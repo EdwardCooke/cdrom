@@ -155,7 +155,7 @@ BODY=$(cat <<EOF
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step2: env=\$MY_VAR"]}}, "env": {"MY_VAR": "from-spec"}},
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step3: pwd=\$(pwd)"]}}, "workdir": "$WORKDIR"},
       {"type": "shell", "params": {"shell": {"string": "sh"}, "args": {"strings": ["-c"]}, "command": {"string": "echo step4: shell override"}}},
-      {"type": "token_exchange", "params": {"audience": {"string": "outside-svc"}}, "outputs": ["token"]},
+      {"type": "token_exchange", "params": {"audience": {"string": "outside-svc"}}},
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step6: token exchange flowed to a later step"]}}, "condition": "{{ if (index .steps 4).Outputs.token }}true{{ else }}false{{ end }}"}
     ]
   }
@@ -178,8 +178,9 @@ wait_for "$WORK/worker.log" 'step2: env=from-spec' 'step 2 env var'
 wait_for "$WORK/worker.log" "step3: pwd=$WORKDIR" 'step 3 workdir'
 wait_for "$WORK/worker.log" 'step4: shell override' 'step 4 shell override'
 # The token_exchange step (step 5) asks the API for a new job token for
-# audience outside-svc and writes it to its "token" output; the worker logs
-# the exchange.
+# audience outside-svc and writes it to a "token" file in its per-step output
+# directory (the executor reads every file there back as a step output); the
+# worker logs the exchange.
 wait_for "$WORK/worker.log" 'executor: exchanged job token' 'worker exchanged the job token'
 # Step 6's condition reads the exchanged token from step 5's outputs; it runs
 # only if the token was captured and flowed to the condition context.
