@@ -196,6 +196,7 @@ func TestExchangeJobTokenDisabled(t *testing.T) {
 		t.Errorf("disabled: token = %q, want empty", resp.GetToken())
 	}
 }
+
 // fakeDB is a dbpb.DatabaseClient that returns a fixed job from GetJob and
 // fails every other call. It backs the job-status gate in checkJobToken: the
 // gate only ever calls GetJob.

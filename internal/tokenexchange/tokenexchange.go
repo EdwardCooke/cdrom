@@ -17,6 +17,8 @@ import (
 
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	"cdrom/internal/grpcutil"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // Exchanger is the API-backed implementation of executor.TokenExchange. It
@@ -39,8 +41,9 @@ func New(api apipb.APIClient, jobID int64, token string) *Exchanger {
 // default exchanged-token lifetime.
 func (e *Exchanger) Exchange(ctx context.Context, audience string, expiresIn time.Duration) (string, error) {
 	resp, err := e.api.ExchangeJobToken(grpcutil.WithBearerToken(ctx, e.token), &apipb.ExchangeJobTokenRequest{
-		JobId:    e.jobID,
-		Audience: audience,
+		JobId:     e.jobID,
+		Audience:  audience,
+		ExpiresIn: durationpb.New(expiresIn),
 	})
 	if err != nil {
 		return "", err
