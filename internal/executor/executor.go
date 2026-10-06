@@ -421,17 +421,23 @@ func JobIdentityFromContext(ctx context.Context) JobIdentity {
 }
 
 // RunInfo is the run-scoped context a job's spec is interpolated against
-// (F-10): the run's concrete parameter values (Params) and the run's own
-// identity (ID, PipelineID, Trigger, TriggerName). The execution target sets
-// it in the context (via ContextWithRunInfo) before calling Execute, so the
-// executor can render a job's spec fields (env, command, workdir) and a step's
-// condition against the run's parameters. A job that is not part of a run (or
-// whose run has no parameters) carries an empty RunInfo, and interpolation is
-// a no-op for it.
+// (F-10): the run's concrete parameter values (Params), the pipeline's named
+// secrets as plaintext (Secrets, F-12), and the run's own identity (ID,
+// PipelineID, Trigger, TriggerName). The execution target sets it in the
+// context (via ContextWithRunInfo) before calling Execute, so the executor can
+// render a job's spec fields (env, command, workdir) and a step's condition
+// against the run's parameters and secrets. A job that is not part of a run
+// (or whose run has no parameters or secrets) carries an empty RunInfo, and
+// interpolation is a no-op for it.
 type RunInfo struct {
 	// Params are the run's concrete parameter values (a parameter not supplied
 	// falls back to its default); empty when the run has no parameters.
 	Params map[string]string
+	// Secrets are the pipeline's named secrets as plaintext (F-12): a name ->
+	// value map the API decrypted from the job's stored ciphertexts. A step's
+	// spec references a secret as `{{ .secrets.name }}`. Empty when the
+	// pipeline has no secrets.
+	Secrets map[string]string
 	// ID is the run's id; 0 when the job is not part of a run.
 	ID int64
 	// PipelineID is the pipeline the run executed; 0 when the job is not part
@@ -449,10 +455,10 @@ type runInfoKey struct{}
 
 // ContextWithRunInfo returns a context that carries run, so Execute can
 // interpolate the job's spec (and a step's condition) against the run's
-// parameters. A RunInfo that carries no parameters and no run identity returns
-// ctx unchanged.
+// parameters and secrets. A RunInfo that carries no parameters, no secrets,
+// and no run identity returns ctx unchanged.
 func ContextWithRunInfo(ctx context.Context, run RunInfo) context.Context {
-	if len(run.Params) == 0 && run.ID == 0 && run.PipelineID == 0 && run.Trigger == "" && run.TriggerName == "" {
+	if len(run.Params) == 0 && len(run.Secrets) == 0 && run.ID == 0 && run.PipelineID == 0 && run.Trigger == "" && run.TriggerName == "" {
 		return ctx
 	}
 	return context.WithValue(ctx, runInfoKey{}, run)
@@ -469,11 +475,12 @@ func RunInfoFromContext(ctx context.Context) RunInfo {
 // against (F-06): the step's own env (so `{{ .NAME }}` still works as before),
 // plus the structured keys "steps" (the prior steps' status/outputs), "jobs"
 // (the upstream jobs' status/outputs), "job" (the current job's identity),
-// "params" (the run's parameter values, F-10), and "run" (the run's identity,
-// F-10). The structured keys are set after the env so they win over any
-// same-named env var.
+// "params" (the run's parameter values, F-10), "secrets" (the pipeline's named
+// secrets as plaintext, F-12), and "run" (the run's identity, F-10). The
+// structured keys are set after the env so they win over any same-named env
+// var.
 func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity, run RunInfo) map[string]any {
-	data := make(map[string]any, len(step.GetEnv())+5)
+	data := make(map[string]any, len(step.GetEnv())+6)
 	for k, v := range step.GetEnv() {
 		data[k] = v
 	}
@@ -481,6 +488,7 @@ func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstre
 	data["jobs"] = toUpstreamJobInfos(upstreamJobs)
 	data["job"] = identity
 	data["params"] = run.Params
+	data["secrets"] = run.Secrets
 	data["run"] = run
 	return data
 }
@@ -680,19 +688,27 @@ func interpolateParamValue(value *dbpb.ParamValue, data map[string]any) (*dbpb.P
 
 // interpolateData builds the data a spec field is interpolated against (F-10):
 // the run's parameter values (top-level, so `{{ .name }}` works) plus the
-// structured keys "params" (the run's parameter values) and "run" (the run's
+// structured keys "params" (the run's parameter values), "secrets" (the
+// pipeline's named secrets as plaintext, F-12), and "run" (the run's
 // identity). The structured keys are set after the params so they win over any
-// same-named parameter.
+// same-named parameter. Secrets are only reachable under the "secrets" key
+// (`{{ .secrets.name }}`), never top-level, so a secret can never collide with
+// a parameter of the same name.
 func interpolateData(run RunInfo) map[string]any {
 	params := run.Params
 	if params == nil {
 		params = map[string]string{}
 	}
-	data := make(map[string]any, len(params)+2)
+	secrets := run.Secrets
+	if secrets == nil {
+		secrets = map[string]string{}
+	}
+	data := make(map[string]any, len(params)+3)
 	for k, v := range params {
 		data[k] = v
 	}
 	data["params"] = params
+	data["secrets"] = secrets
 	data["run"] = run
 	return data
 }

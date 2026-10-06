@@ -120,13 +120,13 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		if err != nil {
 			return fmt.Errorf("%q: stderr pipe: %w", command, err)
 		}
-	} else {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		sink.WriteStepOutput(stepIndex, "stdout", []byte("command: "+command))
+		for _, arg := range args {
+			sink.WriteStepOutput(stepIndex, "stdout", []byte("arg: "+arg))
+		}
+		sink.WriteStepOutput(stepIndex, "stdout", []byte("shell: "+paramString(step, ParamShell)))
+		sink.WriteStepOutput(stepIndex, "stdout", []byte("workdir: "+step.GetWorkdir()))
 	}
-
-	logger.Info("executor: running step",
-		"command", command, "args", args, "shell", paramString(step, ParamShell), "workdir", step.GetWorkdir())
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("%q: %w", command, err)
@@ -141,11 +141,11 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			teeToSink(stdout, os.Stdout, sink, stepIndex, executor.StreamStdout)
+			sendToLogs(stdout, sink, stepIndex, executor.StreamStdout)
 		}()
 		go func() {
 			defer wg.Done()
-			teeToSink(stderr, os.Stderr, sink, stepIndex, executor.StreamStderr)
+			sendToLogs(stderr, sink, stepIndex, executor.StreamStderr)
 		}()
 	}
 
@@ -177,18 +177,16 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 	return nil
 }
 
-// teeToSink copies from src to both local (the target's own stream) and to
+// sendToLogs copies from src to both local (the target's own stream) and to
 // sink (attributed to stepIndex/stream). It runs until src is exhausted (the
 // command's pipe closes). Writes to the sink are best-effort: the sink drops
 // output it cannot keep up with, so this never blocks the command.
-func teeToSink(src io.Reader, local io.Writer, sink executor.LogSink, stepIndex int, stream string) {
+func sendToLogs(src io.Reader, sink executor.LogSink, stepIndex int, stream string) {
 	buffer := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buffer)
 		if n > 0 {
 			data := buffer[:n]
-			// Local logging first (the target's own stdout/stderr).
-			_, _ = local.Write(data)
 			// Stream to the API (best-effort, non-blocking).
 			sink.WriteStepOutput(stepIndex, stream, data)
 		}

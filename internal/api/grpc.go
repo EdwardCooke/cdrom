@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/secrets"
 )
 
 // heartbeatInterval is the recommended worker heartbeat cadence.
@@ -68,6 +70,12 @@ type GRPCServer struct {
 	logger    *slog.Logger
 	hub       *EventHub
 	jobAuth   *JobTokenAuth
+	// secretStore decrypts a job's stored secret ciphertexts into plaintext
+	// when the API hands the job to an execution target (F-12), and redacts
+	// the plaintext from streamed job logs before they are persisted or fanned
+	// out. It is nil when no secrets key is configured; a job whose pipeline
+	// has no secrets needs no store.
+	secretStore secrets.Store
 
 	mu       sync.Mutex
 	live     map[string]*liveWorker // worker name -> live worker
@@ -103,22 +111,26 @@ type liveWorker struct {
 // for the Artifacts service (proxied to execution targets); hub is the event
 // hub that backs the /api/ws WebSocket endpoint (may be nil); jobAuth verifies
 // and mints the job tokens handed to execution targets (may be nil to disable
-// job-token auth).
-func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient, hub *EventHub, jobAuth *JobTokenAuth, logger *slog.Logger) *GRPCServer {
+// job-token auth); secretStore decrypts a job's stored secret ciphertexts into
+// plaintext at dispatch and redacts them from streamed logs (F-12, may be nil
+// when no secrets key is configured); logger is the logger (defaults to
+// slog.Default()).
+func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient, hub *EventHub, jobAuth *JobTokenAuth, secretStore secrets.Store, logger *slog.Logger) *GRPCServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &GRPCServer{
-		db:         db,
-		artifacts:  artifacts,
-		hub:        hub,
-		jobAuth:    jobAuth,
-		logger:     logger,
-		live:       make(map[string]*liveWorker),
-		watchers:   make(map[string]chan *apipb.WatchMessage),
-		logCursors: make(map[string]int64),
-		coalescer:  newLogCoalescer(logCoalesceWindow),
-		published:  make(map[int64]struct{}),
+		db:          db,
+		artifacts:   artifacts,
+		hub:         hub,
+		jobAuth:     jobAuth,
+		secretStore: secretStore,
+		logger:      logger,
+		live:        make(map[string]*liveWorker),
+		watchers:    make(map[string]chan *apipb.WatchMessage),
+		logCursors:  make(map[string]int64),
+		coalescer:   newLogCoalescer(logCoalesceWindow),
+		published:   make(map[int64]struct{}),
 	}
 }
 
@@ -259,6 +271,9 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 	// Hand the agent the status/outputs of the jobs this job depends on (F-06)
 	// so a step's condition can reference them.
 	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
+	// Hand the agent the pipeline's secrets as plaintext (F-12), decrypted from
+	// the job's stored ciphertexts, so a step's spec can reference them.
+	s.resolveSecrets(ctx, apiJob, job)
 	// Hand the agent a job token so it can authenticate its status reports and
 	// any outside-resource calls for this job.
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
@@ -307,6 +322,9 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	}
 	apiJob := toAPIJob(job)
 	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
+	// Hand the worker the pipeline's secrets as plaintext (F-12), decrypted
+	// from the job's stored ciphertexts, so a step's spec can reference them.
+	s.resolveSecrets(ctx, apiJob, job)
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
 		apiJob.Token = token
 	}
@@ -494,8 +512,12 @@ func (s *GRPCServer) StreamJobLogs(stream grpc.ClientStreamingServer[apipb.JobLo
 	if err := s.checkJobToken(stream.Context(), jobID); err != nil {
 		return err
 	}
+	// Build the redactor for this job's secrets once (F-12): every chunk is
+	// run through it before it is persisted or fanned out, so a secret's
+	// plaintext never reaches the artifacts store or the UI.
+	redactor := s.secretRedactorFor(stream.Context(), jobID)
 	var received int64
-	if err := s.handleLogChunk(stream.Context(), jobID, metadata, first.GetData(), &received); err != nil {
+	if err := s.handleLogChunk(stream.Context(), jobID, metadata, first.GetData(), &received, redactor); err != nil {
 		return err
 	}
 	for {
@@ -509,7 +531,7 @@ func (s *GRPCServer) StreamJobLogs(stream grpc.ClientStreamingServer[apipb.JobLo
 		if size := len(chunk.GetData()); size > maxLogChunkSize {
 			return status.Errorf(codes.InvalidArgument, "log chunk of %d bytes exceeds limit of %d", size, maxLogChunkSize)
 		}
-		if err := s.handleLogChunk(stream.Context(), jobID, chunk.GetMetadata(), chunk.GetData(), &received); err != nil {
+		if err := s.handleLogChunk(stream.Context(), jobID, chunk.GetMetadata(), chunk.GetData(), &received, redactor); err != nil {
 			return err
 		}
 	}
@@ -521,12 +543,19 @@ func (s *GRPCServer) StreamJobLogs(stream grpc.ClientStreamingServer[apipb.JobLo
 // of a step's output) is attributed to that step; a chunk without metadata
 // continues the current step.
 //
+// Before anything is persisted or fanned out, the chunk is run through the
+// job's secret redactor (F-12), so a secret's plaintext is never written to
+// the artifacts store or shown to the UI.
+//
 // Persistence is best-effort: if the artifacts service is unreachable the
 // chunk is retried (appendLogWithRetry) and, if it still cannot be persisted
 // within the retry budget, dropped — the stream is never torn down by an
 // artifacts outage. The job_log event is always published so the UI sees the
 // output in real time.
-func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *apipb.JobLogMetadata, data []byte, received *int64) error {
+func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *apipb.JobLogMetadata, data []byte, received *int64, redactor *secretRedactor) error {
+	// Redact any secret plaintext from the output before it is persisted or
+	// fanned out (F-12). A nil redactor (no secrets) leaves the data as-is.
+	data = redactor.redact(data)
 	if len(data) == 0 {
 		return nil
 	}
@@ -1191,6 +1220,95 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		UpstreamClaims: job.GetUpstreamClaims(),
 		RunParams:      job.GetRunParams(),
 	}
+}
+
+// resolveSecrets decrypts the job's stored secret ciphertexts (F-12) into a
+// name -> plaintext map and sets it on the API job handed to an execution
+// target. The target interpolates the values into the job's spec (`{{
+// .secrets.name }}`) before it runs. A job whose pipeline has no secrets (or a
+// nil secret store) is left unchanged. A ciphertext that fails to decrypt (the
+// key changed since it was written) is logged and dropped rather than failing
+// the dispatch: the job's spec that references it will then fail to
+// interpolate, which is a clearer signal than a half-dispatched job.
+func (s *GRPCServer) resolveSecrets(ctx context.Context, apiJob *apipb.Job, dbJob *dbpb.Job) {
+	if s.secretStore == nil || len(dbJob.GetSecrets()) == 0 {
+		return
+	}
+	plaintext := make(map[string]string, len(dbJob.GetSecrets()))
+	for _, secret := range dbJob.GetSecrets() {
+		value, err := s.secretStore.Decrypt(ctx, secret.GetEncrypted())
+		if err != nil {
+			s.logger.Warn("api: decrypt secret for job", "job", dbJob.GetId(), "secret", secret.GetName(), "err", err)
+			continue
+		}
+		plaintext[secret.GetName()] = value
+	}
+	if len(plaintext) > 0 {
+		apiJob.Secrets = plaintext
+	}
+}
+
+// secretRedactor replaces a job's secret plaintext values in log output so the
+// plaintext is never persisted to the artifacts store or fanned out to the UI
+// (F-12). The API is the only component that holds the key, so it is the only
+// place that can both decrypt the ciphertexts (to know the plaintext to look
+// for) and redact them. A nil redactor (a job with no secrets, or no secrets
+// key configured) leaves the output unchanged.
+type secretRedactor struct {
+	// values are the secret plaintexts to redact, sorted longest-first so a
+	// value that is a substring of a longer one is not partially redacted
+	// before the longer one is.
+	values []string
+}
+
+// redact replaces every occurrence of a secret plaintext in data with a
+// redaction marker. A nil receiver is a no-op.
+func (r *secretRedactor) redact(data []byte) []byte {
+	if r == nil || len(r.values) == 0 {
+		return data
+	}
+	out := string(data)
+	for _, v := range r.values {
+		if v == "" {
+			continue
+		}
+		out = strings.ReplaceAll(out, v, "[REDACTED]")
+	}
+	return []byte(out)
+}
+
+// secretRedactorFor fetches the job and returns a redactor for its secret
+// plaintexts (F-12). A job with no secrets (or a nil secret store) yields a
+// nil redactor (no redaction needed). A ciphertext that fails to decrypt is
+// logged and skipped: without the plaintext there is nothing to redact.
+func (s *GRPCServer) secretRedactorFor(ctx context.Context, jobID int64) *secretRedactor {
+	if s.secretStore == nil {
+		return nil
+	}
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: jobID})
+	if err != nil {
+		s.logger.Warn("api: fetch job for log redaction", "job", jobID, "err", err)
+		return nil
+	}
+	if len(job.GetSecrets()) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(job.GetSecrets()))
+	for _, secret := range job.GetSecrets() {
+		value, err := s.secretStore.Decrypt(ctx, secret.GetEncrypted())
+		if err != nil {
+			s.logger.Warn("api: decrypt secret for log redaction", "job", jobID, "secret", secret.GetName(), "err", err)
+			continue
+		}
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	return &secretRedactor{values: values}
 }
 
 // upstreamJobsFor fetches the status and outputs of the jobs job depends on

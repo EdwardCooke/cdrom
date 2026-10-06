@@ -24,6 +24,7 @@ import (
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
+	"cdrom/internal/secrets"
 )
 
 func main() {
@@ -78,6 +79,21 @@ func main() {
 		Artifacts: artifactspb.NewArtifactsClient(artConn),
 	}
 
+	// The secret store (F-12): encrypts a pipeline's secret plaintexts on
+	// create/update and decrypts them at dispatch. It is nil when no secrets
+	// key is configured (the API then rejects pipelines that carry secrets).
+	// The built-in AES store draws each nonce from a counter kept in the
+	// database (via the Database service's NextSecretNonce RPC), so every API
+	// replica shares one sequence and can never reuse a nonce.
+	var secretStore secrets.Store
+	if cfg.Secrets.Enabled() {
+		secretStore, err = secrets.NewStore(cfg.Secrets, &dbNonceSource{db: clients.Database})
+		if err != nil {
+			logger.Error("secrets: init", "err", err)
+			os.Exit(1)
+		}
+	}
+
 	// Event hub backing the /api/ws WebSocket endpoint; both the HTTP server
 	// (snapshot + stream) and the gRPC server (publish) share it.
 	hub := api.NewEventHub()
@@ -108,7 +124,7 @@ func main() {
 	// token — a client needs it to start the sign-in flow. Go's ServeMux
 	// prefers the more specific /api/auth/oidc pattern over the /api/ subtree
 	// handler.
-	apiHandler := authBundle.Middleware(api.New(clients, hub).Handler())
+	apiHandler := authBundle.Middleware(api.New(clients, hub, secretStore).Handler())
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
 	mux.HandleFunc("GET /api/auth/oidc", authBundle.ServeDiscovery)
@@ -148,7 +164,7 @@ func main() {
 		os.Exit(1)
 	}
 	grpcSrv := grpc.NewServer(grpc.Creds(creds))
-	grpcServer := api.NewGRPCServer(clients.Database, clients.Artifacts, hub, jobAuth, logger)
+	grpcServer := api.NewGRPCServer(clients.Database, clients.Artifacts, hub, jobAuth, secretStore, logger)
 	apipb.RegisterAPIServer(grpcSrv, grpcServer)
 
 	// Event-log tail loop (F-23): tails the shared event log and fans new
@@ -170,4 +186,20 @@ func main() {
 	// HTTP server too.
 	stopTail()
 	_ = httpSrv.Shutdown(context.Background())
+}
+
+// dbNonceSource adapts the Database service's NextSecretNonce RPC to the
+// secrets.NonceSource interface (F-12). Every API replica draws its per-
+// encryption nonce from this single shared counter, so no two encryptions —
+// even across replicas — ever reuse a nonce.
+type dbNonceSource struct {
+	db dbpb.DatabaseClient
+}
+
+func (n *dbNonceSource) NextNonce(ctx context.Context) (uint64, error) {
+	resp, err := n.db.NextSecretNonce(ctx, &dbpb.NextSecretNonceRequest{})
+	if err != nil {
+		return 0, err
+	}
+	return uint64(resp.GetNonce()), nil
 }

@@ -3121,3 +3121,230 @@ func TestDeletePipelineCascadesVersions(t *testing.T) {
 		t.Errorf("deleted pipeline still has %d versions, want 0", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Secrets (F-12)
+// ---------------------------------------------------------------------------
+
+// TestNextSecretNonce verifies that the shared secret-nonce counter hands out
+// a strictly increasing sequence (F-12): the first call returns 1 (the row is
+// created on first use, starting at 0, and the call bumps it to 1), and each
+// subsequent call returns the next value. This also exercises the
+// `UPDATE ... RETURNING` statement against the bundled SQLite.
+func TestNextSecretNonce(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	first, err := client.NextSecretNonce(ctx, &dbpb.NextSecretNonceRequest{})
+	if err != nil {
+		t.Fatalf("NextSecretNonce: %v", err)
+	}
+	if first.GetNonce() != 1 {
+		t.Errorf("first nonce = %d, want 1", first.GetNonce())
+	}
+	second, err := client.NextSecretNonce(ctx, &dbpb.NextSecretNonceRequest{})
+	if err != nil {
+		t.Fatalf("NextSecretNonce: %v", err)
+	}
+	if second.GetNonce() != 2 {
+		t.Errorf("second nonce = %d, want 2", second.GetNonce())
+	}
+}
+
+// TestCreatePipelineWithSecrets verifies that a pipeline's named secrets are
+// stored (as opaque ciphertext) and returned on create and fetch (F-12).
+func TestCreatePipelineWithSecrets(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Secrets: []*dbpb.Secret{
+			{Name: "db_password", Encrypted: "enc-1"},
+			{Name: "api_key", Encrypted: "enc-2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if got := len(pipeline.GetSecrets()); got != 2 {
+		t.Fatalf("pipeline secrets = %d, want 2", got)
+	}
+
+	fetched, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	byName := map[string]string{}
+	for _, secret := range fetched.GetSecrets() {
+		byName[secret.GetName()] = secret.GetEncrypted()
+	}
+	if byName["db_password"] != "enc-1" {
+		t.Errorf("db_password = %q, want enc-1", byName["db_password"])
+	}
+	if byName["api_key"] != "enc-2" {
+		t.Errorf("api_key = %q, want enc-2", byName["api_key"])
+	}
+}
+
+// TestCreatePipelineRejectsDuplicateSecret verifies that a pipeline with two
+// secrets of the same name is rejected (F-12): a secret must be referenceable
+// unambiguously.
+func TestCreatePipelineRejectsDuplicateSecret(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "dup",
+		Secrets: []*dbpb.Secret{
+			{Name: "token", Encrypted: "a"},
+			{Name: "token", Encrypted: "b"},
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreatePipeline with duplicate secret = %v, want InvalidArgument", err)
+	}
+}
+
+// TestCreatePipelineRejectsEmptySecretName verifies that a pipeline with a
+// secret that has an empty name is rejected (F-12).
+func TestCreatePipelineRejectsEmptySecretName(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:    "empty",
+		Secrets: []*dbpb.Secret{{Name: "", Encrypted: "x"}},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreatePipeline with empty secret name = %v, want InvalidArgument", err)
+	}
+}
+
+// TestUpdatePipelineReplacesSecrets verifies that updating a pipeline with a
+// non-nil secrets list replaces its secrets (F-12), and that an update with no
+// secrets leaves them unchanged.
+func TestUpdatePipelineReplacesSecrets(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:    "p",
+		Secrets: []*dbpb.Secret{{Name: "old", Encrypted: "a"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	updated, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:      pipeline.GetId(),
+		Secrets: []*dbpb.Secret{{Name: "new", Encrypted: "b"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+	if got := len(updated.GetSecrets()); got != 1 {
+		t.Fatalf("updated secrets = %d, want 1", got)
+	}
+	if updated.GetSecrets()[0].GetName() != "new" || updated.GetSecrets()[0].GetEncrypted() != "b" {
+		t.Errorf("updated secret = %+v, want new/b", updated.GetSecrets()[0])
+	}
+
+	// An update with no secrets leaves the pipeline's secrets unchanged.
+	unchanged, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("UpdatePipeline (no secrets): %v", err)
+	}
+	if got := len(unchanged.GetSecrets()); got != 1 {
+		t.Fatalf("secrets after no-secret update = %d, want 1 (unchanged)", got)
+	}
+	if unchanged.GetSecrets()[0].GetName() != "new" {
+		t.Errorf("secret after no-secret update = %q, want new", unchanged.GetSecrets()[0].GetName())
+	}
+}
+
+// TestCreateRunDenormalizesSecrets verifies that a pipeline's named secrets
+// (as ciphertext) are denormalized onto each of its run's job instances
+// (F-12), so the API can decrypt them at dispatch without re-reading the
+// pipeline.
+func TestCreateRunDenormalizesSecrets(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:    "deploy",
+		Secrets: []*dbpb.Secret{{Name: "db_password", Encrypted: "enc-1"}},
+		Jobs:    []*dbpb.JobDefinition{{Key: "build", Name: "build", TargetGroup: "linux-pool"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := len(resp.GetJobs()); got != 1 {
+		t.Fatalf("run created %d job instances, want 1", got)
+	}
+	secrets := resp.GetJobs()[0].GetSecrets()
+	if got := len(secrets); got != 1 {
+		t.Fatalf("instance secrets = %d, want 1", got)
+	}
+	if secrets[0].GetName() != "db_password" || secrets[0].GetEncrypted() != "enc-1" {
+		t.Errorf("instance secret = %+v, want db_password/enc-1", secrets[0])
+	}
+}
+
+// TestRunAgainstSpecificVersionReproducesSecrets verifies that a run against a
+// specific version carries that version's secrets (F-11/F-12): editing the
+// pipeline's secrets after a run does not change what the run's instances
+// carry.
+func TestRunAgainstSpecificVersionReproducesSecrets(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:    "deploy",
+		Secrets: []*dbpb.Secret{{Name: "token", Encrypted: "v1"}},
+		Jobs:    []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	// A run against the current (version 1) definition.
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := resp.GetJobs()[0].GetSecrets()[0].GetEncrypted(); got != "v1" {
+		t.Fatalf("instance secret = %q, want v1", got)
+	}
+
+	// Edit the pipeline's secrets (a new version).
+	if _, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:      pipeline.GetId(),
+		Secrets: []*dbpb.Secret{{Name: "token", Encrypted: "v2"}},
+	}); err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+
+	// A run against the original version reproduces the old secret.
+	old, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{
+		PipelineId:      pipeline.GetId(),
+		Trigger:         "manual",
+		PipelineVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun (v1): %v", err)
+	}
+	if got := old.GetJobs()[0].GetSecrets()[0].GetEncrypted(); got != "v1" {
+		t.Errorf("v1 instance secret = %q, want v1", got)
+	}
+	// A run against the current version carries the new secret.
+	cur, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun (current): %v", err)
+	}
+	if got := cur.GetJobs()[0].GetSecrets()[0].GetEncrypted(); got != "v2" {
+		t.Errorf("current instance secret = %q, want v2", got)
+	}
+}

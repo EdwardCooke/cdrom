@@ -50,7 +50,7 @@ func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient, hub *Ev
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	apipb.RegisterAPIServer(srv, NewGRPCServer(nil, artifacts, hub, nil, nil))
+	apipb.RegisterAPIServer(srv, NewGRPCServer(nil, artifacts, hub, nil, nil, nil))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -365,25 +365,25 @@ func TestHandleLogChunkRidesOutArtifactsOutage(t *testing.T) {
 
 	real := startArtifactsServer(t)
 	fake := &fakeArtifacts{ArtifactsClient: real}
-	srv := NewGRPCServer(nil, fake, nil, nil, nil)
+	srv := NewGRPCServer(nil, fake, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	var received int64
 	// A chunk that persists fine (artifacts is up).
-	if err := srv.handleLogChunk(ctx, 50, &apipb.JobLogMetadata{JobId: 50, StepIndex: 0, Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT}, []byte("ok\n"), &received); err != nil {
+	if err := srv.handleLogChunk(ctx, 50, &apipb.JobLogMetadata{JobId: 50, StepIndex: 0, Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT}, []byte("ok\n"), &received, nil); err != nil {
 		t.Fatalf("handleLogChunk (ok): %v", err)
 	}
 	// Simulate the artifacts service going down.
 	fake.setFailAppend(true)
 	// A chunk sent during the outage: the API retries, exhausts the budget,
 	// and drops it — but handleLogChunk returns nil, so the stream survives.
-	if err := srv.handleLogChunk(ctx, 50, nil, []byte("lost\n"), &received); err != nil {
+	if err := srv.handleLogChunk(ctx, 50, nil, []byte("lost\n"), &received, nil); err != nil {
 		t.Fatalf("handleLogChunk (lost) must not fail the stream: %v", err)
 	}
 	// The artifacts service recovers.
 	fake.setFailAppend(false)
 	// A chunk sent after recovery is persisted.
-	if err := srv.handleLogChunk(ctx, 50, nil, []byte("back\n"), &received); err != nil {
+	if err := srv.handleLogChunk(ctx, 50, nil, []byte("back\n"), &received, nil); err != nil {
 		t.Fatalf("handleLogChunk (back): %v", err)
 	}
 

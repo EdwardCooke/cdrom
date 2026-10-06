@@ -110,6 +110,16 @@ streamed to the API in near-real-time (F-02, `internal/logstream`); the API
 persists them to the artifacts service and fans them out to the UI as `job_log`
 events.
 
+**Secrets (F-12).** Pipelines declare named secrets (like `params`); values are
+encrypted with a single AES-256-GCM key held in the API's config and stored
+opaquely (ciphertext) on the pipeline, its version snapshots, and each run's job
+instances. The API is the **only** component that can decrypt: it decrypts at
+dispatch and hands plaintext to the target via the API `Job.secrets` map (never
+persisted), which the executor exposes to specs as `{{ .secrets.name }}`.
+Nonces come from a DB-backed counter (`NextSecretNonce`), so all API replicas
+share one key + one sequence. The API also redacts secret values from job logs
+before they reach the artifacts store / UI.
+
 **Feature index.** The detailed spec, acceptance criteria, and RPC/field changes
 for each feature are in `docs/Features.md`. Summary:
 
@@ -126,7 +136,8 @@ for each feature are in `docs/Features.md`. Summary:
 | F-09 | Triggers (cron / webhook / event; atomic `TriggerRun`; cron + event loops; webhook endpoint) |
 | F-10 | Parameters & variables (pipeline `Parameter`s; run values; Go-template interpolation) |
 | F-11 | Pipeline versioning (immutable `PipelineVersion` snapshots; a run binds to the version active at start; run against a specific version) |
-| F-12…F-22 | Roadmap: secrets, approval gates, RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-12 | Secrets management (pipeline-level named secrets; AES-256-GCM with a configured key; DB-backed nonce counter; API decrypts at dispatch; log redaction) |
+| F-13…F-22 | Roadmap: approval gates, RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 
 Cross-cutting execution concepts (full detail in `docs/Features.md` /
@@ -204,6 +215,8 @@ internal/
               interpolation F-10, step condition F-06, step outputs, token exchange)
   stephandlers/ built-in handlers: `shell` (DefaultType) + `token_exchange`; extend via
               executor.RegisterStepType
+  secrets/    secret store: `Store` interface + built-in AES-256-GCM store; nonces
+              come from the Database service's `NextSecretNonce` (F-12)
   services/
     data/     pipeline/job data service
     artifacts/ namespaced file store (artifacts + job logs; gRPC server; store interface)
@@ -257,8 +270,9 @@ Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_P
 `CDROM_DB_POSTGRES_DSN`, `CDROM_ARTIFACTS_ROOT`, `CDROM_ARTIFACTS_STORE`,
 `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
 the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
-auth vars `CDROM_AUTH_*`, the IdP vars `CDROM_IDP_*`, and the job-token auth vars
-`CDROM_GRPC_AUTH_*`.
+auth vars `CDROM_AUTH_*`, the IdP vars `CDROM_IDP_*`, the job-token auth vars
+`CDROM_GRPC_AUTH_*`, and the secrets vars `CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY`
+(base64 32-byte AES-256-GCM key; when unset, secrets are disabled).
 
 A minimal local run (plaintext, no certs):
 

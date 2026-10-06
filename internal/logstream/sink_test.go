@@ -51,7 +51,7 @@ func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient) apipb.A
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	apipb.RegisterAPIServer(srv, api.NewGRPCServer(nil, artifacts, nil, nil, nil))
+	apipb.RegisterAPIServer(srv, api.NewGRPCServer(nil, artifacts, nil, nil, nil, nil))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 

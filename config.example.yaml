@@ -125,3 +125,21 @@ db:
 #  # Default lifetime of an exchanged job token (a job may override it per
 #  # request via the step's expires_in). Defaults to 15m when unset.
 #  exchanged_token_lifetime: 15m
+
+# Secret store (used by the API, F-12). The API is the only component that
+# holds the key: it encrypts a pipeline secret's plaintext when the pipeline
+# is created or updated, and decrypts the stored ciphertext when it hands a
+# job to an execution target (so a step can reference it as
+# `{{ .secrets.name }}`). The database service stores the ciphertext opaquely
+# and never sees the key. Disabled by default: when key is empty the store is
+# off and a pipeline that declares secrets is rejected.
+#
+# kind selects the store backend. The built-in "aes" store (the default) uses
+# AES-256-GCM with a base64-encoded 32-byte key; "vault" and "openbao" are
+# reserved for future first-class backends. The nonce counter is kept in the
+# database so every API replica draws unique nonces from one shared sequence.
+#
+# Generate a key with: openssl rand -base64 32
+#secrets:
+#  kind: aes
+#  key: <base64-encoded 32-byte AES-256 key>

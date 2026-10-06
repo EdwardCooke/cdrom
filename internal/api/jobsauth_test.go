@@ -114,7 +114,7 @@ func TestCheckJobToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
-	s := NewGRPCServer(nil, nil, nil, jta, slog.Default())
+	s := NewGRPCServer(nil, nil, nil, jta, nil, slog.Default())
 
 	// No token -> Unauthenticated.
 	if err := s.checkJobToken(context.Background(), 42); status.Code(err) != codes.Unauthenticated {
@@ -137,7 +137,7 @@ func TestCheckJobToken(t *testing.T) {
 // TestCheckJobTokenDisabled confirms the check is a no-op when job-token auth
 // is disabled (nil JobTokenAuth).
 func TestCheckJobTokenDisabled(t *testing.T) {
-	s := NewGRPCServer(nil, nil, nil, nil, slog.Default())
+	s := NewGRPCServer(nil, nil, nil, nil, nil, slog.Default())
 	if err := s.checkJobToken(context.Background(), 42); err != nil {
 		t.Errorf("disabled: %v, want nil", err)
 	}
@@ -157,7 +157,7 @@ func TestExchangeJobToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
-	s := NewGRPCServer(nil, nil, nil, jta, slog.Default())
+	s := NewGRPCServer(nil, nil, nil, jta, nil, slog.Default())
 
 	// No token -> Unauthenticated.
 	_, err = s.ExchangeJobToken(context.Background(), &apipb.ExchangeJobTokenRequest{JobId: 42, Audience: "outside-svc"})
@@ -187,7 +187,7 @@ func TestExchangeJobToken(t *testing.T) {
 // TestExchangeJobTokenDisabled confirms the RPC is a no-op when job-token auth
 // is disabled (nil JobTokenAuth).
 func TestExchangeJobTokenDisabled(t *testing.T) {
-	s := NewGRPCServer(nil, nil, nil, nil, slog.Default())
+	s := NewGRPCServer(nil, nil, nil, nil, nil, slog.Default())
 	resp, err := s.ExchangeJobToken(context.Background(), &apipb.ExchangeJobTokenRequest{JobId: 42, Audience: "outside-svc"})
 	if err != nil {
 		t.Errorf("disabled: %v, want nil", err)
@@ -268,7 +268,7 @@ func TestCheckJobTokenStatusGate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &fakeDB{job: &dbpb.Job{Id: 42, Status: tc.status}}
-			s := NewGRPCServer(db, nil, nil, jta, slog.Default())
+			s := NewGRPCServer(db, nil, nil, jta, nil, slog.Default())
 			err := s.checkJobToken(ctx, 42)
 			if tc.wantErr == codes.OK {
 				if err != nil {
@@ -299,7 +299,7 @@ func TestExchangeJobTokenExpiresIn(t *testing.T) {
 	}
 	// A running job so the status gate in checkJobToken passes.
 	db := &fakeDB{job: &dbpb.Job{Id: 42, Status: dbpb.JobStatus_JOB_STATUS_RUNNING}}
-	s := NewGRPCServer(db, nil, nil, jta, slog.Default())
+	s := NewGRPCServer(db, nil, nil, jta, nil, slog.Default())
 
 	token := mintTestJobToken(t, base, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))

@@ -226,6 +226,14 @@ message Job {
   // before the job runs. Empty for a job not part of a run (or a run with no
   // parameters).
   map<string, string> run_params = 24;
+  // secrets are the pipeline's named secrets for this run (F-12), as a
+  // name -> PLAINTEXT value map. The API decrypts the job's stored
+  // ciphertext and populates this field when it hands the job to an
+  // execution target (GetJob, StartJobExecution, and the dispatch push); it
+  // is never persisted. The execution target interpolates the values into
+  // the job's spec using Go templates (`{{ .secrets.name }}`) before the job
+  // runs. Empty for a job whose pipeline has no secrets.
+  map<string, string> secrets = 25;
 }
 
 message JobAssignment {

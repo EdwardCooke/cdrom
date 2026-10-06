@@ -19,6 +19,7 @@ import (
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
+	"cdrom/internal/secrets"
 )
 
 // Clients are the gRPC clients the API bridges to.
@@ -37,13 +38,23 @@ type Server struct {
 	// production verifier by default; tests substitute a fake so the
 	// claim-matching path can be exercised without a live identity provider.
 	webhookOIDC webhookTokenVerifier
+	// secretStore encrypts a pipeline's secret plaintexts on create/update and
+	// decrypts them at dispatch (F-12). It is nil when no secrets key is
+	// configured; the API then rejects any pipeline that carries secrets.
+	secretStore secrets.Store
 }
 
 // New creates an API server over the given gRPC clients. hub is the event
 // hub that backs the /api/ws WebSocket endpoint; it may be nil to disable
-// the WebSocket endpoint.
-func New(clients Clients, hub *EventHub) *Server {
-	return &Server{clients: clients, hub: hub, webhookOIDC: newWebhookOIDCVerifier()}
+// the WebSocket endpoint. secretStore (optional) is the store that
+// encrypts/decrypts pipeline secrets (F-12); when omitted (or nil) no secrets
+// key is configured and the API rejects pipelines that carry secrets.
+func New(clients Clients, hub *EventHub, secretStore ...secrets.Store) *Server {
+	var store secrets.Store
+	if len(secretStore) > 0 {
+		store = secretStore[0]
+	}
+	return &Server{clients: clients, hub: hub, webhookOIDC: newWebhookOIDCVerifier(), secretStore: store}
 }
 
 // Handler builds the HTTP handler for the API.
@@ -122,6 +133,12 @@ type pipelineRequest struct {
 	// typed inputs a run can supply. When present they are validated (unique,
 	// non-empty names) before the pipeline is saved.
 	Params []parameterRequest `json:"params,omitempty"`
+	// Secrets are the pipeline's named secrets (F-12): each carries a name and
+	// a plaintext value. The API encrypts each value (with the configured key)
+	// before persisting it; the plaintext is never stored or returned. When
+	// present they are validated (unique, non-empty names) before the pipeline
+	// is saved.
+	Secrets []secretRequest `json:"secrets,omitempty"`
 }
 
 // parameterRequest is the JSON form of a single pipeline parameter (F-10): a
@@ -132,6 +149,14 @@ type parameterRequest struct {
 	Name        string `json:"name"`
 	Default     string `json:"default,omitempty"`
 	Description string `json:"description,omitempty"`
+}
+
+// secretRequest is the JSON form of a single pipeline secret (F-12): a name
+// and a plaintext value. The API encrypts the value before persisting it; the
+// plaintext is never stored or returned to the UI.
+type secretRequest struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // triggerRequest is the JSON form of a single pipeline trigger (F-09). Type
@@ -179,12 +204,18 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid jobs: %v", err)
 		return
 	}
+	secrets, err := s.pipelineSecretsToProto(r.Context(), req.Secrets)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid secrets: %v", err)
+		return
+	}
 	pipeline, err := s.clients.Database.CreatePipeline(r.Context(), &dbpb.CreatePipelineRequest{
 		Name:        req.Name,
 		Description: req.Description,
 		Jobs:        jobs,
 		Triggers:    triggersToProto(req.Triggers),
 		Params:      pipelineParamsToProto(req.Params),
+		Secrets:     secrets,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -208,6 +239,11 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid jobs: %v", err)
 		return
 	}
+	secrets, err := s.pipelineSecretsToProto(r.Context(), req.Secrets)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid secrets: %v", err)
+		return
+	}
 	pipeline, err := s.clients.Database.UpdatePipeline(r.Context(), &dbpb.UpdatePipelineRequest{
 		Id:          pipelineID,
 		Name:        req.Name,
@@ -215,6 +251,7 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		Jobs:        jobs,
 		Triggers:    triggersToProto(req.Triggers),
 		Params:      pipelineParamsToProto(req.Params),
+		Secrets:     secrets,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -265,6 +302,39 @@ func pipelineParamsToProto(params []parameterRequest) []*dbpb.Parameter {
 		})
 	}
 	return out
+}
+
+// pipelineSecretsToProto converts the JSON secret declarations into the proto
+// Secret list carried to the database service (F-12). Each plaintext value is
+// encrypted with the API's secret store before it is handed off, so the
+// database service only ever sees ciphertext. It returns nil when there are no
+// secrets, so an update with no secrets leaves the pipeline's secrets
+// unchanged. It is an error to supply secrets when no secrets key is
+// configured (the API cannot encrypt them).
+func (s *Server) pipelineSecretsToProto(ctx context.Context, reqs []secretRequest) ([]*dbpb.Secret, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+	if s.secretStore == nil {
+		return nil, fmt.Errorf("secrets are not supported: no secrets key is configured")
+	}
+	seen := make(map[string]struct{}, len(reqs))
+	out := make([]*dbpb.Secret, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Name == "" {
+			return nil, fmt.Errorf("secret has an empty name")
+		}
+		if _, dup := seen[req.Name]; dup {
+			return nil, fmt.Errorf("duplicate secret name %q", req.Name)
+		}
+		seen[req.Name] = struct{}{}
+		encrypted, err := s.secretStore.Encrypt(ctx, req.Value)
+		if err != nil {
+			return nil, fmt.Errorf("encrypt secret %q: %w", req.Name, err)
+		}
+		out = append(out, &dbpb.Secret{Name: req.Name, Encrypted: encrypted})
+	}
+	return out, nil
 }
 
 // triggerTypeFromName maps a trigger's JSON type to the proto TriggerType

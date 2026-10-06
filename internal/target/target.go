@@ -67,11 +67,14 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 		Name:   job.GetName(),
 		Status: "running",
 	})
-	// The run's parameters (F-10) are interpolated into the job's spec (env,
-	// command, workdir) and are available to a step's condition. They are
-	// denormalized from the run onto the job by the API.
+	// The run's parameters (F-10) and the pipeline's secrets as plaintext
+	// (F-12) are interpolated into the job's spec (env, command, workdir) and
+	// are available to a step's condition. They are denormalized from the run
+	// onto the job by the API (the API decrypts the job's stored secret
+	// ciphertexts into the plaintext map carried on the job).
 	ctx = executor.ContextWithRunInfo(ctx, executor.RunInfo{
 		Params:      job.GetRunParams(),
+		Secrets:     job.GetSecrets(),
 		ID:          job.GetRunId(),
 		PipelineID:  job.GetPipelineId(),
 		Trigger:     job.GetTriggerType(),

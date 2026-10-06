@@ -32,6 +32,42 @@ type Parameter struct {
 	Description string `json:"description,omitempty"`
 }
 
+// Secret is a named secret a pipeline declares (F-12): a name and the
+// encrypted value. The API is the only component that holds the key: it
+// encrypts the plaintext when the pipeline is created or updated and stores
+// the ciphertext here, and it decrypts the ciphertext when it hands a job to
+// an execution target (so a step can reference the value as
+// `{{ .secrets.name }}`). The database service stores the ciphertext opaquely
+// and never sees the key, so no single service or configuration can decrypt a
+// secret on its own. A run's job instances carry the ciphertext (denormalized
+// from the pipeline, like a run's parameters); the API decrypts it at
+// dispatch time and never returns the plaintext to the UI or logs it.
+type Secret struct {
+	// Name is the secret's name; it must be unique within the pipeline.
+	Name string `json:"name"`
+	// Encrypted is the secret's value, encrypted by the API's secret store
+	// (F-12). It is self-describing (it carries the nonce) and safe to store
+	// opaquely. The plaintext is never persisted.
+	Encrypted string `json:"encrypted"`
+}
+
+// SecretNonce is the shared nonce counter for the built-in AES secret store
+// (F-12). AES-GCM requires a unique key/nonce pair for every encryption, so
+// the counter is kept in the database (not in any API replica's memory):
+// every API replica draws the next nonce from this single shared sequence
+// (via the Database service's NextSecretNonce RPC), so no two encryptions —
+// even across replicas — ever reuse a nonce. The nonce itself is embedded in
+// each stored ciphertext, so decryption does not read this counter.
+type SecretNonce struct {
+	gorm.Model
+	// Name is the counter's name; there is a single counter, so this is a
+	// fixed value (it is the row's unique key).
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
+	// Value is the next nonce to hand out; it is incremented atomically on
+	// each NextSecretNonce call.
+	Value int64 `gorm:"not null;default:0" json:"value"`
+}
+
 // Pipeline is a named, ordered definition of work to be executed.
 type Pipeline struct {
 	gorm.Model
@@ -54,6 +90,14 @@ type Pipeline struct {
 	// values for them are recorded on the run and interpolated into its jobs'
 	// specs by the execution target.
 	Params []Parameter `gorm:"type:text;serializer:json" json:"params,omitempty"`
+	// Secrets are the pipeline's named secrets (F-12): each carries a name and
+	// an encrypted value (the API encrypts the plaintext on create/update and
+	// decrypts it at dispatch). They are stored as a JSON document in a text
+	// column (portable across SQLite and PostgreSQL), like Params. A run's job
+	// instances carry the ciphertext (denormalized from the pipeline); the API
+	// decrypts it and hands the plaintext to the execution target, where a step
+	// references it as `{{ .secrets.name }}`.
+	Secrets []Secret `gorm:"type:text;serializer:json" json:"secrets,omitempty"`
 	// Version is the pipeline's current version (F-11): a monotonically
 	// increasing counter that is bumped every time the pipeline's definition
 	// changes (a create is version 1; each edit is the next version). A run
@@ -100,6 +144,10 @@ type PipelineVersion struct {
 	// Params are the pipeline's parameter declarations at this version. They
 	// are stored as a JSON document in a text column.
 	Params []Parameter `gorm:"type:text;serializer:json" json:"params,omitempty"`
+	// Secrets are the pipeline's named secrets at this version (F-12): each
+	// carries a name and an encrypted value. They are stored as a JSON
+	// document in a text column, like Params.
+	Secrets []Secret `gorm:"type:text;serializer:json" json:"secrets,omitempty"`
 }
 
 // JobDefinitionSnapshot is the declarative form of a job definition as captured
@@ -600,6 +648,13 @@ type Job struct {
 	// command, workdir) using Go templates before the job runs. Empty for a
 	// job not part of a run (or a run with no parameters).
 	RunParams map[string]string `gorm:"type:text;serializer:json" json:"run_params,omitempty"`
+	// Secrets are the pipeline's named secrets for this run (F-12): a
+	// name -> encrypted value list denormalized from the pipeline (or the
+	// version snapshot) onto the job instance at run creation. The ciphertext
+	// is opaque to the database service; the API decrypts it and hands the
+	// plaintext to the execution target, where a step references it as
+	// `{{ .secrets.name }}`.
+	Secrets []Secret `gorm:"type:text;serializer:json" json:"secrets,omitempty"`
 }
 
 // StepCompletion records that one worker completed one step of a job's
@@ -786,5 +841,6 @@ func All() []any {
 		&IDPAuthCode{},
 		&Event{},
 		&Lease{},
+		&SecretNonce{},
 	}
 }

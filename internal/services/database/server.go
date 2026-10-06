@@ -61,11 +61,19 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// rejects the whole create, so a pipeline is never saved with a
 		// parameter that could never be referenced unambiguously.
 		Params: pipelineParamsFromProto(req.GetParams()),
+		// The pipeline's named secrets (F-12) are validated before anything is
+		// persisted: a secret with an empty or duplicate name rejects the whole
+		// create. The encrypted value is opaque to the database service (the
+		// API encrypted the plaintext before calling).
+		Secrets: secretsFromProto(req.GetSecrets()),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if err := validateParams(req.GetParams()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateSecrets(req.GetSecrets()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	// The pipeline's job definitions (F-08) are validated as a DAG before
@@ -239,6 +247,16 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		pipeline.Params = pipelineParamsFromProto(req.GetParams())
+	}
+	// When secrets are supplied (F-12) they replace the pipeline's existing
+	// secrets: they are validated (unique, non-empty names) before anything is
+	// persisted. When none are supplied the pipeline's secrets are left
+	// unchanged.
+	if req.GetSecrets() != nil {
+		if err := validateSecrets(req.GetSecrets()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		pipeline.Secrets = secretsFromProto(req.GetSecrets())
 	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
@@ -468,6 +486,11 @@ type runDefinition struct {
 	// specific version. A run's concrete parameter values are computed from
 	// these.
 	params []models.Parameter
+	// secrets are the definition's named secrets (F-12): the pipeline's
+	// Secrets for the current version, or the snapshot's Secrets for a specific
+	// version. They are denormalized (as ciphertext) onto every job instance so
+	// the API can decrypt them and hand the plaintext to the execution target.
+	secrets []models.Secret
 	// needsByIndex[i] carries the needs (keys) of jobs[i] (F-08); non-nil only
 	// for a version snapshot, where the needs are keys that must be resolved to
 	// the run's instance ids. For the current version the needs are already
@@ -534,6 +557,10 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			// definition's spec, mirroring CreateJob.
 			Attempt:   1,
 			RunParams: runParams,
+			// The pipeline's named secrets (F-12) are denormalized (as
+			// ciphertext) onto the instance so the API can decrypt them and
+			// hand the plaintext to the execution target.
+			Secrets: def.secrets,
 		}
 		if jobDef.Spec.Retry != nil {
 			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
@@ -612,7 +639,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Order("id").Find(&defs).Error; err != nil {
 			return nil, err
 		}
-		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params}, nil
+		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets}, nil
 	}
 	// A run against a specific version: use that version's snapshot.
 	var version models.PipelineVersion
@@ -635,7 +662,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		})
 		needsByIndex[i] = snapshot.Needs
 	}
-	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, needsByIndex: needsByIndex}, nil
+	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, needsByIndex: needsByIndex}, nil
 }
 
 // remapRunDependencies computes a run instance's depends_on (the ids of the
@@ -1921,6 +1948,53 @@ func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCo
 }
 
 // ---------------------------------------------------------------------------
+// Secrets (F-12)
+// ---------------------------------------------------------------------------
+
+// secretNonceName is the name of the single secret-nonce counter row. All API
+// replicas share one key (from configuration), so they must share one nonce
+// sequence to keep the AES-GCM (key, nonce) pairs unique.
+const secretNonceName = "secret-nonce"
+
+// NextSecretNonce returns the next value of the secret-nonce counter and
+// atomically increments it (F-12). The counter is what keeps the AES-GCM
+// nonces unique across every API replica: they all share one key from
+// configuration, so they must share one nonce sequence, and a unique
+// (key, nonce) pair is what makes AES-GCM safe. The counter is persisted here
+// so it survives API restarts and is shared by all replicas.
+//
+// The increment and the read of the new value are a single atomic
+// `UPDATE ... RETURNING value + 1` statement (supported by both SQLite and
+// PostgreSQL), so two concurrent callers can never be handed the same value:
+// the statement both bumps the counter and returns the value it bumped to.
+func (s *Server) NextSecretNonce(ctx context.Context, _ *dbpb.NextSecretNonceRequest) (*dbpb.NextSecretNonceResponse, error) {
+	var nonce int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Ensure the counter row exists (starting at 0). A race here is
+		// harmless: the unique index on name means at most one of the
+		// concurrent inserts wins, and the rest find the row already created.
+		if err := tx.Where("name = ?", secretNonceName).
+			FirstOrCreate(&models.SecretNonce{Name: secretNonceName, Value: 0}).Error; err != nil {
+			return err
+		}
+		// Atomically bump the counter and read the value it bumped to, in one
+		// statement. The returned value is the next nonce to use; the row is
+		// left incremented so the next caller gets the following value.
+		if err := tx.Raw(
+			"UPDATE secret_nonces SET value = value + 1 WHERE name = ? RETURNING value",
+			secretNonceName,
+		).Scan(&nonce).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	return &dbpb.NextSecretNonceResponse{Nonce: nonce}, nil
+}
+
+// ---------------------------------------------------------------------------
 // Event log (F-23, high availability)
 // ---------------------------------------------------------------------------
 //
@@ -2530,6 +2604,59 @@ func runParamsFor(params []models.Parameter, supplied map[string]string) map[str
 	return out
 }
 
+// validateSecrets checks a set of secret declarations (F-12) for well-formed
+// secrets: names are non-empty and unique within the pipeline. The encrypted
+// value is opaque to the database service (the API encrypted the plaintext
+// before calling), so it is not validated here. It returns a descriptive error
+// naming the offending secret, or nil when the set is valid.
+func validateSecrets(secrets []*dbpb.Secret) error {
+	seen := make(map[string]struct{}, len(secrets))
+	for _, secret := range secrets {
+		name := secret.GetName()
+		if name == "" {
+			return fmt.Errorf("secret has an empty name")
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("duplicate secret name %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+// secretsFromProto converts a list of proto secrets into the model's secrets
+// (F-12). An empty list yields nil, so an update with no secrets leaves the
+// pipeline's secrets unchanged.
+func secretsFromProto(secrets []*dbpb.Secret) []models.Secret {
+	if len(secrets) == 0 {
+		return nil
+	}
+	out := make([]models.Secret, 0, len(secrets))
+	for _, secret := range secrets {
+		out = append(out, models.Secret{
+			Name:      secret.GetName(),
+			Encrypted: secret.GetEncrypted(),
+		})
+	}
+	return out
+}
+
+// secretsToProto converts the model's secrets into a list of proto secrets
+// (F-12). An empty slice yields nil.
+func secretsToProto(secrets []models.Secret) []*dbpb.Secret {
+	if len(secrets) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.Secret, 0, len(secrets))
+	for i := range secrets {
+		out = append(out, &dbpb.Secret{
+			Name:      secrets[i].Name,
+			Encrypted: secrets[i].Encrypted,
+		})
+	}
+	return out
+}
+
 // jobDefinitionsFromProto converts a list of proto job definitions into the
 // model's job definitions (F-08). A definition's name defaults to its key when
 // empty, and its failure mode defaults to FailureModeAll. The definition's
@@ -2663,6 +2790,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		Triggers:    triggersToProto(pipeline.Triggers),
 		Params:      pipelineParamsToProto(pipeline.Params),
 		Version:     int32(pipeline.Version),
+		Secrets:     secretsToProto(pipeline.Secrets),
 	}
 }
 
@@ -2682,6 +2810,7 @@ func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 		Triggers:    triggersToProto(v.Triggers),
 		Params:      pipelineParamsToProto(v.Params),
 		CreatedAt:   timestamppb.New(v.CreatedAt),
+		Secrets:     secretsToProto(v.Secrets),
 	}
 }
 
@@ -2728,6 +2857,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		Jobs:        snapshots,
 		Triggers:    pipeline.Triggers,
 		Params:      pipeline.Params,
+		Secrets:     pipeline.Secrets,
 	}
 }
 
@@ -2818,6 +2948,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		TriggerType:    job.TriggerType,
 		UpstreamClaims: upstreamClaimsToStruct(job.UpstreamClaims),
 		RunParams:      job.RunParams,
+		Secrets:        secretsToProto(job.Secrets),
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)

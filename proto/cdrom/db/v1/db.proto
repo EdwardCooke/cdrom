@@ -242,6 +242,14 @@ service Database {
   rpc StoreIDPAuthCode(StoreIDPAuthCodeRequest) returns (google.protobuf.Empty);
   rpc ConsumeIDPAuthCode(ConsumeIDPAuthCodeRequest) returns (IDPAuthCode);
   rpc PruneIDPAuthCodes(PruneIDPAuthCodesRequest) returns (google.protobuf.Empty);
+
+  // Secrets (F-12). NextSecretNonce returns the next value of the named
+  // secret-nonce counter and atomically increments it. The counter is what
+  // keeps the AES-GCM nonces unique across every API replica (they all share
+  // one key from configuration, so they must share one nonce sequence); a
+  // unique (key, nonce) pair is what makes AES-GCM safe. The counter is
+  // persisted here so it survives API restarts and is shared by all replicas.
+  rpc NextSecretNonce(NextSecretNonceRequest) returns (NextSecretNonceResponse);
 }
 
 // Parameter is a named, typed input a pipeline declares (F-10): a name, an
@@ -263,6 +271,20 @@ message Parameter {
   string default = 2;
   // description is a human-readable description of the parameter.
   string description = 3;
+}
+
+// Secret is a named secret of a pipeline (F-12): a name and an encrypted
+// value. The API encrypts the plaintext (with the configured key) when a
+// pipeline is created or updated and decrypts it when it hands a job to an
+// execution target; the database service stores the ciphertext opaquely and
+// never sees the key or the plaintext. A job's step references a secret in a
+// spec template as `{{ .secrets.name }}`.
+message Secret {
+  // name is the secret's name; it must be unique within the pipeline.
+  string name = 1;
+  // encrypted is the ciphertext (the API's encryption of the plaintext
+  // value). It is opaque to every component except the API.
+  string encrypted = 2;
 }
 
 message Pipeline {
@@ -296,6 +318,12 @@ message Pipeline {
   // executed (see PipelineRun.pipeline_version), so a run is bound to the
   // definition that was active when it started.
   int32 version = 10;
+  // secrets are the pipeline's named secrets (F-12): each carries a name and
+  // an encrypted value. The API encrypts the plaintext on create/update and
+  // decrypts it at dispatch; a run's job instances carry the ciphertext
+  // (denormalized from the pipeline) and the API hands the plaintext to the
+  // execution target, where a step references it as `{{ .secrets.name }}`.
+  repeated Secret secrets = 11;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -383,6 +411,11 @@ message CreatePipelineRequest {
   // they are validated (unique, non-empty names) and persisted alongside the
   // pipeline.
   repeated Parameter params = 6;
+  // secrets are the pipeline's named secrets (F-12); when present they are
+  // validated (unique, non-empty names) and persisted alongside the pipeline.
+  // Each carries a name and an encrypted value (the API encrypts the
+  // plaintext before calling).
+  repeated Secret secrets = 7;
 }
 
 message GetPipelineRequest {
@@ -426,6 +459,11 @@ message UpdatePipelineRequest {
   // before anything is persisted. When absent the pipeline's parameters are
   // left unchanged.
   repeated Parameter params = 7;
+  // secrets, when present, replaces the pipeline's named secrets (F-12): the
+  // pipeline's existing secrets are removed and these are created in their
+  // place, and they are validated (unique, non-empty names) before anything
+  // is persisted. When absent the pipeline's secrets are left unchanged.
+  repeated Secret secrets = 8;
 }
 
 message DeletePipelineRequest {
@@ -635,6 +673,9 @@ message PipelineVersion {
   // params are the pipeline's parameter declarations at this version.
   repeated Parameter params = 9;
   google.protobuf.Timestamp created_at = 10;
+  // secrets are the pipeline's named secrets at this version (F-12): each
+  // carries a name and an encrypted value.
+  repeated Secret secrets = 11;
 }
 
 message ListPipelineVersionsRequest {
@@ -984,6 +1025,13 @@ message Job {
   // command, workdir) using Go templates before the job runs. Empty for a
   // job not part of a run (or a run with no parameters).
   map<string, string> run_params = 25;
+  // secrets are the pipeline's named secrets for this run (F-12): a
+  // name -> encrypted value list denormalized from the pipeline (or the
+  // version snapshot) onto the job instance at run creation. The ciphertext
+  // is opaque to the database service; the API decrypts it and hands the
+  // plaintext to the execution target, where a step references it as
+  // `{{ .secrets.name }}`.
+  repeated Secret secrets = 26;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -1539,4 +1587,20 @@ message PruneIDPAuthCodesRequest {
   // created_before drops codes created before this instant; when unset, all
   // codes are pruned.
   google.protobuf.Timestamp created_before = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Secrets (F-12)
+// ---------------------------------------------------------------------------
+
+// NextSecretNonceRequest is the (empty) request for NextSecretNonce; it is
+// present so the RPC has a request message and can grow a name filter later.
+message NextSecretNonceRequest {}
+
+// NextSecretNonceResponse is the result of a NextSecretNonce call.
+message NextSecretNonceResponse {
+  // nonce is the next value of the secret-nonce counter (the call also
+  // atomically increments the counter, so no two callers ever get the same
+  // value).
+  int64 nonce = 1;
 }

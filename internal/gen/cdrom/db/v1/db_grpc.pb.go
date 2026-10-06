@@ -71,6 +71,7 @@ const (
 	Database_StoreIDPAuthCode_FullMethodName        = "/cdrom.db.v1.Database/StoreIDPAuthCode"
 	Database_ConsumeIDPAuthCode_FullMethodName      = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
 	Database_PruneIDPAuthCodes_FullMethodName       = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
+	Database_NextSecretNonce_FullMethodName         = "/cdrom.db.v1.Database/NextSecretNonce"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -302,6 +303,13 @@ type DatabaseClient interface {
 	StoreIDPAuthCode(ctx context.Context, in *StoreIDPAuthCodeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ConsumeIDPAuthCode(ctx context.Context, in *ConsumeIDPAuthCodeRequest, opts ...grpc.CallOption) (*IDPAuthCode, error)
 	PruneIDPAuthCodes(ctx context.Context, in *PruneIDPAuthCodesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Secrets (F-12). NextSecretNonce returns the next value of the named
+	// secret-nonce counter and atomically increments it. The counter is what
+	// keeps the AES-GCM nonces unique across every API replica (they all share
+	// one key from configuration, so they must share one nonce sequence); a
+	// unique (key, nonce) pair is what makes AES-GCM safe. The counter is
+	// persisted here so it survives API restarts and is shared by all replicas.
+	NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error)
 }
 
 type databaseClient struct {
@@ -822,6 +830,16 @@ func (c *databaseClient) PruneIDPAuthCodes(ctx context.Context, in *PruneIDPAuth
 	return out, nil
 }
 
+func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NextSecretNonceResponse)
+	err := c.cc.Invoke(ctx, Database_NextSecretNonce_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -1051,6 +1069,13 @@ type DatabaseServer interface {
 	StoreIDPAuthCode(context.Context, *StoreIDPAuthCodeRequest) (*emptypb.Empty, error)
 	ConsumeIDPAuthCode(context.Context, *ConsumeIDPAuthCodeRequest) (*IDPAuthCode, error)
 	PruneIDPAuthCodes(context.Context, *PruneIDPAuthCodesRequest) (*emptypb.Empty, error)
+	// Secrets (F-12). NextSecretNonce returns the next value of the named
+	// secret-nonce counter and atomically increments it. The counter is what
+	// keeps the AES-GCM nonces unique across every API replica (they all share
+	// one key from configuration, so they must share one nonce sequence); a
+	// unique (key, nonce) pair is what makes AES-GCM safe. The counter is
+	// persisted here so it survives API restarts and is shared by all replicas.
+	NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -1213,6 +1238,9 @@ func (UnimplementedDatabaseServer) ConsumeIDPAuthCode(context.Context, *ConsumeI
 }
 func (UnimplementedDatabaseServer) PruneIDPAuthCodes(context.Context, *PruneIDPAuthCodesRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method PruneIDPAuthCodes not implemented")
+}
+func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -2153,6 +2181,24 @@ func _Database_PruneIDPAuthCodes_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NextSecretNonceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).NextSecretNonce(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_NextSecretNonce_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).NextSecretNonce(ctx, req.(*NextSecretNonceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2363,6 +2409,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PruneIDPAuthCodes",
 			Handler:    _Database_PruneIDPAuthCodes_Handler,
+		},
+		{
+			MethodName: "NextSecretNonce",
+			Handler:    _Database_NextSecretNonce_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

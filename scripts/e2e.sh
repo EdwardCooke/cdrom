@@ -38,6 +38,7 @@ cd "$(dirname "$0")/.."
 
 BIN=./bin
 WORK="$(mktemp -d /tmp/cdrom-e2e.XXXXXX)"
+echo "WORKDIR: ${WORK}"
 WORKDIR="$WORK/workdir"
 mkdir -p "$WORK/artifacts" "$WORKDIR"
 
@@ -50,7 +51,7 @@ cleanup() {
     sleep 1
     for pid in "${PIDS[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
   fi
-  rm -rf "$WORK"
+  #rm -rf "$WORK"
   if [ "$code" -ne 0 ]; then
     echo ">> e2e FAILED (exit $code)" >&2
     exit "$code"
@@ -103,6 +104,18 @@ wait_for() {
   done
   echo ">> timed out waiting for: $what (pattern: $pattern)" >&2
   tail -n 40 "$logfile" >&2
+  exit 1
+}
+
+wait_for_job() {
+  local jobid="$1" pattern="$2" what="$3" i
+  for i in $(seq 1 100); do
+    if curl -s http://127.0.0.1:8080/api/jobs/${jobid}/logs/job.log | grep -qE "$pattern" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo ">> timed out waiting for: $what (pattern: $pattern)" >&2
   exit 1
 }
 
@@ -173,10 +186,10 @@ log ">> job id: $JOB_ID"
 
 # --- verify the worker executed every step ---------------------------------
 log ">> waiting for the worker to execute the job"
-wait_for "$WORK/worker.log" 'step1: plain command' 'step 1 output'
-wait_for "$WORK/worker.log" 'step2: env=from-spec' 'step 2 env var'
-wait_for "$WORK/worker.log" "step3: pwd=$WORKDIR" 'step 3 workdir'
-wait_for "$WORK/worker.log" 'step4: shell override' 'step 4 shell override'
+wait_for_job $JOB_ID 'step1: plain command' 'step 1 output'
+wait_for_job $JOB_ID 'step2: env=from-spec' 'step 2 env var'
+wait_for_job $JOB_ID "step3: pwd=$WORKDIR" 'step 3 workdir'
+wait_for_job $JOB_ID 'step4: shell override' 'step 4 shell override'
 # The token_exchange step (step 5) asks the API for a new job token for
 # audience outside-svc and writes it to a "token" file in its per-step output
 # directory (the executor reads every file there back as a step output); the
@@ -184,7 +197,7 @@ wait_for "$WORK/worker.log" 'step4: shell override' 'step 4 shell override'
 wait_for "$WORK/worker.log" 'executor: exchanged job token' 'worker exchanged the job token'
 # Step 6's condition reads the exchanged token from step 5's outputs; it runs
 # only if the token was captured and flowed to the condition context.
-wait_for "$WORK/worker.log" 'step6: token exchange flowed to a later step' 'step 6 consumed the exchanged token'
+wait_for_job $JOB_ID 'step6: token exchange flowed to a later step' 'step 6 consumed the exchanged token'
 wait_for "$WORK/worker.log" 'job succeeded' 'job success'
 
 # --- verify the API persisted the job as succeeded -------------------------
@@ -380,24 +393,25 @@ log ">> re-running the original shell job"
 STEP1_BEFORE=$(grep -c 'step1: plain command' "$WORK/worker.log" || true)
 RERUN_RESPONSE=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$JOB_ID/rerun")
 log "   $RERUN_RESPONSE"
+RERUN_JOB_ID=$(printf '%s' "$RERUN_RESPONSE" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
 
 # Wait for the worker to execute the job a second time (one more step-1 line).
 log ">> waiting for the re-run to execute"
 for i in $(seq 1 100); do
-  STEP1_NOW=$(grep -c 'step1: plain command' "$WORK/worker.log" || true)
+  STEP1_NOW=$(grep -c 'step1: plain command' "$WORK/artifacts/${RERUN_JOB_ID}/logs/job.log" || true)
   if [ "${STEP1_NOW:-0}" -gt "${STEP1_BEFORE:-0}" ]; then
     break
   fi
   sleep 0.2
 done
-STEP1_AFTER=$(grep -c 'step1: plain command' "$WORK/worker.log" || true)
+STEP1_AFTER=$(grep -c 'step1: plain command' "$WORK/artifacts/${RERUN_JOB_ID}/logs/job.log" || true)
 [ "${STEP1_AFTER:-0}" -gt "${STEP1_BEFORE:-0}" ] \
   || { echo ">> re-run did not produce a fresh execution" >&2; exit 1; }
 
 # Verify the re-run completed as succeeded with the attempt reset to 1.
 RERUN_FINAL=""
 for i in $(seq 1 100); do
-  RERUN_FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID")
+  RERUN_FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$RERUN_JOB_ID")
   if printf '%s' "$RERUN_FINAL" | grep -q '"status":3' \
     && printf '%s' "$RERUN_FINAL" | grep -q '"attempt":1'; then
     break

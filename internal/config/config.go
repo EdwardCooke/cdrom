@@ -16,6 +16,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -108,6 +109,16 @@ type Config struct {
 	// IdP) on job-scoped calls. Disabled by default so a local run works with
 	// no identity provider.
 	GRPCAuth GRPCAuthConfig
+
+	// Secrets configures the secret store the API uses to encrypt and decrypt
+	// pipeline secrets (F-12). The API is the only component that holds the
+	// key: it encrypts a secret's plaintext when a pipeline is created or
+	// updated, and decrypts the stored ciphertext when it hands a job to an
+	// execution target. The database service stores the ciphertext opaquely
+	// and never sees the key. Disabled by default (no key) so a local run
+	// works without secrets; a pipeline that declares secrets requires the
+	// key to be set.
+	Secrets SecretsConfig
 }
 
 // AuthConfig configures OIDC authentication for the API's HTTP surface (the
@@ -190,6 +201,58 @@ func (g GRPCAuthConfig) Validate() error {
 	}
 	if len(g.Audiences) == 0 {
 		return fmt.Errorf("grpc_auth: audiences is required when enabled")
+	}
+	return nil
+}
+
+// SecretsConfig configures the secret store the API uses to encrypt and
+// decrypt pipeline secrets (F-12). The API is the only component that holds
+// the key: it encrypts a secret's plaintext when a pipeline is created or
+// updated, and decrypts the stored ciphertext when it hands a job to an
+// execution target. The database service stores the ciphertext opaquely and
+// never sees the key.
+//
+// Kind selects the store backend (e.g. "aes", the built-in AES-256-GCM store;
+// "vault" and "openbao" are reserved for future first-class backends). Key is
+// the store's key material: for the built-in AES store it is a base64-encoded
+// 32-byte AES-256 key. When Key is empty the store is disabled and a pipeline
+// that declares secrets is rejected.
+type SecretsConfig struct {
+	// Kind selects the secret store backend (case-insensitive). Empty means
+	// the built-in "aes" store.
+	Kind string
+	// Key is the store's key material. For the built-in AES store it is a
+	// base64-encoded 32-byte AES-256 key. Empty disables the store.
+	Key string
+}
+
+// EffectiveKind returns the configured store kind, or the built-in "aes" kind
+// when Kind is empty.
+func (s SecretsConfig) EffectiveKind() string {
+	if s.Kind == "" {
+		return "aes"
+	}
+	return s.Kind
+}
+
+// Enabled reports whether a secret store is configured (a key is set).
+func (s SecretsConfig) Enabled() bool {
+	return s.Key != ""
+}
+
+// Validate checks that the secrets configuration is sane. An empty key is
+// allowed (the store is disabled); a set key must be valid base64 that decodes
+// to a 32-byte AES-256 key (for the built-in store).
+func (s SecretsConfig) Validate() error {
+	if s.Key == "" {
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(s.Key)
+	if err != nil {
+		return fmt.Errorf("secrets: key is not valid base64: %w", err)
+	}
+	if len(key) != 32 {
+		return fmt.Errorf("secrets: key must decode to 32 bytes (AES-256), got %d", len(key))
 	}
 	return nil
 }
@@ -347,6 +410,7 @@ func LoadWithFile(file string) (*Config, error) {
 			CheckInterval: time.Hour,
 		},
 		GRPCAuth: GRPCAuthConfig{},
+		Secrets:  SecretsConfig{},
 	}
 	if file != "" {
 		if err := applyFile(cfg, file); err != nil {
@@ -361,6 +425,9 @@ func LoadWithFile(file string) (*Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.GRPCAuth.Validate(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	if err := cfg.Secrets.Validate(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
@@ -414,6 +481,10 @@ type fileConfig struct {
 		Audiences              []string `yaml:"audiences"`
 		ExchangedTokenLifetime *string  `yaml:"exchanged_token_lifetime"`
 	} `yaml:"grpc_auth"`
+	Secrets *struct {
+		Kind *string `yaml:"kind"`
+		Key  *string `yaml:"key"`
+	} `yaml:"secrets"`
 }
 
 // applyFile overlays the values from the YAML file at path onto cfg.
@@ -558,6 +629,14 @@ func applyFile(cfg *Config, path string) error {
 			}
 		}
 	}
+	if f.Secrets != nil {
+		if f.Secrets.Kind != nil {
+			cfg.Secrets.Kind = *f.Secrets.Kind
+		}
+		if f.Secrets.Key != nil {
+			cfg.Secrets.Key = *f.Secrets.Key
+		}
+	}
 	return nil
 }
 
@@ -621,6 +700,8 @@ func applyEnv(cfg *Config) {
 			cfg.GRPCAuth.ExchangedTokenLifetime = d
 		}
 	}
+	cfg.Secrets.Kind = envOr("CDROM_SECRETS_KIND", cfg.Secrets.Kind)
+	cfg.Secrets.Key = envOr("CDROM_SECRETS_KEY", cfg.Secrets.Key)
 }
 
 func envOr(key, def string) string {
