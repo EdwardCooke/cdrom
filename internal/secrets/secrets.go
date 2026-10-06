@@ -69,21 +69,30 @@ type NonceSource interface {
 
 // NewStore builds a Store from the configured secret store. cfg selects the
 // kind and carries the key material; nonce provides the per-encryption nonce
-// (required by the built-in AES store). A disabled config (no key) returns a
-// nil Store and a nil error; the caller treats a nil store as "secrets are
-// off" and rejects pipelines that declare secrets.
+// (required by the built-in AES store). The built-in AES store is always
+// available: when no key is configured it falls back to an all-zero key, so
+// secrets can be exercised in test / local-dev scenarios without a real key
+// (the zero key provides no real security — set a real key in production).
+// A nil nonce source is an error for the AES store, since it needs a nonce
+// for every encryption.
 func NewStore(cfg config.SecretsConfig, nonce NonceSource) (Store, error) {
-	if !cfg.Enabled() {
-		return nil, nil
-	}
-	key, err := base64.StdEncoding.DecodeString(cfg.Key)
-	if err != nil {
-		return nil, fmt.Errorf("secrets: key is not valid base64: %w", err)
-	}
 	switch StoreKind(strings.ToLower(cfg.EffectiveKind())) {
 	case StoreKindAES, "":
-		if len(key) != 32 {
-			return nil, fmt.Errorf("secrets: aes key must be 32 bytes (AES-256), got %d", len(key))
+		var key []byte
+		if cfg.Key != "" {
+			var err error
+			key, err = base64.StdEncoding.DecodeString(cfg.Key)
+			if err != nil {
+				return nil, fmt.Errorf("secrets: key is not valid base64: %w", err)
+			}
+			if len(key) != 32 {
+				return nil, fmt.Errorf("secrets: aes key must be 32 bytes (AES-256), got %d", len(key))
+			}
+		} else {
+			// No key configured: fall back to an all-zero key so secrets can be
+			// exercised in test / local-dev scenarios. The zero key provides no
+			// real security; set a real key in production.
+			key = make([]byte, 32)
 		}
 		if nonce == nil {
 			return nil, fmt.Errorf("secrets: the aes store requires a nonce source")

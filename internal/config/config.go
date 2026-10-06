@@ -215,14 +215,16 @@ func (g GRPCAuthConfig) Validate() error {
 // Kind selects the store backend (e.g. "aes", the built-in AES-256-GCM store;
 // "vault" and "openbao" are reserved for future first-class backends). Key is
 // the store's key material: for the built-in AES store it is a base64-encoded
-// 32-byte AES-256 key. When Key is empty the store is disabled and a pipeline
-// that declares secrets is rejected.
+// 32-byte AES-256 key. When Key is empty the built-in AES store falls back to
+// an all-zero key, so secrets can be exercised in test / local-dev scenarios
+// without a real key (the zero key provides no real security).
 type SecretsConfig struct {
 	// Kind selects the secret store backend (case-insensitive). Empty means
 	// the built-in "aes" store.
 	Kind string
 	// Key is the store's key material. For the built-in AES store it is a
-	// base64-encoded 32-byte AES-256 key. Empty disables the store.
+	// base64-encoded 32-byte AES-256 key. Empty makes the built-in store fall
+	// back to an all-zero key (test / local-dev convenience).
 	Key string
 }
 
@@ -235,14 +237,10 @@ func (s SecretsConfig) EffectiveKind() string {
 	return s.Kind
 }
 
-// Enabled reports whether a secret store is configured (a key is set).
-func (s SecretsConfig) Enabled() bool {
-	return s.Key != ""
-}
-
 // Validate checks that the secrets configuration is sane. An empty key is
-// allowed (the store is disabled); a set key must be valid base64 that decodes
-// to a 32-byte AES-256 key (for the built-in store).
+// allowed (the built-in store falls back to an all-zero key); a set key must
+// be valid base64 that decodes to a 32-byte AES-256 key (for the built-in
+// store).
 func (s SecretsConfig) Validate() error {
 	if s.Key == "" {
 		return nil

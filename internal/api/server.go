@@ -39,16 +39,18 @@ type Server struct {
 	// claim-matching path can be exercised without a live identity provider.
 	webhookOIDC webhookTokenVerifier
 	// secretStore encrypts a pipeline's secret plaintexts on create/update and
-	// decrypts them at dispatch (F-12). It is nil when no secrets key is
-	// configured; the API then rejects any pipeline that carries secrets.
+	// decrypts them at dispatch (F-12). It is nil only in tests that do not
+	// configure a store; in production the built-in AES store is always
+	// available (falling back to an all-zero key when none is configured).
 	secretStore secrets.Store
 }
 
 // New creates an API server over the given gRPC clients. hub is the event
 // hub that backs the /api/ws WebSocket endpoint; it may be nil to disable
 // the WebSocket endpoint. secretStore (optional) is the store that
-// encrypts/decrypts pipeline secrets (F-12); when omitted (or nil) no secrets
-// key is configured and the API rejects pipelines that carry secrets.
+// encrypts/decrypts pipeline secrets (F-12); when omitted (or nil) the API
+// cannot encrypt or decrypt secrets and rejects any pipeline that carries
+// them (in production the built-in AES store is always supplied).
 func New(clients Clients, hub *EventHub, secretStore ...secrets.Store) *Server {
 	var store secrets.Store
 	if len(secretStore) > 0 {
@@ -101,6 +103,11 @@ func (s *Server) Handler() http.Handler {
 	// file per step (step-<n>.log) plus a combined job.log.
 	mux.HandleFunc("GET /api/jobs/{id}/logs", s.listJobLogs)
 	mux.HandleFunc("GET /api/jobs/{id}/logs/{name}", s.getJobLog)
+
+	// Secrets (F-12): an authenticated user encrypts a value through the API's
+	// secret store. The returned ciphertext is what a pipeline's secret
+	// declaration stores; the plaintext is never persisted or returned.
+	mux.HandleFunc("POST /api/secrets/encrypt", s.encryptSecret)
 
 	// Live event stream (WebSocket).
 	if s.hub != nil {
@@ -309,14 +316,14 @@ func pipelineParamsToProto(params []parameterRequest) []*dbpb.Parameter {
 // encrypted with the API's secret store before it is handed off, so the
 // database service only ever sees ciphertext. It returns nil when there are no
 // secrets, so an update with no secrets leaves the pipeline's secrets
-// unchanged. It is an error to supply secrets when no secrets key is
-// configured (the API cannot encrypt them).
+// unchanged. It is an error to supply secrets when no store is available (the
+// API cannot encrypt them).
 func (s *Server) pipelineSecretsToProto(ctx context.Context, reqs []secretRequest) ([]*dbpb.Secret, error) {
 	if len(reqs) == 0 {
 		return nil, nil
 	}
 	if s.secretStore == nil {
-		return nil, fmt.Errorf("secrets are not supported: no secrets key is configured")
+		return nil, fmt.Errorf("secrets are not supported: no secret store is available")
 	}
 	seen := make(map[string]struct{}, len(reqs))
 	out := make([]*dbpb.Secret, 0, len(reqs))
@@ -1024,6 +1031,45 @@ func (s *Server) getJobLog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Secrets
+// ---------------------------------------------------------------------------
+
+// encryptSecretRequest is the body of POST /api/secrets/encrypt: a plaintext
+// value to encrypt with the API's secret store (F-12).
+type encryptSecretRequest struct {
+	Value string `json:"value"`
+}
+
+// encryptSecretResponse is the response of POST /api/secrets/encrypt: the
+// ciphertext for the supplied value. The ciphertext is self-describing (it
+// carries the nonce) and is what a pipeline's secret declaration stores.
+type encryptSecretResponse struct {
+	Ciphertext string `json:"ciphertext"`
+}
+
+// encryptSecret encrypts a value through the API's secret store (F-12) and
+// returns the ciphertext. It lets an authenticated user produce the ciphertext
+// for a secret value without it ever being persisted by the API. When no
+// secrets key is configured the API cannot encrypt and rejects the request.
+func (s *Server) encryptSecret(w http.ResponseWriter, r *http.Request) {
+	var req encryptSecretRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if s.secretStore == nil {
+		httpError(w, http.StatusBadRequest, "secrets are not supported: no secret store is available")
+		return
+	}
+	ciphertext, err := s.secretStore.Encrypt(r.Context(), req.Value)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "encrypt: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, encryptSecretResponse{Ciphertext: ciphertext})
 }
 
 // ---------------------------------------------------------------------------

@@ -1016,7 +1016,8 @@ pipeline definition (in plaintext) or in logs.
 
 **Scope.**
 - `internal/config` — a `secrets` section (store `kind` + a base64 AES-256
-  `key`); disabled by default (no key).
+  `key`); when no key is set the built-in AES store falls back to an all-zero
+  key (test / local-dev convenience).
 - `internal/secrets` — a `Store` interface (encrypt/decrypt) with a built-in
   AES-256-GCM store; `vault` / `openbao` are reserved first-class kinds (not
   yet implemented). A `NonceSource` supplies a unique nonce per encryption.
@@ -1031,7 +1032,11 @@ pipeline definition (in plaintext) or in logs.
   the API's `Job`, populated by the API at dispatch.
 - `internal/api` — encrypt on pipeline create/update; decrypt at dispatch
   (`GetJob`, `StartJobExecution`, the dispatch push); redact secret plaintext
-  from streamed job logs before persistence/fan-out.
+  from streamed job logs before persistence/fan-out. An authenticated user can
+  also encrypt a value directly via `POST /api/secrets/encrypt` (body
+  `{"value": "…"}` → `{"ciphertext": "…"}`), which returns the ciphertext a
+  pipeline's secret declaration stores; the plaintext is never persisted or
+  returned.
 - `internal/executor` / `internal/target` — carry the decrypted secrets into
   the run context so the spec can interpolate `{{ .secrets.name }}`.
 
@@ -1050,10 +1055,11 @@ pipeline definition (in plaintext) or in logs.
 - **A single key in configuration; the API is the only encryption authority.**
   The built-in store is AES-256-GCM with a 32-byte key from the `secrets`
   config section (`CDROM_SECRETS_KEY`, base64). When no key is configured the
-  store is disabled and the API rejects any pipeline that carries secrets. The
-  database service stores the ciphertext **opaquely** — it never imports the
-  secrets package or holds the key, so no single service or config can decrypt
-  a secret on its own.
+  built-in store falls back to an all-zero key, so secrets can be exercised in
+  test / local-dev scenarios without a real key (the zero key provides no real
+  security — set a real key in production). The database service stores the
+  ciphertext **opaquely** — it never imports the secrets package or holds the
+  key, so no single service or config can decrypt a secret on its own.
 - **The nonce is a shared counter in the database.** AES-GCM requires a unique
   (key, nonce) pair per encryption. Because every API replica shares one key,
   they must share one nonce sequence: the built-in store draws each nonce from
@@ -1088,11 +1094,18 @@ pipeline definition (in plaintext) or in logs.
   the artifacts store or fanned out to the UI, the API replaces every
   occurrence of a secret's plaintext with a redaction marker, so a secret that
   a step echoes to stdout is never stored or shown.
+- **An authenticated user can encrypt a value directly.** `POST
+  /api/secrets/encrypt` (body `{"value": "…"}`) runs the value through the
+  API's secret store and returns `{"ciphertext": "…"}` — the exact ciphertext a
+  pipeline's secret declaration stores. It is a POST (it performs an action and
+  draws a nonce), sits behind the same OIDC Bearer-token middleware as every
+  other `/api/*` route. It never persists the value and never returns the
+  plaintext, so it is safe to call from the UI or a script.
 - **New fields / RPCs.** `Secret` message + `NextSecretNonce` RPC (db);
   `secrets` on `Pipeline`, `CreatePipelineRequest`, `UpdatePipelineRequest`,
   `PipelineVersion`, and `Job` (db); `secrets` (name → plaintext map) on the
-  API's `Job` (api). The `secrets` config section and the `internal/secrets`
-  package are new.
+  API's `Job` (api); `POST /api/secrets/encrypt` (HTTP). The `secrets` config
+  section and the `internal/secrets` package are new.
 
 ### F-13 · Approval gates
 

@@ -12,8 +12,8 @@ import (
 // many times it was consulted, so a test can assert that each encryption drew
 // a fresh nonce.
 type fakeNonceSource struct {
-	next    uint64
-	calls   int
+	next  uint64
+	calls int
 }
 
 func (f *fakeNonceSource) NextNonce(context.Context) (uint64, error) {
@@ -31,15 +31,38 @@ func testConfig() config.SecretsConfig {
 	return config.SecretsConfig{Kind: "aes", Key: base64.StdEncoding.EncodeToString(key)}
 }
 
-// TestNewStoreDisabled returns a nil store (and nil error) when no key is
-// configured: the caller treats that as "secrets are off".
-func TestNewStoreDisabled(t *testing.T) {
-	store, err := NewStore(config.SecretsConfig{}, &fakeNonceSource{})
+// TestNewStoreNoKeyFallsBackToZeroKey verifies that when no key is configured
+// the built-in AES store falls back to an all-zero key (so secrets can be
+// exercised in test / local-dev scenarios) and still round-trips a value.
+func TestNewStoreNoKeyFallsBackToZeroKey(t *testing.T) {
+	nonce := &fakeNonceSource{}
+	store, err := NewStore(config.SecretsConfig{}, nonce)
 	if err != nil {
-		t.Fatalf("NewStore (disabled): %v", err)
+		t.Fatalf("NewStore (no key): %v", err)
 	}
-	if store != nil {
-		t.Errorf("NewStore (disabled) = %v, want nil", store)
+	if store == nil {
+		t.Fatal("NewStore (no key) = nil, want the all-zero-key AES store")
+	}
+	ctx := context.Background()
+	const plaintext = "dev-secret"
+	ct, err := store.Encrypt(ctx, plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	got, err := store.Decrypt(ctx, ct)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if got != plaintext {
+		t.Errorf("Decrypt = %q, want %q", got, plaintext)
+	}
+}
+
+// TestNewStoreAESRequiresNonceSource verifies that the built-in AES store
+// cannot be built without a nonce source, even when no key is configured.
+func TestNewStoreAESRequiresNonceSource(t *testing.T) {
+	if _, err := NewStore(config.SecretsConfig{}, nil); err == nil {
+		t.Fatal("NewStore (no nonce source): expected error, got nil")
 	}
 }
 

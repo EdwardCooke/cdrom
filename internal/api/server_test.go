@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +14,10 @@ import (
 
 	"google.golang.org/grpc"
 
+	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
+	"cdrom/internal/secrets"
 )
 
 // fakeScheduler is a stub SchedulerClient that records the last SubmitJob,
@@ -811,4 +814,121 @@ func TestWebhookRejectsInvalidBody(t *testing.T) {
 	if fakeSched.triggered != nil {
 		t.Error("scheduler.TriggerRun was called for an invalid body, want it rejected")
 	}
+}
+
+// testSecretStore builds a real AES-256-GCM store backed by a throwaway nonce
+// counter, so the API's encrypt endpoint can be exercised end to end.
+func testSecretStore(t *testing.T) secrets.Store {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	store, err := secrets.NewStore(
+		config.SecretsConfig{Kind: "aes", Key: base64.StdEncoding.EncodeToString(key)},
+		&testNonceSource{},
+	)
+	if err != nil {
+		t.Fatalf("secrets.NewStore: %v", err)
+	}
+	return store
+}
+
+// testNonceSource hands out an increasing nonce sequence.
+type testNonceSource struct{ next uint64 }
+
+func (n *testNonceSource) NextNonce(context.Context) (uint64, error) {
+	n.next++
+	return n.next, nil
+}
+
+// TestEncryptSecret verifies that POST /api/secrets/encrypt returns a
+// ciphertext that decrypts back to the supplied value, and that two
+// encryptions of the same value differ (a fresh nonce is drawn each time).
+func TestEncryptSecret(t *testing.T) {
+	store := testSecretStore(t)
+	srv := New(Clients{}, nil, store)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	encrypt := func(value string) string {
+		resp, err := http.Post(ts.URL+"/api/secrets/encrypt", "application/json",
+			bytes.NewBufferString(`{"value":`+jsonString(value)+`}`))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			data, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+		}
+		var out struct {
+			Ciphertext string `json:"ciphertext"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.Ciphertext
+	}
+
+	plaintext := "hunter2"
+	c1 := encrypt(plaintext)
+	c2 := encrypt(plaintext)
+	if c1 == "" {
+		t.Fatal("ciphertext is empty")
+	}
+	if c1 == c2 {
+		t.Error("two encryptions of the same value produced identical ciphertexts, want distinct nonces")
+	}
+	decrypted, err := store.Decrypt(context.Background(), c1)
+	if err != nil {
+		t.Fatalf("decrypt: %v", err)
+	}
+	if decrypted != plaintext {
+		t.Errorf("decrypt = %q, want %q", decrypted, plaintext)
+	}
+}
+
+// TestEncryptSecretNoStore verifies that the endpoint rejects the request when
+// no secret store is configured (a test-only situation; in production the
+// built-in AES store is always available, falling back to an all-zero key).
+func TestEncryptSecretNoStore(t *testing.T) {
+	srv := New(Clients{}, nil) // no secret store
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/secrets/encrypt", "application/json",
+		bytes.NewBufferString(`{"value":"x"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 400 (body %s)", resp.StatusCode, data)
+	}
+}
+
+// TestEncryptSecretInvalidBody verifies that a malformed body is rejected with
+// a 400 before any encryption is attempted.
+func TestEncryptSecretInvalidBody(t *testing.T) {
+	srv := New(Clients{}, nil, testSecretStore(t))
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/secrets/encrypt", "application/json",
+		bytes.NewBufferString(`{not valid json`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// jsonString renders a Go string as a JSON string literal.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

@@ -80,18 +80,28 @@ func main() {
 	}
 
 	// The secret store (F-12): encrypts a pipeline's secret plaintexts on
-	// create/update and decrypts them at dispatch. It is nil when no secrets
-	// key is configured (the API then rejects pipelines that carry secrets).
-	// The built-in AES store draws each nonce from a counter kept in the
-	// database (via the Database service's NextSecretNonce RPC), so every API
-	// replica shares one sequence and can never reuse a nonce.
-	var secretStore secrets.Store
-	if cfg.Secrets.Enabled() {
-		secretStore, err = secrets.NewStore(cfg.Secrets, &dbNonceSource{db: clients.Database})
-		if err != nil {
-			logger.Error("secrets: init", "err", err)
-			os.Exit(1)
-		}
+	// create/update and decrypts them at dispatch. The built-in AES store is
+	// always available: when no key is configured it falls back to an all-zero
+	// key, so secrets can be exercised in test / local-dev scenarios without a
+	// real key (the zero key provides no real security). It draws each nonce
+	// from a counter kept in the database (via the Database service's
+	// NextSecretNonce RPC), so every API replica shares one sequence and can
+	// never reuse a nonce.
+	secretStore, err := secrets.NewStore(cfg.Secrets, &dbNonceSource{db: clients.Database})
+	if err != nil {
+		logger.Error("secrets: init", "err", err)
+		os.Exit(1)
+	}
+	if cfg.Secrets.Key == "" {
+		logger.Error("================================================================")
+		logger.Error("SECURITY WARNING: NO SECRETS ENCRYPTION KEY IS CONFIGURED")
+		logger.Error("================================================================")
+		logger.Error("The API is encrypting pipeline secrets with an ALL-ZERO key.")
+		logger.Error("This provides NO real security: anyone who can read the stored")
+		logger.Error("ciphertext can decrypt every secret. Set CDROM_SECRETS_KEY (or the")
+		logger.Error("'secrets.key' config) to a real 32-byte base64 AES-256 key before")
+		logger.Error("running in production. Generate one with: openssl rand -base64 32")
+		logger.Error("================================================================")
 	}
 
 	// Event hub backing the /api/ws WebSocket endpoint; both the HTTP server

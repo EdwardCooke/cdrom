@@ -118,7 +118,10 @@ dispatch and hands plaintext to the target via the API `Job.secrets` map (never
 persisted), which the executor exposes to specs as `{{ .secrets.name }}`.
 Nonces come from a DB-backed counter (`NextSecretNonce`), so all API replicas
 share one key + one sequence. The API also redacts secret values from job logs
-before they reach the artifacts store / UI.
+before they reach the artifacts store / UI. An authenticated user can encrypt a
+value directly via `POST /api/secrets/encrypt` (body `{"value": "…"}` →
+`{"ciphertext": "…"}`), which returns the ciphertext a pipeline's secret
+declaration stores.
 
 **Feature index.** The detailed spec, acceptance criteria, and RPC/field changes
 for each feature are in `docs/Features.md`. Summary:

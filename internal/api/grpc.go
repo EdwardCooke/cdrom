@@ -73,8 +73,9 @@ type GRPCServer struct {
 	// secretStore decrypts a job's stored secret ciphertexts into plaintext
 	// when the API hands the job to an execution target (F-12), and redacts
 	// the plaintext from streamed job logs before they are persisted or fanned
-	// out. It is nil when no secrets key is configured; a job whose pipeline
-	// has no secrets needs no store.
+	// out. It is nil only in tests that do not configure a store; in
+	// production the built-in AES store is always available. A job whose
+	// pipeline has no secrets needs no store.
 	secretStore secrets.Store
 
 	mu       sync.Mutex
@@ -113,7 +114,7 @@ type liveWorker struct {
 // and mints the job tokens handed to execution targets (may be nil to disable
 // job-token auth); secretStore decrypts a job's stored secret ciphertexts into
 // plaintext at dispatch and redacts them from streamed logs (F-12, may be nil
-// when no secrets key is configured); logger is the logger (defaults to
+// in tests that do not configure a store); logger is the logger (defaults to
 // slog.Default()).
 func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient, hub *EventHub, jobAuth *JobTokenAuth, secretStore secrets.Store, logger *slog.Logger) *GRPCServer {
 	if logger == nil {
