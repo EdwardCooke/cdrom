@@ -50,11 +50,11 @@ func main() {
 	}
 	defer apiConn.Close()
 
-	a := agent.New(jobID, agent.Dependencies{
+	a := agent.New(cfg.AgentName, jobID, agent.Dependencies{
 		API: apipb.NewAPIClient(apiConn),
 	}, logger)
 
-	logger.Info("cdrom agent starting", "job", jobID, "api", cfg.APIAddress)
+	logger.Info("cdrom agent starting", "job", jobID, "name", cfg.AgentName, "api", cfg.APIAddress)
 	status, err := a.Run(ctx)
 	if err != nil {
 		logger.Error("agent: run", "err", err)

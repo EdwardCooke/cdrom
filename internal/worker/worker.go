@@ -9,21 +9,15 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"sync"
 	"time"
 
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
-	dbpb "cdrom/internal/gen/cdrom/db/v1"
-	"cdrom/internal/grpcutil"
-	"cdrom/internal/logstream"
-	"cdrom/internal/tokenexchange"
+	"cdrom/internal/target"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
 	// executor. A target or plugin adds more step types the same way.
@@ -289,7 +283,6 @@ type jobRun struct {
 // cancels this context, which terminates the running step, and the job is
 // reported as cancelled.
 func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
-	jobID := fmt.Sprintf("%d", job.GetId())
 	w.logger.Info("worker: executing job", "job", job.GetId(), "name", job.GetName())
 
 	// A cancellable context bounds the job's execution; a cancellation (F-05)
@@ -307,120 +300,29 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 		w.mu.Unlock()
 	}()
 
-	if _, err := w.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, token), &apipb.ReportJobStatusRequest{
-		JobId:      job.GetId(),
-		Status:     dbpb.JobStatus_JOB_STATUS_RUNNING,
-		StartedAt:  timestamppb.Now(),
+	// The shared execution context: the target's API client, the worker's
+	// name (so a fan-out job's outcome is recorded against this worker's
+	// execution), the job's token, and the worker's step barrier (when the
+	// job has the step-barrier flag set and targets a worker group).
+	tc := &target.Context{
+		API:        w.deps.API,
 		WorkerName: w.name,
-	}); err != nil {
-		w.logger.Error("worker: report running", "job", job.GetId(), "err", err)
+		Token:      token,
+		Logger:     w.logger,
+	}
+	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
+		tc.StepBarrier = newStepBarrier(w.deps.API, w.name, job.GetId(), token, w.logger, 0)
 	}
 
-	w.logger.Info("job started", "job", jobID)
+	target.ReportRunning(ctx, tc, job.GetId())
+	w.logger.Info("job started", "job", job.GetId())
 	collector := &executor.StepResultCollector{}
-	err := w.runJob(jobCtx, job, token, collector)
+	err := target.RunJob(jobCtx, tc, job, collector)
+	// A cancellation delivered on the WatchJobs stream (F-05) marks the run
+	// as user-cancelled; FinishJob reports the job as cancelled, distinct
+	// from a failure.
 	w.mu.Lock()
 	userCancelled := run.userCancel
 	w.mu.Unlock()
-	if err != nil {
-		// A user cancellation (F-05) interrupts the running step and is
-		// reported as cancelled, distinct from a failure.
-		if userCancelled {
-			w.logger.Info("job cancelled", "job", jobID)
-			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
-			return
-		}
-		// A cancellation observed at a step barrier (the job was cancelled
-		// while this worker waited for its peers to finish a step) is also
-		// reported as cancelled, distinct from a failure.
-		if errors.Is(err, executor.ErrCancelled) {
-			w.logger.Info("job cancelled (step barrier)", "job", jobID)
-			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
-			return
-		}
-		// A timeout (the job-level or a step's per-step timeout, F-03) is
-		// reported as timed_out rather than failed, so the UI can tell a hung
-		// job apart from one that ran and errored.
-		if errors.Is(err, executor.ErrTimeout) {
-			w.logger.Error("job timed out", "job", jobID, "err", err.Error())
-			w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_TIMED_OUT, collector)
-			return
-		}
-		w.logger.Error("job failed", "job", jobID, "err", err.Error())
-		w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_FAILED, collector)
-		return
-	}
-	w.logger.Info("job succeeded", "job", jobID)
-	w.report(ctx, job.GetId(), token, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
-}
-
-// runJob executes the job's execution spec: the steps run in order and the
-// job fails on the first step that errors. A job with no spec (or an empty
-// spec) succeeds without doing any work.
-//
-// A log sink is opened for the job so each step's stdout/stderr is streamed
-// to the API in near-real-time (F-02); the API persists it and fans it out to
-// the UI. Streaming is best-effort and resilient: if the API goes away mid-job
-// the sink reopens its stream and resumes, and if it cannot be opened at all
-// the job still runs (its output is only logged locally). collector gathers
-// each step's terminal status (F-06) for report to attach to the final
-// status report.
-func (w *Worker) runJob(ctx context.Context, job *apipb.Job, token string, collector *executor.StepResultCollector) error {
-	sink, err := logstream.NewSink(w.deps.API, ctx, job.GetId(), token, w.logger)
-	if err != nil {
-		w.logger.Warn("worker: open log stream; continuing without streaming", "job", job.GetId(), "err", err)
-	}
-	defer sink.Close()
-	ctx = executor.ContextWithLogSink(ctx, sink)
-	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
-	// A step's condition (F-06) can reference the status/outputs of the jobs
-	// this job depends on (carried by the API) and the job's own identity.
-	ctx = executor.ContextWithUpstreamJobs(ctx, job.GetUpstreamJobs())
-	ctx = executor.ContextWithJobIdentity(ctx, executor.JobIdentity{
-		ID:     job.GetId(),
-		Name:   job.GetName(),
-		Status: "running",
-	})
-	// The run's parameters (F-10) are interpolated into the job's spec (env,
-	// command, workdir) and are available to a step's condition. They are
-	// denormalized from the run onto the job by the API.
-	ctx = executor.ContextWithRunInfo(ctx, executor.RunInfo{
-		Params:      job.GetRunParams(),
-		ID:          job.GetRunId(),
-		PipelineID:  job.GetPipelineId(),
-		Trigger:     job.GetTriggerType(),
-		TriggerName: job.GetTriggerName(),
-	})
-	// A step handler (the built-in "token_exchange" handler) can request a new
-	// job token for a different audience (e.g. an outside resource the job
-	// needs to call) while the job runs; the exchanger calls the API's
-	// ExchangeJobToken RPC, presenting the job's own token.
-	ctx = executor.ContextWithTokenExchange(ctx, tokenexchange.New(w.deps.API, job.GetId(), token))
-	// The cross-worker step barrier: when the job has the step-barrier flag set
-	// and targets a worker group, the workers synchronize at each step boundary
-	// (after a worker completes a step it waits until every worker alive at the
-	// step's start has completed it). A job on a single target (an ephemeral
-	// agent) runs its steps unbarriered.
-	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
-		ctx = executor.ContextWithStepBarrier(ctx, newStepBarrier(w.deps.API, w.name, job.GetId(), token, w.logger, 0))
-	}
-	return executor.Execute(ctx, job.GetSpec(), w.logger)
-}
-
-// report sets the finished timestamp and final status for the worker's
-// execution of the job, presenting the job token, and attaches the job's
-// collected per-step outcomes (F-06). The worker's name is included so the API
-// records the outcome against the worker's execution (fan-out); the job's
-// overall status is derived from the executions by the scheduler.
-func (w *Worker) report(ctx context.Context, jobID int64, token string, status dbpb.JobStatus, collector *executor.StepResultCollector) {
-	if _, err := w.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, token), &apipb.ReportJobStatusRequest{
-		JobId:       jobID,
-		Status:      status,
-		FinishedAt:  timestamppb.Now(),
-		StepResults: collector.ToProto(),
-		Outputs:     collector.JobOutputs(),
-		WorkerName:  w.name,
-	}); err != nil {
-		w.logger.Error("worker: report status", "job", jobID, "status", status, "err", err)
-	}
+	target.FinishJob(ctx, tc, job.GetId(), collector, err, userCancelled)
 }

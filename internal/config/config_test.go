@@ -121,6 +121,31 @@ func TestEnvOverridesFile(t *testing.T) {
 	}
 }
 
+func TestAgentNameDefaultAndOverride(t *testing.T) {
+	// The default agent name is the host name the agent runs on.
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skip("hostname unavailable; cannot assert the default agent name")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentName != host {
+		t.Errorf("AgentName = %q, want the host name %q", cfg.AgentName, host)
+	}
+
+	// An environment variable overrides the default.
+	t.Setenv("CDROM_AGENT_NAME", "agent-from-env")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentName != "agent-from-env" {
+		t.Errorf("AgentName = %q, want agent-from-env (env must override the default)", cfg.AgentName)
+	}
+}
+
 func TestLoadWithFileMissing(t *testing.T) {
 	if _, err := LoadWithFile(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
 		t.Fatal("LoadWithFile: expected error for missing file")

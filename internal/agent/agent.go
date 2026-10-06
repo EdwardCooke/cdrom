@@ -10,19 +10,14 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
-	"cdrom/internal/grpcutil"
-	"cdrom/internal/logstream"
-	"cdrom/internal/tokenexchange"
+	"cdrom/internal/target"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
 	// executor. A target or plugin adds more step types the same way.
@@ -44,18 +39,21 @@ type Dependencies struct {
 
 // Agent is an ephemeral job executor.
 type Agent struct {
+	name   string // the agent's identity (its host name); reported with the job's status
 	jobID  int64
 	deps   Dependencies
 	logger *slog.Logger
 	token  string // job token handed over by the API via GetJob
 }
 
-// New creates an agent that will execute jobID.
-func New(jobID int64, deps Dependencies, logger *slog.Logger) *Agent {
+// New creates an agent that will execute jobID. name is the agent's identity
+// (its host name); it is reported with the job's status so the API can record
+// which target ran the job.
+func New(name string, jobID int64, deps Dependencies, logger *slog.Logger) *Agent {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Agent{jobID: jobID, deps: deps, logger: logger}
+	return &Agent{name: name, jobID: jobID, deps: deps, logger: logger}
 }
 
 // Run executes the job and returns the final status. The process should exit
@@ -71,14 +69,18 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	a.token = job.GetToken()
 	a.logger.Info("agent: executing job", "job", job.GetId(), "name", job.GetName())
 
-	if _, err := a.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, a.token), &apipb.ReportJobStatusRequest{
-		JobId:     a.jobID,
-		Status:    dbpb.JobStatus_JOB_STATUS_RUNNING,
-		StartedAt: timestamppb.Now(),
-	}); err != nil {
-		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED, fmt.Errorf("agent: report running: %w", err)
+	// The shared execution context: the target's API client, the agent's name
+	// (its host name, so the API can record which target ran the job), and the
+	// job's token. An ephemeral agent has no step barrier (it runs its steps
+	// unbarriered).
+	tc := &target.Context{
+		API:        a.deps.API,
+		WorkerName: a.name,
+		Token:      a.token,
+		Logger:     a.logger,
 	}
 
+	target.ReportRunning(ctx, tc, a.jobID)
 	a.logger.Info("job started", "job", a.jobID)
 	// The job runs under a cancellable context (F-05): a background poller
 	// watches the job's status and cancels the context if the job is
@@ -88,29 +90,11 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	go a.watchCancellation(jobCtx, cancel)
 
 	collector := &executor.StepResultCollector{}
-	if err := a.runJob(jobCtx, job, collector); err != nil {
-		// A user cancellation (F-05) interrupts the running step and is
-		// reported as cancelled, distinct from a failure.
-		if jobCtx.Err() == context.Canceled {
-			a.logger.Info("job cancelled", "job", a.jobID)
-			a.report(ctx, dbpb.JobStatus_JOB_STATUS_CANCELLED, collector)
-			return dbpb.JobStatus_JOB_STATUS_CANCELLED, nil
-		}
-		// A timeout (the job-level or a step's per-step timeout, F-03) is
-		// reported as timed_out rather than failed, so the UI can tell a hung
-		// job apart from one that ran and errored.
-		if errors.Is(err, executor.ErrTimeout) {
-			a.logger.Error("job timed out", "job", a.jobID, "err", err.Error())
-			a.report(ctx, dbpb.JobStatus_JOB_STATUS_TIMED_OUT, collector)
-			return dbpb.JobStatus_JOB_STATUS_TIMED_OUT, nil
-		}
-		a.logger.Error("job failed", "job", a.jobID, "err", err.Error())
-		a.report(ctx, dbpb.JobStatus_JOB_STATUS_FAILED, collector)
-		return dbpb.JobStatus_JOB_STATUS_FAILED, nil
-	}
-	a.logger.Info("job succeeded", "job", a.jobID)
-	a.report(ctx, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
-	return dbpb.JobStatus_JOB_STATUS_SUCCEEDED, nil
+	err = target.RunJob(jobCtx, tc, job, collector)
+	// A cancellation observed by the agent's status poller (F-05) — or the
+	// agent's own shutdown — cancelled the job's context; FinishJob reports
+	// the job as cancelled, distinct from a failure.
+	return target.FinishJob(ctx, tc, a.jobID, collector, err, jobCtx.Err() == context.Canceled), nil
 }
 
 // watchCancellation polls the job's status (F-05) and cancels the job's
@@ -140,62 +124,5 @@ func (a *Agent) watchCancellation(ctx context.Context, cancel context.CancelFunc
 				return
 			}
 		}
-	}
-}
-
-// runJob executes the job's execution spec: the steps run in order and the
-// job fails on the first step that errors. A job with no spec (or an empty
-// spec) succeeds without doing any work.
-//
-// A log sink is opened for the job so each step's stdout/stderr is streamed
-// to the API in near-real-time (F-02); the API persists it and fans it out to
-// the UI. Streaming is best-effort and resilient: if the API goes away mid-job
-// the sink reopens its stream and resumes, and if it cannot be opened at all
-// the job still runs (its output is only logged locally). collector gathers
-// each step's terminal status (F-06) for report to attach to the final
-// status report.
-func (a *Agent) runJob(ctx context.Context, job *apipb.Job, collector *executor.StepResultCollector) error {
-	sink, err := logstream.NewSink(a.deps.API, ctx, a.jobID, a.token, a.logger)
-	if err != nil {
-		a.logger.Warn("agent: open log stream; continuing without streaming", "job", a.jobID, "err", err)
-	}
-	defer sink.Close()
-	ctx = executor.ContextWithLogSink(ctx, sink)
-	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
-	// A step's condition (F-06) can reference the status/outputs of the jobs
-	// this job depends on (carried by the API) and the job's own identity.
-	ctx = executor.ContextWithUpstreamJobs(ctx, job.GetUpstreamJobs())
-	ctx = executor.ContextWithJobIdentity(ctx, executor.JobIdentity{
-		ID:     job.GetId(),
-		Name:   job.GetName(),
-		Status: "running",
-	})
-	// The run's parameters (F-10) are interpolated into the job's spec (env,
-	// command, workdir) and are available to a step's condition. They are
-	// denormalized from the run onto the job by the API.
-	ctx = executor.ContextWithRunInfo(ctx, executor.RunInfo{
-		Params:      job.GetRunParams(),
-		ID:          job.GetRunId(),
-		PipelineID:  job.GetPipelineId(),
-		Trigger:     job.GetTriggerType(),
-		TriggerName: job.GetTriggerName(),
-	})
-	// A step handler (the built-in "token_exchange" handler) can request a new
-	// job token for a different audience (e.g. an outside resource the job
-	// needs to call) while the job runs; the exchanger calls the API's
-	// ExchangeJobToken RPC, presenting the job's own token.
-	ctx = executor.ContextWithTokenExchange(ctx, tokenexchange.New(a.deps.API, a.jobID, a.token))
-	return executor.Execute(ctx, job.GetSpec(), a.logger)
-}
-
-func (a *Agent) report(ctx context.Context, status dbpb.JobStatus, collector *executor.StepResultCollector) {
-	if _, err := a.deps.API.ReportJobStatus(grpcutil.WithBearerToken(ctx, a.token), &apipb.ReportJobStatusRequest{
-		JobId:       a.jobID,
-		Status:      status,
-		FinishedAt:  timestamppb.Now(),
-		StepResults: collector.ToProto(),
-		Outputs:     collector.JobOutputs(),
-	}); err != nil {
-		a.logger.Error("agent: report status", "job", a.jobID, "status", status, "err", err)
 	}
 }

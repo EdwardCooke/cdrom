@@ -107,7 +107,7 @@ func TestAgentCancelInterruptsRunningJob(t *testing.T) {
 		Status: dbpb.JobStatus_JOB_STATUS_PENDING,
 		Spec:   &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "agent-cancel-blocker"}}},
 	}}
-	a := New(7, Dependencies{API: api}, testLogger())
+	a := New("agent-host", 7, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -157,7 +157,7 @@ func TestAgentTokenExchangeStep(t *testing.T) {
 			},
 		}},
 	}}
-	a := New(9, Dependencies{API: api}, testLogger())
+	a := New("agent-host", 9, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

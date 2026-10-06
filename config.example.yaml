@@ -42,6 +42,11 @@ db:
 # Job an ephemeral agent was spawned to execute (used by the agent).
 #agent_job_id: "123"
 
+# Identity of an ephemeral agent (used by the agent). Defaults to the host
+# name the agent runs on; reported with the job's status so the API can
+# record which target ran the job.
+#agent_name: my-host
+
 # Mutual TLS for gRPC communication between services. When ca_file is set,
 # all gRPC traffic uses mTLS; otherwise it is plaintext. Generate a local
 # dev certificate set with `make certs`, then point all three paths at it.

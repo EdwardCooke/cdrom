@@ -774,6 +774,17 @@ internal/
               RPC (presents the job's own token); the single shared
               implementation used by worker + agent so a step handler can
               request a job token for a different audience
+  target/     shared execution layer for the two execution targets (the worker
+              and the agent): builds the executor's run context (the log sink,
+              the step-status reporter, the upstream jobs + job identity for a
+              step's condition, the run's parameters + identity for spec
+              interpolation, and the token exchanger), reports a job's status
+              to the API (the "running" start and the final status, with its
+              step results + outputs), and makes the shared post-run status
+              decision (cancelled / timed_out / failed / succeeded, F-03/F-05)
+              from the run's outcome + a "cancelled" flag each target computes
+              its own way; the worker supplies its StepBarrier, the agent runs
+              unbarriered; used by worker + agent
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
@@ -814,15 +825,15 @@ internal/
               status (F-09) + the TriggerRun RPC that atomically claims a
               trigger's fire window and drives the run's instances (F-09)
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
-  worker/     long-lived worker implementation (implements the executor's
-              StepBarrier via the API's ReportStepCompletion/CheckStepBarrier
-              RPCs, so a job that fans out to a worker group synchronizes its
-              workers at each step boundary; sets the shared
-              internal/tokenexchange TokenExchange so a step handler can
-              request a job token for a different audience)
-  agent/      ephemeral agent implementation (sets the shared
-              internal/tokenexchange TokenExchange so a step handler can
-              request a job token for a different audience)
+  worker/     long-lived worker implementation (builds its run context and
+              reports job status through the shared internal/target layer;
+              supplies the executor's StepBarrier via the API's
+              ReportStepCompletion/CheckStepBarrier RPCs, so a job that fans
+              out to a worker group synchronizes its workers at each step
+              boundary)
+  agent/      ephemeral agent implementation (builds its run context and
+              reports job status through the shared internal/target layer;
+              runs its steps unbarriered)
   idp/        local OIDC identity provider (JWT issuer, auto key rotation;
               signing keys + auth codes persisted through the Database service)
 proto/        protobuf definitions (proto/cdrom/<service>/v1/)
@@ -873,7 +884,8 @@ Other notable variables: `CDROM_DB_BACKEND` (`sqlite`|`postgres`),
 `CDROM_DB_SQLITE_PATH`, `CDROM_DB_POSTGRES_DSN`,
 `CDROM_ARTIFACTS_ROOT`, `CDROM_ARTIFACTS_STORE` (`filesystem`|`s3`|`azureblob`,
 default `filesystem`), `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`,
-`CDROM_AGENT_JOB_ID`, `CDROM_API_ADDR`, `CDROM_API_HTTP_ADDR`, the
+`CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME` (the agent's identity, defaulting to
+the host name it runs on), `CDROM_API_ADDR`, `CDROM_API_HTTP_ADDR`, the
 mTLS certificate paths `CDROM_TLS_CA_FILE`, `CDROM_TLS_CERT_FILE`,
 `CDROM_TLS_KEY_FILE` (equivalents of the `tls` section in the config file),
 and the auth variables `CDROM_AUTH_ENABLED` (`true`/`1`),

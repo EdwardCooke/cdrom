@@ -82,6 +82,11 @@ type Config struct {
 	// AgentJobID is the job an ephemeral agent was spawned to execute.
 	AgentJobID string
 
+	// AgentName identifies an ephemeral agent process. It defaults to the host
+	// name the agent runs on (see defaultAgentName); it is reported with the
+	// job's status so the API can record which target ran the job.
+	AgentName string
+
 	// TLS configures mutual TLS for gRPC communication between services.
 	// When CAFile is set, all gRPC connections use mTLS; otherwise they
 	// fall back to plaintext.
@@ -326,6 +331,7 @@ func LoadWithFile(file string) (*Config, error) {
 		APIHTTPAddress:   DefaultAPIHTTPAddress,
 		ArtifactsRoot:    "artifacts", ArtifactsStore: "filesystem", WorkerName: "worker-1",
 		WorkerGroup: "default",
+		AgentName:   defaultAgentName(),
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
 			SQLitePath:  "cdrom.db",
@@ -375,6 +381,7 @@ type fileConfig struct {
 	WorkerName       *string `yaml:"worker_name"`
 	WorkerGroup      *string `yaml:"worker_group"`
 	AgentJobID       *string `yaml:"agent_job_id"`
+	AgentName        *string `yaml:"agent_name"`
 	DB               *struct {
 		Backend     *string `yaml:"backend"`
 		SQLitePath  *string `yaml:"sqlite_path"`
@@ -451,6 +458,9 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.AgentJobID != nil {
 		cfg.AgentJobID = *f.AgentJobID
+	}
+	if f.AgentName != nil {
+		cfg.AgentName = *f.AgentName
 	}
 	if f.DB != nil {
 		if f.DB.Backend != nil {
@@ -564,6 +574,7 @@ func applyEnv(cfg *Config) {
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.WorkerGroup = envOr("CDROM_WORKER_GROUP", cfg.WorkerGroup)
 	cfg.AgentJobID = envOr("CDROM_AGENT_JOB_ID", cfg.AgentJobID)
+	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
 	cfg.DB.Backend = database.Backend(envOr("CDROM_DB_BACKEND", string(cfg.DB.Backend)))
 	cfg.DB.SQLitePath = envOr("CDROM_DB_SQLITE_PATH", cfg.DB.SQLitePath)
 	cfg.DB.PostgresDSN = envOr("CDROM_DB_POSTGRES_DSN", cfg.DB.PostgresDSN)
@@ -617,6 +628,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// defaultAgentName is the default identity of an ephemeral agent: the host
+// name it runs on. When the host name cannot be determined it falls back to
+// "agent". It is the same mechanism a worker's name is set by (a config value
+// that can be overridden by a file or environment variable), so an agent and
+// a worker are identified the same way.
+func defaultAgentName() string {
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return "agent"
 }
 
 // splitAndTrim splits s on commas and trims surrounding whitespace from each
