@@ -255,9 +255,10 @@ func (s *Server) CreateRun(ctx context.Context, req *schedpb.CreateRunRequest) (
 		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
 	}
 	created, err := s.db.CreateRun(ctx, &dbpb.CreateRunRequest{
-		PipelineId: req.GetPipelineId(),
-		Trigger:    req.GetTrigger(),
-		Params:     req.GetParams(),
+		PipelineId:      req.GetPipelineId(),
+		Trigger:         req.GetTrigger(),
+		Params:          req.GetParams(),
+		PipelineVersion: req.GetPipelineVersion(),
 	})
 	if err != nil {
 		return nil, err
@@ -357,16 +358,17 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 // toProtoRun converts a db proto PipelineRun into the scheduler's Run message.
 func toProtoRun(run *dbpb.PipelineRun) *schedpb.Run {
 	return &schedpb.Run{
-		Id:          run.GetId(),
-		PipelineId:  run.GetPipelineId(),
-		Status:      run.GetStatus(),
-		Trigger:     run.GetTrigger(),
-		Params:      run.GetParams(),
-		StartedAt:   run.GetStartedAt(),
-		FinishedAt:  run.GetFinishedAt(),
-		CreatedAt:   run.GetCreatedAt(),
-		UpdatedAt:   run.GetUpdatedAt(),
-		TriggerName: run.GetTriggerName(),
-		SourceRunId: run.GetSourceRunId(),
+		Id:              run.GetId(),
+		PipelineId:      run.GetPipelineId(),
+		Status:          run.GetStatus(),
+		Trigger:         run.GetTrigger(),
+		Params:          run.GetParams(),
+		StartedAt:       run.GetStartedAt(),
+		FinishedAt:      run.GetFinishedAt(),
+		CreatedAt:       run.GetCreatedAt(),
+		UpdatedAt:       run.GetUpdatedAt(),
+		TriggerName:     run.GetTriggerName(),
+		SourceRunId:     run.GetSourceRunId(),
+		PipelineVersion: run.GetPipelineVersion(),
 	}
 }

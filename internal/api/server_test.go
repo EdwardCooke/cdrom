@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,6 +353,104 @@ func TestCreateRunEmptyBody(t *testing.T) {
 	}
 }
 
+// TestCreateRunForwardsPipelineVersion verifies that a run request carrying a
+// pipeline_version is forwarded to the scheduler (F-11).
+func TestCreateRunForwardsPipelineVersion(t *testing.T) {
+	fake := &fakeScheduler{}
+	srv := New(Clients{Scheduler: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"trigger": "manual", "pipeline_version": 2}`
+	resp, err := http.Post(ts.URL+"/api/pipelines/3/runs", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fake.created == nil {
+		t.Fatal("scheduler.CreateRun was not called")
+	}
+	if got := fake.created.GetPipelineVersion(); got != 2 {
+		t.Errorf("pipeline_version = %d, want 2", got)
+	}
+}
+
+// TestListPipelineVersions verifies that GET /api/pipelines/{id}/versions
+// returns the pipeline's version history (F-11).
+func TestListPipelineVersions(t *testing.T) {
+	fake := &fakeDatabase{versions: &dbpb.ListPipelineVersionsResponse{
+		Versions: []*dbpb.PipelineVersion{
+			{PipelineId: 3, Version: 2, Name: "deploy v2"},
+			{PipelineId: 3, Version: 1, Name: "deploy"},
+		},
+	}}
+	srv := New(Clients{Database: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/pipelines/3/versions")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	var versions []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&versions); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("got %d versions, want 2", len(versions))
+	}
+	if versions[0]["version"] != float64(2) {
+		t.Errorf("newest version = %v, want 2", versions[0]["version"])
+	}
+	if versions[1]["version"] != float64(1) {
+		t.Errorf("oldest version = %v, want 1", versions[1]["version"])
+	}
+}
+
+// TestGetPipelineVersion verifies that GET /api/pipelines/{id}/versions/{v}
+// returns the snapshot of one version (F-11).
+func TestGetPipelineVersion(t *testing.T) {
+	fake := &fakeDatabase{version: &dbpb.PipelineVersion{
+		PipelineId:  3,
+		Version:     1,
+		Name:        "deploy",
+		Description: "deploys the app",
+		Jobs:        []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	}}
+	srv := New(Clients{Database: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/pipelines/3/versions/1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	var version map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&version); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if version["version"] != float64(1) {
+		t.Errorf("version = %v, want 1", version["version"])
+	}
+	if version["name"] != "deploy" {
+		t.Errorf("name = %v, want deploy", version["name"])
+	}
+}
+
 // fakeDatabase is a stub DatabaseClient for the API's pipeline/job handlers
 // (F-08): it records CreatePipeline and CreateJob calls and returns canned
 // results. Only the methods the handlers use are implemented.
@@ -361,6 +460,8 @@ type fakeDatabase struct {
 	createdJob          *dbpb.CreateJobRequest
 	pipeline            *dbpb.Pipeline
 	job                 *dbpb.Job
+	versions            *dbpb.ListPipelineVersionsResponse
+	version             *dbpb.PipelineVersion
 }
 
 func (f *fakeDatabase) CreatePipeline(ctx context.Context, in *dbpb.CreatePipelineRequest, opts ...grpc.CallOption) (*dbpb.Pipeline, error) {
@@ -384,6 +485,20 @@ func (f *fakeDatabase) CreateJob(ctx context.Context, in *dbpb.CreateJobRequest,
 		return f.job, nil
 	}
 	return &dbpb.Job{Id: 1, Name: in.GetName(), Status: dbpb.JobStatus_JOB_STATUS_PENDING}, nil
+}
+
+func (f *fakeDatabase) ListPipelineVersions(ctx context.Context, in *dbpb.ListPipelineVersionsRequest, opts ...grpc.CallOption) (*dbpb.ListPipelineVersionsResponse, error) {
+	if f.versions != nil {
+		return f.versions, nil
+	}
+	return &dbpb.ListPipelineVersionsResponse{}, nil
+}
+
+func (f *fakeDatabase) GetPipelineVersion(ctx context.Context, in *dbpb.GetPipelineVersionRequest, opts ...grpc.CallOption) (*dbpb.PipelineVersion, error) {
+	if f.version != nil {
+		return f.version, nil
+	}
+	return &dbpb.PipelineVersion{PipelineId: in.GetPipelineId(), Version: in.GetVersion()}, nil
 }
 
 // TestCreatePipelineWithJobs verifies that POST /api/pipelines with job

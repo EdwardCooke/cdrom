@@ -125,7 +125,8 @@ for each feature are in `docs/Features.md`. Summary:
 | F-08 | Job dependencies DAG (`needs` by stable `key`; validated at save; reuses F-06 resolver) |
 | F-09 | Triggers (cron / webhook / event; atomic `TriggerRun`; cron + event loops; webhook endpoint) |
 | F-10 | Parameters & variables (pipeline `Parameter`s; run values; Go-template interpolation) |
-| F-11…F-22 | Roadmap: versioning, secrets, approval gates, RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-11 | Pipeline versioning (immutable `PipelineVersion` snapshots; a run binds to the version active at start; run against a specific version) |
+| F-12…F-22 | Roadmap: secrets, approval gates, RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 
 Cross-cutting execution concepts (full detail in `docs/Features.md` /

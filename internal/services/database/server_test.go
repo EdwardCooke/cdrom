@@ -2822,3 +2822,302 @@ func TestCreateRunNoParamsLeavesRunParamsEmpty(t *testing.T) {
 		t.Errorf("run_params = %v, want empty for a pipeline with no params", resp.GetJobs()[0].GetRunParams())
 	}
 }
+
+// firstStepCommand returns the `command` param of the job's first step, or
+// "" if the job has no steps or the first step has no command param.
+func firstStepCommand(job *dbpb.Job) string {
+	if job == nil || len(job.GetSpec().GetSteps()) == 0 {
+		return ""
+	}
+	return job.GetSpec().GetSteps()[0].GetParams()["command"].GetString_()
+}
+
+// TestCreatePipelineStartsAtVersion1 verifies that a freshly created pipeline
+// starts at version 1 and that a version-1 snapshot is recorded (F-11).
+func TestCreatePipelineStartsAtVersion1(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if got := pipeline.GetVersion(); got != 1 {
+		t.Fatalf("new pipeline version = %d, want 1", got)
+	}
+
+	list, err := client.ListPipelineVersions(ctx, &dbpb.ListPipelineVersionsRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("ListPipelineVersions: %v", err)
+	}
+	if got := len(list.GetVersions()); got != 1 {
+		t.Fatalf("pipeline has %d versions, want 1", got)
+	}
+	if v := list.GetVersions()[0]; v.GetVersion() != 1 || v.GetPipelineId() != pipeline.GetId() {
+		t.Errorf("version snapshot = (pipeline %d, version %d), want (pipeline %d, version 1)",
+			v.GetPipelineId(), v.GetVersion(), pipeline.GetId())
+	}
+}
+
+// TestUpdatePipelineBumpsVersion verifies that editing a pipeline bumps its
+// version and that the previous version's snapshot is preserved (F-11).
+func TestUpdatePipelineBumpsVersion(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if got := pipeline.GetVersion(); got != 1 {
+		t.Fatalf("new pipeline version = %d, want 1", got)
+	}
+
+	updated, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:   pipeline.GetId(),
+		Name: "deploy v2",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+	if got := updated.GetVersion(); got != 2 {
+		t.Fatalf("updated pipeline version = %d, want 2", got)
+	}
+
+	list, err := client.ListPipelineVersions(ctx, &dbpb.ListPipelineVersionsRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("ListPipelineVersions: %v", err)
+	}
+	if got := len(list.GetVersions()); got != 2 {
+		t.Fatalf("pipeline has %d versions, want 2", got)
+	}
+	// Newest first.
+	if v := list.GetVersions()[0]; v.GetVersion() != 2 || v.GetName() != "deploy v2" {
+		t.Errorf("newest version = (version %d, name %q), want (2, deploy v2)", v.GetVersion(), v.GetName())
+	}
+	if v := list.GetVersions()[1]; v.GetVersion() != 1 || v.GetName() != "deploy" {
+		t.Errorf("oldest version = (version %d, name %q), want (1, deploy)", v.GetVersion(), v.GetName())
+	}
+}
+
+// TestRunRecordsCurrentVersion verifies that a run records the version of the
+// pipeline that was active when it started (F-11).
+func TestRunRecordsCurrentVersion(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{
+			Key:         "build",
+			Name:        "build",
+			TargetGroup: "linux-pool",
+			Spec:        &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "make build"}}}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := resp.GetRun().GetPipelineVersion(); got != 1 {
+		t.Fatalf("run pipeline_version = %d, want 1", got)
+	}
+	if got := firstStepCommand(resp.GetJobs()[0]); got != "make build" {
+		t.Errorf("run job command = %q, want make build", got)
+	}
+}
+
+// TestRunAgainstSpecificVersionReproducesOldDefinition verifies that a run can
+// be executed against a specific (older) version, reproducing that version's
+// definition, while a run against the current version uses the new definition
+// (F-11).
+func TestRunAgainstSpecificVersionReproducesOldDefinition(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{
+			Key:         "build",
+			Name:        "build",
+			TargetGroup: "linux-pool",
+			Spec:        &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "make build"}}}}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+
+	// A run against the current (v1) definition.
+	resp1, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun (v1): %v", err)
+	}
+	if got := resp1.GetRun().GetPipelineVersion(); got != 1 {
+		t.Fatalf("run1 pipeline_version = %d, want 1", got)
+	}
+
+	// Edit the pipeline: the build job now runs a different command. This
+	// bumps the pipeline to version 2.
+	if _, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:   pipeline.GetId(),
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{
+			Key:         "build",
+			Name:        "build",
+			TargetGroup: "linux-pool",
+			Spec:        &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Params: map[string]*dbpb.ParamValue{"command": {String_: "make build-v2"}}}}},
+		}},
+	}); err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+
+	// A run explicitly against version 1 reproduces the old definition.
+	respOld, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{
+		PipelineId:      pipeline.GetId(),
+		Trigger:         "manual",
+		PipelineVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun (version 1): %v", err)
+	}
+	if got := respOld.GetRun().GetPipelineVersion(); got != 1 {
+		t.Errorf("runOld pipeline_version = %d, want 1", got)
+	}
+	if got := firstStepCommand(respOld.GetJobs()[0]); got != "make build" {
+		t.Errorf("runOld job command = %q, want make build (the v1 definition)", got)
+	}
+
+	// A run against the current version uses the new definition.
+	respNew, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun (current): %v", err)
+	}
+	if got := respNew.GetRun().GetPipelineVersion(); got != 2 {
+		t.Errorf("runNew pipeline_version = %d, want 2", got)
+	}
+	if got := firstStepCommand(respNew.GetJobs()[0]); got != "make build-v2" {
+		t.Errorf("runNew job command = %q, want make build-v2 (the v2 definition)", got)
+	}
+}
+
+// TestCreateRunUnknownVersionRejected verifies that a run requesting a version
+// that does not exist is rejected (F-11).
+func TestCreateRunUnknownVersionRejected(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	_, err = client.CreateRun(ctx, &dbpb.CreateRunRequest{
+		PipelineId:      pipeline.GetId(),
+		Trigger:         "manual",
+		PipelineVersion: 99,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreateRun(version 99) error = %v, want InvalidArgument", err)
+	}
+}
+
+// TestListAndGetPipelineVersion verifies the List/GetPipelineVersion RPCs
+// round-trip a version snapshot (F-11).
+func TestListAndGetPipelineVersion(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name:        "deploy",
+		Description: "deploys the app",
+		Jobs: []*dbpb.JobDefinition{
+			{Key: "build", Name: "build", TargetGroup: "linux-pool"},
+			{Key: "test", Name: "test", TargetGroup: "linux-pool", Needs: []string{"build"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+
+	got, err := client.GetPipelineVersion(ctx, &dbpb.GetPipelineVersionRequest{
+		PipelineId: pipeline.GetId(),
+		Version:    1,
+	})
+	if err != nil {
+		t.Fatalf("GetPipelineVersion: %v", err)
+	}
+	if got.GetPipelineId() != pipeline.GetId() || got.GetVersion() != 1 {
+		t.Errorf("snapshot = (pipeline %d, version %d), want (pipeline %d, version 1)",
+			got.GetPipelineId(), got.GetVersion(), pipeline.GetId())
+	}
+	if got.GetName() != "deploy" || got.GetDescription() != "deploys the app" {
+		t.Errorf("snapshot (name %q, description %q), want (deploy, deploys the app)", got.GetName(), got.GetDescription())
+	}
+	if len(got.GetJobs()) != 2 {
+		t.Fatalf("snapshot has %d jobs, want 2", len(got.GetJobs()))
+	}
+	// The test job's needs are preserved in the snapshot.
+	var testJob *dbpb.JobDefinition
+	for _, j := range got.GetJobs() {
+		if j.GetKey() == "test" {
+			testJob = j
+		}
+	}
+	if testJob == nil {
+		t.Fatalf("snapshot is missing the test job")
+	}
+	if len(testJob.GetNeeds()) != 1 || testJob.GetNeeds()[0] != "build" {
+		t.Errorf("snapshot test job needs = %v, want [build]", testJob.GetNeeds())
+	}
+
+	// GetPipelineVersion rejects a version that does not exist.
+	if _, err := client.GetPipelineVersion(ctx, &dbpb.GetPipelineVersionRequest{PipelineId: pipeline.GetId(), Version: 5}); status.Code(err) != codes.NotFound {
+		t.Errorf("GetPipelineVersion(version 5) error = %v, want NotFound", err)
+	}
+}
+
+// TestDeletePipelineCascadesVersions verifies that deleting a pipeline removes
+// its version snapshots (F-11).
+func TestDeletePipelineCascadesVersions(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if _, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id:   pipeline.GetId(),
+		Name: "deploy v2",
+		Jobs: []*dbpb.JobDefinition{{Key: "build", Name: "build"}},
+	}); err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+	if _, err := client.DeletePipeline(ctx, &dbpb.DeletePipelineRequest{Id: pipeline.GetId()}); err != nil {
+		t.Fatalf("DeletePipeline: %v", err)
+	}
+
+	list, err := client.ListPipelineVersions(ctx, &dbpb.ListPipelineVersionsRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("ListPipelineVersions: %v", err)
+	}
+	if got := len(list.GetVersions()); got != 0 {
+		t.Errorf("deleted pipeline still has %d versions, want 0", got)
+	}
+}

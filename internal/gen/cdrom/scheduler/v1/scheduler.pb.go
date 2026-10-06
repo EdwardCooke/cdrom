@@ -584,9 +584,15 @@ type Run struct {
 	TriggerName string `protobuf:"bytes,10,opt,name=trigger_name,json=triggerName,proto3" json:"trigger_name,omitempty"`
 	// source_run_id is the id of the run that started this run (an event
 	// trigger, F-09); 0 when the run was not started by an event trigger.
-	SourceRunId   int64 `protobuf:"varint,11,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SourceRunId int64 `protobuf:"varint,11,opt,name=source_run_id,json=sourceRunId,proto3" json:"source_run_id,omitempty"`
+	// pipeline_version is the version of the pipeline this run executed (F-11):
+	// the version that was active when the run started. It is recorded so a run
+	// is bound to the definition it executed — re-running an old run reproduces
+	// the old definition. A run created against a specific version (a re-run of
+	// an old run) records that version instead of the pipeline's current one.
+	PipelineVersion int32 `protobuf:"varint,12,opt,name=pipeline_version,json=pipelineVersion,proto3" json:"pipeline_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Run) Reset() {
@@ -696,6 +702,13 @@ func (x *Run) GetSourceRunId() int64 {
 	return 0
 }
 
+func (x *Run) GetPipelineVersion() int32 {
+	if x != nil {
+		return x.PipelineVersion
+	}
+	return 0
+}
+
 type CreateRunRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// pipeline_id is the pipeline to execute.
@@ -703,9 +716,16 @@ type CreateRunRequest struct {
 	// trigger is how the run was started (e.g. "manual").
 	Trigger string `protobuf:"bytes,2,opt,name=trigger,proto3" json:"trigger,omitempty"`
 	// params are the run's parameters (F-10); empty until parameters land.
-	Params        map[string]string `protobuf:"bytes,3,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Params map[string]string `protobuf:"bytes,3,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// pipeline_version, when set (> 0), is the specific version of the pipeline
+	// to execute (F-11): the run's job instances are created from that version's
+	// definition snapshot rather than the pipeline's current definitions, and
+	// the run records this version. This is how a run is re-executed against its
+	// original version (a re-run of an old run reproduces the old definition).
+	// When 0 the run executes the pipeline's current version.
+	PipelineVersion int32 `protobuf:"varint,4,opt,name=pipeline_version,json=pipelineVersion,proto3" json:"pipeline_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CreateRunRequest) Reset() {
@@ -757,6 +777,13 @@ func (x *CreateRunRequest) GetParams() map[string]string {
 		return x.Params
 	}
 	return nil
+}
+
+func (x *CreateRunRequest) GetPipelineVersion() int32 {
+	if x != nil {
+		return x.PipelineVersion
+	}
+	return 0
 }
 
 // TriggerRunRequest is the request for the scheduler's TriggerRun RPC (F-09):
@@ -921,7 +948,7 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x10CancelJobRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"!\n" +
 	"\x0fRerunJobRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x03R\x02id\"\xad\x04\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"\xd8\x04\n" +
 	"\x03Run\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -939,15 +966,17 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12!\n" +
 	"\ftrigger_name\x18\n" +
 	" \x01(\tR\vtriggerName\x12\"\n" +
-	"\rsource_run_id\x18\v \x01(\x03R\vsourceRunId\x1a9\n" +
+	"\rsource_run_id\x18\v \x01(\x03R\vsourceRunId\x12)\n" +
+	"\x10pipeline_version\x18\f \x01(\x05R\x0fpipelineVersion\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd2\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfd\x01\n" +
 	"\x10CreateRunRequest\x12\x1f\n" +
 	"\vpipeline_id\x18\x01 \x01(\x03R\n" +
 	"pipelineId\x12\x18\n" +
 	"\atrigger\x18\x02 \x01(\tR\atrigger\x12H\n" +
-	"\x06params\x18\x03 \x03(\v20.cdrom.scheduler.v1.CreateRunRequest.ParamsEntryR\x06params\x1a9\n" +
+	"\x06params\x18\x03 \x03(\v20.cdrom.scheduler.v1.CreateRunRequest.ParamsEntryR\x06params\x12)\n" +
+	"\x10pipeline_version\x18\x04 \x01(\x05R\x0fpipelineVersion\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x03\n" +

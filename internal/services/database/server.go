@@ -48,6 +48,9 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		Name:        req.GetName(),
 		Description: req.GetDescription(),
 		FailureMode: failureModeFromProto(req.GetFailureMode()),
+		// A new pipeline starts at version 1 (F-11); each subsequent edit is
+		// the next version.
+		Version: 1,
 		// The pipeline's triggers (F-09) are validated before anything is
 		// persisted: a malformed trigger (a bad cron expression, a webhook
 		// with no secret, a duplicate name) rejects the whole create, so a
@@ -121,6 +124,12 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 				Updates(&models.Job{DependsOn: defs[i].DependsOn}).Error; err != nil {
 				return err
 			}
+		}
+		// Snapshot the pipeline's definition as version 1 (F-11): the create
+		// is the pipeline's first version, so a run of the pipeline is bound
+		// to a version snapshot that can be re-executed or inspected.
+		if err := tx.Create(snapshotPipelineVersion(pipeline, defs)).Error; err != nil {
+			return err
 		}
 		return nil
 	}); err != nil {
@@ -200,6 +209,10 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 	if err := s.db.WithContext(ctx).First(&pipeline, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Every update is a new version (F-11): the pipeline's version is bumped
+	// and a snapshot of the new definition is stored, so a run bound to the
+	// previous version still reproduces the old definition.
+	pipeline.Version++
 	if req.GetName() != "" {
 		pipeline.Name = req.GetName()
 	}
@@ -288,23 +301,50 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 					return err
 				}
 			}
+			// Snapshot the new definition as the pipeline's new version
+			// (F-11), atomically with the update.
+			if err := tx.Create(snapshotPipelineVersion(&pipeline, defs)).Error; err != nil {
+				return err
+			}
 			return nil
 		}); err != nil {
 			return nil, grpcErr(err)
 		}
 		pipeline.Jobs = defs
-	} else if err := s.db.WithContext(ctx).Save(&pipeline).Error; err != nil {
-		return nil, grpcErr(err)
+	} else {
+		// No job definitions supplied: the pipeline's job definitions are
+		// unchanged, so the new version's snapshot carries the pipeline's
+		// current definitions.
+		defs, err := s.loadPipelineJobDefinitions(ctx, pipeline.ID)
+		if err != nil {
+			return nil, grpcErr(err)
+		}
+		if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Save(&pipeline).Error; err != nil {
+				return err
+			}
+			if err := tx.Create(snapshotPipelineVersion(&pipeline, defs)).Error; err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return nil, grpcErr(err)
+		}
+		pipeline.Jobs = defs
 	}
 	return toProtoPipeline(&pipeline), nil
 }
 
 func (s *Server) DeletePipeline(ctx context.Context, req *dbpb.DeletePipelineRequest) (*emptypb.Empty, error) {
-	// Remove child jobs and runs first, then the pipeline itself.
+	// Remove child jobs, runs, and version snapshots first, then the pipeline
+	// itself.
 	if err := s.db.WithContext(ctx).Where("pipeline_id = ?", req.GetId()).Delete(&models.Job{}).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	if err := s.db.WithContext(ctx).Where("pipeline_id = ?", req.GetId()).Delete(&models.PipelineRun{}).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if err := s.db.WithContext(ctx).Where("pipeline_id = ?", req.GetId()).Delete(&models.PipelineVersion{}).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	result := s.db.WithContext(ctx).Delete(&models.Pipeline{}, req.GetId())
@@ -346,16 +386,43 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 	if err := s.db.WithContext(ctx).First(&pipeline, pipelineID).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Pre-validate a requested version (F-11) before the transaction so a
+	// missing version surfaces as InvalidArgument rather than being wrapped by
+	// the transaction into an Internal error.
+	if requested := int(req.GetPipelineVersion()); requested > 0 {
+		var count int64
+		if err := s.db.WithContext(ctx).Model(&models.PipelineVersion{}).
+			Where("pipeline_id = ? AND version = ?", pipelineID, requested).
+			Count(&count).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+		if count == 0 {
+			return nil, status.Error(codes.InvalidArgument,
+				fmt.Sprintf("pipeline %d has no version %d", pipelineID, requested))
+		}
+	}
 	response := &dbpb.CreateRunResponse{}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		run := &models.PipelineRun{
-			PipelineID:  pipelineID,
-			Status:      models.RunStatusPending,
-			Trigger:     req.GetTrigger(),
-			TriggerName: req.GetTrigger(),
-			Params:      req.GetParams(),
+		// The version the run executes (F-11): the specific version requested,
+		// or the pipeline's current version when none is requested. It is
+		// recorded on the run so the run is bound to the definition it
+		// executed.
+		pipelineVersion := pipeline.Version
+		if requested := int(req.GetPipelineVersion()); requested > 0 {
+			pipelineVersion = requested
 		}
-		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run)
+		run := &models.PipelineRun{
+			PipelineID:      pipelineID,
+			PipelineVersion: pipelineVersion,
+			Status:          models.RunStatusPending,
+			Trigger:         req.GetTrigger(),
+			TriggerName:     req.GetTrigger(),
+			Params:          req.GetParams(),
+		}
+		// The version the run's job instances are created from (F-11): the
+		// specific version requested (a re-run of an old run reproduces that
+		// version's definition), or 0 for the pipeline's current definitions.
+		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run, int(req.GetPipelineVersion()))
 		if err != nil {
 			return err
 		}
@@ -382,60 +449,105 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 //
 // The run row is created first so the job instances can reference it. The
 // caller is responsible for committing (or rolling back) the transaction.
-func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, run *models.PipelineRun) (*models.PipelineRun, []models.Job, error) {
+// runDefinition is the source a run's job instances are created from (F-11):
+// either the pipeline's current job definitions (a run against the current
+// version) or a version snapshot's job definitions (a run against a specific
+// version, e.g. a re-run of an old run). It carries the definition's failure
+// mode (used to default a job that sets none) and, for a version snapshot, the
+// needs (keys) of each definition so the run's internal dependencies can be
+// remapped from keys to the run's own instance ids.
+type runDefinition struct {
+	// jobs are the job definitions the run's instances are created from.
+	jobs []models.Job
+	// failureMode is the definition's default failure mode (the pipeline's
+	// FailureMode for the current version, or the snapshot's for a specific
+	// version).
+	failureMode models.FailureMode
+	// params are the definition's parameter declarations (F-10): the
+	// pipeline's Params for the current version, or the snapshot's Params for a
+	// specific version. A run's concrete parameter values are computed from
+	// these.
+	params []models.Parameter
+	// needsByIndex[i] carries the needs (keys) of jobs[i] (F-08); non-nil only
+	// for a version snapshot, where the needs are keys that must be resolved to
+	// the run's instance ids. For the current version the needs are already
+	// resolved to depends_on ids on the definitions, so this is nil.
+	needsByIndex [][]string
+}
+
+// createRunAndInstances creates a pipeline run row and one job instance per
+// job definition, inside the caller's transaction (F-07). The definitions the
+// instances are created from are selected by requestedVersion (F-11): 0 uses
+// the pipeline's current job definitions (a run against the current version),
+// while a specific version uses that version's snapshot (a re-run of an old
+// run reproduces the old definition). Each instance is a fresh Job row bound
+// to the run (RunID) and the pipeline (PipelineID), carrying a snapshot of its
+// definition's spec, target group, retry policy, and ignore-failed flag.
+//
+// Each instance's dependencies are remapped to the run's own instance ids, so
+// the run's internal dependencies (F-06) reference the run's own job
+// instances rather than the pipeline's definitions. This is what makes two
+// runs of the same pipeline independent: each run's instances depend on each
+// other, not on the other run's instances.
+//
+// The run row is created first so the job instances can reference it. The
+// caller is responsible for committing (or rolling back) the transaction.
+func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, run *models.PipelineRun, requestedVersion int) (*models.PipelineRun, []models.Job, error) {
 	if err := tx.Create(run).Error; err != nil {
 		return nil, nil, err
 	}
 	pipelineID := run.PipelineID
-	// Load the pipeline's job definitions (the run's job instances are created
-	// from these). Only the definitions (run_id IS NULL) are used; a
-	// pipeline's job instances from prior runs are excluded so they are not
-	// mistaken for definitions.
-	var defs []models.Job
-	if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipelineID).Order("id").Find(&defs).Error; err != nil {
+	// Select the definition the run's instances are created from (F-11): the
+	// pipeline's current job definitions for a run against the current version,
+	// or the requested version's snapshot for a run against a specific version
+	// (a re-run of an old run reproduces the old definition).
+	def, err := s.runDefinitionFor(tx, pipeline, requestedVersion)
+	if err != nil {
 		return nil, nil, err
 	}
 	// The run's concrete parameter values (F-10): the values supplied for the
-	// pipeline's parameters, a parameter not supplied falling back to its
+	// definition's parameters, a parameter not supplied falling back to its
 	// default. They are denormalized onto every job instance so the execution
 	// target can interpolate them into the job's spec (env, command, workdir)
 	// before the job runs.
-	runParams := runParamsFor(pipeline.Params, run.Params)
+	runParams := runParamsFor(def.params, run.Params)
 	// Pass 1: create every job instance (without depends_on yet) so all
-	// instance ids are known, and record the definition-id -> instance-id
-	// mapping used to remap each instance's depends_on to the run's own
-	// instance ids.
-	instances := make([]models.Job, 0, len(defs))
-	defToInstance := make(map[uint]uint, len(defs))
-	for i := range defs {
-		def := &defs[i]
+	// instance ids are known, and record the key -> instance-id mapping used to
+	// remap each instance's dependencies to the run's own instance ids (a
+	// version snapshot's needs are keys, so the mapping is keyed by the job's
+	// stable key, F-08).
+	instances := make([]models.Job, 0, len(def.jobs))
+	keyToInstanceID := make(map[string]uint, len(def.jobs))
+	defToInstance := make(map[uint]uint, len(def.jobs))
+	for i := range def.jobs {
+		jobDef := &def.jobs[i]
 		job := &models.Job{
 			PipelineID:  &pipelineID,
 			RunID:       &run.ID,
-			Key:         def.Key,
-			Name:        def.Name,
-			TargetGroup: def.TargetGroup,
+			Key:         jobDef.Key,
+			Name:        jobDef.Name,
+			TargetGroup: jobDef.TargetGroup,
 			Status:      models.JobStatusPending,
-			Spec:        def.Spec,
+			Spec:        jobDef.Spec,
 			// A new instance starts on its first attempt (F-04); the retry
 			// budget and ignore-failed flag are denormalized from the
 			// definition's spec, mirroring CreateJob.
 			Attempt:   1,
 			RunParams: runParams,
 		}
-		if def.Spec.Retry != nil {
-			job.MaxAttempts = def.Spec.Retry.MaxAttempts
+		if jobDef.Spec.Retry != nil {
+			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
 		}
-		job.IgnoreFailed = def.Spec.IgnoreFailed
+		job.IgnoreFailed = jobDef.Spec.IgnoreFailed
 		// The instance's step-barrier flag is denormalized from its
 		// definition's spec, mirroring CreateJob.
-		job.StepBarrier = def.Spec.StepBarrier
+		job.StepBarrier = jobDef.Spec.StepBarrier
 		// The instance's failure mode is denormalized from its definition's
-		// spec; when the spec sets none it inherits the pipeline's default
+		// spec; when the spec sets none it inherits the definition's default
 		// (defaulting to FailureModeAll), mirroring CreateJob.
-		job.FailureMode = def.Spec.FailureMode
+		job.FailureMode = jobDef.Spec.FailureMode
 		if job.FailureMode == "" {
-			job.FailureMode = pipeline.FailureMode
+			job.FailureMode = def.failureMode
 		}
 		if job.FailureMode == "" {
 			job.FailureMode = models.FailureModeAll
@@ -450,25 +562,24 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 		if err := tx.Create(job).Error; err != nil {
 			return nil, nil, err
 		}
-		defToInstance[def.ID] = job.ID
+		if jobDef.ID != 0 {
+			defToInstance[jobDef.ID] = job.ID
+		}
+		if job.Key != "" {
+			keyToInstanceID[job.Key] = job.ID
+		}
 		instances = append(instances, *job)
 	}
-	// Pass 2: remap each instance's depends_on to the run's own instance
-	// ids. A definition's depends_on (already resolved from its needs at
-	// save time, F-08) are remapped from the definition ids to the run's
-	// instance ids. A dependency that cannot be resolved (an id outside this
-	// pipeline) is left as-is (best-effort); in practice a pipeline's job
-	// dependencies reference other jobs in the same pipeline.
+	// Pass 2: remap each instance's dependencies to the run's own instance
+	// ids. For the current version a definition's depends_on (already resolved
+	// from its needs at save time, F-08) are remapped from the definition ids
+	// to the run's instance ids. For a version snapshot the needs (keys) are
+	// resolved to the run's instance ids via the snapshot's key->id map. A
+	// dependency that cannot be resolved is left as-is (best-effort); in
+	// practice a pipeline's job dependencies reference other jobs in the same
+	// pipeline.
 	for i := range instances {
-		def := &defs[i]
-		remapped := make([]uint, 0, len(def.DependsOn))
-		for _, defDepID := range def.DependsOn {
-			if instID, ok := defToInstance[defDepID]; ok {
-				remapped = append(remapped, instID)
-			} else {
-				remapped = append(remapped, defDepID)
-			}
-		}
+		remapped := remapRunDependencies(def, i, defToInstance, keyToInstanceID)
 		if len(remapped) == 0 {
 			continue
 		}
@@ -481,6 +592,78 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 		instances[i].DependsOn = remapped
 	}
 	return run, instances, nil
+}
+
+// runDefinitionFor selects the definition a run's job instances are created
+// from (F-11). A run against the current version (PipelineVersion 0) uses the
+// pipeline's current job definitions (run_id IS NULL) and the pipeline's
+// failure mode. A run against a specific version uses that version's snapshot:
+// its job definitions (converted to the Job model, with needs carried in
+// needsByIndex so they can be remapped to the run's instance ids) and the
+// snapshot's failure mode. A version that does not exist is an error (a run
+// can only be created against a version that was recorded).
+func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, requestedVersion int) (*runDefinition, error) {
+	if requestedVersion <= 0 {
+		// A run against the current version: use the pipeline's current job
+		// definitions (the definitions, run_id IS NULL; a pipeline's job
+		// instances from prior runs are excluded so they are not mistaken for
+		// definitions).
+		var defs []models.Job
+		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Order("id").Find(&defs).Error; err != nil {
+			return nil, err
+		}
+		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params}, nil
+	}
+	// A run against a specific version: use that version's snapshot.
+	var version models.PipelineVersion
+	if err := tx.Where("pipeline_id = ? AND version = ?", pipeline.ID, requestedVersion).
+		First(&version).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Errorf(codes.InvalidArgument, "pipeline %d has no version %d", pipeline.ID, requestedVersion)
+		}
+		return nil, err
+	}
+	jobs := make([]models.Job, 0, len(version.Jobs))
+	needsByIndex := make([][]string, len(version.Jobs))
+	for i := range version.Jobs {
+		snapshot := &version.Jobs[i]
+		jobs = append(jobs, models.Job{
+			Key:         snapshot.Key,
+			Name:        snapshot.Name,
+			TargetGroup: snapshot.TargetGroup,
+			Spec:        snapshot.Spec,
+		})
+		needsByIndex[i] = snapshot.Needs
+	}
+	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, needsByIndex: needsByIndex}, nil
+}
+
+// remapRunDependencies computes a run instance's depends_on (the ids of the
+// run's own job instances it depends on) from the run's definition (F-11). For
+// the current version the instance's DependsOn (already resolved from its
+// needs at save time, F-08) are remapped from the definition ids to the run's
+// instance ids. For a version snapshot the needs (keys) are resolved to the
+// run's instance ids via the snapshot's key->id map. A dependency that cannot
+// be resolved is dropped (best-effort); in practice a pipeline's job
+// dependencies reference other jobs in the same pipeline.
+func remapRunDependencies(def *runDefinition, index int, defToInstance map[uint]uint, keyToInstanceID map[string]uint) []uint {
+	if def.needsByIndex != nil {
+		// A version snapshot: resolve the needs (keys) to the run's instance
+		// ids via the key->instance-id map built in pass 1.
+		return resolveNeedsToDependsOn(def.needsByIndex[index], keyToInstanceID)
+	}
+	// The current version: remap the definition's depends_on (definition ids,
+	// already resolved from its needs at save time, F-08) to the run's
+	// instance ids.
+	remapped := make([]uint, 0, len(def.jobs[index].DependsOn))
+	for _, defDepID := range def.jobs[index].DependsOn {
+		if instID, ok := defToInstance[defDepID]; ok {
+			remapped = append(remapped, instID)
+		} else {
+			remapped = append(remapped, defDepID)
+		}
+	}
+	return remapped
 }
 
 // TriggerRun atomically claims a trigger-fired run (F-09): it creates a
@@ -526,18 +709,21 @@ func (s *Server) TriggerRun(ctx context.Context, req *dbpb.TriggerRunRequest) (*
 			response.Created = false
 			return nil
 		}
-		// No duplicate: create the run and its job instances.
+		// No duplicate: create the run and its job instances. A trigger-fired
+		// run always executes the pipeline's current version (F-11), which is
+		// recorded on the run.
 		sourceRunID := sourceRunIDFromParams(req.GetParams())
 		run := &models.PipelineRun{
-			PipelineID:     pipelineID,
-			Status:         models.RunStatusPending,
-			Trigger:        triggerSourceFromType(req.GetTriggerType()),
-			TriggerName:    req.GetTriggerName(),
-			SourceRunID:    sourceRunID,
-			Params:         req.GetParams(),
-			UpstreamClaims: upstreamClaimsFromStruct(req.GetUpstreamClaims()),
+			PipelineID:      pipelineID,
+			PipelineVersion: pipeline.Version,
+			Status:          models.RunStatusPending,
+			Trigger:         triggerSourceFromType(req.GetTriggerType()),
+			TriggerName:     req.GetTriggerName(),
+			SourceRunID:     sourceRunID,
+			Params:          req.GetParams(),
+			UpstreamClaims:  upstreamClaimsFromStruct(req.GetUpstreamClaims()),
 		}
-		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run)
+		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run, 0)
 		if err != nil {
 			return err
 		}
@@ -697,6 +883,50 @@ func (s *Server) UpdateRun(ctx context.Context, req *dbpb.UpdateRunRequest) (*db
 		return nil, grpcErr(err)
 	}
 	return toProtoRun(&run), nil
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline versions (F-11)
+// ---------------------------------------------------------------------------
+
+// ListPipelineVersions returns a pipeline's version history (F-11), most recent
+// first. Each version is an immutable snapshot of the pipeline's definition at
+// that version, so a run bound to a version can be inspected (or re-executed)
+// against the exact definition it ran.
+func (s *Server) ListPipelineVersions(ctx context.Context, req *dbpb.ListPipelineVersionsRequest) (*dbpb.ListPipelineVersionsResponse, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	var versions []models.PipelineVersion
+	if err := s.db.WithContext(ctx).
+		Where("pipeline_id = ?", req.GetPipelineId()).
+		Order("version DESC").
+		Find(&versions).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListPipelineVersionsResponse{}
+	for i := range versions {
+		response.Versions = append(response.Versions, toProtoPipelineVersion(&versions[i]))
+	}
+	return response, nil
+}
+
+// GetPipelineVersion returns the immutable snapshot of one version of a
+// pipeline's definition (F-11). A version that does not exist is NotFound.
+func (s *Server) GetPipelineVersion(ctx context.Context, req *dbpb.GetPipelineVersionRequest) (*dbpb.PipelineVersion, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	if req.GetVersion() <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "version is required")
+	}
+	var version models.PipelineVersion
+	if err := s.db.WithContext(ctx).
+		Where("pipeline_id = ? AND version = ?", req.GetPipelineId(), req.GetVersion()).
+		First(&version).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoPipelineVersion(&version), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -2432,6 +2662,72 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		Jobs:        toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
 		Triggers:    triggersToProto(pipeline.Triggers),
 		Params:      pipelineParamsToProto(pipeline.Params),
+		Version:     int32(pipeline.Version),
+	}
+}
+
+// toProtoPipelineVersion converts a pipeline version snapshot into its proto
+// form (F-11). The snapshot's job definitions are presented in the declarative
+// JobDefinition form (key, name, target group, needs, spec), so a version can
+// be re-executed or re-saved without loss.
+func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
+	return &dbpb.PipelineVersion{
+		Id:          int64(v.ID),
+		PipelineId:  int64(v.PipelineID),
+		Version:     int32(v.Version),
+		Name:        v.Name,
+		Description: v.Description,
+		FailureMode: failureModeToProto(v.FailureMode),
+		Jobs:        jobDefinitionsToProto(v.Jobs),
+		Triggers:    triggersToProto(v.Triggers),
+		Params:      pipelineParamsToProto(v.Params),
+		CreatedAt:   timestamppb.New(v.CreatedAt),
+	}
+}
+
+// jobDefinitionsToProto converts a version snapshot's job definitions into the
+// proto JobDefinition list (F-11).
+func jobDefinitionsToProto(snapshots []models.JobDefinitionSnapshot) []*dbpb.JobDefinition {
+	out := make([]*dbpb.JobDefinition, 0, len(snapshots))
+	for i := range snapshots {
+		out = append(out, &dbpb.JobDefinition{
+			Key:         snapshots[i].Key,
+			Name:        snapshots[i].Name,
+			TargetGroup: snapshots[i].TargetGroup,
+			Needs:       snapshots[i].Needs,
+			Spec:        specToProto(snapshots[i].Spec),
+		})
+	}
+	return out
+}
+
+// snapshotPipelineVersion builds the immutable snapshot of a pipeline's
+// definition at its current version (F-11). The job definitions' needs are
+// reconstructed from their depends_on (ids) via the key map, so the snapshot
+// carries the authoring form (needs, by key) rather than the stored form
+// (depends_on, by id). The snapshot is stored as a PipelineVersion row so a
+// run bound to this version can be re-executed (or inspected) without loss.
+func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *models.PipelineVersion {
+	keyMap := pipelineKeyMap(defs)
+	snapshots := make([]models.JobDefinitionSnapshot, 0, len(defs))
+	for i := range defs {
+		snapshots = append(snapshots, models.JobDefinitionSnapshot{
+			Key:         defs[i].Key,
+			Name:        defs[i].Name,
+			TargetGroup: defs[i].TargetGroup,
+			Needs:       needsFromDependsOn(defs[i].DependsOn, keyMap),
+			Spec:        defs[i].Spec,
+		})
+	}
+	return &models.PipelineVersion{
+		PipelineID:  pipeline.ID,
+		Version:     pipeline.Version,
+		Name:        pipeline.Name,
+		Description: pipeline.Description,
+		FailureMode: pipeline.FailureMode,
+		Jobs:        snapshots,
+		Triggers:    pipeline.Triggers,
+		Params:      pipeline.Params,
 	}
 }
 
@@ -2472,15 +2768,16 @@ func upstreamClaimsFromStruct(s *structpb.Struct) map[string]any {
 
 func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 	proto := &dbpb.PipelineRun{
-		Id:             int64(run.ID),
-		PipelineId:     int64(run.PipelineID),
-		Status:         runStatusToProto(run.Status),
-		Trigger:        run.Trigger,
-		Params:         run.Params,
-		CreatedAt:      timestamppb.New(run.CreatedAt),
-		UpdatedAt:      timestamppb.New(run.UpdatedAt),
-		TriggerName:    run.TriggerName,
-		UpstreamClaims: upstreamClaimsToStruct(run.UpstreamClaims),
+		Id:              int64(run.ID),
+		PipelineId:      int64(run.PipelineID),
+		Status:          runStatusToProto(run.Status),
+		Trigger:         run.Trigger,
+		Params:          run.Params,
+		CreatedAt:       timestamppb.New(run.CreatedAt),
+		UpdatedAt:       timestamppb.New(run.UpdatedAt),
+		TriggerName:     run.TriggerName,
+		UpstreamClaims:  upstreamClaimsToStruct(run.UpstreamClaims),
+		PipelineVersion: int32(run.PipelineVersion),
 	}
 	if run.Pipeline != nil {
 		// The pipeline's name (F-09): the scheduler's event loop matches a

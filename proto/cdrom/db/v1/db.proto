@@ -50,6 +50,15 @@ service Database {
   // uses it to persist a run's derived status and start/finish timestamps.
   rpc UpdateRun(UpdateRunRequest) returns (PipelineRun);
 
+  // Pipeline versions (F-11). Each change to a pipeline definition produces a
+  // new version; a run is bound to the version that was active when it
+  // started. ListPipelineVersions returns a pipeline's version history (most
+  // recent first); GetPipelineVersion returns the immutable snapshot of one
+  // version (its definition: name, description, failure mode, job
+  // definitions, triggers, and parameters).
+  rpc ListPipelineVersions(ListPipelineVersionsRequest) returns (ListPipelineVersionsResponse);
+  rpc GetPipelineVersion(GetPipelineVersionRequest) returns (PipelineVersion);
+
   // Jobs
   rpc CreateJob(CreateJobRequest) returns (Job);
   rpc GetJob(GetJobRequest) returns (Job);
@@ -281,6 +290,12 @@ message Pipeline {
   // recorded on the run and interpolated into its jobs' specs by the
   // execution target.
   repeated Parameter params = 9;
+  // version is the pipeline's current version (F-11): a monotonically
+  // increasing counter bumped every time the definition changes (a create is
+  // version 1; each edit is the next version). A run records the version it
+  // executed (see PipelineRun.pipeline_version), so a run is bound to the
+  // definition that was active when it started.
+  int32 version = 10;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -478,6 +493,14 @@ message PipelineRun {
   // execution targets, letting a job's steps (or the outside resources they
   // call) see who triggered the run.
   google.protobuf.Struct upstream_claims = 13;
+  // pipeline_version is the version of the pipeline this run executed (F-11):
+  // the version that was active when the run started. It is recorded so a run
+  // is bound to the definition it executed — re-running an old run reproduces
+  // the old definition, and "what exactly did run #42 execute?" is answerable
+  // from the version snapshot. A run created against a specific version (a
+  // re-run of an old run) records that version instead of the pipeline's
+  // current one.
+  int32 pipeline_version = 14;
 }
 
 message CreateRunRequest {
@@ -487,6 +510,13 @@ message CreateRunRequest {
   string trigger = 2;
   // params are the run's parameters (F-10); empty until parameters land.
   map<string, string> params = 3;
+  // pipeline_version, when set (> 0), is the specific version of the pipeline
+  // to execute (F-11): the run's job instances are created from that version's
+  // definition snapshot rather than the pipeline's current definitions, and
+  // the run records this version. This is how a run is re-executed against its
+  // original version (a re-run of an old run reproduces the old definition).
+  // When 0 the run executes the pipeline's current version.
+  int32 pipeline_version = 4;
 }
 
 // CreateRunResponse is the result of CreateRun: the created run plus the job
@@ -573,6 +603,55 @@ message UpdateRunRequest {
   google.protobuf.Timestamp started_at = 3;
   // finished_at, when set, records when the run finished.
   google.protobuf.Timestamp finished_at = 4;
+}
+
+// PipelineVersion is an immutable snapshot of a pipeline's definition at one
+// version (F-11). Each change to a pipeline produces a new version; the
+// database service stores one PipelineVersion row per version, capturing the
+// definition (name, description, failure mode, job definitions, triggers, and
+// parameters) exactly as it was. A run is bound to the version that was active
+// when it started (see PipelineRun.pipeline_version), so "what exactly did run
+// #42 execute?" is answerable from the version snapshot, and a run can be
+// re-executed against its original version even after the pipeline has since
+// been edited.
+message PipelineVersion {
+  int64 id = 1;
+  // pipeline_id is the pipeline this version belongs to.
+  int64 pipeline_id = 2;
+  // version is the version number this snapshot represents (1-based; it
+  // matches the pipeline's version at the time the snapshot was taken).
+  int32 version = 3;
+  // name is the pipeline's name at this version.
+  string name = 4;
+  // description is the pipeline's description at this version.
+  string description = 5;
+  // failure_mode is the pipeline's default failure mode at this version.
+  FailureMode failure_mode = 6;
+  // jobs are the pipeline's job definitions at this version (the declarative
+  // form: key, name, target group, needs, and spec).
+  repeated JobDefinition jobs = 7;
+  // triggers are the pipeline's trigger definitions at this version.
+  repeated Trigger triggers = 8;
+  // params are the pipeline's parameter declarations at this version.
+  repeated Parameter params = 9;
+  google.protobuf.Timestamp created_at = 10;
+}
+
+message ListPipelineVersionsRequest {
+  // pipeline_id is the pipeline to list versions for.
+  int64 pipeline_id = 1;
+}
+
+message ListPipelineVersionsResponse {
+  // versions are the pipeline's version snapshots, most recent first.
+  repeated PipelineVersion versions = 1;
+}
+
+message GetPipelineVersionRequest {
+  // pipeline_id is the pipeline the version belongs to.
+  int64 pipeline_id = 1;
+  // version is the version number to fetch.
+  int32 version = 2;
 }
 
 enum JobStatus {

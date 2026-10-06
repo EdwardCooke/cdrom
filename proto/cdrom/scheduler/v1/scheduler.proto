@@ -160,6 +160,12 @@ message Run {
   // source_run_id is the id of the run that started this run (an event
   // trigger, F-09); 0 when the run was not started by an event trigger.
   int64 source_run_id = 11;
+  // pipeline_version is the version of the pipeline this run executed (F-11):
+  // the version that was active when the run started. It is recorded so a run
+  // is bound to the definition it executed — re-running an old run reproduces
+  // the old definition. A run created against a specific version (a re-run of
+  // an old run) records that version instead of the pipeline's current one.
+  int32 pipeline_version = 12;
 }
 
 message CreateRunRequest {
@@ -169,6 +175,13 @@ message CreateRunRequest {
   string trigger = 2;
   // params are the run's parameters (F-10); empty until parameters land.
   map<string, string> params = 3;
+  // pipeline_version, when set (> 0), is the specific version of the pipeline
+  // to execute (F-11): the run's job instances are created from that version's
+  // definition snapshot rather than the pipeline's current definitions, and
+  // the run records this version. This is how a run is re-executed against its
+  // original version (a re-run of an old run reproduces the old definition).
+  // When 0 the run executes the pipeline's current version.
+  int32 pipeline_version = 4;
 }
 
 // TriggerRunRequest is the request for the scheduler's TriggerRun RPC (F-09):

@@ -62,6 +62,9 @@ type wsRun struct {
 	PipelineID int64  `json:"pipeline_id"`
 	Status     string `json:"status"`
 	Trigger    string `json:"trigger"`
+	// PipelineVersion is the version of the pipeline this run executed (F-11);
+	// 0 means the field is unset.
+	PipelineVersion int32 `json:"pipeline_version,omitempty"`
 }
 
 // handleWebSocket upgrades the connection, sends a state snapshot, then
@@ -159,10 +162,11 @@ func (s *Server) snapshot() (*wsSnapshot, error) {
 		}
 		for _, run := range runsResp.GetRuns() {
 			snap.Runs = append(snap.Runs, wsRun{
-				ID:         run.GetId(),
-				PipelineID: run.GetPipelineId(),
-				Status:     runStatusName(run.GetStatus()),
-				Trigger:    run.GetTrigger(),
+				ID:              run.GetId(),
+				PipelineID:      run.GetPipelineId(),
+				Status:          runStatusName(run.GetStatus()),
+				Trigger:         run.GetTrigger(),
+				PipelineVersion: run.GetPipelineVersion(),
 			})
 		}
 	}

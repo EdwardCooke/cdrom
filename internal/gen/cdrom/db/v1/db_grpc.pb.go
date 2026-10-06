@@ -30,6 +30,8 @@ const (
 	Database_GetRun_FullMethodName                  = "/cdrom.db.v1.Database/GetRun"
 	Database_ListRuns_FullMethodName                = "/cdrom.db.v1.Database/ListRuns"
 	Database_UpdateRun_FullMethodName               = "/cdrom.db.v1.Database/UpdateRun"
+	Database_ListPipelineVersions_FullMethodName    = "/cdrom.db.v1.Database/ListPipelineVersions"
+	Database_GetPipelineVersion_FullMethodName      = "/cdrom.db.v1.Database/GetPipelineVersion"
 	Database_CreateJob_FullMethodName               = "/cdrom.db.v1.Database/CreateJob"
 	Database_GetJob_FullMethodName                  = "/cdrom.db.v1.Database/GetJob"
 	Database_ListJobs_FullMethodName                = "/cdrom.db.v1.Database/ListJobs"
@@ -114,6 +116,14 @@ type DatabaseClient interface {
 	// leave the corresponding field unchanged. The scheduler's run-status loop
 	// uses it to persist a run's derived status and start/finish timestamps.
 	UpdateRun(ctx context.Context, in *UpdateRunRequest, opts ...grpc.CallOption) (*PipelineRun, error)
+	// Pipeline versions (F-11). Each change to a pipeline definition produces a
+	// new version; a run is bound to the version that was active when it
+	// started. ListPipelineVersions returns a pipeline's version history (most
+	// recent first); GetPipelineVersion returns the immutable snapshot of one
+	// version (its definition: name, description, failure mode, job
+	// definitions, triggers, and parameters).
+	ListPipelineVersions(ctx context.Context, in *ListPipelineVersionsRequest, opts ...grpc.CallOption) (*ListPipelineVersionsResponse, error)
+	GetPipelineVersion(ctx context.Context, in *GetPipelineVersionRequest, opts ...grpc.CallOption) (*PipelineVersion, error)
 	// Jobs
 	CreateJob(ctx context.Context, in *CreateJobRequest, opts ...grpc.CallOption) (*Job, error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
@@ -396,6 +406,26 @@ func (c *databaseClient) UpdateRun(ctx context.Context, in *UpdateRunRequest, op
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PipelineRun)
 	err := c.cc.Invoke(ctx, Database_UpdateRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListPipelineVersions(ctx context.Context, in *ListPipelineVersionsRequest, opts ...grpc.CallOption) (*ListPipelineVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPipelineVersionsResponse)
+	err := c.cc.Invoke(ctx, Database_ListPipelineVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetPipelineVersion(ctx context.Context, in *GetPipelineVersionRequest, opts ...grpc.CallOption) (*PipelineVersion, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineVersion)
+	err := c.cc.Invoke(ctx, Database_GetPipelineVersion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -835,6 +865,14 @@ type DatabaseServer interface {
 	// leave the corresponding field unchanged. The scheduler's run-status loop
 	// uses it to persist a run's derived status and start/finish timestamps.
 	UpdateRun(context.Context, *UpdateRunRequest) (*PipelineRun, error)
+	// Pipeline versions (F-11). Each change to a pipeline definition produces a
+	// new version; a run is bound to the version that was active when it
+	// started. ListPipelineVersions returns a pipeline's version history (most
+	// recent first); GetPipelineVersion returns the immutable snapshot of one
+	// version (its definition: name, description, failure mode, job
+	// definitions, triggers, and parameters).
+	ListPipelineVersions(context.Context, *ListPipelineVersionsRequest) (*ListPipelineVersionsResponse, error)
+	GetPipelineVersion(context.Context, *GetPipelineVersionRequest) (*PipelineVersion, error)
 	// Jobs
 	CreateJob(context.Context, *CreateJobRequest) (*Job, error)
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
@@ -1052,6 +1090,12 @@ func (UnimplementedDatabaseServer) ListRuns(context.Context, *ListRunsRequest) (
 }
 func (UnimplementedDatabaseServer) UpdateRun(context.Context, *UpdateRunRequest) (*PipelineRun, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateRun not implemented")
+}
+func (UnimplementedDatabaseServer) ListPipelineVersions(context.Context, *ListPipelineVersionsRequest) (*ListPipelineVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPipelineVersions not implemented")
+}
+func (UnimplementedDatabaseServer) GetPipelineVersion(context.Context, *GetPipelineVersionRequest) (*PipelineVersion, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPipelineVersion not implemented")
 }
 func (UnimplementedDatabaseServer) CreateJob(context.Context, *CreateJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateJob not implemented")
@@ -1367,6 +1411,42 @@ func _Database_UpdateRun_Handler(srv interface{}, ctx context.Context, dec func(
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).UpdateRun(ctx, req.(*UpdateRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListPipelineVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPipelineVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListPipelineVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListPipelineVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListPipelineVersions(ctx, req.(*ListPipelineVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetPipelineVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPipelineVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetPipelineVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetPipelineVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetPipelineVersion(ctx, req.(*GetPipelineVersionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2119,6 +2199,14 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateRun",
 			Handler:    _Database_UpdateRun_Handler,
+		},
+		{
+			MethodName: "ListPipelineVersions",
+			Handler:    _Database_ListPipelineVersions_Handler,
+		},
+		{
+			MethodName: "GetPipelineVersion",
+			Handler:    _Database_GetPipelineVersion_Handler,
 		},
 		{
 			MethodName: "CreateJob",

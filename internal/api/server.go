@@ -62,6 +62,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/pipelines/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 
+	// Pipeline versions (F-11): each change to a pipeline produces a new
+	// version; a run is bound to the version that was active when it started.
+	// Versions are listed and fetched via the database service.
+	mux.HandleFunc("GET /api/pipelines/{id}/versions", s.listPipelineVersions)
+	mux.HandleFunc("GET /api/pipelines/{id}/versions/{version}", s.getPipelineVersion)
+
 	// Webhook trigger (F-09): an external POST (authenticated with the
 	// pipeline's webhook trigger secret) starts a run, passing the request's
 	// JSON body as run parameters.
@@ -333,16 +339,22 @@ func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // runRequest is the body of POST /api/pipelines/{id}/runs. Trigger is how the
-// run was started (e.g. "manual"); Params are the run's parameters (F-10).
+// run was started (e.g. "manual"); Params are the run's parameters (F-10);
+// PipelineVersion, when set (> 0), is the specific version of the pipeline to
+// execute (F-11) — a re-run of an old run against its original version. When
+// 0 the run executes the pipeline's current version.
 type runRequest struct {
-	Trigger string            `json:"trigger,omitempty"`
-	Params  map[string]string `json:"params,omitempty"`
+	Trigger         string            `json:"trigger,omitempty"`
+	Params          map[string]string `json:"params,omitempty"`
+	PipelineVersion int32             `json:"pipeline_version,omitempty"`
 }
 
 // createRun triggers a new execution of a pipeline (F-07): it asks the
 // scheduler to create a PipelineRun and one job instance per job definition in
 // the pipeline, then drive them. The run's overall status is derived from its
-// job instances by the scheduler's run-status loop.
+// job instances by the scheduler's run-status loop. When the request names a
+// specific version (F-11) the run executes that version's definition and
+// records it; otherwise it executes the pipeline's current version.
 func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	pipelineID, ok := pathID(w, r)
 	if !ok {
@@ -356,9 +368,10 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err := s.clients.Scheduler.CreateRun(r.Context(), &schedpb.CreateRunRequest{
-		PipelineId: pipelineID,
-		Trigger:    req.Trigger,
-		Params:     req.Params,
+		PipelineId:      pipelineID,
+		Trigger:         req.Trigger,
+		Params:          req.Params,
+		PipelineVersion: req.PipelineVersion,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -394,6 +407,45 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+// listPipelineVersions lists a pipeline's version history (F-11), most recent
+// first. Each version is an immutable snapshot of the pipeline's definition at
+// that version.
+func (s *Server) listPipelineVersions(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.clients.Database.ListPipelineVersions(r.Context(), &dbpb.ListPipelineVersionsRequest{PipelineId: pipelineID})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(response.GetVersions()))
+}
+
+// getPipelineVersion fetches the immutable snapshot of one version of a
+// pipeline's definition (F-11).
+func (s *Server) getPipelineVersion(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	version, err := strconv.ParseInt(r.PathValue("version"), 10, 32)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid version: %v", err)
+		return
+	}
+	versionProto, err := s.clients.Database.GetPipelineVersion(r.Context(), &dbpb.GetPipelineVersionRequest{
+		PipelineId: pipelineID,
+		Version:    int32(version),
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, versionProto)
 }
 
 // webhookSecretHeader is the header a webhook caller presents the pipeline's

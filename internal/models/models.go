@@ -54,6 +54,73 @@ type Pipeline struct {
 	// values for them are recorded on the run and interpolated into its jobs'
 	// specs by the execution target.
 	Params []Parameter `gorm:"type:text;serializer:json" json:"params,omitempty"`
+	// Version is the pipeline's current version (F-11): a monotonically
+	// increasing counter that is bumped every time the pipeline's definition
+	// changes (a create is version 1; each edit is the next version). A run
+	// records the version it executed (see PipelineRun.PipelineVersion), so a
+	// run is bound to the definition that was active when it started and a
+	// re-run of an old run reproduces the old definition.
+	Version int `gorm:"not null;default:1" json:"version"`
+}
+
+// PipelineVersion is an immutable snapshot of a pipeline's definition at one
+// version (F-11). Each change to a pipeline produces a new version; the
+// database service stores one PipelineVersion row per version, capturing the
+// definition (name, description, failure mode, job definitions, triggers, and
+// parameters) exactly as it was. A run is bound to the version that was active
+// when it started (see PipelineRun.PipelineVersion), so "what exactly did run
+// #42 execute?" is answerable from the version snapshot, and a run can be
+// re-executed against its original version even after the pipeline has since
+// been edited.
+//
+// The snapshot is stored as a JSON document in a text column (portable across
+// SQLite and PostgreSQL) rather than as separate columns, so a version row is
+// a single immutable record and adding a field to the definition never
+// requires a schema change.
+type PipelineVersion struct {
+	gorm.Model
+	// PipelineID is the pipeline this version belongs to.
+	PipelineID uint `gorm:"uniqueIndex:idx_pipeline_version_unique,priority:1;not null" json:"pipeline_id"`
+	// Version is the version number this snapshot represents (1-based; it
+	// matches the pipeline's Version at the time the snapshot was taken).
+	Version int `gorm:"uniqueIndex:idx_pipeline_version_unique,priority:2;not null" json:"version"`
+	// Name is the pipeline's name at this version.
+	Name string `json:"name"`
+	// Description is the pipeline's description at this version.
+	Description string `json:"description"`
+	// FailureMode is the pipeline's default failure mode at this version.
+	FailureMode FailureMode `json:"failure_mode"`
+	// Jobs are the pipeline's job definitions at this version (the declarative
+	// form: key, name, target group, needs, and spec). They are stored as a
+	// JSON document in a text column (portable across SQLite and PostgreSQL).
+	Jobs []JobDefinitionSnapshot `gorm:"type:text;serializer:json" json:"jobs,omitempty"`
+	// Triggers are the pipeline's trigger definitions at this version. They
+	// are stored as a JSON document in a text column.
+	Triggers []Trigger `gorm:"type:text;serializer:json" json:"triggers,omitempty"`
+	// Params are the pipeline's parameter declarations at this version. They
+	// are stored as a JSON document in a text column.
+	Params []Parameter `gorm:"type:text;serializer:json" json:"params,omitempty"`
+}
+
+// JobDefinitionSnapshot is the declarative form of a job definition as captured
+// in a pipeline version (F-11): the key (the job's stable name, F-08), the
+// display name, the target group, the needs (dependencies, expressed as the
+// keys of other jobs in the pipeline, F-08), and the execution spec. It is the
+// same shape the UI authors a pipeline with, so a version snapshot can be
+// re-executed (or re-saved) without loss.
+type JobDefinitionSnapshot struct {
+	// Key is the job's stable, pipeline-scoped identifier (F-08).
+	Key string `json:"key"`
+	// Name is the job's display name; empty means the key is used.
+	Name string `json:"name,omitempty"`
+	// TargetGroup selects a group of long-lived workers; empty means the job
+	// runs on an ephemeral Kubernetes agent.
+	TargetGroup string `json:"target_group,omitempty"`
+	// Needs lists the keys of the jobs this job depends on (F-08).
+	Needs []string `json:"needs,omitempty"`
+	// Spec is the execution spec to snapshot onto each of the job's run
+	// instances.
+	Spec JobSpec `json:"spec,omitempty"`
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -170,6 +237,14 @@ type PipelineRun struct {
 	PipelineID uint `gorm:"index;not null" json:"pipeline_id"`
 	// Pipeline is the pipeline this run executed (loaded on demand).
 	Pipeline *Pipeline `json:"pipeline,omitempty"`
+	// PipelineVersion is the version of the pipeline this run executed (F-11):
+	// the version that was active when the run started. It is recorded so a
+	// run is bound to the definition it executed — re-running an old run
+	// reproduces the old definition, and "what exactly did run #42 execute?"
+	// is answerable from the version snapshot. A run created against a
+	// specific version (a re-run of an old run) records that version instead
+	// of the pipeline's current one.
+	PipelineVersion int `json:"pipeline_version"`
 	// Status is the run's overall state, derived from its job instances.
 	Status RunStatus `gorm:"default:pending;index" json:"status"`
 	// Trigger is how the run was started (e.g. "manual", "cron", "webhook",
@@ -702,6 +777,7 @@ func All() []any {
 	return []any{
 		&Pipeline{},
 		&PipelineRun{},
+		&PipelineVersion{},
 		&Job{},
 		&JobExecution{},
 		&StepCompletion{},

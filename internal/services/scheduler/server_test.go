@@ -208,3 +208,33 @@ func TestTriggerRunValidates(t *testing.T) {
 		t.Errorf("TriggerRun with no trigger_name: want error, got nil")
 	}
 }
+
+// TestCreateRunForwardsPipelineVersion verifies the scheduler's CreateRun RPC
+// forwards the requested pipeline version to the database (F-11), so a run can
+// be created against a specific (older) version of the pipeline.
+func TestCreateRunForwardsPipelineVersion(t *testing.T) {
+	db := &fakeCreateRunDB{
+		response: &dbpb.CreateRunResponse{
+			Run: &dbpb.PipelineRun{Id: 42, PipelineId: 3, PipelineVersion: 2, Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: "manual"},
+		},
+	}
+	s := &Server{db: db, logger: testLogger()}
+
+	run, err := s.CreateRun(context.Background(), &schedpb.CreateRunRequest{
+		PipelineId:      3,
+		Trigger:         "manual",
+		PipelineVersion: 2,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := run.GetPipelineVersion(); got != 2 {
+		t.Errorf("run pipeline_version = %d, want 2", got)
+	}
+	if db.request == nil {
+		t.Fatal("db.CreateRun was not called")
+	}
+	if got := db.request.GetPipelineVersion(); got != 2 {
+		t.Errorf("db.CreateRun pipeline_version = %d, want 2", got)
+	}
+}
