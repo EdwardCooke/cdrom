@@ -128,13 +128,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The API's HTTP server. When username/password authentication is enabled
+	// (the default for local development) the API attaches a proxy client to
+	// the IdP so the UI can sign in via /api/login and register via
+	// /api/register — the real logic (password verification, token minting,
+	// user storage) lives in the IdP. The IdP's base URL is the configured
+	// auth issuer, falling back to the default IdP address.
+	apiServer := api.New(clients, hub, secretStore)
+	if cfg.Auth.UserPassEnabled {
+		idpBase := cfg.Auth.Issuer
+		if idpBase == "" {
+			idpBase = config.DefaultIdPAddress
+		}
+		// The audience the API's OIDC verifier checks on a presented token
+		// (token_audience when set, else client_id). It is passed to the IdP
+		// so a login token is stamped with an audience the API will accept.
+		audience := cfg.Auth.TokenAudience
+		if audience == "" {
+			audience = cfg.Auth.ClientID
+		}
+		apiServer.SetUserPassClient(api.NewUserPassClient(idpBase, idpClient, audience))
+	}
+
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
 	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
 	// endpoint is registered on a parent mux so it is reachable without a
 	// token — a client needs it to start the sign-in flow. Go's ServeMux
 	// prefers the more specific /api/auth/oidc pattern over the /api/ subtree
-	// handler.
-	apiHandler := authBundle.Middleware(api.New(clients, hub, secretStore).Handler())
+	// handler. When username/password auth is enabled the sign-in entry points
+	// (/api/login, /api/register) are exempted from the token check so they
+	// stay reachable without a token.
+	var exempt []string
+	if cfg.Auth.UserPassEnabled {
+		exempt = []string{"/api/login", "/api/register"}
+	}
+	apiHandler := authBundle.MiddlewareExempt(apiServer.Handler(), exempt...)
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
 	mux.HandleFunc("GET /api/auth/oidc", authBundle.ServeDiscovery)

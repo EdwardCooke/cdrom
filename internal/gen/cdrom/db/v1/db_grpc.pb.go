@@ -72,6 +72,11 @@ const (
 	Database_StoreIDPAuthCode_FullMethodName        = "/cdrom.db.v1.Database/StoreIDPAuthCode"
 	Database_ConsumeIDPAuthCode_FullMethodName      = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
 	Database_PruneIDPAuthCodes_FullMethodName       = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
+	Database_CreateUser_FullMethodName              = "/cdrom.db.v1.Database/CreateUser"
+	Database_GetIDPUser_FullMethodName              = "/cdrom.db.v1.Database/GetIDPUser"
+	Database_ListIDPUsers_FullMethodName            = "/cdrom.db.v1.Database/ListIDPUsers"
+	Database_UpdateIDPUser_FullMethodName           = "/cdrom.db.v1.Database/UpdateIDPUser"
+	Database_DeleteIDPUser_FullMethodName           = "/cdrom.db.v1.Database/DeleteIDPUser"
 	Database_NextSecretNonce_FullMethodName         = "/cdrom.db.v1.Database/NextSecretNonce"
 )
 
@@ -311,6 +316,16 @@ type DatabaseClient interface {
 	StoreIDPAuthCode(ctx context.Context, in *StoreIDPAuthCodeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	ConsumeIDPAuthCode(ctx context.Context, in *ConsumeIDPAuthCodeRequest, opts ...grpc.CallOption) (*IDPAuthCode, error)
 	PruneIDPAuthCodes(ctx context.Context, in *PruneIDPAuthCodesRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// IdP users. The IdP persists registered users (their profile, password
+	// hash, and roles) here so multiple IdP replicas share the same user
+	// directory. Passwords are stored only as a salted hash; the plaintext is
+	// never persisted. CreateUser is idempotent on email (it upserts the
+	// profile and roles); GetUser/UpdateUser/DeleteUser key on the user id.
+	CreateUser(ctx context.Context, in *CreateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	GetIDPUser(ctx context.Context, in *GetIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	ListIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error)
+	UpdateIDPUser(ctx context.Context, in *UpdateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -848,6 +863,56 @@ func (c *databaseClient) PruneIDPAuthCodes(ctx context.Context, in *PruneIDPAuth
 	return out, nil
 }
 
+func (c *databaseClient) CreateUser(ctx context.Context, in *CreateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_CreateUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetIDPUser(ctx context.Context, in *GetIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_GetIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListIDPUsersResponse)
+	err := c.cc.Invoke(ctx, Database_ListIDPUsers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateIDPUser(ctx context.Context, in *UpdateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_UpdateIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NextSecretNonceResponse)
@@ -1094,6 +1159,16 @@ type DatabaseServer interface {
 	StoreIDPAuthCode(context.Context, *StoreIDPAuthCodeRequest) (*emptypb.Empty, error)
 	ConsumeIDPAuthCode(context.Context, *ConsumeIDPAuthCodeRequest) (*IDPAuthCode, error)
 	PruneIDPAuthCodes(context.Context, *PruneIDPAuthCodesRequest) (*emptypb.Empty, error)
+	// IdP users. The IdP persists registered users (their profile, password
+	// hash, and roles) here so multiple IdP replicas share the same user
+	// directory. Passwords are stored only as a salted hash; the plaintext is
+	// never persisted. CreateUser is idempotent on email (it upserts the
+	// profile and roles); GetUser/UpdateUser/DeleteUser key on the user id.
+	CreateUser(context.Context, *CreateIDPUserRequest) (*IDPUser, error)
+	GetIDPUser(context.Context, *GetIDPUserRequest) (*IDPUser, error)
+	ListIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error)
+	UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error)
+	DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*emptypb.Empty, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1266,6 +1341,21 @@ func (UnimplementedDatabaseServer) ConsumeIDPAuthCode(context.Context, *ConsumeI
 }
 func (UnimplementedDatabaseServer) PruneIDPAuthCodes(context.Context, *PruneIDPAuthCodesRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method PruneIDPAuthCodes not implemented")
+}
+func (UnimplementedDatabaseServer) CreateUser(context.Context, *CreateIDPUserRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateUser not implemented")
+}
+func (UnimplementedDatabaseServer) GetIDPUser(context.Context, *GetIDPUserRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) ListIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListIDPUsers not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteIDPUser not implemented")
 }
 func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
@@ -2227,6 +2317,96 @@ func _Database_PruneIDPAuthCodes_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateIDPUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateUser(ctx, req.(*CreateIDPUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetIDPUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetIDPUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetIDPUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetIDPUser(ctx, req.(*GetIDPUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListIDPUsers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListIDPUsersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListIDPUsers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListIDPUsers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListIDPUsers(ctx, req.(*ListIDPUsersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateIDPUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateIDPUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateIDPUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateIDPUser(ctx, req.(*UpdateIDPUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteIDPUserRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteIDPUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteIDPUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteIDPUser(ctx, req.(*DeleteIDPUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NextSecretNonceRequest)
 	if err := dec(in); err != nil {
@@ -2459,6 +2639,26 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PruneIDPAuthCodes",
 			Handler:    _Database_PruneIDPAuthCodes_Handler,
+		},
+		{
+			MethodName: "CreateUser",
+			Handler:    _Database_CreateUser_Handler,
+		},
+		{
+			MethodName: "GetIDPUser",
+			Handler:    _Database_GetIDPUser_Handler,
+		},
+		{
+			MethodName: "ListIDPUsers",
+			Handler:    _Database_ListIDPUsers_Handler,
+		},
+		{
+			MethodName: "UpdateIDPUser",
+			Handler:    _Database_UpdateIDPUser_Handler,
+		},
+		{
+			MethodName: "DeleteIDPUser",
+			Handler:    _Database_DeleteIDPUser_Handler,
 		},
 		{
 			MethodName: "NextSecretNonce",

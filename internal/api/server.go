@@ -44,6 +44,18 @@ type Server struct {
 	// configure a store; in production the built-in AES store is always
 	// available (falling back to an all-zero key when none is configured).
 	secretStore secrets.Store
+	// userpass proxies the UI's username/password requests (login, register,
+	// user/role management) to the IdP, where the real logic lives. It is nil
+	// when username/password authentication is disabled, in which case the
+	// /api/login, /api/register, and /api/users endpoints respond 501.
+	userpass UserPassClient
+}
+
+// SetUserPassClient attaches the IdP username/password proxy client, enabling
+// the /api/login, /api/register, and /api/users endpoints. When left nil the
+// endpoints are disabled (they respond 501).
+func (s *Server) SetUserPassClient(c UserPassClient) {
+	s.userpass = c
 }
 
 // New creates an API server over the given gRPC clients. hub is the event
@@ -114,6 +126,17 @@ func (s *Server) Handler() http.Handler {
 	// secret store. The returned ciphertext is what a pipeline's secret
 	// declaration stores; the plaintext is never persisted or returned.
 	mux.HandleFunc("POST /api/secrets/encrypt", s.encryptSecret)
+
+	// Username/password authentication (proxied to the IdP). These are the
+	// unauthenticated entry points: login and register require no token, and
+	// user/role management requires an authenticated (admin) caller. They are
+	// disabled (501) when username/password auth is not enabled.
+	mux.HandleFunc("POST /api/login", s.login)
+	mux.HandleFunc("POST /api/register", s.register)
+	mux.HandleFunc("GET /api/users", s.listUsers)
+	mux.HandleFunc("POST /api/users", s.createUser)
+	mux.HandleFunc("PUT /api/users/{id}", s.updateUser)
+	mux.HandleFunc("DELETE /api/users/{id}", s.deleteUser)
 
 	// Live event stream (WebSocket).
 	if s.hub != nil {
@@ -1136,6 +1159,240 @@ func (s *Server) encryptSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, encryptSecretResponse{Ciphertext: ciphertext})
+}
+
+// ---------------------------------------------------------------------------
+// Username/password authentication (proxied to the IdP)
+// ---------------------------------------------------------------------------
+
+// adminRole is the role required to manage users and roles. A user with this
+// role can list, create, update, and delete users (and change their roles).
+const adminRole = "admin"
+
+// requireUserPass reports whether username/password authentication is enabled
+// (a userpass client is attached). When it is not, the endpoints respond 501.
+func (s *Server) requireUserPass(w http.ResponseWriter) bool {
+	if s.userpass == nil {
+		httpError(w, http.StatusNotImplemented, "username/password authentication is not enabled")
+		return false
+	}
+	return true
+}
+
+// requireAdmin verifies the caller is an authenticated user with the admin
+// role (used by the user/role management endpoints). It reports false (and
+// writes the response) when the caller is not an admin.
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	user := auth.UserFromContext(r.Context())
+	if user.Subject == "" {
+		httpError(w, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	if !user.HasRole(adminRole) {
+		httpError(w, http.StatusForbidden, "admin role required")
+		return false
+	}
+	return true
+}
+
+// loginRequest is the body of POST /api/login: the user's email and password.
+type loginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// login is the unauthenticated entry point for username/password sign-in. It
+// proxies the credentials to the IdP, which verifies them and mints an OIDC
+// token for the user (stamped with the user's roles). The returned token is
+// the same OIDC token the API verifies on every other request, so a client
+// can present it as `Authorization: Bearer <access_token>`.
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUserPass(w) {
+		return
+	}
+	var req loginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if req.Email == "" || req.Password == "" {
+		httpError(w, http.StatusUnauthorized, "email and password are required")
+		return
+	}
+	result, err := s.userpass.Login(r.Context(), req.Email, req.Password)
+	if err != nil {
+		if e, ok := err.(*userPassError); ok && e.status == http.StatusUnauthorized {
+			httpError(w, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		httpError(w, http.StatusBadGateway, "login: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// registerRequest is the body of POST /api/register: the required fields to
+// create a user (first/last/email and a password).
+type registerRequest struct {
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+}
+
+// register is the unauthenticated entry point for creating a user. It proxies
+// the request to the IdP, which hashes the password and stores the user. The
+// first user ever registered is given the admin role (so a local run has a
+// way in); later users get the default role.
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUserPass(w) {
+		return
+	}
+	var req registerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if req.Email == "" || req.Password == "" {
+		httpError(w, http.StatusBadRequest, "email and password are required")
+		return
+	}
+	result, err := s.userpass.Register(r.Context(), RegisterRequest{
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+		Password:  req.Password,
+	})
+	if err != nil {
+		if e, ok := err.(*userPassError); ok {
+			if e.status == http.StatusConflict {
+				httpError(w, http.StatusConflict, "a user with that email already exists")
+				return
+			}
+			httpError(w, http.StatusBadGateway, "register: %v", err)
+			return
+		}
+		httpError(w, http.StatusBadGateway, "register: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+// listUsers returns all registered users. It requires an authenticated admin
+// caller.
+func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUserPass(w) {
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	users, err := s.userpass.ListUsers(r.Context())
+	if err != nil {
+		httpError(w, http.StatusBadGateway, "list users: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(users))
+}
+
+// createUser creates a user (profile, password, and roles). It requires an
+// authenticated admin caller, and — unlike the unauthenticated register — it
+// honours the supplied roles.
+type createUserRequest struct {
+	FirstName string   `json:"first_name"`
+	LastName  string   `json:"last_name"`
+	Email     string   `json:"email"`
+	Password  string   `json:"password"`
+	Roles     []string `json:"roles,omitempty"`
+}
+
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUserPass(w) {
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var req createUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if req.Email == "" || req.Password == "" {
+		httpError(w, http.StatusBadRequest, "email and password are required")
+		return
+	}
+	result, err := s.userpass.CreateUser(r.Context(), RegisterRequest{
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+		Password:  req.Password,
+		Roles:     req.Roles,
+	})
+	if err != nil {
+		if e, ok := err.(*userPassError); ok && e.status == http.StatusConflict {
+			httpError(w, http.StatusConflict, "a user with that email already exists")
+			return
+		}
+		httpError(w, http.StatusBadGateway, "create user: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+// updateUser updates a user's profile and/or roles (and password when
+// supplied). It requires an authenticated admin caller.
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUserPass(w) {
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+	var req UpdateUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	result, err := s.userpass.UpdateUser(r.Context(), id, req)
+	if err != nil {
+		if e, ok := err.(*userPassError); ok && e.status == http.StatusNotFound {
+			httpError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		httpError(w, http.StatusBadGateway, "update user: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// deleteUser removes a user by ID. It requires an authenticated admin caller.
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireUserPass(w) {
+		return
+	}
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+	if err := s.userpass.DeleteUser(r.Context(), id); err != nil {
+		if e, ok := err.(*userPassError); ok && e.status == http.StatusNotFound {
+			httpError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		httpError(w, http.StatusBadGateway, "delete user: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // ---------------------------------------------------------------------------

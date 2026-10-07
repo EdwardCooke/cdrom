@@ -962,6 +962,110 @@ func TestIDPAuthCodes(t *testing.T) {
 	}
 }
 
+// TestIDPUsers verifies the IdP user CRUD RPCs: create (new and upsert on
+// email), get by email and by ID, list, update, and delete, plus the
+// not-found cases.
+func TestIDPUsers(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// Create a new user.
+	created, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
+		User: &dbpb.IDPUser{
+			FirstName:    "Ada",
+			LastName:     "Lovelace",
+			Email:        "ada@example.com",
+			PasswordHash: "$2a$10$hash",
+			Roles:        []string{"admin"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if created.GetId() == "" {
+		t.Fatal("created user has no ID")
+	}
+	if created.GetEmail() != "ada@example.com" {
+		t.Errorf("email = %q, want ada@example.com", created.GetEmail())
+	}
+	if len(created.GetRoles()) != 1 || created.GetRoles()[0] != "admin" {
+		t.Errorf("roles = %v, want [admin]", created.GetRoles())
+	}
+	id := created.GetId()
+
+	// Get by email.
+	byEmail, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Email: "ada@example.com"})
+	if err != nil {
+		t.Fatalf("GetIDPUser by email: %v", err)
+	}
+	if byEmail.GetId() != id {
+		t.Errorf("by email id = %q, want %q", byEmail.GetId(), id)
+	}
+
+	// Get by ID.
+	byID, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Id: id})
+	if err != nil {
+		t.Fatalf("GetIDPUser by id: %v", err)
+	}
+	if byID.GetEmail() != "ada@example.com" {
+		t.Errorf("by id email = %q, want ada@example.com", byID.GetEmail())
+	}
+
+	// Create a second user.
+	if _, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
+		User: &dbpb.IDPUser{Email: "bob@example.com", PasswordHash: "h2", Roles: []string{"user"}},
+	}); err != nil {
+		t.Fatalf("CreateUser bob: %v", err)
+	}
+
+	// List returns both.
+	listed, err := client.ListIDPUsers(ctx, &dbpb.ListIDPUsersRequest{})
+	if err != nil {
+		t.Fatalf("ListIDPUsers: %v", err)
+	}
+	if len(listed.GetUsers()) != 2 {
+		t.Errorf("list = %d users, want 2", len(listed.GetUsers()))
+	}
+
+	// Update the user's roles.
+	updated, err := client.UpdateIDPUser(ctx, &dbpb.UpdateIDPUserRequest{
+		User: &dbpb.IDPUser{Id: id, Roles: []string{"admin", "dev"}},
+	})
+	if err != nil {
+		t.Fatalf("UpdateIDPUser: %v", err)
+	}
+	if len(updated.GetRoles()) != 2 {
+		t.Errorf("updated roles = %v, want 2 roles", updated.GetRoles())
+	}
+
+	// Upsert on email: creating with the same email updates the existing user
+	// (does not create a duplicate).
+	if _, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
+		User: &dbpb.IDPUser{Email: "ada@example.com", FirstName: "Ada", Roles: []string{"admin"}},
+	}); err != nil {
+		t.Fatalf("CreateUser upsert: %v", err)
+	}
+	listed2, err := client.ListIDPUsers(ctx, &dbpb.ListIDPUsersRequest{})
+	if err != nil {
+		t.Fatalf("ListIDPUsers (after upsert): %v", err)
+	}
+	if len(listed2.GetUsers()) != 2 {
+		t.Errorf("list after upsert = %d users, want 2 (no duplicate)", len(listed2.GetUsers()))
+	}
+
+	// Delete the user.
+	if _, err := client.DeleteIDPUser(ctx, &dbpb.DeleteIDPUserRequest{Id: id}); err != nil {
+		t.Fatalf("DeleteIDPUser: %v", err)
+	}
+	if _, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Id: id}); status.Code(err) != codes.NotFound {
+		t.Errorf("get after delete = %v, want NotFound", err)
+	}
+	// Deleting again is a NotFound.
+	if _, err := client.DeleteIDPUser(ctx, &dbpb.DeleteIDPUserRequest{Id: id}); status.Code(err) != codes.NotFound {
+		t.Errorf("re-delete = %v, want NotFound", err)
+	}
+}
+
 // TestSkipJob verifies SkipJob's conditional semantics (F-06): a pending job
 // transitions to skipped, but a job that already started (or finished) is
 // left untouched.

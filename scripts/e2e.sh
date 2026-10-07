@@ -28,6 +28,12 @@
 # user approves or rejects it via the HTTP API; an approval lets the job
 # continue to its later steps, a rejection fails it).
 #
+# It also exercises F-24 (username/password authentication: the API proxies the
+# UI's register/login/user-management requests to the IdP, which verifies the
+# password and mints an OIDC token; the first registered user becomes an admin,
+# later users get the default role, and the user-management endpoints are gated
+# behind an authenticated admin caller).
+#
 # Usage: scripts/e2e.sh
 #
 # Requires: the built binaries in ./bin (run `make build` first), curl, and jq.
@@ -139,6 +145,24 @@ wait_for_status() {
   echo ">> timed out waiting for: $what (status ${status})" >&2
   printf '%s' "$body" >&2
   exit 1
+}
+
+# http_request <method> <url> [json-body]
+# Performs an HTTP request and sets HTTP_CODE (the response status code) and
+# HTTP_BODY (the response body). When a JSON body is given it is sent with a
+# Content-Type: application/json header. Used by the F-24 assertions, which
+# need both the status code and the body from a single call.
+http_request() {
+  local method="$1" url="$2" body="${3:-}"
+  local out
+  if [ -n "$body" ]; then
+    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url" \
+      -H 'Content-Type: application/json' -d "$body")
+  else
+    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url")
+  fi
+  HTTP_CODE=$(printf '%s' "$out" | tail -n 1)
+  HTTP_BODY=$(printf '%s' "$out" | sed '$d')
 }
 
 # --- boot the stack --------------------------------------------------------
@@ -567,4 +591,71 @@ REJECT_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$REJECT_JOB_ID/logs/job.log
 printf '%s' "$REJECT_LOG" | grep -q 'reject: should not run' \
   && { echo ">> post-gate step ran despite the rejection" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, and an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it)"
+# --- verify username/password authentication (F-24) ------------------------
+# The API proxies the UI's register/login/user-management requests to the IdP,
+# where the real logic lives (password verification, token minting, user
+# storage). Username/password auth is enabled by default, so the stack's IdP
+# serves these endpoints. The unauthenticated entry points (register, login)
+# work without a token; the user-management endpoints are gated behind an
+# authenticated admin caller. This stack leaves OIDC auth off (so the other
+# tests can call the API without a token), so an unauthenticated caller to a
+# user-management endpoint is rejected (401) rather than verified.
+log ">> verifying username/password authentication (F-24)"
+
+# Register the first user: created (201) and, as the first user, given the
+# admin role.
+http_request POST http://127.0.0.1:8080/api/register \
+  '{"first_name":"Ada","last_name":"Lovelace","email":"ada@example.com","password":"s3cret"}'
+[ "$HTTP_CODE" = "201" ] \
+  || { echo ">> first register returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
+printf '%s' "$HTTP_BODY" | jq -e '.roles | index("admin")' >/dev/null \
+  || { echo ">> first user was not given the admin role: $HTTP_BODY" >&2; exit 1; }
+
+# Register a second user: created (201) with the default user role.
+http_request POST http://127.0.0.1:8080/api/register \
+  '{"first_name":"Bob","last_name":"Jones","email":"bob@example.com","password":"pw"}'
+[ "$HTTP_CODE" = "201" ] \
+  || { echo ">> second register returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
+printf '%s' "$HTTP_BODY" | jq -e '.roles | index("user")' >/dev/null \
+  || { echo ">> second user was not given the user role: $HTTP_BODY" >&2; exit 1; }
+
+# Registering a duplicate email is rejected (409).
+http_request POST http://127.0.0.1:8080/api/register \
+  '{"first_name":"Ada","last_name":"L","email":"ada@example.com","password":"x"}'
+[ "$HTTP_CODE" = "409" ] \
+  || { echo ">> duplicate register returned $HTTP_CODE, want 409" >&2; exit 1; }
+
+# Login with valid credentials: returns an OIDC access token (200). The token
+# is a signed JWT (three dot-separated segments) minted by the IdP, stamped
+# with the user's roles.
+http_request POST http://127.0.0.1:8080/api/login \
+  '{"email":"ada@example.com","password":"s3cret"}'
+[ "$HTTP_CODE" = "200" ] \
+  || { echo ">> login returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
+LOGIN_TOKEN=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
+[ -n "$LOGIN_TOKEN" ] && [ "$LOGIN_TOKEN" != "null" ] \
+  || { echo ">> login returned no access_token: $HTTP_BODY" >&2; exit 1; }
+[ "$(printf '%s' "$LOGIN_TOKEN" | awk -F. '{print NF}')" = "3" ] \
+  || { echo ">> login access_token is not a JWT: $LOGIN_TOKEN" >&2; exit 1; }
+printf '%s' "$HTTP_BODY" | jq -e '.roles | index("admin")' >/dev/null \
+  || { echo ">> login response did not carry the user's admin role: $HTTP_BODY" >&2; exit 1; }
+
+# Login with a wrong password is rejected (401).
+http_request POST http://127.0.0.1:8080/api/login \
+  '{"email":"ada@example.com","password":"wrong"}'
+[ "$HTTP_CODE" = "401" ] \
+  || { echo ">> wrong-password login returned $HTTP_CODE, want 401" >&2; exit 1; }
+
+# Login for an unknown user is rejected (401).
+http_request POST http://127.0.0.1:8080/api/login \
+  '{"email":"nobody@example.com","password":"x"}'
+[ "$HTTP_CODE" = "401" ] \
+  || { echo ">> unknown-user login returned $HTTP_CODE, want 401" >&2; exit 1; }
+
+# The user-management endpoints are gated behind an authenticated admin caller.
+# With this stack's auth-off config an unauthenticated caller is rejected (401).
+http_request GET http://127.0.0.1:8080/api/users
+[ "$HTTP_CODE" = "401" ] \
+  || { echo ">> unauthenticated list users returned $HTTP_CODE, want 401" >&2; exit 1; }
+
+log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it), and username/password auth registers users (first becomes admin), logs in with a valid password (minting a JWT), rejects bad credentials, and gates user management behind an authenticated caller"

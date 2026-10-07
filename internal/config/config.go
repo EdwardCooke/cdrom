@@ -128,6 +128,12 @@ type AuthConfig struct {
 	// Enabled turns OIDC authentication on. When false (the default) the API
 	// does not require authentication.
 	Enabled bool
+	// UserPassEnabled turns on username/password authentication (the API's
+	// /api/login and /api/register endpoints, which proxy to the IdP). It is
+	// enabled by default so a local development run can sign in with a
+	// password without a full OIDC client; set it to false to disable the
+	// password endpoints (e.g. when using an external identity provider).
+	UserPassEnabled bool
 	// Issuer is the OIDC issuer URL (the identity provider's base URL, e.g.
 	// https://accounts.example.com or a Keycloak realm URL). Required when
 	// Enabled is true.
@@ -398,8 +404,12 @@ func LoadWithFile(file string) (*Config, error) {
 			SQLitePath:  "cdrom.db",
 			PostgresDSN: "",
 		},
-		TLS:  TLSConfig{},
-		Auth: AuthConfig{},
+		TLS: TLSConfig{},
+		// UserPassEnabled defaults to true so a local run can sign in with a
+		// password (the API's /api/login and /api/register) without a full
+		// OIDC client; deployments using an external identity provider can
+		// disable it.
+		Auth: AuthConfig{UserPassEnabled: true},
 		IdP: IdPConfig{
 			Issuer:        defaultIdPIssuer,
 			KeyLifetime:   90 * 24 * time.Hour,
@@ -458,12 +468,13 @@ type fileConfig struct {
 		KeyFile  *string `yaml:"key_file"`
 	} `yaml:"tls"`
 	Auth *struct {
-		Enabled       *bool    `yaml:"enabled"`
-		Issuer        *string  `yaml:"issuer"`
-		ClientID      *string  `yaml:"client_id"`
-		RedirectURL   *string  `yaml:"redirect_url"`
-		Scopes        []string `yaml:"scopes"`
-		TokenAudience *string  `yaml:"token_audience"`
+		Enabled         *bool    `yaml:"enabled"`
+		UserPassEnabled *bool    `yaml:"userpass_enabled"`
+		Issuer          *string  `yaml:"issuer"`
+		ClientID        *string  `yaml:"client_id"`
+		RedirectURL     *string  `yaml:"redirect_url"`
+		Scopes          []string `yaml:"scopes"`
+		TokenAudience   *string  `yaml:"token_audience"`
 	} `yaml:"auth"`
 	IdP *struct {
 		Issuer        *string   `yaml:"issuer"`
@@ -556,6 +567,9 @@ func applyFile(cfg *Config, path string) error {
 	if f.Auth != nil {
 		if f.Auth.Enabled != nil {
 			cfg.Auth.Enabled = *f.Auth.Enabled
+		}
+		if f.Auth.UserPassEnabled != nil {
+			cfg.Auth.UserPassEnabled = *f.Auth.UserPassEnabled
 		}
 		if f.Auth.Issuer != nil {
 			cfg.Auth.Issuer = *f.Auth.Issuer
@@ -660,6 +674,9 @@ func applyEnv(cfg *Config) {
 	cfg.TLS.KeyFile = envOr("CDROM_TLS_KEY_FILE", cfg.TLS.KeyFile)
 	if v := os.Getenv("CDROM_AUTH_ENABLED"); v != "" {
 		cfg.Auth.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("CDROM_AUTH_USERPASS_ENABLED"); v != "" {
+		cfg.Auth.UserPassEnabled = v == "true" || v == "1"
 	}
 	cfg.Auth.Issuer = envOr("CDROM_AUTH_ISSUER", cfg.Auth.Issuer)
 	cfg.Auth.ClientID = envOr("CDROM_AUTH_CLIENT_ID", cfg.Auth.ClientID)

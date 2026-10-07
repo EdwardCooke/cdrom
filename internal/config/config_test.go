@@ -48,6 +48,35 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DB.SQLitePath != "cdrom.db" {
 		t.Errorf("DB.SQLitePath = %q, want cdrom.db", cfg.DB.SQLitePath)
 	}
+	// Username/password auth is enabled by default for local development.
+	if !cfg.Auth.UserPassEnabled {
+		t.Errorf("Auth.UserPassEnabled = false, want true (default)")
+	}
+}
+
+func TestUserPassEnabledConfig(t *testing.T) {
+	// Disabled via the config file.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("auth:\n  userpass_enabled: false\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.Auth.UserPassEnabled {
+		t.Errorf("UserPassEnabled = true, want false (from file)")
+	}
+
+	// Overridden by the environment.
+	t.Setenv("CDROM_AUTH_USERPASS_ENABLED", "true")
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if !cfg.Auth.UserPassEnabled {
+		t.Errorf("UserPassEnabled = false, want true (env must override file)")
+	}
 }
 
 func TestLoadWithFile(t *testing.T) {

@@ -66,6 +66,20 @@ type User struct {
 	Subject string `json:"sub"`
 	Name    string `json:"name,omitempty"`
 	Email   string `json:"email,omitempty"`
+	// Roles are the user's role names, stamped onto the token by the IdP
+	// (from the user's registered roles). They are empty when the token was
+	// not minted for a registered user (e.g. the local OIDC dev flow).
+	Roles []string `json:"roles,omitempty"`
+}
+
+// HasRole reports whether the user carries the named role.
+func (u User) HasRole(role string) bool {
+	for _, r := range u.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // userContextKey is the context key under which the authenticated user is
@@ -91,10 +105,28 @@ func UserFromContext(ctx context.Context) User {
 // verifies against the identity provider. When authentication is disabled it
 // passes requests through unchanged.
 func (a *Auth) Middleware(next http.Handler) http.Handler {
+	return a.MiddlewareExempt(next)
+}
+
+// MiddlewareExempt is Middleware with a set of unauthenticated paths: requests
+// whose path is in exempt bypass the token check (they are reachable without a
+// Bearer token even when authentication is enabled). This is how the API keeps
+// its sign-in entry points (e.g. /api/login and /api/register) reachable while
+// still requiring a token on every other request. When authentication is
+// disabled it passes all requests through unchanged.
+func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handler {
 	if !a.Enabled() {
 		return next
 	}
+	exemptSet := make(map[string]bool, len(exempt))
+	for _, p := range exempt {
+		exemptSet[p] = true
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if exemptSet[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
 		user, err := a.Provider.UserFromRequest(r)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -109,12 +141,13 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 // userFromIDToken extracts the principal from validated OIDC claims.
 func userFromIDToken(idToken *oidc.IDToken) User {
 	var claims struct {
-		Subject string `json:"sub"`
-		Name    string `json:"name"`
-		Email   string `json:"email"`
+		Subject string   `json:"sub"`
+		Name    string   `json:"name"`
+		Email   string   `json:"email"`
+		Roles   []string `json:"roles"`
 	}
 	_ = idToken.Claims(&claims)
-	return User{Subject: claims.Subject, Name: claims.Name, Email: claims.Email}
+	return User{Subject: claims.Subject, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
 }
 
 // DiscoveryDocument is the OIDC discovery document the API serves at

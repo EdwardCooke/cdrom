@@ -794,6 +794,39 @@ type IDPAuthCode struct {
 	Email         string `json:"email"`
 }
 
+// IDPUser is a registered user of the local identity provider. The IdP uses
+// it for username/password authentication: it verifies a login against the
+// stored password hash and, on success, mints an OIDC token for the user
+// (stamping the user's roles onto the token). The password is stored only as
+// a salted hash (PasswordHash); the plaintext is never persisted. Roles are
+// the user's role names (e.g. "admin", "user"); they are stamped onto the
+// user's tokens so the API can enforce role-based access.
+//
+// The user directory is stored in the database (not on the IdP's local
+// filesystem) so multiple IdP replicas share the same users and can run
+// behind a load balancer.
+//
+// The model does not embed gorm.Model because the user's primary key is a
+// string (a stable identifier used as the token's subject), not the numeric
+// gorm.Model ID; the timestamps are declared explicitly instead.
+type IDPUser struct {
+	// ID is the user's stable identifier (the token's subject); it is the
+	// table's primary key.
+	ID        string `gorm:"primaryKey;not null" json:"id"`
+	FirstName string `gorm:"column:first_name" json:"first_name"`
+	LastName  string `gorm:"column:last_name" json:"last_name"`
+	// Email is the user's unique login identifier.
+	Email string `gorm:"uniqueIndex;not null" json:"email"`
+	// PasswordHash is the salted hash of the user's password (bcrypt). It is
+	// never returned to the UI; the IdP uses it only to verify logins.
+	PasswordHash string `gorm:"column:password_hash;type:text" json:"-"`
+	// Roles are the user's role names, serialized to a JSON document in a
+	// text column (portable across SQLite and PostgreSQL).
+	Roles     []string  `gorm:"type:text;serializer:json" json:"roles"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Event is a row in the shared, append-only event log (F-23, high
 // availability). The event log is the coordination bus that makes the control
 // plane horizontally scalable: every API pod tails it and fans the events out
@@ -870,6 +903,7 @@ func All() []any {
 		&Worker{},
 		&IDPSigningKey{},
 		&IDPAuthCode{},
+		&IDPUser{},
 		&Event{},
 		&Lease{},
 		&SecretNonce{},

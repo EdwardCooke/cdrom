@@ -65,8 +65,16 @@ db:
 # `Authorization: Bearer <token>`. The API verifies the token against the
 # IdP's JWKS — there is no session cookie. GET /api/auth/oidc advertises the
 # IdP's discovery document so a client can start the flow.
+#
+# userpass_enabled (default: true) turns on username/password authentication:
+# the API exposes unauthenticated POST /api/login and POST /api/register
+# (plus admin-only /api/users for role management) that proxy to the IdP, where
+# credentials are verified and an OIDC token is minted. It is enabled by
+# default so a local development run can sign in with a password without a full
+# OIDC client; set it to false when using an external identity provider.
 #auth:
 #  enabled: true
+#  userpass_enabled: true   # default; set false to disable /api/login & /api/register
 #  issuer: https://accounts.example.com/realms/cdrom
 #  client_id: cdrom-ui
 #  redirect_url: http://localhost:8080/api/auth/callback
@@ -95,6 +103,14 @@ db:
 # present a CA-signed client certificate (the API's mTLS identity); in
 # plaintext mode the grant is open. audiences are the default audience values
 # stamped on minted job tokens (a mint request may override them).
+#
+# The IdP also hosts the user directory for username/password authentication
+# (POST /register, POST /login, and the /users management endpoints). Its
+# state — the user directory (profiles, bcrypt password hashes, and roles) —
+# is persisted through the Database service, like its signing keys and auth
+# codes, so multiple IdP replicas share the same users. The API's /api/login
+# and /api/register proxy to these endpoints; the IdP verifies the password
+# and mints an OIDC token stamped with the user's roles.
 #idp:
 #  issuer: http://127.0.0.1:7104
 #  key_lifetime: 2160h      # 90 days

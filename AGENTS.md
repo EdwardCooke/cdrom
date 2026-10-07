@@ -144,6 +144,7 @@ for each feature are in `docs/Features.md`. Summary:
 | F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
 | F-14…F-22 | Roadmap: RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
+| F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
 
 Cross-cutting execution concepts (full detail in `docs/Features.md` /
 `docs/Architecture.md`):
@@ -288,7 +289,8 @@ Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_P
 `CDROM_DB_POSTGRES_DSN`, `CDROM_ARTIFACTS_ROOT`, `CDROM_ARTIFACTS_STORE`,
 `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
 the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
-auth vars `CDROM_AUTH_*`, the IdP vars `CDROM_IDP_*`, the job-token auth vars
+auth vars `CDROM_AUTH_*` (incl. `CDROM_AUTH_USERPASS_ENABLED`, username/password
+auth, default on), the IdP vars `CDROM_IDP_*`, the job-token auth vars
 `CDROM_GRPC_AUTH_*`, and the secrets vars `CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY`
 (base64 32-byte AES-256-GCM key; when unset, secrets are disabled).
 
@@ -303,9 +305,12 @@ make build
 ./bin/worker      # registers with the api, watches for jobs
 ```
 
-To exercise the full OIDC login flow, also run `./bin/idp` (OIDC IdP / JWT issuer
-on :7104, auto key rotation) and point the API's `auth` config at it
-(`auth.enabled: true`, `auth.issuer: http://127.0.0.1:7104`,
+To exercise authentication, also run `./bin/idp` (OIDC IdP / JWT issuer on :7104,
+auto key rotation). For **username/password** sign-in (enabled by default), point
+the API's `auth.issuer` at it (`http://127.0.0.1:7104`), then register the first
+user (`POST /api/register` — it becomes an `admin`) and sign in with
+`POST /api/login`. For the full **OIDC** authorization-code flow, additionally
+enable it (`auth.enabled: true`, `auth.issuer: http://127.0.0.1:7104`,
 `auth.client_id: cdrom-ui`, `auth.redirect_url: http://127.0.0.1:8080/api/auth/callback`).
 For mTLS, run `make certs` and point every binary at the cert set via the `tls`
 section of the config file.
@@ -336,9 +341,37 @@ implemented in `internal/auth`.
 - **Local IdP (`cmd/idp`):** a standalone HTTP OIDC IdP / JWT issuer (discovery
   doc, JWKS, `/auth` authorization-code + PKCE, `/token` minting RS256 tokens).
   It auto-rotates its RSA key near expiry and keeps serving predecessor keys
-  until they expire. Its state (signing keys + auth codes) lives in the Database
-  service, so multiple IdP replicas can share keys behind a load balancer — it
-  requires `./bin/db` to be running.
+  until they expire. Its state (signing keys + auth codes + the user directory
+  for username/password auth) lives in the Database service, so multiple IdP
+  replicas can share keys and users behind a load balancer — it requires
+  `./bin/db` to be running.
+
+### Username/password authentication
+
+Alongside OIDC, the API supports username/password sign-in for easy local
+testing of the UI. **Enabled by default** (`auth.userpass_enabled: true`,
+`CDROM_AUTH_USERPASS_ENABLED`); set it to `false` to disable (e.g. when using an
+external identity provider). All the real logic lives in the **IdP**; the API is
+a thin proxy (the API's gRPC/HTTP surface never sees the password hash or
+verifies credentials itself).
+
+- **Unauthenticated endpoints** (reachable without a token even when OIDC auth
+  is on — they are exempted from the auth middleware): `POST /api/login`
+  (body `{"email","password"}` → the IdP verifies the password and returns an
+  OIDC `access_token` stamped with the user's roles, plus the user's profile)
+  and `POST /api/register` (body `{"first_name","last_name","email","password"}`
+  → the IdP hashes the password (bcrypt) and stores the user; the **first** user
+  registered becomes an `admin`, later users get the default `user` role).
+- **Role management** (require an authenticated caller with the `admin` role):
+  `GET /api/users`, `POST /api/users` (create with explicit roles),
+  `PUT /api/users/{id}` (update profile/roles/password), `DELETE /api/users/{id}`.
+  The API proxies these to the IdP's `/users` endpoints.
+- **Tokens:** a login returns the same OIDC token the API verifies on every
+  other request (against the IdP's JWKS); the user's roles are stamped onto the
+  token and surfaced via `auth.User.Roles` (`User.HasRole`).
+- The user directory (profiles, bcrypt password hashes, roles) is persisted
+  through the Database service (`internal/models.IDPUser`), like the IdP's keys
+  and auth codes, so multiple IdP replicas share it.
 
 ### Job Tokens (gRPC surface)
 

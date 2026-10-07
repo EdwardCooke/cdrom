@@ -1168,12 +1168,12 @@ a human sign-off.
 
 **What.** Define roles (e.g. viewer, operator, admin) and bind users (from the
 OIDC identity) to them. Gate actions — trigger, cancel, approve, edit
-pipelines, manage secrets — by role.
+pipelines, manage secrets, every operation in the system should be a permission — by role.
 
 **Why.** A shared CD platform needs to distinguish who may do what.
 
 **Scope.**
-- `internal/models` — `Role`, `User`/membership (map OIDC subject → roles).
+- `internal/models` — `Role`, `User`/membership (map OIDC subject/role claims → roles).
 - `internal/auth` — expose the authenticated principal (already available via
   `auth.UserFromContext`) to the authorization check.
 - An authorization helper (in `internal/`) that the API handlers and gRPC
@@ -1448,6 +1448,70 @@ pods per cluster, dual cluster).
 
 ---
 
+## Phase 6 — Authentication
+
+### F-24 · Username/password authentication
+
+**What.** A password-based sign-in path alongside OIDC, so the UI can be
+exercised in local development without a full OIDC client. The API exposes
+unauthenticated `POST /api/login` and `POST /api/register` (plus admin-only
+`/api/users` for role management) that **proxy to the IdP**, where the real
+logic lives: the IdP verifies the password against a stored bcrypt hash and,
+on success, mints an OIDC token for the user (stamped with the user's roles).
+The API is a pure proxy — it never sees the password hash or verifies
+credentials itself. The returned token is the same OIDC token the API already
+verifies on every other request (against the IdP's JWKS).
+
+**Why.** The OIDC authorization-code + PKCE flow is the right production path
+but is awkward to drive from a browser-less local setup. A password login
+(`register` the first user, then `login`) gives a one-command way to get a
+token for the UI and curl. It is **enabled by default** for local development
+and can be turned off (`auth.userpass_enabled: false`) when an external
+identity provider is used.
+
+**Scope.**
+- `proto/cdrom/db/v1/db.proto` + `internal/services/database` — `IDPUser`
+  table (GORM `AutoMigrate`) + `CreateUser` / `GetIDPUser` / `ListIDPUsers` /
+  `UpdateIDPUser` / `DeleteIDPUser` RPCs. The user directory (profiles,
+  bcrypt password hashes, roles) is persisted through the Database service, so
+  multiple IdP replicas share it.
+- `internal/idp` — `UserStore` (DB-backed + in-memory) and the user endpoints:
+  `POST /register` (hash the password with bcrypt, store the user; the first
+  user becomes an `admin`, later users get the default `user` role),
+  `POST /login` (verify the password, mint an OIDC token stamped with the
+  user's roles), and `GET/POST/PUT/DELETE /users` (role management). The
+  endpoints are disabled (501) when no user store is attached.
+- `internal/config` — `auth.userpass_enabled` (default `true`;
+  `CDROM_AUTH_USERPASS_ENABLED`).
+- `internal/api` — `UserPassClient` (an HTTP proxy to the IdP) and the
+  `/api/login`, `/api/register`, and `/api/users` handlers. The login/register
+  endpoints are exempted from the auth middleware (reachable without a token);
+  the user-management endpoints require an authenticated caller with the
+  `admin` role.
+- `internal/auth` — `User.Roles` + `User.HasRole` (roles are read from the
+  token's `roles` claim); `MiddlewareExempt` so the sign-in entry points stay
+  reachable while the rest of `/api/*` still requires a token.
+
+**Acceptance criteria.**
+- [x] `POST /api/register` with `first_name`/`last_name`/`email`/`password`
+      creates a user (the password is stored only as a bcrypt hash, never the
+      plaintext); the first user registered is given the `admin` role, later
+      users the default `user` role.
+- [x] `POST /api/login` with valid credentials returns an OIDC `access_token`
+      (plus the user's profile and roles) that the API verifies against the
+      IdP's JWKS; a wrong password or unknown user is a 401.
+- [x] The token's `roles` claim carries the user's roles and is surfaced via
+      `auth.User.Roles`.
+- [x] `GET/POST/PUT/DELETE /api/users` manage users and roles and require an
+      authenticated caller with the `admin` role (403 for a non-admin, 401 for
+      an unauthenticated caller).
+- [x] `auth.userpass_enabled: false` disables the endpoints (they respond 501)
+      and the API works with no IdP user store.
+- [x] The user directory is shared across IdP replicas via the Database
+      service (like the IdP's signing keys and auth codes).
+
+---
+
 ## Suggested build order
 
 The phases are ordered so each builds on the last. A pragmatic first cut:
@@ -1464,6 +1528,8 @@ The phases are ordered so each builds on the last. A pragmatic first cut:
 8. **F-23** — high-availability control plane (shared event log, hybrid
    push/pull dispatch, scheduler leader election, cross-pod live logs). See
    [`HighAvailability.md`](HighAvailability.md).
+9. **F-24** — username/password authentication (a password sign-in path
+   alongside OIDC, proxied to the IdP; enabled by default for local dev).
 
 ---
 
@@ -1494,3 +1560,4 @@ Tick each feature off as it lands.
 - [ ] F-21 Config as code
 - [ ] F-22 Post-deploy verification & rollback
 - [x] F-23 High-availability control plane
+- [x] F-24 Username/password authentication

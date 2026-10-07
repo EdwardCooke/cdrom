@@ -77,7 +77,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := idp.NewServer(cfg.IdP, km, idp.NewDBAuthCodeStore(dbClient), logger)
+	srv := idp.NewServer(cfg.IdP, km, idp.NewDBAuthCodeStore(dbClient), logger).
+		WithUsers(idp.NewDBUserStore(dbClient))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

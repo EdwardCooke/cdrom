@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2013,6 +2015,170 @@ func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCo
 }
 
 // ---------------------------------------------------------------------------
+// IdP users
+// ---------------------------------------------------------------------------
+
+// CreateUser registers (or updates) a user. Email is the unique key: when a
+// user with the email already exists the profile and roles are updated (and
+// the password hash replaced when a new one is supplied). A new user is given
+// a stable string ID (the token's subject). The password is stored only as
+// the supplied hash; the plaintext is never persisted by the database service.
+func (s *Server) CreateUser(ctx context.Context, req *dbpb.CreateIDPUserRequest) (*dbpb.IDPUser, error) {
+	u := req.GetUser()
+	if u == nil || u.GetEmail() == "" {
+		return nil, status.Error(codes.InvalidArgument, "email is required")
+	}
+	var existing models.IDPUser
+	err := s.db.WithContext(ctx).Where("email = ?", u.GetEmail()).First(&existing).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, grpcErr(err)
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// New user: mint a stable string ID and insert.
+		id, err := newUserID()
+		if err != nil {
+			return nil, grpcErr(err)
+		}
+		user := &models.IDPUser{
+			ID:           id,
+			FirstName:    u.GetFirstName(),
+			LastName:     u.GetLastName(),
+			Email:        u.GetEmail(),
+			PasswordHash: u.GetPasswordHash(),
+			Roles:        nonNilRoles(u.GetRoles()),
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		}
+		if err := s.db.WithContext(ctx).Create(user).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+		return toProtoIDPUser(user), nil
+	}
+	// Existing user: update the profile and roles; replace the password hash
+	// only when a new one is supplied.
+	existing.FirstName = u.GetFirstName()
+	existing.LastName = u.GetLastName()
+	existing.Roles = nonNilRoles(u.GetRoles())
+	if u.GetPasswordHash() != "" {
+		existing.PasswordHash = u.GetPasswordHash()
+	}
+	existing.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&existing).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPUser(&existing), nil
+}
+
+// GetIDPUser returns a user by ID, or by email when the ID is empty. A
+// missing user returns NotFound.
+func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*dbpb.IDPUser, error) {
+	query := s.db.WithContext(ctx).Model(&models.IDPUser{})
+	if req.GetId() != "" {
+		query = query.Where("id = ?", req.GetId())
+	} else if req.GetEmail() != "" {
+		query = query.Where("email = ?", req.GetEmail())
+	} else {
+		return nil, status.Error(codes.InvalidArgument, "id or email is required")
+	}
+	var user models.IDPUser
+	if err := query.First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPUser(&user), nil
+}
+
+// ListIDPUsers returns all registered users, ordered by ID.
+func (s *Server) ListIDPUsers(ctx context.Context, _ *dbpb.ListIDPUsersRequest) (*dbpb.ListIDPUsersResponse, error) {
+	var users []models.IDPUser
+	if err := s.db.WithContext(ctx).Order("id").Find(&users).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListIDPUsersResponse{}
+	for i := range users {
+		response.Users = append(response.Users, toProtoIDPUser(&users[i]))
+	}
+	return response, nil
+}
+
+// UpdateIDPUser updates a user's profile and/or roles. Only the fields set on
+// the request's user are changed; an empty password_hash leaves the existing
+// password untouched. A missing user returns NotFound.
+func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserRequest) (*dbpb.IDPUser, error) {
+	u := req.GetUser()
+	if u == nil || u.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", u.GetId()).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if u.GetFirstName() != "" {
+		user.FirstName = u.GetFirstName()
+	}
+	if u.GetLastName() != "" {
+		user.LastName = u.GetLastName()
+	}
+	if u.GetEmail() != "" {
+		user.Email = u.GetEmail()
+	}
+	if len(u.GetRoles()) > 0 {
+		user.Roles = nonNilRoles(u.GetRoles())
+	}
+	if u.GetPasswordHash() != "" {
+		user.PasswordHash = u.GetPasswordHash()
+	}
+	user.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPUser(&user), nil
+}
+
+// DeleteIDPUser removes a user by ID. A missing user returns NotFound.
+func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserRequest) (*emptypb.Empty, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", req.GetId()).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if err := s.db.WithContext(ctx).Delete(&user).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// newUserID returns a random 16-hex-character user identifier (the token's
+// subject). It is stable for the life of the user and unique with
+// overwhelming probability.
+func newUserID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("database: generate user id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// nonNilRoles returns a non-nil slice so that an empty role set is stored as
+// an empty JSON array rather than null.
+func nonNilRoles(roles []string) []string {
+	if roles == nil {
+		return []string{}
+	}
+	return roles
+}
+
+// ---------------------------------------------------------------------------
 // Secrets (F-12)
 // ---------------------------------------------------------------------------
 
@@ -3339,6 +3505,18 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 		Name:          code.Name,
 		Email:         code.Email,
 		CreatedAt:     timestamppb.New(code.CreatedAt),
+	}
+}
+
+func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
+	return &dbpb.IDPUser{
+		Id:           user.ID,
+		FirstName:    user.FirstName,
+		LastName:     user.LastName,
+		Email:        user.Email,
+		PasswordHash: user.PasswordHash,
+		Roles:        nonNilRoles(user.Roles),
+		CreatedAt:    timestamppb.New(user.CreatedAt),
 	}
 }
 

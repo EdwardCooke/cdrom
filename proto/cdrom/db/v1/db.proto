@@ -250,6 +250,17 @@ service Database {
   rpc ConsumeIDPAuthCode(ConsumeIDPAuthCodeRequest) returns (IDPAuthCode);
   rpc PruneIDPAuthCodes(PruneIDPAuthCodesRequest) returns (google.protobuf.Empty);
 
+  // IdP users. The IdP persists registered users (their profile, password
+  // hash, and roles) here so multiple IdP replicas share the same user
+  // directory. Passwords are stored only as a salted hash; the plaintext is
+  // never persisted. CreateUser is idempotent on email (it upserts the
+  // profile and roles); GetUser/UpdateUser/DeleteUser key on the user id.
+  rpc CreateUser(CreateIDPUserRequest) returns (IDPUser);
+  rpc GetIDPUser(GetIDPUserRequest) returns (IDPUser);
+  rpc ListIDPUsers(ListIDPUsersRequest) returns (ListIDPUsersResponse);
+  rpc UpdateIDPUser(UpdateIDPUserRequest) returns (IDPUser);
+  rpc DeleteIDPUser(DeleteIDPUserRequest) returns (google.protobuf.Empty);
+
   // Secrets (F-12). NextSecretNonce returns the next value of the named
   // secret-nonce counter and atomically increments it. The counter is what
   // keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1650,6 +1661,64 @@ message PruneIDPAuthCodesRequest {
   // created_before drops codes created before this instant; when unset, all
   // codes are pruned.
   google.protobuf.Timestamp created_before = 1;
+}
+
+// ---------------------------------------------------------------------------
+// IdP users
+// ---------------------------------------------------------------------------
+
+// IDPUser is a registered user of the local identity provider. The IdP uses
+// it for username/password authentication: it verifies a login against the
+// stored password hash and, on success, mints an OIDC token for the user
+// (stamping the user's roles onto the token). The password is stored only as
+// a salted hash (PasswordHash); the plaintext is never persisted. Roles are
+// the user's role names (e.g. "admin", "user"); they are stamped onto the
+// user's tokens so the API can enforce role-based access.
+message IDPUser {
+  // id is the user's stable identifier (the token's subject).
+  string id = 1;
+  string first_name = 2;
+  string last_name = 3;
+  // email is the user's unique login identifier.
+  string email = 4;
+  // password_hash is the salted hash of the user's password (bcrypt). It is
+  // never returned by the API to the UI; the IdP uses it only to verify
+  // logins.
+  string password_hash = 5;
+  // roles are the user's role names, stamped onto the tokens the IdP mints
+  // for the user.
+  repeated string roles = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+// CreateIDPUserRequest registers (or updates) a user. Email is the unique
+// key; when a user with the email already exists the profile and roles are
+// updated (and the password hash replaced when a new one is supplied).
+message CreateIDPUserRequest {
+  IDPUser user = 1;
+}
+
+message GetIDPUserRequest {
+  // id is the user's identifier; when empty, email is used.
+  string id = 1;
+  string email = 2;
+}
+
+message ListIDPUsersRequest {}
+
+message ListIDPUsersResponse {
+  repeated IDPUser users = 1;
+}
+
+// UpdateIDPUserRequest updates a user's profile and/or roles. Only the
+// fields set on user are changed; an empty password_hash leaves the existing
+// password untouched.
+message UpdateIDPUserRequest {
+  IDPUser user = 1;
+}
+
+message DeleteIDPUserRequest {
+  string id = 1;
 }
 
 // ---------------------------------------------------------------------------
