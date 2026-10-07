@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"cdrom/internal/auth"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
@@ -92,6 +93,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
 	mux.HandleFunc("POST /api/jobs/{id}/rerun", s.rerunJob)
+	// Approval gates (F-13): an authorized user approves or rejects a job that
+	// is awaiting approval. The actor (the authenticated user) and an optional
+	// reason are recorded on the job.
+	mux.HandleFunc("POST /api/jobs/{id}/approve", s.approveJob)
+	mux.HandleFunc("POST /api/jobs/{id}/reject", s.rejectJob)
 
 	// Workers (via the scheduler service).
 	mux.HandleFunc("GET /api/workers", s.listWorkers)
@@ -927,6 +933,66 @@ func (s *Server) rerunJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+// approvalRequest is the body of POST /api/jobs/{id}/approve and
+// /api/jobs/{id}/reject (F-13): an optional free-text reason the user gives
+// for the decision.
+type approvalRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// approveJob approves a job that is awaiting approval (F-13): it records the
+// decision (approved), the actor (the authenticated user), and an optional
+// reason on the job (via the scheduler, which persists it and appends a
+// job_status event to the shared event log, F-23). The execution target waiting
+// at the gate observes the decision on its next poll and continues the job.
+// Only a job that is still awaiting approval can be approved; a job that is no
+// longer awaiting approval (it was cancelled, or the gate was already
+// resolved) is left untouched.
+func (s *Server) approveJob(w http.ResponseWriter, r *http.Request) {
+	s.resolveApproval(w, r, "approved")
+}
+
+// rejectJob rejects a job that is awaiting approval (F-13): it records the
+// decision (rejected), the actor, and an optional reason on the job. The
+// execution target waiting at the gate observes the decision and fails the
+// job. Only a job that is still awaiting approval can be rejected.
+func (s *Server) rejectJob(w http.ResponseWriter, r *http.Request) {
+	s.resolveApproval(w, r, "rejected")
+}
+
+// resolveApproval is the shared implementation of the approve/reject
+// endpoints (F-13). It records the decision (approved or rejected), the actor
+// (the authenticated user, via auth.UserFromContext), and an optional reason
+// on the job (via the scheduler's ResolveApproval, which persists it and
+// appends a job_status event to the shared event log, F-23). The actor is the
+// authenticated user's subject; when authentication is disabled there is no
+// actor (the decision is recorded with an empty actor).
+func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decision string) {
+	jobID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req approvalRequest
+	// The body is optional (a reason is not required); an empty or absent body
+	// is fine.
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	actor := auth.UserFromContext(r.Context()).Subject
+	job, err := s.clients.Scheduler.ResolveApproval(r.Context(), &schedpb.ResolveApprovalRequest{
+		Id:       jobID,
+		Decision: decision,
+		Actor:    actor,
+		Reason:   req.Reason,
+	})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
+	writeJSON(w, http.StatusOK, job)
+}
+
 // ---------------------------------------------------------------------------
 // Workers
 // ---------------------------------------------------------------------------
@@ -1109,6 +1175,8 @@ func jobStatusFromName(name string) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_TIMED_OUT
 	case "skipped":
 		return dbpb.JobStatus_JOB_STATUS_SKIPPED
+	case "awaiting_approval":
+		return dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}

@@ -184,6 +184,30 @@ func (s *Server) publishCancel(ctx context.Context, jobID int64) {
 	}
 }
 
+// publishJobStatus appends a "job_status" event for a job to the shared event
+// log (F-23) so every API pod can fan the status change out to its UI clients.
+// The status change itself is persisted by the caller (e.g. via
+// Database.ResolveApproval); this only appends the event. Best-effort: a
+// failure to append does not fail the caller.
+func (s *Server) publishJobStatus(ctx context.Context, jobID int64) {
+	if s.db == nil {
+		return
+	}
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: jobID})
+	if err != nil {
+		s.logger.Warn("scheduler: publish job status fetch job", "job", jobID, "err", err)
+		return
+	}
+	if _, err := s.db.PublishJobStatus(ctx, &dbpb.PublishJobStatusRequest{
+		JobId:       jobID,
+		Status:      job.GetStatus(),
+		Attempt:     job.GetAttempt(),
+		MaxAttempts: job.GetMaxAttempts(),
+	}); err != nil {
+		s.logger.Warn("scheduler: publish job status event", "job", jobID, "err", err)
+	}
+}
+
 // jobRerunner is the subset of the Database client the RerunJob RPC uses to
 // reset a finished job to pending with a fresh attempt. The concrete
 // dbpb.DatabaseClient satisfies it; tests inject a fake.
@@ -232,6 +256,48 @@ func (s *Server) RerunJob(ctx context.Context, req *schedpb.RerunJobRequest) (*s
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
 	}
 	return s.rerunJob(ctx, s.db, s.db, req.GetId())
+}
+
+// ResolveApproval records the outcome of a job's approval gate (F-13): it
+// persists the decision (approved or rejected), the actor, and the reason via
+// the Database service (conditionally — only if the job is still awaiting
+// approval), and appends a "job_status" event to the shared event log (F-23)
+// so every API pod can fan the decision out to its UI clients. A job that is
+// no longer awaiting approval (it was cancelled, or the gate was already
+// resolved) is left untouched, so a late decision is a no-op. The execution
+// target waiting at the gate observes the decision on its next CheckApproval
+// poll and proceeds (approved) or fails the job (rejected).
+func (s *Server) ResolveApproval(ctx context.Context, req *schedpb.ResolveApprovalRequest) (*schedpb.Job, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	if req.GetDecision() != "approved" && req.GetDecision() != "rejected" {
+		return nil, status.Error(codes.InvalidArgument, "decision must be \"approved\" or \"rejected\"")
+	}
+	resp, err := s.db.ResolveApproval(ctx, &dbpb.ResolveApprovalRequest{
+		JobId:     req.GetId(),
+		Decision:  req.GetDecision(),
+		Actor:     req.GetActor(),
+		Reason:    req.GetReason(),
+		DecidedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Append a job_status event to the shared event log (F-23) so every API
+	// pod can fan the decision out to its UI clients. Best-effort: a failure
+	// to append does not undo the decision already persisted above.
+	s.publishJobStatus(ctx, req.GetId())
+	updated, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetResolved() {
+		s.logger.Info("scheduler: approval gate resolved", "job", req.GetId(), "decision", req.GetDecision(), "actor", req.GetActor())
+	} else {
+		s.logger.Info("scheduler: approval gate already resolved or not awaiting", "job", req.GetId())
+	}
+	return toProtoJob(updated), nil
 }
 
 // CreateRun starts a new execution of a pipeline (F-07): it asks the Database
@@ -334,24 +400,28 @@ func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
 
 func toProtoJob(job *dbpb.Job) *schedpb.Job {
 	return &schedpb.Job{
-		Id:           job.GetId(),
-		PipelineId:   job.GetPipelineId(),
-		RunId:        job.GetRunId(),
-		Name:         job.GetName(),
-		Status:       job.GetStatus(),
-		TargetGroup:  job.GetTargetGroup(),
-		StartedAt:    job.GetStartedAt(),
-		FinishedAt:   job.GetFinishedAt(),
-		Spec:         job.GetSpec(),
-		Attempt:      job.GetAttempt(),
-		MaxAttempts:  job.GetMaxAttempts(),
-		DependsOn:    job.GetDependsOn(),
-		StepResults:  job.GetStepResults(),
-		Outputs:      job.GetOutputs(),
-		UpstreamJobs: job.GetUpstreamJobs(),
-		IgnoreFailed: job.GetIgnoreFailed(),
-		Key:          job.GetKey(),
-		RunParams:    job.GetRunParams(),
+		Id:               job.GetId(),
+		PipelineId:       job.GetPipelineId(),
+		RunId:            job.GetRunId(),
+		Name:             job.GetName(),
+		Status:           job.GetStatus(),
+		TargetGroup:      job.GetTargetGroup(),
+		StartedAt:        job.GetStartedAt(),
+		FinishedAt:       job.GetFinishedAt(),
+		Spec:             job.GetSpec(),
+		Attempt:          job.GetAttempt(),
+		MaxAttempts:      job.GetMaxAttempts(),
+		DependsOn:        job.GetDependsOn(),
+		StepResults:      job.GetStepResults(),
+		Outputs:          job.GetOutputs(),
+		UpstreamJobs:     job.GetUpstreamJobs(),
+		IgnoreFailed:     job.GetIgnoreFailed(),
+		Key:              job.GetKey(),
+		RunParams:        job.GetRunParams(),
+		ApprovalMessage:  job.GetApprovalMessage(),
+		ApprovalDecision: job.GetApprovalDecision(),
+		ApprovalActor:    job.GetApprovalActor(),
+		ApprovalReason:   job.GetApprovalReason(),
 	}
 }
 

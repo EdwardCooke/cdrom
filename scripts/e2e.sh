@@ -20,14 +20,17 @@
 #
 # It also exercises F-03 (a job-level timeout terminates a job as timed_out)
 # and F-04 (a failing job with a retry policy is re-dispatched up to its
-# limit, and a finished job can be re-run for a fresh execution), and the
+# limit, and a finished job can be re-run for a fresh execution), the
 # token_exchange step handler (a step that asks the API, via the worker's
 # TokenExchange, for a new job token for a different audience and hands it to
-# a later step as a step output; the API mints it from the local IdP).
+# a later step as a step output; the API mints it from the local IdP), and
+# F-13 (an approval gate: a job pauses at an approval step until an authorized
+# user approves or rejects it via the HTTP API; an approval lets the job
+# continue to its later steps, a rejection fails it).
 #
 # Usage: scripts/e2e.sh
 #
-# Requires: the built binaries in ./bin (run `make build` first) and curl.
+# Requires: the built binaries in ./bin (run `make build` first), curl, and jq.
 #
 # The script always tears the stack down and removes its temp directory on
 # exit, even on failure.
@@ -51,7 +54,7 @@ cleanup() {
     sleep 1
     for pid in "${PIDS[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
   fi
-  #rm -rf "$WORK"
+  rm -rf "$WORK"
   if [ "$code" -ne 0 ]; then
     echo ">> e2e FAILED (exit $code)" >&2
     exit "$code"
@@ -119,6 +122,25 @@ wait_for_job() {
   exit 1
 }
 
+# wait_for_status <jobid> <status> <what>
+# Polls GET /api/jobs/{id} until the job's status equals <status> (the numeric
+# JobStatus value, e.g. 8 for awaiting_approval, 3 for succeeded, 4 for
+# failed). Returns the last observed job JSON on stdout.
+wait_for_status() {
+  local jobid="$1" status="$2" what="$3" i body
+  for i in $(seq 1 100); do
+    body=$(curl -s "http://127.0.0.1:8080/api/jobs/${jobid}")
+    if [ "$(printf '%s' "$body" | jq -r '.status')" = "$status" ]; then
+      printf '%s' "$body"
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo ">> timed out waiting for: $what (status ${status})" >&2
+  printf '%s' "$body" >&2
+  exit 1
+}
+
 # --- boot the stack --------------------------------------------------------
 log ">> booting stack in $WORK"
 start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db" CDROM_LOG_FORMAT=text -- "$BIN/db"
@@ -180,7 +202,7 @@ RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
   -d "$BODY")
 log "   $RESPONSE"
 
-JOB_ID=$(printf '%s' "$RESPONSE" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+JOB_ID=$(printf '%s' "$RESPONSE" | jq -r '.id')
 [ -n "$JOB_ID" ] || { echo ">> could not parse job id from response" >&2; exit 1; }
 log ">> job id: $JOB_ID"
 
@@ -205,13 +227,13 @@ log ">> waiting for persisted status=succeeded (3)"
 FINAL=""
 for i in $(seq 1 100); do
   FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID")
-  if printf '%s' "$FINAL" | grep -q '"status":3'; then
+  if [ "$(printf '%s' "$FINAL" | jq -r '.status')" = "3" ]; then
     break
   fi
   sleep 0.2
 done
 log "   $FINAL"
-printf '%s' "$FINAL" | grep -q '"status":3' \
+[ "$(printf '%s' "$FINAL" | jq -r '.status')" = "3" ] \
   || { echo ">> job did not reach status=succeeded" >&2; exit 1; }
 
 # --- verify the token exchange went through the API and IdP ---------------
@@ -314,7 +336,7 @@ TIMEOUT_RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
   -d "$TIMEOUT_BODY")
 log "   $TIMEOUT_RESPONSE"
 
-TIMEOUT_JOB_ID=$(printf '%s' "$TIMEOUT_RESPONSE" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+TIMEOUT_JOB_ID=$(printf '%s' "$TIMEOUT_RESPONSE" | jq -r '.id')
 [ -n "$TIMEOUT_JOB_ID" ] || { echo ">> could not parse timeout job id" >&2; exit 1; }
 log ">> timeout job id: $TIMEOUT_JOB_ID"
 
@@ -326,13 +348,13 @@ wait_for "$WORK/worker.log" 'job timed out' 'worker reports the job timed out'
 TIMEOUT_FINAL=""
 for i in $(seq 1 100); do
   TIMEOUT_FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$TIMEOUT_JOB_ID")
-  if printf '%s' "$TIMEOUT_FINAL" | grep -q '"status":6'; then
+  if [ "$(printf '%s' "$TIMEOUT_FINAL" | jq -r '.status')" = "6" ]; then
     break
   fi
   sleep 0.2
 done
 log "   $TIMEOUT_FINAL"
-printf '%s' "$TIMEOUT_FINAL" | grep -q '"status":6' \
+[ "$(printf '%s' "$TIMEOUT_FINAL" | jq -r '.status')" = "6" ] \
   || { echo ">> timeout job did not reach status=timed_out" >&2; exit 1; }
 
 # --- verify a job with a retry policy is re-dispatched up to its limit (F-04) ---
@@ -359,7 +381,7 @@ RETRY_RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
   -d "$RETRY_BODY")
 log "   $RETRY_RESPONSE"
 
-RETRY_JOB_ID=$(printf '%s' "$RETRY_RESPONSE" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+RETRY_JOB_ID=$(printf '%s' "$RETRY_RESPONSE" | jq -r '.id')
 [ -n "$RETRY_JOB_ID" ] || { echo ">> could not parse retry job id" >&2; exit 1; }
 log ">> retry job id: $RETRY_JOB_ID"
 
@@ -372,16 +394,16 @@ log ">> waiting for the job to exhaust its retries (failed, attempt 3)"
 RETRY_FINAL=""
 for i in $(seq 1 200); do
   RETRY_FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$RETRY_JOB_ID")
-  if printf '%s' "$RETRY_FINAL" | grep -q '"status":4' \
-    && printf '%s' "$RETRY_FINAL" | grep -q '"attempt":3'; then
+  if [ "$(printf '%s' "$RETRY_FINAL" | jq -r '.status')" = "4" ] \
+    && [ "$(printf '%s' "$RETRY_FINAL" | jq -r '.attempt')" = "3" ]; then
     break
   fi
   sleep 0.2
 done
 log "   $RETRY_FINAL"
-printf '%s' "$RETRY_FINAL" | grep -q '"status":4' \
+[ "$(printf '%s' "$RETRY_FINAL" | jq -r '.status')" = "4" ] \
   || { echo ">> retry job did not reach status=failed" >&2; exit 1; }
-printf '%s' "$RETRY_FINAL" | grep -q '"attempt":3' \
+[ "$(printf '%s' "$RETRY_FINAL" | jq -r '.attempt')" = "3" ] \
   || { echo ">> retry job did not exhaust its retries (attempt != 3)" >&2; exit 1; }
 
 # --- verify a finished job can be re-run for a fresh execution (F-04) -------
@@ -393,7 +415,7 @@ log ">> re-running the original shell job"
 STEP1_BEFORE=$(grep -c 'step1: plain command' "$WORK/worker.log" || true)
 RERUN_RESPONSE=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$JOB_ID/rerun")
 log "   $RERUN_RESPONSE"
-RERUN_JOB_ID=$(printf '%s' "$RERUN_RESPONSE" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+RERUN_JOB_ID=$(printf '%s' "$RERUN_RESPONSE" | jq -r '.id')
 
 # Wait for the worker to execute the job a second time (one more step-1 line).
 log ">> waiting for the re-run to execute"
@@ -412,14 +434,137 @@ STEP1_AFTER=$(grep -c 'step1: plain command' "$WORK/artifacts/${RERUN_JOB_ID}/lo
 RERUN_FINAL=""
 for i in $(seq 1 100); do
   RERUN_FINAL=$(curl -s "http://127.0.0.1:8080/api/jobs/$RERUN_JOB_ID")
-  if printf '%s' "$RERUN_FINAL" | grep -q '"status":3' \
-    && printf '%s' "$RERUN_FINAL" | grep -q '"attempt":1'; then
+  if [ "$(printf '%s' "$RERUN_FINAL" | jq -r '.status')" = "3" ] \
+    && [ "$(printf '%s' "$RERUN_FINAL" | jq -r '.attempt')" = "1" ]; then
     break
   fi
   sleep 0.2
 done
 log "   $RERUN_FINAL"
-printf '%s' "$RERUN_FINAL" | grep -q '"status":3' \
+[ "$(printf '%s' "$RERUN_FINAL" | jq -r '.status')" = "3" ] \
   || { echo ">> re-run did not reach status=succeeded" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, and a finished job can be re-run for a fresh execution"
+# --- verify an approval gate pauses the job until approved (F-13) ----------
+# A job whose second step is an approval gate (type "approval") pauses in the
+# awaiting_approval state (status 8) until an authorized user approves it via
+# the HTTP API. The gate's message is a template rendered against the job's
+# condition context (here it references the job's identity). Once approved,
+# the job continues to its later steps and succeeds; the decision (reason) is
+# recorded on the job.
+log ">> submitting a job with an approval gate"
+APPROVAL_BODY=$(cat <<EOF
+{
+  "name": "e2e-approval-job",
+  "target_group": "default",
+  "spec": {
+    "steps": [
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo approval: pre-gate step"]}}},
+      {"type": "approval", "params": {"message": {"string": "release {{ .job.Name }} now"}}},
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo approval: post-gate step"]}}}
+    ]
+  }
+}
+EOF
+)
+APPROVAL_RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d "$APPROVAL_BODY")
+log "   $APPROVAL_RESPONSE"
+
+APPROVAL_JOB_ID=$(printf '%s' "$APPROVAL_RESPONSE" | jq -r '.id')
+[ -n "$APPROVAL_JOB_ID" ] || { echo ">> could not parse approval job id" >&2; exit 1; }
+log ">> approval job id: $APPROVAL_JOB_ID"
+
+# The worker runs the pre-gate step, then pauses at the approval step and
+# reports the job awaiting_approval (status 8) with the rendered message.
+log ">> waiting for the job to pause at the approval gate (status 8)"
+AWAITING=$(wait_for_status "$APPROVAL_JOB_ID" 8 'job awaiting approval')
+log "   $AWAITING"
+# The gate's message is rendered against the job's condition context: the
+# template `release {{ .job.Name }} now` becomes `release e2e-approval-job now`.
+# Check only the rendered approval_message field (the spec still carries the
+# raw template, so extracting the field is the only reliable check).
+APPROVAL_MSG=$(printf '%s' "$AWAITING" | jq -r '.approval_message')
+[ "$APPROVAL_MSG" = "release e2e-approval-job now" ] \
+  || { echo ">> approval message was not rendered against the job identity (got: $APPROVAL_MSG)" >&2; exit 1; }
+
+# Approve the gate (with a reason). The decision is recorded on the job and
+# the job moves back to running.
+log ">> approving the gate"
+APPROVE_RESPONSE=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$APPROVAL_JOB_ID/approve" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "lgtm"}')
+log "   $APPROVE_RESPONSE"
+
+# The worker observes the approval on its next poll and continues to the
+# post-gate step, which runs and the job succeeds.
+log ">> waiting for the job to continue past the gate and succeed"
+APPROVED_FINAL=$(wait_for_status "$APPROVAL_JOB_ID" 3 'job succeeded after approval')
+log "   $APPROVED_FINAL"
+# The post-gate step ran only because the gate was approved.
+wait_for_job "$APPROVAL_JOB_ID" 'approval: post-gate step' 'post-gate step output'
+# The decision is recorded on the job: approved, with the reason.
+[ "$(printf '%s' "$APPROVED_FINAL" | jq -r '.approval_decision')" = "approved" ] \
+  || { echo ">> approval decision was not recorded as approved" >&2; exit 1; }
+[ "$(printf '%s' "$APPROVED_FINAL" | jq -r '.approval_reason')" = "lgtm" ] \
+  || { echo ">> approval reason was not recorded" >&2; exit 1; }
+
+# --- verify a rejected approval gate fails the job (F-13) ------------------
+# A job whose first step is an approval gate is rejected via the HTTP API:
+# the gate's decision is recorded as rejected, the job fails, and its later
+# steps never run.
+log ">> submitting a job to reject at its approval gate"
+REJECT_BODY=$(cat <<EOF
+{
+  "name": "e2e-reject-job",
+  "target_group": "default",
+  "spec": {
+    "steps": [
+      {"type": "approval", "params": {"message": {"string": "ship {{ .job.Name }}?"}}},
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo reject: should not run"]}}}
+    ]
+  }
+}
+EOF
+)
+REJECT_RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d "$REJECT_BODY")
+log "   $REJECT_RESPONSE"
+
+REJECT_JOB_ID=$(printf '%s' "$REJECT_RESPONSE" | jq -r '.id')
+[ -n "$REJECT_JOB_ID" ] || { echo ">> could not parse reject job id" >&2; exit 1; }
+log ">> reject job id: $REJECT_JOB_ID"
+
+# The worker pauses at the approval gate (status 8) with the rendered message.
+log ">> waiting for the job to pause at the approval gate (status 8)"
+REJECT_AWAITING=$(wait_for_status "$REJECT_JOB_ID" 8 'job awaiting approval')
+[ "$(printf '%s' "$REJECT_AWAITING" | jq -r '.approval_message')" = "ship e2e-reject-job?" ] \
+  || { echo ">> reject approval message was not rendered" >&2; exit 1; }
+
+# Reject the gate (with a reason). The decision is recorded as rejected and
+# the job moves to failed.
+log ">> rejecting the gate"
+REJECT_DECISION=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$REJECT_JOB_ID/reject" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason": "not yet"}')
+log "   $REJECT_DECISION"
+
+# The job fails (status 4): the worker observes the rejection on its next poll
+# and fails the job, and the gate's rejection already moved it to failed.
+log ">> waiting for the job to fail after the rejection"
+REJECTED_FINAL=$(wait_for_status "$REJECT_JOB_ID" 4 'job failed after rejection')
+log "   $REJECTED_FINAL"
+# The decision is recorded on the job: rejected, with the reason.
+[ "$(printf '%s' "$REJECTED_FINAL" | jq -r '.approval_decision')" = "rejected" ] \
+  || { echo ">> approval decision was not recorded as rejected" >&2; exit 1; }
+[ "$(printf '%s' "$REJECTED_FINAL" | jq -r '.approval_reason')" = "not yet" ] \
+  || { echo ">> reject reason was not recorded" >&2; exit 1; }
+# The post-gate step never ran (the job failed at the gate). Give the worker a
+# moment to settle, then confirm its output is absent from the job log.
+sleep 1
+REJECT_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$REJECT_JOB_ID/logs/job.log")
+printf '%s' "$REJECT_LOG" | grep -q 'reject: should not run' \
+  && { echo ">> post-gate step ran despite the rejection" >&2; exit 1; }
+
+log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, and an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it)"

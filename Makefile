@@ -26,6 +26,10 @@ build: $(addprefix build-,$(CONTROL_BINS) $(EXEC_BINS))
 certs:
 	./scripts/gencerts.sh certs
 
+## e2e: build and run the end-to-end smoke test against a local stack
+e2e: build
+	./scripts/e2e.sh
+
 ## proto: regenerate gRPC/protobuf Go code from proto/ (requires protoc,
 ##        protoc-gen-go, protoc-gen-go-grpc on PATH)
 proto:

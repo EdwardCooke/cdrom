@@ -346,6 +346,14 @@ const (
 	// from failed so reporting and on_failure logic can tell "didn't run"
 	// apart from "ran and errored".
 	JobStatusSkipped JobStatus = "skipped"
+	// JobStatusAwaitingApproval is a non-terminal, in-flight state (F-13): the
+	// job is paused at an approval gate, waiting for an authorized user to
+	// approve or reject it. It is distinct from pending (not yet dispatched)
+	// and running (actively executing a step) so the UI can show the gate and
+	// its message. The job leaves this state when the gate is resolved
+	// (approved → running, rejected → failed) or the job is cancelled/timed
+	// out.
+	JobStatusAwaitingApproval JobStatus = "awaiting_approval"
 )
 
 // RunStatus is the lifecycle state of a pipeline run (F-07). A run's status
@@ -655,6 +663,29 @@ type Job struct {
 	// plaintext to the execution target, where a step references it as
 	// `{{ .secrets.name }}`.
 	Secrets []Secret `gorm:"type:text;serializer:json" json:"secrets,omitempty"`
+	// ApprovalMessage is the (rendered) message an approval gate (F-13) shows
+	// to the user while the job is awaiting approval. It is set by the
+	// execution target when it reports the job awaiting_approval and is
+	// visible to the UI (via GET /api/jobs/{id}) so the approver knows what
+	// they are approving.
+	ApprovalMessage string `json:"approval_message,omitempty"`
+	// ApprovalRequestedAt is when the job entered the awaiting_approval state
+	// (F-13); nil when the job is not (or was not) awaiting approval.
+	ApprovalRequestedAt *time.Time `json:"approval_requested_at,omitempty"`
+	// ApprovalDecision is the outcome of the job's approval gate (F-13):
+	// "approved" or "rejected"; empty when the job has no approval gate or the
+	// gate has not been resolved.
+	ApprovalDecision string `json:"approval_decision,omitempty"`
+	// ApprovalActor is the identity (the OIDC subject) of the user who resolved
+	// the job's approval gate (F-13); empty when the gate has not been
+	// resolved.
+	ApprovalActor string `json:"approval_actor,omitempty"`
+	// ApprovalDecidedAt is when the job's approval gate was resolved (F-13);
+	// nil when the gate has not been resolved.
+	ApprovalDecidedAt *time.Time `json:"approval_decided_at,omitempty"`
+	// ApprovalReason is the (optional) free-text reason the user gave when they
+	// resolved the job's approval gate (F-13); empty when the user gave none.
+	ApprovalReason string `json:"approval_reason,omitempty"`
 }
 
 // StepCompletion records that one worker completed one step of a job's

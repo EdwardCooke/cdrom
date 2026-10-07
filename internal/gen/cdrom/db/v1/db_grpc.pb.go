@@ -51,6 +51,7 @@ const (
 	Database_AbandonWorkerExecutions_FullMethodName = "/cdrom.db.v1.Database/AbandonWorkerExecutions"
 	Database_ReportStepCompletion_FullMethodName    = "/cdrom.db.v1.Database/ReportStepCompletion"
 	Database_CheckStepBarrier_FullMethodName        = "/cdrom.db.v1.Database/CheckStepBarrier"
+	Database_ResolveApproval_FullMethodName         = "/cdrom.db.v1.Database/ResolveApproval"
 	Database_PublishAssignment_FullMethodName       = "/cdrom.db.v1.Database/PublishAssignment"
 	Database_PublishCancel_FullMethodName           = "/cdrom.db.v1.Database/PublishCancel"
 	Database_PublishJobStatus_FullMethodName        = "/cdrom.db.v1.Database/PublishJobStatus"
@@ -224,6 +225,13 @@ type DatabaseClient interface {
 	// a job with a step barrier polls it after each step before proceeding to
 	// the next.
 	CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error)
+	// ResolveApproval records the outcome of a job's approval gate (F-13): it
+	// sets the approval decision, actor, and timestamp only if the job is still
+	// awaiting approval. It returns whether the job was resolved. This is how
+	// the API's approve/reject endpoints persist a user's decision: a job that
+	// is no longer awaiting approval (it was cancelled, or the gate was already
+	// resolved) is left untouched, so a late decision is a no-op.
+	ResolveApproval(ctx context.Context, in *ResolveApprovalRequest, opts ...grpc.CallOption) (*ResolveApprovalResponse, error)
 	// Event log (F-23, high availability). The event log is the shared,
 	// append-only coordination bus: the scheduler's background loops and the
 	// API publish state changes to it, and every API pod tails it to fan events
@@ -630,6 +638,16 @@ func (c *databaseClient) CheckStepBarrier(ctx context.Context, in *CheckStepBarr
 	return out, nil
 }
 
+func (c *databaseClient) ResolveApproval(ctx context.Context, in *ResolveApprovalRequest, opts ...grpc.CallOption) (*ResolveApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveApprovalResponse)
+	err := c.cc.Invoke(ctx, Database_ResolveApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) PublishAssignment(ctx context.Context, in *PublishAssignmentRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PublishEventResponse)
@@ -990,6 +1008,13 @@ type DatabaseServer interface {
 	// a job with a step barrier polls it after each step before proceeding to
 	// the next.
 	CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error)
+	// ResolveApproval records the outcome of a job's approval gate (F-13): it
+	// sets the approval decision, actor, and timestamp only if the job is still
+	// awaiting approval. It returns whether the job was resolved. This is how
+	// the API's approve/reject endpoints persist a user's decision: a job that
+	// is no longer awaiting approval (it was cancelled, or the gate was already
+	// resolved) is left untouched, so a late decision is a no-op.
+	ResolveApproval(context.Context, *ResolveApprovalRequest) (*ResolveApprovalResponse, error)
 	// Event log (F-23, high availability). The event log is the shared,
 	// append-only coordination bus: the scheduler's background loops and the
 	// API publish state changes to it, and every API pod tails it to fan events
@@ -1178,6 +1203,9 @@ func (UnimplementedDatabaseServer) ReportStepCompletion(context.Context, *Report
 }
 func (UnimplementedDatabaseServer) CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CheckStepBarrier not implemented")
+}
+func (UnimplementedDatabaseServer) ResolveApproval(context.Context, *ResolveApprovalRequest) (*ResolveApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveApproval not implemented")
 }
 func (UnimplementedDatabaseServer) PublishAssignment(context.Context, *PublishAssignmentRequest) (*PublishEventResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishAssignment not implemented")
@@ -1821,6 +1849,24 @@ func _Database_CheckStepBarrier_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ResolveApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ResolveApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ResolveApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ResolveApproval(ctx, req.(*ResolveApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_PublishAssignment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PublishAssignmentRequest)
 	if err := dec(in); err != nil {
@@ -2329,6 +2375,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckStepBarrier",
 			Handler:    _Database_CheckStepBarrier_Handler,
+		},
+		{
+			MethodName: "ResolveApproval",
+			Handler:    _Database_ResolveApproval_Handler,
 		},
 		{
 			MethodName: "PublishAssignment",

@@ -34,6 +34,14 @@ service Scheduler {
   // failed, cancelled, or timed_out) can be re-run; a job that is still
   // pending or running is rejected.
   rpc RerunJob(RerunJobRequest) returns (Job);
+  // ResolveApproval records the outcome of a job's approval gate (F-13): it
+  // persists the decision (approved or rejected), the actor, and the reason
+  // (via Database.ResolveApproval, conditionally — only if the job is still
+  // awaiting approval) and appends a "job_status" event to the shared event
+  // log (F-23) so every API pod can fan the decision out to its UI clients.
+  // A job that is no longer awaiting approval (it was cancelled, or the gate
+  // was already resolved) is left untouched, so a late decision is a no-op.
+  rpc ResolveApproval(ResolveApprovalRequest) returns (Job);
   // CreateRun starts a new execution of a pipeline (F-07): it creates a
   // PipelineRun and one job instance per job definition in the pipeline,
   // then drives them (dispatching the dependency-free instances to the API,
@@ -88,6 +96,19 @@ message Job {
   // from the run onto the job instance. The execution target interpolates
   // them into the job's spec using Go templates before the job runs.
   map<string, string> run_params = 18;
+  // approval_message is the (rendered) message an approval gate (F-13) shows
+  // to the user while the job is awaiting approval; visible to the UI via
+  // GET /api/jobs/{id}.
+  string approval_message = 19;
+  // approval_decision is the outcome of the job's approval gate (F-13):
+  // "approved" or "rejected"; empty when the gate has not been resolved.
+  string approval_decision = 20;
+  // approval_actor is the identity of the user who resolved the job's approval
+  // gate (F-13); empty when the gate has not been resolved.
+  string approval_actor = 21;
+  // approval_reason is the (optional) free-text reason the user gave when they
+  // resolved the job's approval gate (F-13); empty when the user gave none.
+  string approval_reason = 22;
 }
 
 message SubmitJobRequest {
@@ -130,6 +151,18 @@ message CancelJobRequest {
 
 message RerunJobRequest {
   int64 id = 1;
+}
+
+// ResolveApprovalRequest records the outcome of a job's approval gate (F-13).
+message ResolveApprovalRequest {
+  // id is the job whose approval gate is resolved.
+  int64 id = 1;
+  // decision is the gate's outcome: "approved" or "rejected".
+  string decision = 2;
+  // actor is the identity (the OIDC subject) of the user who resolved the gate.
+  string actor = 3;
+  // reason is the (optional) free-text reason the user gave for the decision.
+  string reason = 4;
 }
 
 // Run is a pipeline run (F-07): one execution of a pipeline, owning a set of

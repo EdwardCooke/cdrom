@@ -158,6 +158,13 @@ service Database {
   // a job with a step barrier polls it after each step before proceeding to
   // the next.
   rpc CheckStepBarrier(CheckStepBarrierRequest) returns (CheckStepBarrierResponse);
+  // ResolveApproval records the outcome of a job's approval gate (F-13): it
+  // sets the approval decision, actor, and timestamp only if the job is still
+  // awaiting approval. It returns whether the job was resolved. This is how
+  // the API's approve/reject endpoints persist a user's decision: a job that
+  // is no longer awaiting approval (it was cancelled, or the gate was already
+  // resolved) is left untouched, so a late decision is a no-op.
+  rpc ResolveApproval(ResolveApprovalRequest) returns (ResolveApprovalResponse);
 
   // Event log (F-23, high availability). The event log is the shared,
   // append-only coordination bus: the scheduler's background loops and the
@@ -712,6 +719,13 @@ enum JobStatus {
   // from FAILED so reporting and on_failure logic can tell "didn't run" apart
   // from "ran and errored".
   JOB_STATUS_SKIPPED = 7;
+  // JOB_STATUS_AWAITING_APPROVAL is a non-terminal, in-flight state (F-13):
+  // the job is paused at an approval gate, waiting for an authorized user to
+  // approve or reject it. It is distinct from PENDING (not yet dispatched)
+  // and RUNNING (actively executing a step) so the UI can show the gate and
+  // its message. The job leaves this state when the gate is resolved
+  // (approved → running, rejected → failed) or the job is cancelled/timed out.
+  JOB_STATUS_AWAITING_APPROVAL = 8;
 }
 // FailureMode controls how a job that runs on several workers (a job targeting
 // a worker group, which runs on every worker in the group) is judged from the
@@ -1032,6 +1046,27 @@ message Job {
   // plaintext to the execution target, where a step references it as
   // `{{ .secrets.name }}`.
   repeated Secret secrets = 26;
+  // approval_message is the (rendered) message an approval gate (F-13) shows
+  // to the user while the job is awaiting approval. It is set by the execution
+  // target when it reports the job awaiting_approval and is visible to the UI
+  // (via GET /api/jobs/{id}) so the approver knows what they are approving.
+  string approval_message = 27;
+  // approval_requested_at is when the job entered the awaiting_approval state
+  // (F-13); unset when the job is not (or was not) awaiting approval.
+  google.protobuf.Timestamp approval_requested_at = 28;
+  // approval_decision is the outcome of the job's approval gate (F-13):
+  // "approved" or "rejected"; empty when the job has no approval gate or the
+  // gate has not been resolved.
+  string approval_decision = 29;
+  // approval_actor is the identity (the OIDC subject) of the user who resolved
+  // the job's approval gate (F-13); empty when the gate has not been resolved.
+  string approval_actor = 30;
+  // approval_decided_at is when the job's approval gate was resolved (F-13);
+  // unset when the gate has not been resolved.
+  google.protobuf.Timestamp approval_decided_at = 31;
+  // approval_reason is the (optional) free-text reason the user gave when they
+  // resolved the job's approval gate (F-13); empty when the user gave none.
+  string approval_reason = 32;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -1128,6 +1163,11 @@ message UpdateJobRequest {
   // the previously recorded outputs unchanged (e.g. the initial "running"
   // report carries no outputs yet).
   map<string, string> outputs = 7;
+  // approval_message is the (rendered) message an approval gate (F-13) shows
+  // to the user while the job is awaiting approval. It is set by the execution
+  // target when it reports the job awaiting_approval. Absent/empty leaves the
+  // previously recorded message unchanged.
+  string approval_message = 8;
 }
 
 message ReapJobRequest {
@@ -1332,6 +1372,29 @@ message CheckStepBarrierResponse {
   // cancelled is true when the job has been cancelled (a waiting worker
   // should stop and report the job cancelled).
   bool cancelled = 2;
+}
+
+// ResolveApprovalRequest records the outcome of a job's approval gate (F-13).
+message ResolveApprovalRequest {
+  // job_id is the job whose approval gate is resolved.
+  int64 job_id = 1;
+  // decision is the gate's outcome: "approved" or "rejected".
+  string decision = 2;
+  // actor is the identity (the OIDC subject) of the user who resolved the gate.
+  string actor = 3;
+  // decided_at is the timestamp to record when the gate is resolved; when
+  // absent the server stamps the current time.
+  google.protobuf.Timestamp decided_at = 4;
+  // reason is the (optional) free-text reason the user gave for the decision.
+  string reason = 5;
+}
+
+// ResolveApprovalResponse is the result of a ResolveApproval call.
+message ResolveApprovalResponse {
+  // resolved is true when the job was still awaiting approval and its gate
+  // was resolved; false when it was no longer awaiting approval (it was
+  // cancelled, or the gate was already resolved).
+  bool resolved = 1;
 }
 
 // ---------------------------------------------------------------------------

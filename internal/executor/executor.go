@@ -151,7 +151,12 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			return err
 		}
 		stepToRun = withEnv(step, map[string]string{StepOutputDirEnv: outDir})
-		stepErr := runStep(jobCtx, i, stepToRun, logger)
+		// Carry the step's condition context (F-06) into the handler's context
+		// so a step handler (the approval handler, F-13) can render a template
+		// (e.g. an approval message) against the same data a step's condition
+		// uses (secrets, prior steps' outputs, run parameters, upstream jobs).
+		stepCtx := ContextWithConditionContext(jobCtx, condCtx)
+		stepErr := runStep(stepCtx, i, stepToRun, logger)
 		stepStatus := StepStatusSucceeded
 		if stepErr != nil {
 			stepStatus = StepStatusFailed
@@ -211,6 +216,12 @@ type StepHandler func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logg
 // empty. The built-in shell handler (internal/stephandlers) registers itself
 // under this name, so a step with no type runs through the shell handler.
 const DefaultType = "shell"
+
+// TypeApproval is the step type of the built-in approval handler (F-13): a
+// step of this type pauses the job at an approval gate until an authorized
+// user approves or rejects it. The built-in handler (internal/stephandlers)
+// registers itself under this name.
+const TypeApproval = "approval"
 
 // LogSink receives a job's step output (stdout/stderr) as it is produced, so
 // an execution target can stream it to the API in near-real-time (F-02). A
@@ -346,6 +357,91 @@ func ContextWithTokenExchange(ctx context.Context, exchanger TokenExchange) cont
 func TokenExchangeFromContext(ctx context.Context) TokenExchange {
 	exchanger, _ := ctx.Value(tokenExchangeKey{}).(TokenExchange)
 	return exchanger
+}
+
+// Approval lets a step handler pause a job at an approval gate (F-13): it
+// reports the job as awaiting approval (with a message shown to the user) and
+// then waits for an authorized user to approve or reject it. The execution
+// target (worker or agent) implements it by calling the API's
+// ReportJobStatus (to report awaiting_approval + message) and CheckApproval
+// (to poll for the decision), presenting the job's own token. A step handler
+// that gates on approval (the built-in "approval" handler) obtains the gate
+// from the context (via ApprovalFromContext) and blocks until the gate is
+// resolved or the step's context is done.
+//
+// Implementations must be safe for concurrent use. Both methods are called
+// with the step's context (already bounded by the step's per-step timeout, when
+// set) and must return promptly when that context is done.
+type Approval interface {
+	// ReportAwaitingApproval reports that the job is paused at an approval
+	// gate, showing message to the user (F-13). It is called once, before the
+	// handler waits for a decision.
+	ReportAwaitingApproval(ctx context.Context, message string) error
+	// CheckApproval reports the current state of the job's approval gate:
+	// whether it has been resolved (approved or rejected) or whether the job
+	// has been cancelled. A handler waiting at the gate polls it until the
+	// gate is resolved.
+	CheckApproval(ctx context.Context) (CheckApprovalResult, error)
+}
+
+// CheckApprovalResult is the outcome of an Approval.CheckApproval call.
+type CheckApprovalResult struct {
+	// Resolved is true when the gate has been decided (approved or rejected).
+	Resolved bool
+	// Decision is the gate's outcome: "approved" or "rejected" (set only when
+	// Resolved is true).
+	Decision string
+	// Cancelled is true when the job has been cancelled (a handler waiting at
+	// the gate should stop and report the job cancelled).
+	Cancelled bool
+}
+
+type approvalKey struct{}
+
+// ContextWithApproval returns a context that carries gate, so step handlers
+// can pause a job at an approval gate. A nil gate returns ctx unchanged.
+func ContextWithApproval(ctx context.Context, gate Approval) context.Context {
+	if gate == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, approvalKey{}, gate)
+}
+
+// ApprovalFromContext returns the Approval carried by ctx, or nil when none is
+// set. Step handlers call this to pause a job at an approval gate.
+func ApprovalFromContext(ctx context.Context) Approval {
+	gate, _ := ctx.Value(approvalKey{}).(Approval)
+	return gate
+}
+
+// ConditionContext is the data a step's condition (and, for the approval
+// handler, its message, F-13) is rendered against: the step's own env, plus
+// the structured keys "steps" (prior steps' status/outputs), "jobs" (upstream
+// jobs' status/outputs), "job" (the job's identity), "params" (run parameters,
+// F-10), "secrets" (named secrets as plaintext, F-12), and "run" (run
+// identity, F-10). Execute builds it for each step and carries it in the
+// context handed to the step's handler, so a handler (the approval handler)
+// can render a template against the same context a step's condition uses.
+type ConditionContext = map[string]any
+
+type conditionContextKey struct{}
+
+// ContextWithConditionContext returns a context that carries data, so a step
+// handler can render a template (e.g. an approval message) against the step's
+// condition context. A nil data returns ctx unchanged.
+func ContextWithConditionContext(ctx context.Context, data ConditionContext) context.Context {
+	if data == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, conditionContextKey{}, data)
+}
+
+// ConditionContextFromContext returns the condition context carried by ctx, or
+// nil when none is set. Step handlers call this to render a template (e.g. an
+// approval message) against the step's condition context.
+func ConditionContextFromContext(ctx context.Context) ConditionContext {
+	data, _ := ctx.Value(conditionContextKey{}).(ConditionContext)
+	return data
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +711,12 @@ func interpolateSpec(spec *dbpb.JobSpec, run RunInfo) (*dbpb.JobSpec, error) {
 // interpolateStep returns a copy of step with its workdir, env values, and
 // params rendered as Go templates against data (F-10). A field that fails to
 // render (e.g. it references a parameter with no value) is a spec error.
+//
+// The approval handler's "message" param (F-13) is an exception: it is a
+// template that may reference prior steps' outputs and upstream jobs (the full
+// condition context), which this run-level interpolation does not have. It is
+// left unrendered here and is rendered lazily by the approval handler against
+// the step's condition context when the gate is reached.
 func interpolateStep(step *dbpb.JobStep, data map[string]any) (*dbpb.JobStep, error) {
 	clone := proto.Clone(step).(*dbpb.JobStep)
 	if step.GetWorkdir() != "" {
@@ -642,6 +744,13 @@ func interpolateStep(step *dbpb.JobStep, data map[string]any) (*dbpb.JobStep, er
 	if len(step.GetParams()) > 0 {
 		params := make(map[string]*dbpb.ParamValue, len(step.GetParams()))
 		for k, v := range step.GetParams() {
+			// The approval handler's message (F-13) is rendered lazily against
+			// the step's condition context (which has prior steps' outputs and
+			// upstream jobs); it is not rendered here.
+			if step.GetType() == TypeApproval && k == "message" {
+				params[k] = v
+				continue
+			}
 			rendered, err := interpolateParamValue(v, data)
 			if err != nil {
 				return nil, fmt.Errorf("param %q: %w", k, err)
@@ -728,6 +837,18 @@ func renderTemplate(s string, data map[string]any) (string, error) {
 		return "", fmt.Errorf("render template %q: %w", s, err)
 	}
 	return buf.String(), nil
+}
+
+// RenderTemplate renders s (a Go template) against data and returns the
+// rendered string. It is the public form of renderTemplate, exposed so a step
+// handler (the approval handler, F-13) can render a template — such as an
+// approval message — against the step's condition context (secrets, prior
+// steps' outputs, run parameters, upstream jobs, and the job's identity). It
+// uses the same missingkey=error semantics as spec interpolation (F-10) and a
+// step's condition (F-06): a reference to a key that is absent from data is a
+// render error.
+func RenderTemplate(s string, data map[string]any) (string, error) {
+	return renderTemplate(s, data)
 }
 
 // readStepOutputs reads every file in dir (the step's output directory, F-06)

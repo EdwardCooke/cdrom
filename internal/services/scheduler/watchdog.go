@@ -72,20 +72,28 @@ func (s *Server) StartWatchdog(ctx context.Context) {
 	}()
 }
 
-// reapTimedOutJobs lists the running jobs and reaps any that have exceeded
-// their effective timeout. A job with no timeout is never reaped. Reaping is
-// conditional (Database.ReapJob), so a job that reported a terminal status
-// between the list and the reap is left untouched. db and publisher are the
-// watchdog's dependencies (the concrete clients in production, fakes in
-// tests); publisher may be nil to skip the event append.
+// reapTimedOutJobs lists the in-flight jobs (running, or paused at an approval
+// gate, F-13) and reaps any that have exceeded their effective timeout. A job
+// with no timeout is never reaped. Reaping is conditional (Database.ReapJob),
+// so a job that reported a terminal status between the list and the reap is
+// left untouched. db and publisher are the watchdog's dependencies (the
+// concrete clients in production, fakes in tests); publisher may be nil to
+// skip the event append.
 func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, publisher jobStatusPublisher) {
-	response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: dbpb.JobStatus_JOB_STATUS_RUNNING})
-	if err != nil {
-		s.logger.Warn("scheduler: watchdog list running jobs", "err", err)
-		return
+	// In-flight jobs are those that are running or paused at an approval gate
+	// (F-13). A target that goes silent while waiting at a gate would otherwise
+	// leave the job awaiting_approval forever, so the watchdog reaps it too.
+	var jobs []*dbpb.Job
+	for _, status := range []dbpb.JobStatus{dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL} {
+		response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: status})
+		if err != nil {
+			s.logger.Warn("scheduler: watchdog list in-flight jobs", "status", status, "err", err)
+			return
+		}
+		jobs = append(jobs, response.GetJobs()...)
 	}
 	now := time.Now()
-	for _, job := range response.GetJobs() {
+	for _, job := range jobs {
 		if job.GetTargetGroup() != "" {
 			// A job that targets a worker group runs on every worker in the
 			// group (fan-out). Each worker enforces its own execution's timeout

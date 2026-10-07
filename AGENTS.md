@@ -92,11 +92,12 @@ first step that errors, and a job with no spec is a no-op that succeeds.
 **Step handlers.** The executor is a generic dispatch engine: it selects an
 `executor.StepHandler` by the step's `type` (empty → `executor.DefaultType`) and
 runs it. Built-in handlers live in `internal/stephandlers`: **`shell`**
-(registered under `executor.DefaultType`) and **`token_exchange`**. A target or
-plugin adds new types with `executor.RegisterStepType(name, handler)` (e.g.
-`ansible`, `terraform`). A step whose type is unregistered fails the job with a
-clear error. Worker and agent blank-import `internal/stephandlers` so built-ins
-register before any job runs — this is the seam for the later plugin architecture.
+(registered under `executor.DefaultType`), **`token_exchange`**, and
+**`approval`** (F-13). A target or plugin adds new types with
+`executor.RegisterStepType(name, handler)` (e.g. `ansible`, `terraform`). A step
+whose type is unregistered fails the job with a clear error. Worker and agent
+blank-import `internal/stephandlers` so built-ins register before any job runs —
+this is the seam for the later plugin architecture.
 
 **Shell contract.** The `shell` handler reads `command` (string), `args` (list),
 and `shell` (string) from `params`. The command is executed **directly by the
@@ -140,7 +141,8 @@ for each feature are in `docs/Features.md`. Summary:
 | F-10 | Parameters & variables (pipeline `Parameter`s; run values; Go-template interpolation) |
 | F-11 | Pipeline versioning (immutable `PipelineVersion` snapshots; a run binds to the version active at start; run against a specific version) |
 | F-12 | Secrets management (pipeline-level named secrets; AES-256-GCM with a configured key; DB-backed nonce counter; API decrypts at dispatch; log redaction) |
-| F-13…F-22 | Roadmap: approval gates, RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
+| F-14…F-22 | Roadmap: RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 
 Cross-cutting execution concepts (full detail in `docs/Features.md` /
@@ -157,6 +159,17 @@ Cross-cutting execution concepts (full detail in `docs/Features.md` /
 - **Token exchange handler.** The `token_exchange` step handler requests a new
   job token for a different `audience` (via the executor's `TokenExchange`,
   backed by the API's `ExchangeJobToken`) and writes it to a step output.
+- **Approval gate (F-13).** An `approval` step pauses the job: the handler
+  renders its `message` param (same interpolation as conditions — secrets, step
+  outputs, run params, upstream job outputs, job identity, env) and reports the
+  job `awaiting_approval` with the message via the API (`internal/approval`
+  gate), then polls `CheckApproval` until a decision lands. The UI sees the
+  pending gate + message on `GET /api/jobs/{id}` and decides via
+  `POST /api/jobs/{id}/approve` / `POST /api/jobs/{id}/reject` (optional
+  `reason` body); the decision (actor, timestamp, reason) is persisted on the
+  job row. Approved → the step succeeds and the job resumes; rejected → the
+  step fails the job; a timeout or cancellation ends the job as usual. The
+  gate is job-level: one approval unblocks every worker of a fan-out job.
 
 ### Logging
 
@@ -211,13 +224,15 @@ internal/
   logging/    centralized logging (stdout or CDROM_LOG_FILE)
   logstream/  executor.LogSink streaming a job's step output to the API (worker + agent)
   tokenexchange/ shared executor.TokenExchange via the API's ExchangeJobToken (worker + agent)
+  approval/   executor.Approval gate via the API (worker + agent): report
+              awaiting_approval + poll CheckApproval (F-13)
   target/     shared execution layer for worker + agent (run context, status reporting,
               post-run status decision; worker supplies the StepBarrier, agent runs unbarriered)
   executor/   shared job-step executor: dispatch engine (handler by type, job/step timeouts,
               LogSink, StepStatusReporter, StepBarrier, TokenExchange, RunInfo; spec
               interpolation F-10, step condition F-06, step outputs, token exchange)
-  stephandlers/ built-in handlers: `shell` (DefaultType) + `token_exchange`; extend via
-              executor.RegisterStepType
+  stephandlers/ built-in handlers: `shell` (DefaultType) + `token_exchange` +
+              `approval` (F-13); extend via executor.RegisterStepType
   secrets/    secret store: `Store` interface + built-in AES-256-GCM store; nonces
               come from the Database service's `NextSecretNonce` (F-12)
   services/

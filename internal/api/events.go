@@ -135,6 +135,8 @@ func jobStatusName(status dbpb.JobStatus) string {
 		return "timed_out"
 	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
 		return "skipped"
+	case dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
+		return "awaiting_approval"
 	default:
 		return "unknown"
 	}

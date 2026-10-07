@@ -91,12 +91,21 @@ func (s *Server) StartJobStatusLoop(ctx context.Context) {
 // loop's dependencies (the concrete clients in production, fakes in tests);
 // publisher may be nil to skip the event append.
 func (s *Server) processJobStatuses(ctx context.Context, db jobStatusDB, publisher jobStatusEventPublisher) {
-	response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: dbpb.JobStatus_JOB_STATUS_RUNNING})
-	if err != nil {
-		s.logger.Warn("scheduler: job-status list running jobs", "err", err)
-		return
+	// In-flight group jobs are those that are running or paused at an approval
+	// gate (F-13). A group job that is awaiting_approval (its job row was set
+	// when a worker reported the gate) is re-derived here once its workers'
+	// executions leave the gate (after the gate is resolved), so the job row
+	// returns to running or a terminal status.
+	var jobs []*dbpb.Job
+	for _, status := range []dbpb.JobStatus{dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL} {
+		response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: status})
+		if err != nil {
+			s.logger.Warn("scheduler: job-status list in-flight jobs", "status", status, "err", err)
+			return
+		}
+		jobs = append(jobs, response.GetJobs()...)
 	}
-	for _, job := range response.GetJobs() {
+	for _, job := range jobs {
 		if job.GetTargetGroup() == "" {
 			// An agent job reports its status directly to the job row.
 			continue
@@ -132,6 +141,28 @@ func (s *Server) processJob(ctx context.Context, db jobStatusDB, publisher jobSt
 		// the group is down). Leave the job running; the watchdog reaps it if
 		// it has a timeout.
 		return
+	}
+	// A group job paused at an approval gate (F-13) has its job row in
+	// awaiting_approval (set when a worker reported the gate on the job row;
+	// the workers' executions stay running while they wait). While no alive
+	// worker's execution has reached a terminal status, the gate is still open
+	// (or workers are running post-approval but none has finished): leave the
+	// job row as-is, so re-deriving does not wrongly move it back to running.
+	// Once at least one execution reaches a terminal status (the gate resolved
+	// and a worker finished, or was rejected), re-derive normally.
+	if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL {
+		anyTerminal := false
+		for _, execution := range latest {
+			switch execution.GetStatus() {
+			case dbpb.JobStatus_JOB_STATUS_SUCCEEDED, dbpb.JobStatus_JOB_STATUS_FAILED,
+				dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
+				dbpb.JobStatus_JOB_STATUS_SKIPPED:
+				anyTerminal = true
+			}
+		}
+		if !anyTerminal {
+			return
+		}
 	}
 	derived := deriveJobStatus(latest, failureModeFromProto(job.GetFailureMode()))
 	if derived == jobStatusFromProto(job.GetStatus()) {
@@ -227,7 +258,10 @@ func deriveJobStatus(executions []*dbpb.JobExecution, mode models.FailureMode) m
 			anyFailed = true
 		case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
 			anyTimedOut = true
-		case dbpb.JobStatus_JOB_STATUS_PENDING, dbpb.JobStatus_JOB_STATUS_RUNNING:
+		case dbpb.JobStatus_JOB_STATUS_PENDING, dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
+			// Awaiting approval (F-13) is in-flight: a worker paused at an
+			// approval gate has not finished, so its execution does not count
+			// as a terminal outcome.
 			anyRunning = true
 		}
 	}

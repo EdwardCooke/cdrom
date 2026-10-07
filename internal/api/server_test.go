@@ -25,6 +25,7 @@ import (
 type fakeScheduler struct {
 	submitted *schedpb.SubmitJobRequest
 	rerun     *schedpb.RerunJobRequest
+	resolved  *schedpb.ResolveApprovalRequest
 	created   *schedpb.CreateRunRequest
 	triggered *schedpb.TriggerRunRequest
 	job       *schedpb.Job
@@ -66,6 +67,11 @@ func (f *fakeScheduler) CancelJob(ctx context.Context, in *schedpb.CancelJobRequ
 
 func (f *fakeScheduler) RerunJob(ctx context.Context, in *schedpb.RerunJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
 	f.rerun = in
+	return f.job, nil
+}
+
+func (f *fakeScheduler) ResolveApproval(ctx context.Context, in *schedpb.ResolveApprovalRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
+	f.resolved = in
 	return f.job, nil
 }
 
@@ -290,6 +296,68 @@ func TestRerunJob(t *testing.T) {
 	}
 	if fake.rerun.GetId() != 9 {
 		t.Errorf("rerun job id = %d, want 9", fake.rerun.GetId())
+	}
+}
+
+// TestApproveJob verifies that POST /api/jobs/{id}/approve (F-13) forwards the
+// job id and the "approved" decision to the scheduler's ResolveApproval RPC and
+// returns the job.
+func TestApproveJob(t *testing.T) {
+	fake := &fakeScheduler{job: &schedpb.Job{Id: 9, Name: "build", Status: dbpb.JobStatus_JOB_STATUS_PENDING}}
+	srv := New(Clients{Scheduler: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/jobs/9/approve", "application/json", nil)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	if fake.resolved == nil {
+		t.Fatal("scheduler.ResolveApproval was not called")
+	}
+	if fake.resolved.GetId() != 9 {
+		t.Errorf("resolved job id = %d, want 9", fake.resolved.GetId())
+	}
+	if fake.resolved.GetDecision() != "approved" {
+		t.Errorf("decision = %q, want approved", fake.resolved.GetDecision())
+	}
+}
+
+// TestRejectJob verifies that POST /api/jobs/{id}/reject (F-13) forwards the
+// job id, the "rejected" decision, and an optional reason to the scheduler's
+// ResolveApproval RPC and returns the job.
+func TestRejectJob(t *testing.T) {
+	fake := &fakeScheduler{job: &schedpb.Job{Id: 9, Name: "build", Status: dbpb.JobStatus_JOB_STATUS_PENDING}}
+	srv := New(Clients{Scheduler: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `{"reason": "not ready for production"}`
+	resp, err := http.Post(ts.URL+"/api/jobs/9/reject", "application/json", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	if fake.resolved == nil {
+		t.Fatal("scheduler.ResolveApproval was not called")
+	}
+	if fake.resolved.GetId() != 9 {
+		t.Errorf("resolved job id = %d, want 9", fake.resolved.GetId())
+	}
+	if fake.resolved.GetDecision() != "rejected" {
+		t.Errorf("decision = %q, want rejected", fake.resolved.GetDecision())
+	}
+	if fake.resolved.GetReason() != "not ready for production" {
+		t.Errorf("reason = %q, want %q", fake.resolved.GetReason(), "not ready for production")
 	}
 }
 

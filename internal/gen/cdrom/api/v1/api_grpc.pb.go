@@ -31,6 +31,7 @@ const (
 	API_ReportJobStatus_FullMethodName      = "/cdrom.api.v1.API/ReportJobStatus"
 	API_ReportStepCompletion_FullMethodName = "/cdrom.api.v1.API/ReportStepCompletion"
 	API_CheckStepBarrier_FullMethodName     = "/cdrom.api.v1.API/CheckStepBarrier"
+	API_CheckApproval_FullMethodName        = "/cdrom.api.v1.API/CheckApproval"
 	API_CancelJob_FullMethodName            = "/cdrom.api.v1.API/CancelJob"
 	API_StreamJobLogs_FullMethodName        = "/cdrom.api.v1.API/StreamJobLogs"
 	API_ExchangeJobToken_FullMethodName     = "/cdrom.api.v1.API/ExchangeJobToken"
@@ -100,6 +101,13 @@ type APIClient interface {
 	// job-token auth is enabled the caller must present a job token scoped to
 	// the job.
 	CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error)
+	// CheckApproval reports the current state of a job's approval gate (F-13):
+	// whether it has been resolved (approved or rejected) or whether the job has
+	// been cancelled (so a target waiting at the gate can stop). An execution
+	// target that is paused at an approval step polls it until the gate is
+	// resolved. When job-token auth is enabled the caller must present a job
+	// token scoped to the job.
+	CheckApproval(ctx context.Context, in *CheckApprovalRequest, opts ...grpc.CallOption) (*CheckApprovalResponse, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
 	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
@@ -259,6 +267,16 @@ func (c *aPIClient) CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CheckStepBarrierResponse)
 	err := c.cc.Invoke(ctx, API_CheckStepBarrier_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) CheckApproval(ctx context.Context, in *CheckApprovalRequest, opts ...grpc.CallOption) (*CheckApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckApprovalResponse)
+	err := c.cc.Invoke(ctx, API_CheckApproval_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -446,6 +464,13 @@ type APIServer interface {
 	// job-token auth is enabled the caller must present a job token scoped to
 	// the job.
 	CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error)
+	// CheckApproval reports the current state of a job's approval gate (F-13):
+	// whether it has been resolved (approved or rejected) or whether the job has
+	// been cancelled (so a target waiting at the gate can stop). An execution
+	// target that is paused at an approval step polls it until the gate is
+	// resolved. When job-token auth is enabled the caller must present a job
+	// token scoped to the job.
+	CheckApproval(context.Context, *CheckApprovalRequest) (*CheckApprovalResponse, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
 	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
@@ -531,6 +556,9 @@ func (UnimplementedAPIServer) ReportStepCompletion(context.Context, *ReportStepC
 }
 func (UnimplementedAPIServer) CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CheckStepBarrier not implemented")
+}
+func (UnimplementedAPIServer) CheckApproval(context.Context, *CheckApprovalRequest) (*CheckApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckApproval not implemented")
 }
 func (UnimplementedAPIServer) CancelJob(context.Context, *CancelJobRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelJob not implemented")
@@ -759,6 +787,24 @@ func _API_CheckStepBarrier_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _API_CheckApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).CheckApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_CheckApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).CheckApproval(ctx, req.(*CheckApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _API_CancelJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelJobRequest)
 	if err := dec(in); err != nil {
@@ -970,6 +1016,10 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckStepBarrier",
 			Handler:    _API_CheckStepBarrier_Handler,
+		},
+		{
+			MethodName: "CheckApproval",
+			Handler:    _API_CheckApproval_Handler,
 		},
 		{
 			MethodName: "CancelJob",

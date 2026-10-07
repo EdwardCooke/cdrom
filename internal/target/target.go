@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"cdrom/internal/approval"
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -85,6 +86,11 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	// needs to call) while the job runs; the exchanger calls the API's
 	// ExchangeJobToken RPC, presenting the job's own token.
 	ctx = executor.ContextWithTokenExchange(ctx, tokenexchange.New(tc.API, job.GetId(), tc.Token))
+	// A step handler (the built-in "approval" handler, F-13) can pause the job
+	// at an approval gate: it reports the job as awaiting approval (with a
+	// message shown to the user) and polls the API for the gate's decision
+	// (approved or rejected), presenting the job's own token.
+	ctx = executor.ContextWithApproval(ctx, approval.New(tc.API, job.GetId(), tc.Token))
 	// The cross-worker step barrier: when the job has the step-barrier flag set
 	// and targets a worker group, the workers synchronize at each step boundary
 	// (after a worker completes a step it waits until every worker alive at the

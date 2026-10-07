@@ -363,8 +363,37 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
 		return nil, status.Error(codes.InvalidArgument, "status is required")
 	}
-	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
 		return nil, err
+	}
+	// A report of awaiting_approval (F-13) is a job-level pause: the approval
+	// gate is job-level (one approval unblocks every worker of a fan-out job),
+	// so it is recorded on the job row — not a worker's execution — with the
+	// message shown to the user. This applies to both group and single-target
+	// jobs. The job row is updated directly (not via the execution), and the
+	// status is published so the UI sees the gate and its message.
+	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL {
+		if s.db == nil {
+			return nil, status.Error(codes.Unavailable, "database service is not configured")
+		}
+		updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+			Id:              req.GetJobId(),
+			Status:          req.GetStatus(),
+			ApprovalMessage: req.GetApprovalMessage(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		s.logger.Info("api: job awaiting approval", "job", req.GetJobId())
+		s.publish(Event{
+			Type:        EventJobStatus,
+			JobID:       req.GetJobId(),
+			Status:      jobStatusName(updated.GetStatus()),
+			Attempt:     updated.GetAttempt(),
+			MaxAttempts: updated.GetMaxAttempts(),
+		})
+		s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
+		return toAPIJob(updated), nil
 	}
 	// A report from a named worker for a job that targets a worker group is a
 	// fan-out report: it is recorded against the worker's execution of the job
@@ -434,7 +463,7 @@ func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.Report
 	if req.GetWorkerName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
 	}
-	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
 		return nil, err
 	}
 	if s.db == nil {
@@ -460,7 +489,7 @@ func (s *GRPCServer) CheckStepBarrier(ctx context.Context, req *apipb.CheckStepB
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
 		return nil, err
 	}
 	if s.db == nil {
@@ -476,6 +505,36 @@ func (s *GRPCServer) CheckStepBarrier(ctx context.Context, req *apipb.CheckStepB
 	return &apipb.CheckStepBarrierResponse{
 		Satisfied: resp.GetSatisfied(),
 		Cancelled: resp.GetCancelled(),
+	}, nil
+}
+
+// CheckApproval reports the current state of a job's approval gate (F-13):
+// whether it has been resolved (approved or rejected) or whether the job has
+// been cancelled. An execution target paused at an approval step polls it until
+// the gate is resolved. When job-token auth is enabled the caller must present
+// a job token scoped to the job.
+func (s *GRPCServer) CheckApproval(ctx context.Context, req *apipb.CheckApprovalRequest) (*apipb.CheckApprovalResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	// allowTerminal: a rejection moves the job to failed (terminal), which
+	// would otherwise invalidate the worker's token and make this poll fail
+	// before it can observe the rejection. The poll is read-only, so it is
+	// safe to keep serving it for a finished job.
+	if err := s.checkJobToken(ctx, req.GetJobId(), true); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
+	if err != nil {
+		return nil, err
+	}
+	return &apipb.CheckApprovalResponse{
+		Resolved:  job.GetApprovalDecision() != "",
+		Decision:  job.GetApprovalDecision(),
+		Cancelled: job.GetStatus() == dbpb.JobStatus_JOB_STATUS_CANCELLED,
 	}, nil
 }
 
@@ -510,7 +569,7 @@ func (s *GRPCServer) StreamJobLogs(stream grpc.ClientStreamingServer[apipb.JobLo
 	}
 	jobID := metadata.GetJobId()
 	// Verify the caller's job token is scoped to this job, once, up front.
-	if err := s.checkJobToken(stream.Context(), jobID); err != nil {
+	if err := s.checkJobToken(stream.Context(), jobID, false); err != nil {
 		return err
 	}
 	// Build the redactor for this job's secrets once (F-12): every chunk is
@@ -691,7 +750,7 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		return nil, status.Error(codes.InvalidArgument, "audience is required")
 	}
 	// The caller must present a valid job token scoped to this job.
-	if err := s.checkJobToken(ctx, req.GetJobId()); err != nil {
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
 		return nil, err
 	}
 	// Look up the job so the new token carries the same pipeline/group scope
@@ -1104,7 +1163,7 @@ func (s *GRPCServer) checkArtifactToken(ctx context.Context, namespace string) e
 	if err != nil {
 		return status.Error(codes.InvalidArgument, "invalid artifact namespace")
 	}
-	return s.checkJobToken(ctx, id)
+	return s.checkJobToken(ctx, id, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,7 +1190,13 @@ func (s *GRPCServer) removeLive(name string) {
 // reused. A job that is still pending or running is active, so its token is
 // valid. A nil db client (e.g. in tests) cannot check the status, so the
 // status check is skipped. It is a no-op when job-token auth is disabled.
-func (s *GRPCServer) checkJobToken(ctx context.Context, jobID int64) error {
+//
+// allowTerminal relaxes the status gate: a read-only poll that must keep
+// working after the job reaches a terminal state (the approval gate's
+// CheckApproval, which a target paused at a gate polls to observe a rejection
+// that has already moved the job to failed) passes true so the token is
+// accepted even for a finished job. Every other call site passes false.
+func (s *GRPCServer) checkJobToken(ctx context.Context, jobID int64, allowTerminal bool) error {
 	if !s.jobAuth.Enabled() {
 		return nil
 	}
@@ -1155,7 +1220,7 @@ func (s *GRPCServer) checkJobToken(ctx context.Context, jobID int64) error {
 		if err != nil {
 			return status.Error(codes.Unauthenticated, "job token could not be validated")
 		}
-		if jobStatusIsTerminal(job.GetStatus()) {
+		if !allowTerminal && jobStatusIsTerminal(job.GetStatus()) {
 			return status.Error(codes.PermissionDenied, "job is no longer running; its token is invalid")
 		}
 	}
@@ -1199,27 +1264,33 @@ func bearerToken(ctx context.Context) string {
 
 func toAPIJob(job *dbpb.Job) *apipb.Job {
 	return &apipb.Job{
-		Id:             job.GetId(),
-		PipelineId:     job.GetPipelineId(),
-		Name:           job.GetName(),
-		Status:         job.GetStatus(),
-		TargetGroup:    job.GetTargetGroup(),
-		StartedAt:      job.GetStartedAt(),
-		FinishedAt:     job.GetFinishedAt(),
-		Spec:           job.GetSpec(),
-		Attempt:        job.GetAttempt(),
-		MaxAttempts:    job.GetMaxAttempts(),
-		DependsOn:      job.GetDependsOn(),
-		StepResults:    job.GetStepResults(),
-		Outputs:        job.GetOutputs(),
-		IgnoreFailed:   job.GetIgnoreFailed(),
-		FailureMode:    job.GetFailureMode(),
-		StepBarrier:    job.GetStepBarrier(),
-		Key:            job.GetKey(),
-		TriggerName:    job.GetTriggerName(),
-		TriggerType:    job.GetTriggerType(),
-		UpstreamClaims: job.GetUpstreamClaims(),
-		RunParams:      job.GetRunParams(),
+		Id:                  job.GetId(),
+		PipelineId:          job.GetPipelineId(),
+		Name:                job.GetName(),
+		Status:              job.GetStatus(),
+		TargetGroup:         job.GetTargetGroup(),
+		StartedAt:           job.GetStartedAt(),
+		FinishedAt:          job.GetFinishedAt(),
+		Spec:                job.GetSpec(),
+		Attempt:             job.GetAttempt(),
+		MaxAttempts:         job.GetMaxAttempts(),
+		DependsOn:           job.GetDependsOn(),
+		StepResults:         job.GetStepResults(),
+		Outputs:             job.GetOutputs(),
+		IgnoreFailed:        job.GetIgnoreFailed(),
+		FailureMode:         job.GetFailureMode(),
+		StepBarrier:         job.GetStepBarrier(),
+		Key:                 job.GetKey(),
+		TriggerName:         job.GetTriggerName(),
+		TriggerType:         job.GetTriggerType(),
+		UpstreamClaims:      job.GetUpstreamClaims(),
+		RunParams:           job.GetRunParams(),
+		ApprovalMessage:     job.GetApprovalMessage(),
+		ApprovalDecision:    job.GetApprovalDecision(),
+		ApprovalActor:       job.GetApprovalActor(),
+		ApprovalReason:      job.GetApprovalReason(),
+		ApprovalRequestedAt: job.GetApprovalRequestedAt(),
+		ApprovalDecidedAt:   job.GetApprovalDecidedAt(),
 	}
 }
 

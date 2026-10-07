@@ -360,7 +360,8 @@ reference it rather than redefining it.
   flip the status in the database. `POST /api/jobs/{id}/cancel` (API →
   scheduler `CancelJob`) persists the cancellation with the conditional
   `Database.CancelJob` RPC (marks the job `cancelled` only if it is still
-  `pending` or `running`, so cancelling a finished job is a no-op) and then
+  `pending`, `running`, or `awaiting_approval`, so cancelling a finished job
+  is a no-op) and then
   signals the target through the API's `CancelJob` RPC. The API's `WatchJobs`
   server stream carries a `WatchMessage` (a oneof of `JobAssignment` and
   `JobCancellation`): the API pushes a `JobCancellation` down every live
@@ -375,9 +376,10 @@ reference it rather than redefining it.
   the job is still marked `cancelled` in the database, and the target's next
   status report (or the scheduler's watchdog) reconciles it. A late target
   report cannot clobber a terminal status: `Database.UpdateJob` applies a
-  target's status report only if the job is still `pending` or `running`, so
-  once a job is `succeeded`, `failed`, `cancelled`, or `timed_out` a late
-  report (e.g. a target that finished just as it was cancelled) is ignored.
+  target's status report only if the job is still `pending`, `running`, or
+  `awaiting_approval`, so once a job is `succeeded`, `failed`, `cancelled`, or
+  `timed_out` a late report (e.g. a target that finished just as it was
+  cancelled) is ignored.
 - **Skip propagation & step conditions (F-06).** A job or step can be
   skipped — never run — instead of failing, in two ways:
   - *Step `condition`.* A step's `condition` param is a Go template
@@ -609,6 +611,11 @@ stateDiagram-v2
     PENDING --> CANCELLED: cancel requested
     RUNNING --> CANCELLED: cancel requested
     PENDING --> SKIPPED: dependency resolver (F-06, a depends_on dependency did not succeed)
+    RUNNING --> AWAITING_APPROVAL: approval step (F-13)
+    AWAITING_APPROVAL --> RUNNING: approved
+    AWAITING_APPROVAL --> FAILED: rejected
+    AWAITING_APPROVAL --> CANCELLED: cancel requested
+    AWAITING_APPROVAL --> TIMED_OUT: job timeout / watchdog reap
     FAILED --> PENDING: retry claimed (F-04, within budget)
     SUCCEEDED --> PENDING: re-run (F-04)
     FAILED --> PENDING: re-run (F-04)

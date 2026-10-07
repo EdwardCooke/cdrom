@@ -65,6 +65,13 @@ service API {
   // job-token auth is enabled the caller must present a job token scoped to
   // the job.
   rpc CheckStepBarrier(CheckStepBarrierRequest) returns (CheckStepBarrierResponse);
+  // CheckApproval reports the current state of a job's approval gate (F-13):
+  // whether it has been resolved (approved or rejected) or whether the job has
+  // been cancelled (so a target waiting at the gate can stop). An execution
+  // target that is paused at an approval step polls it until the gate is
+  // resolved. When job-token auth is enabled the caller must present a job
+  // token scoped to the job.
+  rpc CheckApproval(CheckApprovalRequest) returns (CheckApprovalResponse);
   // CancelJob is called by the scheduler to signal the execution target
   // running a job to stop the work (F-05). The API delivers a JobCancellation
   // down the worker's WatchJobs stream (for a long-lived worker) or, for an
@@ -234,6 +241,27 @@ message Job {
   // the job's spec using Go templates (`{{ .secrets.name }}`) before the job
   // runs. Empty for a job whose pipeline has no secrets.
   map<string, string> secrets = 25;
+  // approval_message is the (rendered) message an approval gate (F-13) shows
+  // to the user while the job is awaiting approval. It is set by the execution
+  // target when it reports the job awaiting_approval and is visible to the UI
+  // (via GET /api/jobs/{id}) so the approver knows what they are approving.
+  string approval_message = 26;
+  // approval_requested_at is when the job entered the awaiting_approval state
+  // (F-13); unset when the job is not (or was not) awaiting approval.
+  google.protobuf.Timestamp approval_requested_at = 27;
+  // approval_decision is the outcome of the job's approval gate (F-13):
+  // "approved" or "rejected"; empty when the job has no approval gate or the
+  // gate has not been resolved.
+  string approval_decision = 28;
+  // approval_actor is the identity of the user who resolved the job's approval
+  // gate (F-13); empty when the gate has not been resolved.
+  string approval_actor = 29;
+  // approval_decided_at is when the job's approval gate was resolved (F-13);
+  // unset when the gate has not been resolved.
+  google.protobuf.Timestamp approval_decided_at = 30;
+  // approval_reason is the (optional) free-text reason the user gave when they
+  // resolved the job's approval gate (F-13); empty when the user gave none.
+  string approval_reason = 31;
 }
 
 message JobAssignment {
@@ -344,6 +372,11 @@ message ReportJobStatusRequest {
   // the scheduler. An ephemeral agent (no worker name) reports against the
   // job row directly.
   string worker_name = 7;
+  // approval_message is the (rendered) message an approval gate (F-13) shows
+  // to the user. It is set by the execution target when it reports the job
+  // awaiting_approval (F-13); the API persists it on the job so the UI can
+  // show it. It is ignored for any other status.
+  string approval_message = 8;
 }
 
 // ReportStepCompletionRequest records that the calling worker has completed a
@@ -374,6 +407,27 @@ message CheckStepBarrierResponse {
   // cancelled is true when the job has been cancelled (a waiting worker
   // should stop and report the job cancelled).
   bool cancelled = 2;
+}
+
+// CheckApprovalRequest asks whether a job's approval gate (F-13) has been
+// resolved or whether the job has been cancelled.
+message CheckApprovalRequest {
+  // job_id is the job whose approval gate is checked.
+  int64 job_id = 1;
+}
+
+// CheckApprovalResponse is the result of a CheckApproval call.
+message CheckApprovalResponse {
+  // resolved is true when the job's approval gate has been decided (approved
+  // or rejected); a target waiting at the gate may then proceed (approved) or
+  // fail the job (rejected).
+  bool resolved = 1;
+  // decision is the gate's outcome: "approved" or "rejected" (set only when
+  // resolved is true).
+  string decision = 2;
+  // cancelled is true when the job has been cancelled (a target waiting at
+  // the gate should stop and report the job cancelled).
+  bool cancelled = 3;
 }
 
 // JobLogStream names which output stream a chunk of log data belongs to.

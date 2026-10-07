@@ -723,6 +723,96 @@ func TestCancelJob(t *testing.T) {
 	}
 }
 
+// TestResolveApproval verifies that ResolveApproval (F-13) records the
+// decision, actor, and reason on a job that is awaiting approval, and that a
+// job that is no longer awaiting approval (it reached a terminal state) is left
+// untouched (a late decision is a no-op).
+func TestResolveApproval(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// A job that is awaiting approval is resolved.
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "gated"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:              job.GetId(),
+		Status:          dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL,
+		ApprovalMessage: "please approve the production deploy",
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	resp, err := client.ResolveApproval(ctx, &dbpb.ResolveApprovalRequest{
+		JobId:     job.GetId(),
+		Decision:  "approved",
+		Actor:     "alice@example.com",
+		Reason:    "verified the canary",
+		DecidedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("ResolveApproval: %v", err)
+	}
+	if !resp.GetResolved() {
+		t.Fatal("awaiting-approval job was not resolved, want resolved=true")
+	}
+	fetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetApprovalDecision() != "approved" {
+		t.Errorf("decision = %q, want approved", fetched.GetApprovalDecision())
+	}
+	if fetched.GetApprovalActor() != "alice@example.com" {
+		t.Errorf("actor = %q, want alice@example.com", fetched.GetApprovalActor())
+	}
+	if fetched.GetApprovalReason() != "verified the canary" {
+		t.Errorf("reason = %q, want %q", fetched.GetApprovalReason(), "verified the canary")
+	}
+	if fetched.GetApprovalDecidedAt() == nil {
+		t.Error("approval_decided_at not set on resolved job")
+	}
+	// An approval moves the job back to running (the target continues its
+	// remaining steps); the target's final report then records the outcome.
+	if fetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_RUNNING {
+		t.Errorf("status = %v, want RUNNING (approved)", fetched.GetStatus())
+	}
+
+	// A job that is no longer awaiting approval is not resolved (a late
+	// decision is a no-op).
+	other, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "done"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:         other.GetId(),
+		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		StartedAt:  timestamppb.Now(),
+		FinishedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	resp, err = client.ResolveApproval(ctx, &dbpb.ResolveApprovalRequest{
+		JobId:     other.GetId(),
+		Decision:  "approved",
+		Actor:     "bob@example.com",
+		DecidedAt: timestamppb.Now(),
+	})
+	if err != nil {
+		t.Fatalf("ResolveApproval: %v", err)
+	}
+	if resp.GetResolved() {
+		t.Fatal("terminal job was resolved, want resolved=false")
+	}
+	fetched, err = client.GetJob(ctx, &dbpb.GetJobRequest{Id: other.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if fetched.GetApprovalDecision() != "" {
+		t.Errorf("decision = %q, want empty (unchanged)", fetched.GetApprovalDecision())
+	}
+}
+
 // TestUpdateJobIgnoresLateReportOnTerminalJob verifies that a status report
 // from a target on a job that already reached a terminal state is a no-op
 // (F-05): a late report (e.g. a target that finished just as it was

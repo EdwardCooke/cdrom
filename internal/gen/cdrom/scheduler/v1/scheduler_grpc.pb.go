@@ -19,13 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Scheduler_SubmitJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/SubmitJob"
-	Scheduler_GetJob_FullMethodName     = "/cdrom.scheduler.v1.Scheduler/GetJob"
-	Scheduler_ListJobs_FullMethodName   = "/cdrom.scheduler.v1.Scheduler/ListJobs"
-	Scheduler_CancelJob_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/CancelJob"
-	Scheduler_RerunJob_FullMethodName   = "/cdrom.scheduler.v1.Scheduler/RerunJob"
-	Scheduler_CreateRun_FullMethodName  = "/cdrom.scheduler.v1.Scheduler/CreateRun"
-	Scheduler_TriggerRun_FullMethodName = "/cdrom.scheduler.v1.Scheduler/TriggerRun"
+	Scheduler_SubmitJob_FullMethodName       = "/cdrom.scheduler.v1.Scheduler/SubmitJob"
+	Scheduler_GetJob_FullMethodName          = "/cdrom.scheduler.v1.Scheduler/GetJob"
+	Scheduler_ListJobs_FullMethodName        = "/cdrom.scheduler.v1.Scheduler/ListJobs"
+	Scheduler_CancelJob_FullMethodName       = "/cdrom.scheduler.v1.Scheduler/CancelJob"
+	Scheduler_RerunJob_FullMethodName        = "/cdrom.scheduler.v1.Scheduler/RerunJob"
+	Scheduler_ResolveApproval_FullMethodName = "/cdrom.scheduler.v1.Scheduler/ResolveApproval"
+	Scheduler_CreateRun_FullMethodName       = "/cdrom.scheduler.v1.Scheduler/CreateRun"
+	Scheduler_TriggerRun_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/TriggerRun"
 )
 
 // SchedulerClient is the client API for Scheduler service.
@@ -56,6 +57,14 @@ type SchedulerClient interface {
 	// failed, cancelled, or timed_out) can be re-run; a job that is still
 	// pending or running is rejected.
 	RerunJob(ctx context.Context, in *RerunJobRequest, opts ...grpc.CallOption) (*Job, error)
+	// ResolveApproval records the outcome of a job's approval gate (F-13): it
+	// persists the decision (approved or rejected), the actor, and the reason
+	// (via Database.ResolveApproval, conditionally — only if the job is still
+	// awaiting approval) and appends a "job_status" event to the shared event
+	// log (F-23) so every API pod can fan the decision out to its UI clients.
+	// A job that is no longer awaiting approval (it was cancelled, or the gate
+	// was already resolved) is left untouched, so a late decision is a no-op.
+	ResolveApproval(ctx context.Context, in *ResolveApprovalRequest, opts ...grpc.CallOption) (*Job, error)
 	// CreateRun starts a new execution of a pipeline (F-07): it creates a
 	// PipelineRun and one job instance per job definition in the pipeline,
 	// then drives them (dispatching the dependency-free instances to the API,
@@ -129,6 +138,16 @@ func (c *schedulerClient) RerunJob(ctx context.Context, in *RerunJobRequest, opt
 	return out, nil
 }
 
+func (c *schedulerClient) ResolveApproval(ctx context.Context, in *ResolveApprovalRequest, opts ...grpc.CallOption) (*Job, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Job)
+	err := c.cc.Invoke(ctx, Scheduler_ResolveApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *schedulerClient) CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*Run, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Run)
@@ -177,6 +196,14 @@ type SchedulerServer interface {
 	// failed, cancelled, or timed_out) can be re-run; a job that is still
 	// pending or running is rejected.
 	RerunJob(context.Context, *RerunJobRequest) (*Job, error)
+	// ResolveApproval records the outcome of a job's approval gate (F-13): it
+	// persists the decision (approved or rejected), the actor, and the reason
+	// (via Database.ResolveApproval, conditionally — only if the job is still
+	// awaiting approval) and appends a "job_status" event to the shared event
+	// log (F-23) so every API pod can fan the decision out to its UI clients.
+	// A job that is no longer awaiting approval (it was cancelled, or the gate
+	// was already resolved) is left untouched, so a late decision is a no-op.
+	ResolveApproval(context.Context, *ResolveApprovalRequest) (*Job, error)
 	// CreateRun starts a new execution of a pipeline (F-07): it creates a
 	// PipelineRun and one job instance per job definition in the pipeline,
 	// then drives them (dispatching the dependency-free instances to the API,
@@ -214,6 +241,9 @@ func (UnimplementedSchedulerServer) CancelJob(context.Context, *CancelJobRequest
 }
 func (UnimplementedSchedulerServer) RerunJob(context.Context, *RerunJobRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method RerunJob not implemented")
+}
+func (UnimplementedSchedulerServer) ResolveApproval(context.Context, *ResolveApprovalRequest) (*Job, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveApproval not implemented")
 }
 func (UnimplementedSchedulerServer) CreateRun(context.Context, *CreateRunRequest) (*Run, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRun not implemented")
@@ -332,6 +362,24 @@ func _Scheduler_RerunJob_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Scheduler_ResolveApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).ResolveApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_ResolveApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).ResolveApproval(ctx, req.(*ResolveApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Scheduler_CreateRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateRunRequest)
 	if err := dec(in); err != nil {
@@ -394,6 +442,10 @@ var Scheduler_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RerunJob",
 			Handler:    _Scheduler_RerunJob_Handler,
+		},
+		{
+			MethodName: "ResolveApproval",
+			Handler:    _Scheduler_ResolveApproval_Handler,
 		},
 		{
 			MethodName: "CreateRun",

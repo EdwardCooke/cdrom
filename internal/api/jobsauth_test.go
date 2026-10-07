@@ -117,19 +117,19 @@ func TestCheckJobToken(t *testing.T) {
 	s := NewGRPCServer(nil, nil, nil, jta, nil, slog.Default())
 
 	// No token -> Unauthenticated.
-	if err := s.checkJobToken(context.Background(), 42); status.Code(err) != codes.Unauthenticated {
+	if err := s.checkJobToken(context.Background(), 42, false); status.Code(err) != codes.Unauthenticated {
 		t.Errorf("no token: got %v, want Unauthenticated", err)
 	}
 
 	// Valid token for job 42 -> ok.
 	token := mintTestJobToken(t, base, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
-	if err := s.checkJobToken(ctx, 42); err != nil {
+	if err := s.checkJobToken(ctx, 42, false); err != nil {
 		t.Errorf("valid token: %v", err)
 	}
 
 	// Token for job 42 but requesting job 7 -> PermissionDenied.
-	if err := s.checkJobToken(ctx, 7); status.Code(err) != codes.PermissionDenied {
+	if err := s.checkJobToken(ctx, 7, false); status.Code(err) != codes.PermissionDenied {
 		t.Errorf("wrong job: got %v, want PermissionDenied", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestCheckJobToken(t *testing.T) {
 // is disabled (nil JobTokenAuth).
 func TestCheckJobTokenDisabled(t *testing.T) {
 	s := NewGRPCServer(nil, nil, nil, nil, nil, slog.Default())
-	if err := s.checkJobToken(context.Background(), 42); err != nil {
+	if err := s.checkJobToken(context.Background(), 42, false); err != nil {
 		t.Errorf("disabled: %v, want nil", err)
 	}
 }
@@ -269,7 +269,7 @@ func TestCheckJobTokenStatusGate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := &fakeDB{job: &dbpb.Job{Id: 42, Status: tc.status}}
 			s := NewGRPCServer(db, nil, nil, jta, nil, slog.Default())
-			err := s.checkJobToken(ctx, 42)
+			err := s.checkJobToken(ctx, 42, false)
 			if tc.wantErr == codes.OK {
 				if err != nil {
 					t.Fatalf("checkJobToken: %v, want ok", err)
@@ -280,6 +280,45 @@ func TestCheckJobTokenStatusGate(t *testing.T) {
 				t.Fatalf("checkJobToken: got %v, want %v", status.Code(err), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestCheckJobTokenAllowTerminal confirms that allowTerminal relaxes the
+// status gate: a read-only poll (the approval gate's CheckApproval) must keep
+// working after a rejection has moved the job to a terminal state, so a token
+// for a finished job is accepted when allowTerminal is true and rejected when
+// it is false.
+func TestCheckJobTokenAllowTerminal(t *testing.T) {
+	base := startTestIDP(t)
+	cfg := config.GRPCAuthConfig{
+		Enabled:    true,
+		IdPAddress: base,
+		Audiences:  []string{"cdrom-api"},
+	}
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	if err != nil {
+		t.Fatalf("NewJobTokenAuth: %v", err)
+	}
+	token := mintTestJobToken(t, base, "42")
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+
+	// A failed job (terminal): the token is rejected by default but accepted
+	// when allowTerminal is set.
+	failed := NewGRPCServer(&fakeDB{job: &dbpb.Job{Id: 42, Status: dbpb.JobStatus_JOB_STATUS_FAILED}}, nil, nil, jta, nil, slog.Default())
+	if err := failed.checkJobToken(ctx, 42, false); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("failed job, allowTerminal=false: got %v, want PermissionDenied", err)
+	}
+	if err := failed.checkJobToken(ctx, 42, true); err != nil {
+		t.Errorf("failed job, allowTerminal=true: %v, want ok", err)
+	}
+
+	// A running job (non-terminal): the token is accepted either way.
+	running := NewGRPCServer(&fakeDB{job: &dbpb.Job{Id: 42, Status: dbpb.JobStatus_JOB_STATUS_RUNNING}}, nil, nil, jta, nil, slog.Default())
+	if err := running.checkJobToken(ctx, 42, false); err != nil {
+		t.Errorf("running job, allowTerminal=false: %v, want ok", err)
+	}
+	if err := running.checkJobToken(ctx, 42, true); err != nil {
+		t.Errorf("running job, allowTerminal=true: %v, want ok", err)
 	}
 }
 

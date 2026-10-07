@@ -1135,6 +1135,12 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		updates["status"] = modelStatus
+		// When a target reports the job awaiting_approval (F-13), stamp when it
+		// entered the gate so the UI can show how long it has been waiting.
+		if modelStatus == models.JobStatusAwaitingApproval {
+			now := time.Now()
+			updates["approval_requested_at"] = &now
+		}
 	}
 	if timestamp := req.GetStartedAt(); timestamp != nil {
 		instant := timestamp.AsTime()
@@ -1143,6 +1149,13 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 	if timestamp := req.GetFinishedAt(); timestamp != nil {
 		instant := timestamp.AsTime()
 		updates["finished_at"] = &instant
+	}
+	// approval_message (F-13) is the (rendered) message an approval gate shows
+	// to the user; it is set by the execution target when it reports the job
+	// awaiting_approval. A non-empty message is persisted; an empty one leaves
+	// the previously recorded message unchanged.
+	if message := req.GetApprovalMessage(); message != "" {
+		updates["approval_message"] = message
 	}
 	// step_results (F-06) are informational per-step outcomes, not part of
 	// the terminal-status guard below: they are persisted whenever the
@@ -1199,10 +1212,14 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 		// failed, cancelled, or timed_out, a late report (e.g. a target that
 		// finished just as it was cancelled) is ignored. The conditional
 		// update is atomic, so a concurrent cancellation (Database.CancelJob)
-		// or reap (Database.ReapJob) wins over a late target report.
+		// or reap (Database.ReapJob) wins over a late target report. A job
+		// that is awaiting approval (F-13) is not terminal: a target that
+		// paused at an approval gate reports its final status (succeeded after
+		// approval, failed after rejection) once the gate is resolved, so
+		// awaiting_approval is an updatable state like pending and running.
 		result := s.db.WithContext(ctx).
 			Model(&models.Job{}).
-			Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning}).
+			Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval}).
 			Updates(updates)
 		if result.Error != nil {
 			return nil, grpcErr(result.Error)
@@ -1240,7 +1257,7 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 	}
 	result := s.db.WithContext(ctx).
 		Model(&models.Job{}).
-		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning}).
+		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval}).
 		Updates(map[string]any{
 			"status":      models.JobStatusTimedOut,
 			"finished_at": &finishedAt,
@@ -1271,7 +1288,7 @@ func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*db
 	}
 	result := s.db.WithContext(ctx).
 		Model(&models.Job{}).
-		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning}).
+		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval}).
 		Updates(map[string]any{
 			"status":      models.JobStatusCancelled,
 			"finished_at": &finishedAt,
@@ -1311,6 +1328,54 @@ func (s *Server) SkipJob(ctx context.Context, req *dbpb.SkipJobRequest) (*dbpb.S
 		return nil, grpcErr(result.Error)
 	}
 	return &dbpb.SkipJobResponse{Skipped: result.RowsAffected > 0}, nil
+}
+
+// ResolveApproval records the outcome of a job's approval gate (F-13): it sets
+// the approval decision, actor, and timestamp only if the job is still in the
+// awaiting_approval state. It returns whether the job was resolved. This is
+// how the API's approve/reject endpoints persist a user's decision: a job that
+// is no longer awaiting approval (it was cancelled, or the gate was already
+// resolved) is left untouched, so a late decision is a no-op. The conditional
+// update is done atomically with a WHERE clause on the status so a concurrent
+// cancellation or a second decision cannot be clobbered.
+func (s *Server) ResolveApproval(ctx context.Context, req *dbpb.ResolveApprovalRequest) (*dbpb.ResolveApprovalResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	if req.GetDecision() != "approved" && req.GetDecision() != "rejected" {
+		return nil, status.Error(codes.InvalidArgument, "decision must be \"approved\" or \"rejected\"")
+	}
+	decidedAt := time.Now()
+	if timestamp := req.GetDecidedAt(); timestamp != nil {
+		decidedAt = timestamp.AsTime()
+	}
+	// Resolving the gate also moves the job out of the awaiting_approval state:
+	// an approval means the job is running again (the target continues its
+	// remaining steps), and a rejection means the job has failed (the target's
+	// approval step fails and it reports failed). Recording the status here
+	// (rather than waiting for the target's final report) keeps the UI from
+	// showing "awaiting approval" for the whole post-approval run.
+	updates := map[string]any{
+		"approval_decision":   req.GetDecision(),
+		"approval_actor":      req.GetActor(),
+		"approval_decided_at": &decidedAt,
+		"approval_reason":     req.GetReason(),
+		"updated_at":          time.Now(),
+	}
+	if req.GetDecision() == "approved" {
+		updates["status"] = models.JobStatusRunning
+	} else { // rejected
+		updates["status"] = models.JobStatusFailed
+		updates["finished_at"] = &decidedAt
+	}
+	result := s.db.WithContext(ctx).
+		Model(&models.Job{}).
+		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusAwaitingApproval).
+		Updates(updates)
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.ResolveApprovalResponse{Resolved: result.RowsAffected > 0}, nil
 }
 
 // ClaimJob atomically claims a pending job for execution (F-23): it sets the
@@ -2928,27 +2993,31 @@ func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 
 func toProtoJob(job *models.Job) *dbpb.Job {
 	proto := &dbpb.Job{
-		Id:             int64(job.ID),
-		Name:           job.Name,
-		Status:         jobStatusToProto(job.Status),
-		TargetGroup:    job.TargetGroup,
-		CreatedAt:      timestamppb.New(job.CreatedAt),
-		UpdatedAt:      timestamppb.New(job.UpdatedAt),
-		Spec:           specToProto(job.Spec),
-		Attempt:        int32(job.Attempt),
-		MaxAttempts:    int32(job.MaxAttempts),
-		DependsOn:      dependsOnToProto(job.DependsOn),
-		StepResults:    stepResultsToProto(job.StepResults),
-		Outputs:        job.Outputs,
-		IgnoreFailed:   job.IgnoreFailed,
-		FailureMode:    failureModeToProto(job.FailureMode),
-		StepBarrier:    job.StepBarrier,
-		Key:            job.Key,
-		TriggerName:    job.TriggerName,
-		TriggerType:    job.TriggerType,
-		UpstreamClaims: upstreamClaimsToStruct(job.UpstreamClaims),
-		RunParams:      job.RunParams,
-		Secrets:        secretsToProto(job.Secrets),
+		Id:               int64(job.ID),
+		Name:             job.Name,
+		Status:           jobStatusToProto(job.Status),
+		TargetGroup:      job.TargetGroup,
+		CreatedAt:        timestamppb.New(job.CreatedAt),
+		UpdatedAt:        timestamppb.New(job.UpdatedAt),
+		Spec:             specToProto(job.Spec),
+		Attempt:          int32(job.Attempt),
+		MaxAttempts:      int32(job.MaxAttempts),
+		DependsOn:        dependsOnToProto(job.DependsOn),
+		StepResults:      stepResultsToProto(job.StepResults),
+		Outputs:          job.Outputs,
+		IgnoreFailed:     job.IgnoreFailed,
+		FailureMode:      failureModeToProto(job.FailureMode),
+		StepBarrier:      job.StepBarrier,
+		Key:              job.Key,
+		TriggerName:      job.TriggerName,
+		TriggerType:      job.TriggerType,
+		UpstreamClaims:   upstreamClaimsToStruct(job.UpstreamClaims),
+		RunParams:        job.RunParams,
+		Secrets:          secretsToProto(job.Secrets),
+		ApprovalMessage:  job.ApprovalMessage,
+		ApprovalDecision: job.ApprovalDecision,
+		ApprovalActor:    job.ApprovalActor,
+		ApprovalReason:   job.ApprovalReason,
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
@@ -2961,6 +3030,12 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 	}
 	if job.FinishedAt != nil {
 		proto.FinishedAt = timestamppb.New(*job.FinishedAt)
+	}
+	if job.ApprovalRequestedAt != nil {
+		proto.ApprovalRequestedAt = timestamppb.New(*job.ApprovalRequestedAt)
+	}
+	if job.ApprovalDecidedAt != nil {
+		proto.ApprovalDecidedAt = timestamppb.New(*job.ApprovalDecidedAt)
 	}
 	return proto
 }
@@ -3328,6 +3403,8 @@ func jobStatusToProto(status models.JobStatus) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_TIMED_OUT
 	case models.JobStatusSkipped:
 		return dbpb.JobStatus_JOB_STATUS_SKIPPED
+	case models.JobStatusAwaitingApproval:
+		return dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}
@@ -3349,6 +3426,8 @@ func jobStatusFromProto(status dbpb.JobStatus) (models.JobStatus, error) {
 		return models.JobStatusTimedOut, nil
 	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
 		return models.JobStatusSkipped, nil
+	case dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
+		return models.JobStatusAwaitingApproval, nil
 	default:
 		return "", fmt.Errorf("unknown job status %v", status)
 	}
@@ -3374,6 +3453,8 @@ func jobStatusName(status dbpb.JobStatus) string {
 		return "timed_out"
 	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
 		return "skipped"
+	case dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
+		return "awaiting_approval"
 	default:
 		return "unknown"
 	}
