@@ -149,6 +149,9 @@ for each feature are in `docs/Features.md`. Summary:
 | F-14…F-22 | Roadmap: RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 | F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
+| F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
+
+| F-26 | Roadmap: service accounts (role-assignable non-human identities; exactly two individually rotatable API keys generated and hashed by the Database service, returned once on create/rotate for UI display; disable/enable; permanent soft deletion with both key slots cleared; granular create/edit/rotate/disable/enable/delete/assign-role/remove-role management permissions; not yet implemented) |
 
 Cross-cutting execution concepts (full detail in `docs/Features.md` /
 `docs/Architecture.md`):

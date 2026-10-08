@@ -1512,6 +1512,347 @@ identity provider is used.
 - [x] The user directory is shared across IdP replicas via the Database
       service (like the IdP's signing keys and auth codes).
 
+### F-25 · API keys
+
+**What.** A user can create one or more **API keys** — long-lived credentials
+that authenticate them to the API in place of a JWT. A key is a string
+`cdrom-` followed by 64 random alphanumeric characters; only its hash is
+stored, and the plaintext is shown to the user exactly once (at creation and
+at each rotation). A key carries a **description**, an **expiration date**
+(at most one year in the future), and a **pipeline scope** (a set of pipeline
+IDs, or all pipelines). The key's effective permissions are the owner's own
+permissions **limited to** the key's pipeline scope. A key is presented to the
+API as `Authorization: Bearer <username>:<apikey>` (the username is the
+user's email) and is accepted anywhere a JWT would be. API keys are available
+to any user who has the permission to create one, whether they signed in via
+OIDC or username/password (internal); a user with the appropriate role (e.g.
+`admin`) can create a key **for another user**. A user can **edit/renew** a
+key (change its description, expiration, or pipeline scope) without changing
+the key's secret, and can **rotate** it (a new secret is generated and the old
+one stops working). A user is **locked out of API-key access** after a
+configurable number of failed key attempts — a mechanism that is separate from
+(and independent of) any password-attempt lockout.
+
+**Why.** UI sign-in (OIDC or password) is interactive and browser-oriented.
+Scripts, CI systems, and other non-interactive clients need a way to
+authenticate to the API without driving a full OIDC flow, while still being
+bound to a specific user and a limited set of pipelines. API keys provide
+that: a per-user, per-pipeline-scoped, expiring, revocable credential that
+plugs into the same authorization the user already has.
+
+**Scope.**
+- `internal/models` — an `IDPAPIKey` entity (owner user ID, description, key
+  hash, key prefix, expiration, pipeline scope) registered in `All()`; per-user
+  API-key lockout state on `IDPUser` (`APIKeyFailedCount`,
+  `APIKeyLockedUntil`).
+- `proto/cdrom/db/v1/db.proto` + `internal/services/database` — an `IDPAPIKey`
+  message + `CreateAPIKey` / `GetAPIKey` / `ListAPIKeys` / `UpdateAPIKey` /
+  `RotateAPIKey` / `DeleteAPIKey` / `VerifyAPIKey` RPCs. The Database service
+  stores the key hash opaquely and never sees the plaintext.
+- `proto/cdrom/idp/v1/idp.proto` + `internal/idp` — the IdP's gRPC API-only
+  surface gains the API-key operations: `CreateAPIKey` (generate the
+  `cdrom-…` secret, hash it, store it, return the plaintext once),
+  `GetAPIKey` / `ListAPIKeys` (metadata + prefix, never the plaintext),
+  `UpdateAPIKey` (edit description/expiration/pipeline scope without changing
+  the secret — "renew"), `RotateAPIKey` (generate a new secret, return it
+  once), `DeleteAPIKey`, and `VerifyAPIKey` (check the presented
+  `username:apikey` against the stored hash, expiration, and lockout; on a
+  miss, increment the user's failure counter and lock them out at the
+  configured max). The RPCs are `Unimplemented` when no user store is
+  attached. The key directory (hashes, metadata, lockout state) is
+  DB-backed, so multiple IdP replicas share it.
+- `internal/config` — an `auth.api_key` section: `enabled` (default `true`),
+  `max_failures` (the failure count that triggers lockout),
+  `lockout_duration` (how long a lockout lasts; `0` = until reset), and an
+  optional `pepper` (mixed into the key hash).
+- `internal/api` — an `APIKeyClient` (a gRPC proxy to the IdP, like
+  `UserPassClient`) and the `/api/api-keys` handlers: `POST /api/api-keys`
+  (create for self, or for another user when the caller has the appropriate
+  role), `GET /api/api-keys` (list the caller's keys, or all when admin),
+  `GET /api/api-keys/{id}`, `PUT /api/api-keys/{id}` (edit/renew),
+  `POST /api/api-keys/{id}/rotate`, `DELETE /api/api-keys/{id}`. The create
+  and rotate responses return the plaintext key once.
+- `internal/auth` — the middleware accepts `Authorization: Bearer
+  <username>:<apikey>` as an alternative to a JWT: when the bearer value is of
+  the form `<username>:cdrom-…` it calls the IdP's `VerifyAPIKey` and, on
+  success, establishes the authenticated user (with the user's roles) plus the
+  key's pipeline scope in the request context; a miss is a 401. The pipeline
+  scope is carried on `auth.User` (e.g. a `PipelineScope` field) so
+  authorization can limit the caller to the key's pipelines.
+
+**Acceptance criteria.**
+- [ ] A user (whether they signed in via OIDC or username/password) can create
+      an API key; the response returns the plaintext `cdrom-…` key once, and
+      the stored record holds only its hash.
+- [ ] API keys are available to any user with the permission to create one, on
+      both the OIDC and the username/password (internal) sign-in paths.
+- [ ] A user with the appropriate role (e.g. `admin`) can create an API key for
+      another user; the key belongs to that user and its effective permissions
+      are that user's, limited to the key's pipeline scope.
+- [ ] A user can have any number of API keys.
+- [ ] A key's expiration date is validated to be at most one year in the
+      future; an expired key is rejected.
+- [ ] `Authorization: Bearer <username>:<apikey>` authenticates the caller as
+      the key's owner on any `/api/*` route that accepts a JWT; a JWT and an
+      API key are both accepted (both sign-in methods coexist).
+- [ ] The key's effective permissions are the owner's permissions limited to
+      the key's pipeline scope (a key scoped to pipeline X cannot act on
+      pipeline Y, even if the owner could).
+- [ ] A key can be edited/renewed (description, expiration, pipeline scope)
+      without changing its secret — the same `cdrom-…` value keeps working.
+- [ ] A key can be rotated: a new `cdrom-…` secret is generated and returned
+      once, and the previous secret stops working.
+- [ ] The plaintext key is never returned by list/get (only the prefix and
+      metadata); it is returned only by create and rotate.
+- [ ] After the configured number of failed API-key attempts for a user, that
+      user is locked out of API-key access (for the configured duration, or
+      until reset); password sign-in is unaffected.
+- [ ] API-key lockout is a separate mechanism from password-attempt lockout
+      (distinct counters/state).
+- [ ] `auth.api_key.enabled: false` disables API-key authentication and the
+      `/api/api-keys` endpoints (they respond 501).
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **The key is `cdrom-` + 64 random alphanumeric characters; only its hash is
+  stored.** The plaintext is generated by the IdP at create/rotate and returned
+  to the caller exactly once. The stored value is a SHA-512 hash of the key
+  (optionally mixed with a configured pepper), so a database leak does not
+  reveal usable keys. Because the key is high-entropy, a fast hash (not
+  bcrypt) is used so per-request verification stays cheap.
+- **The key is presented as `Authorization: Bearer <username>:<apikey>`.** The
+  middleware distinguishes it from a JWT by shape: a bearer value of the form
+  `<username>:cdrom-…` is an API-key credential, anything else is a JWT. The
+  username is the user's email (the same unique identifier as password login).
+  This keeps a single `Authorization` header for all three credential types
+  (OIDC JWT, password-login JWT, API key).
+- **The real logic lives in the IdP; the API is a thin proxy.** Mirroring
+  F-24, the API's `APIKeyClient` forwards create/get/list/update/rotate/delete
+  /verify to the IdP's gRPC surface (over mTLS when TLS is configured), so
+  only the API can manage or verify keys. The key directory (hashes, metadata,
+  lockout state) is persisted through the Database service, so multiple IdP
+  replicas share it.
+- **Effective permissions = owner's permissions ∩ key's pipeline scope.** The
+  key's pipeline scope (a set of pipeline IDs; an empty set means all
+  pipelines) is intersected with the owner's own role-based permissions (F-14).
+  A key can only narrow, never widen, what the owner can do. The scope is
+  carried on the authenticated principal so authorization checks apply it. Until
+  F-14 lands, the owner's "permissions" are their coarse role (admin/user) and
+  the key's pipeline scope is the additional narrowing.
+- **Edit/renew vs rotate.** `UpdateAPIKey` changes the description, expiration,
+  and/or pipeline scope without touching the key's secret (the same `cdrom-…`
+  value keeps working) — this is "renew". `RotateAPIKey` generates a brand-new
+  secret (a new hash), returns it once, and invalidates the previous one. Both
+  are supported.
+- **API-key lockout is per-user and distinct from password lockout.** Failed
+  `VerifyAPIKey` attempts (a wrong key, or a key whose owner does not match the
+  presented username) increment the user's `APIKeyFailedCount`; at the
+  configured `max_failures` the user's `APIKeyLockedUntil` is set (for
+  `lockout_duration`, or permanently when it is `0`) and the counter resets. A
+  successful verification clears the counter. While locked, every API-key
+  verification for that user fails (401) until the lockout expires or is reset.
+  This state is separate from any password-attempt lockout, so brute-forcing
+  API keys does not lock a user out of password sign-in, and vice versa. An
+  admin can reset a user's API-key lockout.
+- **New fields / RPCs.** `IDPAPIKey` model + `IDPUser` lockout fields (db);
+  `IDPAPIKey` message + `CreateAPIKey` / `GetAPIKey` / `ListAPIKeys` /
+  `UpdateAPIKey` / `RotateAPIKey` / `DeleteAPIKey` / `VerifyAPIKey` RPCs (db);
+  the matching IdP gRPC RPCs (idp); the `auth.api_key` config section; the
+  `/api/api-keys` HTTP handlers; and the API-key branch of the auth middleware
+  (auth).
+
+### F-26 · Service accounts
+
+**What.** A service account is a non-human identity for automation, independent
+of any user's login or employment lifecycle. It has assignable F-14 roles and
+**exactly two API-key slots**, numbered `1` and `2`, both usable concurrently
+and individually rotatable. Creation returns both plaintext keys; rotation
+returns only the replacement key for the selected slot. The Database service
+generates and hashes the keys; plaintext is never persisted and is returned
+only in these successful mutation responses for one-time display in the UI.
+An account can be temporarily **disabled** to stop access, or permanently
+**soft-deleted**, retaining its identity while zeroing out both key slots.
+
+**Why.** Integrations should not depend on a human's personal API key. Two
+independent credentials allow a client to switch to the other slot before
+rotating a key, avoiding downtime. Separate management permissions let an
+operator rotate credentials or disable access without also being able to
+create identities, delete them, or grant privileges.
+
+**Account model.**
+- `ServiceAccount`: immutable ID, unique immutable login name (separate from
+  the human email namespace), editable display name and description, role
+  memberships, `disabled`, nullable `deleted_at`, creation/update timestamps,
+  creator/updater principal IDs, and a revision for concurrent mutations.
+  An account has no password or interactive OIDC login.
+- `ServiceAccountKey`: account ID, slot (`1` or `2`), hash, non-secret display
+  prefix, generation/rotation timestamp, and a generation counter.
+  Enforce a unique `(service_account_id, slot)` and valid slot values. Every
+  account retains two slot records; callers cannot add a third or delete one.
+  Public DTOs expose slot metadata, never hashes.
+- Roles determine the account's own permissions, not the creator's. An
+  account with no roles has no authorized operations. Role bindings use the
+  same F-14 roles and resource scopes as human principals; no implicit admin
+  or default privileged role is assigned.
+- `deleted_at` is an irreversible tombstone, not a hard delete or a generic
+  soft-delete mechanism that hides the row from verification. Keep the name
+  reserved after deletion so a new identity cannot impersonate the old one.
+  Retain identity, role history, and audit references for attribution.
+
+**Key lifecycle and storage.**
+- Create the account, its role bindings, and both freshly generated keys in
+  one Database-service transaction. Use Go `crypto/rand` to generate each
+  independent secret (`cdrom-sa-` plus 64 uniformly random alphanumeric
+  characters); fail the whole operation if randomness, hashing, or storage
+  fails. A service-account-specific prefix distinguishes F-26 from F-25.
+- Store only SHA-512 hashes of these high-entropy keys and non-secret
+  metadata. Compare hashes in constant time. If a pepper is configured, use
+  HMAC-SHA-512 and keep the pepper out of the database; all Database replicas
+  must share it. Never return stored hashes to the API, IdP, or UI.
+- Unlike F-25, which proposes generation/hashing in the IdP, **F-26 key
+  generation, hashing, and verification belong to the Database service**.
+  The IdP coordinates identity operations over gRPC; it does not generate
+  these secrets or read their hashes. All persistence remains DB-owned.
+- Rotating slot `1` or `2` atomically replaces only that slot's hash and
+  metadata. The old value stops authenticating as soon as the transaction
+  commits; the other slot remains valid and unchanged. Never rotate both
+  slots implicitly. Use account revision checks to reject conflicting
+  rotations or lifecycle mutations rather than silently overwriting them.
+- Disable preserves both hashes and role bindings but rejects both keys.
+  Enable restores access with the same keys and current roles. Rotation is
+  allowed while disabled to support incident recovery, but does not enable
+  the account.
+- Delete atomically marks `deleted_at`, sets `disabled`, and **zeros out both
+  slots**: clear hashes, prefixes, and any credential-bearing fields to
+  empty values, leaving no usable verifier. Empty hashes must never match a
+  credential. Keep only non-secret lifecycle metadata. There is no restore,
+  enable, edit, role mutation, or rotation after deletion; repeated delete
+  is idempotent.
+- Plaintext keys exist only transiently for verification and committed
+  create/rotate responses. Never write them to logs, traces, audit events,
+  event streams, caches, or database records. Return secrets only after
+  commit. If a response is lost, keys cannot be retrieved; an authorized
+  caller must rotate the affected slot, not replay a stored plaintext result.
+  Require TLS outside local development, including internal gRPC hops.
+
+**Management permissions (F-14).** Roles contain granular permissions; the
+following are permission names, not hard-coded roles:
+
+| Permission | Allows |
+|------------|--------|
+| `service-accounts.can-view` | List/read account and slot metadata, including deleted accounts when explicitly requested |
+| `service-accounts.can-create` | Create an account and receive its two initial keys |
+| `service-accounts.can-edit` | Change display name/description only |
+| `service-accounts.can-rotate-keys` | Rotate either individual slot and receive that replacement key |
+| `service-accounts.can-disable` | Temporarily disable an account |
+| `service-accounts.can-enable` | Re-enable a disabled, non-deleted account |
+| `service-accounts.can-delete` | Permanently soft-delete an account and clear both key slots |
+| `service-accounts.can-assign-roles` | Add authorized role bindings |
+| `service-accounts.can-remove-roles` | Remove authorized role bindings |
+
+Enforce each permission server-side, including on direct gRPC management
+calls; UI visibility is not authorization. Resource-scoped permissions limit
+which accounts the caller can manage. Editing metadata cannot change roles,
+status, or keys. Creation with roles additionally requires
+`can-assign-roles`; creating without roles requires only `can-create`.
+Assignment must satisfy F-14 delegation rules: possessing
+`can-assign-roles` alone must not let a caller grant privileges or scopes they
+are not authorized to delegate. Removal requires `can-remove-roles`, not
+assignment permission. Service accounts can manage accounts only when
+explicitly granted these permissions and scopes; self-management must not
+bypass delegation checks. Authorize before generating or returning secrets.
+
+**Authentication and revocation.**
+- Accept `Authorization: Bearer <login-name>:cdrom-sa-...` on the UI-facing
+  HTTP API through the existing API-key authentication branch. Resolve a
+  distinct service-account principal (`service-account:<id>`) with its
+  current role bindings; never treat it as a human user or a job token.
+  F-26 does not replace worker/agent job-token authentication.
+- API middleware delegates verification to the IdP, which calls the
+  Database service to check account state and either slot's hash. Read state
+  and roles consistently on every request; do not exchange these keys for
+  long-lived JWTs or cache positive verification in a way that delays
+  revocation. Subsequent requests after committed disable/delete/rotation
+  or role removal must observe the change on every API replica.
+- Unknown identity, wrong key, disabled account, or deleted account returns
+  the same generic 401; an authenticated principal lacking a permission gets
+  403. Database/IdP outages fail closed with an explicit service error,
+  never an authenticated fallback.
+- Apply F-25-style throttling/lockout to the service-account identity across
+  both slots, with state separate from human accounts. Lockout is not
+  administrative disable; successful verification cannot undo disable.
+  Existing WebSocket/stream access must be revalidated and closed when
+  access is revoked; an already committed action is not rolled back.
+
+**Scope and API contract.**
+- `internal/models` — account, role bindings, two key slots, and lockout
+  state; register entities in `All()` and migrate via GORM `AutoMigrate`.
+- `proto/cdrom/db/v1/db.proto` + `internal/services/database` — transactional
+  create, metadata update, role assignment/removal, disable/enable, delete,
+  per-slot rotation, metadata queries, and credential verification RPCs.
+  Keep internal hash-bearing models separate from public protobuf messages.
+- `proto/cdrom/idp/v1/idp.proto` + `internal/idp` — matching identity and
+  management RPCs backed only by the Database service. Accept trusted caller
+  context from the authenticated API and enforce the same permission and
+  delegation checks; transport trust alone is not management authorization.
+- `internal/auth` + `internal/api` — service-account principal support and
+  thin HTTP-to-IdP proxies:
+
+| Endpoint | Response / behavior |
+|----------|---------------------|
+| `POST /api/service-accounts` | 201; account metadata plus `keys: [{slot: 1, key: "..."}, {slot: 2, key: "..."}]` |
+| `GET /api/service-accounts` | Metadata only; deleted accounts excluded unless explicitly requested |
+| `GET /api/service-accounts/{id}` | Metadata and both slots' non-secret metadata only |
+| `PATCH /api/service-accounts/{id}` | Update display name/description only; reject protected fields |
+| `POST /api/service-accounts/{id}/keys/{slot}/rotate` | Selected slot metadata plus its plaintext `key` once; invalid slot is 400 |
+| `POST /api/service-accounts/{id}/disable` | Disabled account metadata; no secrets |
+| `POST /api/service-accounts/{id}/enable` | Enabled account metadata; no secrets |
+| `POST /api/service-accounts/{id}/roles` | Assign validated role bindings; no secrets |
+| `DELETE /api/service-accounts/{id}/roles/{role_id}` | Remove the specified role binding; no secrets |
+| `DELETE /api/service-accounts/{id}` | 204 after tombstone and key clearing commit; never hard-delete |
+
+Mutations use revision checks (stale revisions return 409), with idempotent
+delete for an already-deleted account. Other mutations on a tombstone return
+410. Create/rotate responses use `Cache-Control: no-store`; GET/list/edit,
+errors, disable/enable, role changes, and delete never return plaintext keys.
+- `ui/` — list/detail and role management screens, distinct active/disabled/
+  deleted states, two individually labeled rotation controls, and confirmation
+  for destructive operations. Display/copy both keys after create and only
+  the selected replacement after rotate, with a one-time-display warning.
+  Do not persist secrets in browser storage, URLs, analytics, or client logs;
+  clear transient UI state on dismissal/navigation. Gate each control by its
+  corresponding permission, including enable separately from disable.
+- F-15 audit events — actor kind/ID, target account, action, key slot when
+  applicable, role changes, timestamp, and outcome. Record lifecycle and
+  management actions without keys or hashes; preserve attribution after
+  deletion.
+
+**Acceptance criteria.**
+- [ ] Creating an account persists two independent hashed keys atomically
+      and returns exactly two plaintext keys once; both authenticate as the
+      same service-account principal with its assigned roles.
+- [ ] Account GET/list and every non-key mutation expose metadata only;
+      stored hashes and plaintext keys never appear in logs/audit/events.
+- [ ] Rotating either slot returns only its new key, invalidates only its old
+      key, and leaves the other slot unchanged; slots outside `1`/`2` fail.
+- [ ] Disable rejects both keys on all replicas and closes existing live
+      access; enable restores the unchanged keys. Rotation while disabled
+      does not restore access.
+- [ ] Delete retains the account and both slot rows, sets the tombstone, and
+      empties both hashes/prefixes atomically. Both keys fail immediately;
+      deleted accounts cannot be restored or mutated and names cannot be reused.
+- [ ] Each management permission is tested independently on HTTP and gRPC;
+      `can-edit` cannot mutate roles/keys/status, and create-with-roles also
+      requires assignment permission. Unauthorized calls return no secrets.
+- [ ] Role assignment/removal uses F-14 delegation/resource checks and
+      affects subsequent authorization without waiting for token expiry.
+- [ ] Concurrent rotation/disable/delete tests reject stale revisions and
+      prove that deletion cannot race into retaining or recreating a key.
+- [ ] SQLite integration tests verify creation rollback, hash-only storage,
+      zeroed deletion, constant-time verifier use, lockout isolation,
+      cross-replica revocation, and fail-closed dependency errors.
+- [ ] UI tests verify permission-specific controls, slot-specific rotation,
+      one-time key display, transient secret cleanup, and all lifecycle states.
+
 ---
 
 ## Suggested build order
@@ -1532,6 +1873,14 @@ The phases are ordered so each builds on the last. A pragmatic first cut:
    [`HighAvailability.md`](HighAvailability.md).
 9. **F-24** — username/password authentication (a password sign-in path
    alongside OIDC, proxied to the IdP; enabled by default for local dev).
+10. **F-25** — API keys (per-user, per-pipeline-scoped, expiring, rotatable
+    credentials presented as `Bearer <username>:<apikey>`; the real logic lives
+    in the IdP, proxied by the API; a separate API-key lockout).
+
+11. **F-14 → F-25 → F-26** — service accounts (non-human role-bound
+    identities, two individually rotatable Database-generated keys,
+    granular management permissions, disable/enable, and irreversible
+    soft deletion with both key slots cleared). F-15 supplies audit history.
 
 ---
 
@@ -1563,3 +1912,5 @@ Tick each feature off as it lands.
 - [ ] F-22 Post-deploy verification & rollback
 - [x] F-23 High-availability control plane
 - [x] F-24 Username/password authentication
+- [ ] F-25 API keys
+- [ ] F-26 Service accounts
