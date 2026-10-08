@@ -1,6 +1,7 @@
 package idp
 
 import (
+	"crypto/rsa"
 	"log/slog"
 	"os"
 	"testing"
@@ -36,11 +37,11 @@ func TestKeyManagerGenerateAndJWKS(t *testing.T) {
 	if len(keys) != 1 {
 		t.Fatalf("JWKS has %d keys, want 1", len(keys))
 	}
-	if keys[0].Kty != "RSA" || keys[0].Alg != "RS256" || keys[0].Kid == "" {
+	if keys[0].Algorithm != "RS256" || keys[0].KeyID == "" {
 		t.Errorf("unexpected jwk: %+v", keys[0])
 	}
-	if keys[0].N == "" || keys[0].E == "" {
-		t.Error("jwk is missing n or e")
+	if _, ok := keys[0].Key.(*rsa.PublicKey); !ok {
+		t.Errorf("jwk key is %T, want *rsa.PublicKey", keys[0].Key)
 	}
 }
 
@@ -53,7 +54,7 @@ func TestKeyManagerPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("NewKeyManager: %v", err)
 	}
 	keys1, _ := km1.JWKS()
-	kid1 := keys1[0].Kid
+	kid1 := keys1[0].KeyID
 
 	// A fresh manager over the same store must reuse the persisted key.
 	km2, err := NewKeyManager(cfg, store, testLogger())
@@ -61,7 +62,7 @@ func TestKeyManagerPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("NewKeyManager (reload): %v", err)
 	}
 	keys2, _ := km2.JWKS()
-	if len(keys2) != 1 || keys2[0].Kid != kid1 {
+	if len(keys2) != 1 || keys2[0].KeyID != kid1 {
 		t.Fatalf("reload JWKS = %+v, want the same kid %q", keys2, kid1)
 	}
 }
@@ -74,7 +75,7 @@ func TestKeyManagerRotation(t *testing.T) {
 		t.Fatalf("NewKeyManager: %v", err)
 	}
 	keysBefore, _ := km.JWKS()
-	kidBefore := keysBefore[0].Kid
+	kidBefore := keysBefore[0].KeyID
 
 	// Wait until the current key is within its rotate-before window.
 	time.Sleep(250 * time.Millisecond)
@@ -86,10 +87,10 @@ func TestKeyManagerRotation(t *testing.T) {
 	}
 	var kidAfter string
 	for _, k := range keysAfter {
-		if k.Kid == kidBefore {
+		if k.KeyID == kidBefore {
 			continue
 		}
-		kidAfter = k.Kid
+		kidAfter = k.KeyID
 	}
 	if kidAfter == "" {
 		t.Fatal("rotation did not introduce a new key")

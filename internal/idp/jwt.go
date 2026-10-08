@@ -1,55 +1,50 @@
 package idp
 
 import (
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
+
+	jose "github.com/go-jose/go-jose/v4"
 )
 
-// jwkJSON is a single entry in a JSON Web Key Set (JWKS). Only the fields
-// needed to verify an RS256 signature are emitted.
-type jwkJSON struct {
-	Kty string `json:"kty"`
-	Use string `json:"use"`
-	Alg string `json:"alg"`
-	Kid string `json:"kid"`
-	N   string `json:"n"`
-	E   string `json:"e"`
-}
-
-// jwk renders the key's public part as a JWKS entry.
-func (k *signingKey) jwk() jwkJSON {
-	return jwkJSON{
-		Kty: "RSA",
-		Use: "sig",
-		Alg: "RS256",
-		Kid: k.kid,
-		N:   base64.RawURLEncoding.EncodeToString(k.key.PublicKey.N.Bytes()),
-		E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(k.key.PublicKey.E)).Bytes()),
+// jwk renders the key's public part as a JSON Web Key for the JWKS the IdP
+// serves. The key ID, algorithm, and use are stamped so a verifier can select
+// the right key and confirm the signature algorithm.
+func (k *signingKey) jwk() jose.JSONWebKey {
+	return jose.JSONWebKey{
+		Key:       k.key.Public(),
+		KeyID:     k.kid,
+		Algorithm: string(jose.RS256),
+		Use:       "sig",
 	}
 }
 
-// signRS256 builds a compact RS256 JWT over claims, signed with the key.
+// signRS256 builds a compact RS256 JWT over claims, signed with the key. The
+// JWT header carries the key ID (so a verifier selects the matching JWKS key)
+// and the "JWT" type.
 func (k *signingKey) signRS256(claims map[string]any) (string, error) {
-	header, err := json.Marshal(map[string]any{"alg": "RS256", "typ": "JWT", "kid": k.kid})
-	if err != nil {
-		return "", fmt.Errorf("idp: marshal jwt header: %w", err)
-	}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", fmt.Errorf("idp: marshal jwt claims: %w", err)
 	}
-	signingInput := base64.RawURLEncoding.EncodeToString(header) + "." +
-		base64.RawURLEncoding.EncodeToString(payload)
-	hashed := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, k.key, crypto.SHA256, hashed[:])
+	signer, err := jose.NewSigner(jose.SigningKey{
+		Algorithm: jose.RS256,
+		Key: &jose.JSONWebKey{
+			Key:       k.key,
+			KeyID:     k.kid,
+			Algorithm: string(jose.RS256),
+		},
+	}, (&jose.SignerOptions{}).WithType(jose.ContentType("JWT")))
+	if err != nil {
+		return "", fmt.Errorf("idp: create jwt signer: %w", err)
+	}
+	obj, err := signer.Sign(payload)
 	if err != nil {
 		return "", fmt.Errorf("idp: sign jwt: %w", err)
 	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+	token, err := obj.CompactSerialize()
+	if err != nil {
+		return "", fmt.Errorf("idp: serialize jwt: %w", err)
+	}
+	return token, nil
 }

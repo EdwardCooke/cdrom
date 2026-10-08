@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"cdrom/internal/config"
@@ -260,11 +261,11 @@ func (k *KeyManager) persist() error {
 
 // JWKS returns the JSON Web Keys to serve: the current key plus any
 // not-yet-expired predecessor keys.
-func (k *KeyManager) JWKS() ([]jwkJSON, error) {
+func (k *KeyManager) JWKS() ([]jose.JSONWebKey, error) {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	now := time.Now()
-	var out []jwkJSON
+	var out []jose.JSONWebKey
 	seen := make(map[string]bool)
 	if k.current != nil && k.current.expiresAt.After(now) {
 		out = append(out, k.current.jwk())

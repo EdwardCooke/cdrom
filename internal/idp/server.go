@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -205,7 +206,7 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+	writeJSON(w, http.StatusOK, jose.JSONWebKeySet{Keys: keys})
 }
 
 // handleAuthorize is the authorization endpoint. It validates the request,
