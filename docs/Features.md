@@ -1162,29 +1162,212 @@ a human sign-off.
 - [x] An approval timeout (the step's or job's timeout) fails the job
       (`timed_out`).
 - [x] Only authorized actors can approve (pairs with F-14; the actor is the
-      authenticated user, recorded on the decision).
+      authenticated user, recorded on the decision). F-27 extends "authorized"
+      to named approval groups, so a pipeline can reference a group instead of
+      individual users.
 
 ### F-14 · Roles & permissions (RBAC)
 
-**What.** Define roles (e.g. viewer, operator, admin) and bind users (from the
-OIDC identity) to them. Gate actions — trigger, cancel, approve, edit
-pipelines, manage secrets, every operation in the system should be a permission — by role.
+**What.** A full role-based access control layer: a catalog of fine-grained
+**permissions** (every operation in the system is a permission), **roles**
+(built-in plus user-defined **custom roles**, each a named set of permissions),
+and **bindings** that attach roles to principals (users, service accounts) —
+optionally scoped to individual pipelines. Authorization is deny-by-default: a
+principal can do exactly what its bound roles permit, nothing else.
 
-**Why.** A shared CD platform needs to distinguish who may do what.
+Roles reach a principal through several independent binding mechanisms, which
+compose (effective permissions are the union of all of them):
+
+- **User-directory roles** (F-24) — the built-in IdP stamps the user's
+  registered roles onto the token's `roles` claim; the API reads them from the
+  verified token. No per-request database lookup.
+- **JWT claim mapping** — for tokens from *any* IdP (including external
+  enterprise IdPs), a configurable claim (e.g. `groups`, `roles`, `scope`) is
+  read and its values mapped to role names, so group membership in the
+  corporate IdP drives Cdrom roles without Cdrom's user directory knowing the
+  user at all.
+- **Direct bindings** — role bindings stored in the Database service and
+  managed via the API; the mechanism for scoped grants (e.g. "operator on
+  pipeline X") and the only mechanism F-26 service accounts use.
+- **API keys** (F-25) — a key acts as its owner with the owner's permissions
+  further limited to the key's pipeline scope.
+
+**Why.** A shared CD platform must distinguish who may do what: a viewer
+should not trigger a production deploy, a pipeline owner should manage their
+pipeline without being a platform admin, and an enterprise should drive roles
+from its existing IdP groups instead of re-managing membership in Cdrom.
+
+**The permission model.**
+
+- **Permissions** are fine-grained, namespaced names
+  (`<area>.can-<action>`). The catalog is extensible — every feature
+  registers its permissions here (F-26 adds `service-accounts.*`, F-19 adds
+  `artifacts.can-promote`, …):
+
+  | Permission | Allows |
+  |------------|--------|
+  | `pipelines.can-view` | List/read pipelines, versions, runs, jobs, logs, artifacts |
+  | `pipelines.can-create` | Create pipelines |
+  | `pipelines.can-edit` | Edit a pipeline's definition (jobs, steps, triggers, params) |
+  | `pipelines.can-delete` | Delete a pipeline |
+  | `runs.can-trigger` | Trigger a run (manually or via webhook) |
+  | `runs.can-cancel` | Cancel a running run/job |
+  | `jobs.can-approve` | Approve a gated job (F-13) |
+  | `jobs.can-reject` | Reject a gated job (F-13) |
+  | `secrets.can-view` | See which secrets a pipeline declares (names only, never values) |
+  | `secrets.can-manage` | Create/update/delete secret values |
+  | `roles.can-manage` | Create/edit/delete custom roles |
+  | `roles.can-assign` | Grant/remove role bindings (subject to the delegation rules) |
+  | `users.can-manage` | Manage users and their roles (F-24) |
+  | `api-keys.can-manage` | Create/edit/rotate API keys (F-25) |
+  | `audit.can-view` | Query the audit log (F-15) |
+  | `workers.can-view` | View worker/agent status and the pending queue (F-16) |
+
+- **Roles** are named sets of permissions. **Built-in roles** ship with the
+  platform and cannot be deleted or have their permission sets edited:
+  - `admin` — every permission (the platform administrator).
+  - `operator` — view + trigger + cancel + approve/reject (runs a platform).
+  - `viewer` — read-only access to everything.
+  - `user` — the default role of a registered user (F-24): `viewer` plus
+    self-service (manage own API keys, own profile).
+  **Custom roles** are created by a principal with `roles.can-manage`: a name,
+  a description, and an explicit set of permissions (e.g. `pipeline-owner` =
+  view + edit + trigger + cancel + approve; `secret-keeper` = view + manage
+  secrets). A role may also **include** other roles (composition), so
+  `senior-operator` can be `operator` + `secrets.can-manage` without
+  duplicating the list.
+
+- **Bindings** attach a role to a principal, optionally **scoped to a
+  pipeline**: an unscoped binding grants the role's permissions
+  platform-wide; a pipeline-scoped binding grants them only for that pipeline
+  (a scoped `runs.can-trigger` triggers runs of pipeline X but not pipeline
+  Y). Scoping applies to resource-scoped permissions (pipelines, runs, jobs,
+  secrets); platform-wide permissions (role/user management, audit) are only
+  granted by unscoped bindings.
+
+**Delegation rules.** Granting a role is itself a permission
+(`roles.can-assign`), and it is bounded: a caller may bind a role to a
+principal only if the caller already holds that role (unscoped, or with a
+scope at least as wide as the one being granted). An operator cannot promote
+someone to admin, and a pipeline-scoped operator cannot grant platform-wide
+operator. Removing a binding requires `roles.can-assign` on the role being
+removed. `admin` is grantable only by an `admin`.
+
+**Nice-to-haves** (build after the core works):
+- **Role templates / config-as-code** — export/import role definitions as YAML
+  (pairs with F-21) so role sets are reviewable in source control.
+- **Per-pipeline owner shortcut** — creating a pipeline optionally binds the
+  creator a scoped `pipeline-owner` custom role on it.
+- **Permission introspection** — `GET /api/me/permissions` returns the
+  caller's effective permissions (per scope) so the UI hides/disables actions
+  the caller can't use instead of surfacing 403s.
+- **Role health view** — a UI screen listing roles, who holds each, and which
+  permissions each grants; flags roles that grant admin-level power.
+- **Just-in-time elevation** — a time-boxed elevation request ("grant me
+  operator for 1 hour", approved by an admin, auto-expiring binding) for
+  break-glass access.
 
 **Scope.**
-- `internal/models` — `Role`, `User`/membership (map OIDC subject/role claims → roles).
-- `internal/auth` — expose the authenticated principal (already available via
-  `auth.UserFromContext`) to the authorization check.
-- An authorization helper (in `internal/`) that the API handlers and gRPC
-  surface consult before mutating actions.
-- `internal/api/server.go` — enforce on the relevant endpoints.
+- `internal/models` — `Role` (name, description, built-in flag, permissions
+  JSON, included-role names) and `RoleBinding` (principal kind
+  `user`/`service-account`, principal id, role name, optional pipeline scope)
+  registered in `All()`.
+- `proto/cdrom/db/v1/db.proto` + `internal/services/database` — role and
+  binding CRUD RPCs (create/get/list/update/delete roles; add/list/remove
+  bindings).
+- `internal/authz` (new package) — the authorization engine:
+  `Check(ctx, principal, permission, resource) (bool, error)` and
+  `PermissionsFor(ctx, principal)`. Resolves a principal's roles from (a) the
+  token's `roles` claim, (b) the configured claim mapping, and (c) stored
+  bindings; expands role composition; filters by resource scope;
+  deny-by-default. Results are cached and invalidated on role/binding
+  mutation (via the shared event log, F-23, so every API replica sees the
+  change).
+- `internal/auth` — `User` already carries `Roles` from the token's `roles`
+  claim; add the claim-mapping step (read the configured claim, map values to
+  role names, append to `User.Roles`).
+- `internal/config` — an `auth.roles` section: `role_claim` (the claim to
+  read, e.g. `groups`; empty = claim mapping disabled) and `role_mappings`
+  (claim value → role name; unmapped values are ignored unless
+  `role_claim_as_names: true`, in which case each value is itself a role
+  name).
+- `internal/api/server.go` — enforce `authz.Check` on the relevant endpoints
+  before acting; new management endpoints: `GET/POST /api/roles`,
+  `GET/PUT/DELETE /api/roles/{name}`, `GET/POST /api/role-bindings`,
+  `DELETE /api/role-bindings/{id}`, `GET /api/me/permissions`.
+- `internal/api` (gRPC surface) — user-role authorization applies to the
+  UI-facing surface; the gRPC target surface keeps job-token auth, and the
+  IdP's API-only gRPC surface stays reachable only from the API via mTLS.
+- `ui/` — role management (custom role CRUD, permission checkboxes, role
+  inclusion), binding management (principal + role + optional pipeline
+  scope), and a "my permissions" view; hide/disable actions the caller lacks.
 
 **Acceptance criteria.**
-- [ ] A viewer cannot trigger or cancel a run; an operator can; an admin can
-      manage secrets/pipelines.
-- [ ] Authorization is enforced server-side on both the HTTP and gRPC surfaces.
-- [ ] The acting principal is recorded on the action (feeds F-15).
+- [ ] A `viewer` can read pipelines/runs/logs but cannot trigger, cancel,
+      approve, or edit anything (403 on each).
+- [ ] An `operator` can trigger and cancel runs and approve/reject gated jobs
+      (F-13), but cannot edit pipelines or manage secrets.
+- [ ] An `admin` can do everything, including manage roles, users, and
+      secrets.
+- [ ] A principal with `roles.can-manage` can create a custom role with an
+      arbitrary permission set; a principal bound to it gets exactly those
+      permissions.
+- [ ] A custom role that includes another role inherits its permissions
+      (composition); editing the included role changes the composed
+      permissions.
+- [ ] A pipeline-scoped binding grants the role's resource-scoped permissions
+      only for that pipeline (trigger on pipeline X succeeds, on pipeline Y
+      403s); platform-wide permissions are never granted by a scoped binding.
+- [ ] With `auth.roles.role_claim` set, a token whose claim carries a mapped
+      value is authorized as the mapped role — including tokens from an
+      external IdP that Cdrom's user directory knows nothing about.
+- [ ] Delegation: a non-admin cannot grant a role they do not hold, cannot
+      grant a wider scope than they hold, and `admin` is grantable only by an
+      admin.
+- [ ] Deny-by-default: a principal with no roles (and no mapped claims) can
+      do nothing (not even list pipelines).
+- [ ] Authorization is enforced server-side on both the HTTP and gRPC
+      surfaces; UI visibility is not authorization.
+- [ ] The acting principal is recorded on the action (feeds F-15); role and
+      binding mutations are themselves audited.
+- [ ] A role or binding change takes effect on every API replica without a
+      restart (cache invalidation via the event log).
+- [ ] `GET /api/me/permissions` returns the caller's effective permissions
+      per scope, and the UI uses it to disable actions the caller lacks.
+- [ ] Built-in roles cannot be deleted or have their permission sets edited;
+      custom roles can.
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **Deny-by-default, union of bindings.** A principal's effective permission
+  set is the union of the permissions of every role bound to it (via token
+  claim, claim mapping, or stored binding), expanded through role
+  composition, then filtered by resource scope per request. No implicit
+  permissions; no deny rules in v1 — a principal who should not have a
+  permission simply is not bound to the role that grants it.
+- **Roles live in the Database service; evaluation happens in the API.** Role
+  and binding rows are owned by the Database service (like the IdP's user
+  directory, F-24) so every API replica sees the same data; each API replica
+  evaluates locally with a short-lived cache invalidated by role/binding
+  mutation events on the shared event log (F-23), so a grant takes effect
+  within ~50 ms on every pod.
+- **The token's `roles` claim is the fast path; stored bindings and claim
+  mapping are the general path.** For users known to the built-in IdP, roles
+  are stamped onto the token at login (F-24) and need no DB lookup per
+  request. Stored bindings and claim mapping cover the rest: external-IdP
+  users, service accounts (F-26), and scoped grants. The mechanisms compose —
+  a principal can have token-stamped and bound roles at once.
+- **Claim mapping is config, not data.** `auth.roles.role_claim` +
+  `role_mappings` are deployment config (env/config file), so an enterprise
+  points Cdrom at its IdP's group claim without per-group database rows; the
+  mapping is static and reviewed with the rest of the config.
+- **Scoping is per-pipeline only in v1.** The resource dimension is the
+  pipeline (which subsumes its runs, jobs, and secrets); worker groups and
+  environments (F-17) can be added as further scope dimensions later.
+  Platform-wide permissions (role/user management, audit) ignore scope.
+- **API keys and service accounts plug in without new machinery.** A key's
+  effective permissions are the owner's role-derived permissions ∩ the key's
+  pipeline scope (F-25); a service account's are its bound roles' permissions
+  (F-26). Both are just principals with a role set.
 
 ### F-15 · Audit log
 
@@ -1853,6 +2036,128 @@ errors, disable/enable, role changes, and delete never return plaintext keys.
 - [ ] UI tests verify permission-specific controls, slot-specific rotation,
       one-time key display, transient secret cleanup, and all lifecycle states.
 
+### F-27 · Approval groups (named approver sets)
+
+**What.** Named **approval groups** — sets of users that a pipeline's
+`approval` step (F-13) can reference — so a pipeline declares *who may
+approve* by group instead of hard-coding individual users. An approval step
+gains an `approvers` param: a list of references, each either a **group name**
+(e.g. `group:release-managers`) or an **individual user** (email/subject). The
+gate is authorized for the union of every member of the referenced groups plus
+the named individuals; a decision is accepted only from a user in that set who
+also holds the F-14 `jobs.can-approve` / `jobs.can-reject` permission.
+
+**Why.** Today an approval gate is authorized purely by F-14 permission, so a
+pipeline can't say "only the release managers may approve this prod deploy"
+without making them all admins or enumerating users in the pipeline. Teams
+reorganize — people join and leave a team — and a pipeline that names
+individuals goes stale. A group is a stable, centrally-managed handle the
+pipeline points at; membership changes propagate without touching any pipeline
+or version snapshot.
+
+**The model.**
+- **ApprovalGroup** — a named set of users: a unique `name`, a `description`,
+  and a `members` list (user subjects/emails). It is a set of *people*,
+  distinct from an F-14 **role** (a set of *permissions*); the two overlap only
+  in that a group's membership can be derived from a role (a nice-to-have
+  below). Stored in the Database service (like the IdP's user directory, F-24)
+  so every API replica shares the same groups.
+- **`approvers` param** on an `approval` step — a list of references. A
+  reference is `group:<name>` or a bare user identifier. When the param is
+  absent or empty, the gate falls back to F-13 behavior: anyone with the
+  relevant F-14 permission may decide (backward compatible).
+- **Authorization at decision time** — when a user calls approve/reject, the
+  API resolves the gate's authorized set (members of each referenced group ∪
+  named individuals) and accepts the decision only if the actor is in that set
+  *and* holds the F-14 permission. Membership is resolved when the decision
+  arrives, not at dispatch, so adding or removing a member takes effect for
+  gates already waiting.
+
+**Nice-to-haves** (build after the core works):
+- **Reference a role** — an `approvers` entry of `role:<name>` authorizes
+  everyone currently holding that F-14 role, bridging groups and roles without
+  maintaining a separate member list.
+- **N-of-M quorum** — a `quorum` param (K) makes the gate pass only after K
+  *distinct* authorized approvers have approved, for high-blast-radius prod
+  gates ("two of the release managers must sign off").
+- **Membership from an IdP claim** — a group whose members are auto-derived
+  from a claim value (e.g. everyone whose `groups` claim includes
+  `release-managers`), so membership tracks the corporate IdP without manual
+  edits (pairs with F-14's claim mapping).
+- **Pipeline default approvers** — a pipeline-level default `approvers` set
+  that an `approval` step inherits unless it overrides, so a team sets its
+  approvers once per pipeline rather than per step.
+- **UI group management + prompt** — a screen to create/edit groups and their
+  members; the approval prompt (F-13) shows which group(s)/individuals the gate
+  is waiting on.
+
+**Scope.**
+- `internal/models` — an `ApprovalGroup` entity (name, description, members
+  JSON) registered in `All()`.
+- `proto/cdrom/db/v1/db.proto` + `internal/services/database` — approval-group
+  CRUD RPCs (create/get/list/update/delete) and a `ListApprovalGroupMembers`
+  (or fold members into the group message) the API uses to resolve a gate's
+  authorized set.
+- `internal/stephandlers/approval.go` — read the `approvers` param and carry
+  the references onto the gate (the handler still reports `awaiting_approval`
+  and polls; it does not itself authorize — the API does).
+- `internal/approval` + `internal/api` — the gate carries the `approvers`
+  references; `resolveApproval` (F-13) resolves the authorized set and rejects
+  a decision from an actor outside it (403) or lacking the F-14 permission.
+- `internal/services/scheduler` — `ResolveApproval` validates the actor against
+  the gate's authorized set (group members ∪ individuals) before persisting the
+  decision.
+- `internal/api/server.go` — `GET/POST /api/approval-groups`,
+  `GET/PUT/DELETE /api/approval-groups/{name}` (gated by an F-14 permission,
+  e.g. `roles.can-manage` or a new `approvals.can-manage`); enforce the
+  membership + permission check in `resolveApproval`.
+- `ui/` — approval-group management (create/edit, member list) and an approval
+  prompt that names the waiting group(s)/individuals.
+
+**Design decisions (folded into AGENTS.md / Architecture.md).**
+- **A group is people; a role is permissions.** F-14 roles grant *what you may
+  do*; an approval group names *who may act on a specific gate*. They are
+  separate concepts that compose: the actor must be in the gate's authorized
+  set (group/individual) **and** hold the F-14 permission. This keeps a
+  pipeline's approval policy ("release managers") independent of platform-wide
+  RBAC, and lets the same group be referenced by many pipelines.
+- **Membership is resolved at decision time, not dispatch time.** The gate
+  stores the `approvers` references (group names / individuals), not a frozen
+  member list, so a member added or removed mid-flight is reflected the next
+  time a decision is checked. This mirrors how F-14 role/binding changes take
+  effect on every replica without a restart.
+- **Backward compatible with F-13.** No `approvers` param → the existing
+  behavior (anyone with the F-14 permission decides). Adding the param is
+  opt-in per step, so existing pipelines and version snapshots are unaffected.
+- **Groups live in the Database service; the API resolves and enforces.** Group
+  rows are owned by the Database service (shared across replicas, F-24-style);
+  the API reads members when a decision arrives and is the only place that
+  authorizes, so the check is identical on every replica.
+- **Quorum (nice-to-have) is a gate property, not a step re-run.** When
+  `quorum: K` is set the gate tracks distinct approving actors and reports
+  resolved only at K; a rejection by any authorized actor still fails the job
+  immediately.
+
+**Acceptance criteria.**
+- [ ] A pipeline's `approval` step can reference a named group; a member of
+      that group can approve, and a non-member gets 403.
+- [ ] `approvers` can mix group names and individual users; the authorized set
+      is their union (a member of any referenced group or a named individual
+      may decide).
+- [ ] With no `approvers` param, behavior is unchanged from F-13 (anyone with
+      the F-14 `jobs.can-approve` / `jobs.can-reject` permission decides).
+- [ ] A decision requires both group/individual membership **and** the F-14
+      permission (a group member without the permission is still rejected).
+- [ ] Adding or removing a group member takes effect for a gate already
+      `awaiting_approval` (membership resolved at decision time).
+- [ ] Approval groups are manageable (create/read/update/delete) via the API
+      and UI, gated by an F-14 permission; group mutations are audited (F-15).
+- [ ] The UI approval prompt shows which group(s)/individuals the gate is
+      waiting on.
+- [ ] (Nice-to-have) `role:<name>` in `approvers` authorizes everyone holding
+      that role; `quorum: K` passes the gate only after K distinct authorized
+      approvers.
+
 ---
 
 ## Suggested build order
@@ -1881,6 +2186,9 @@ The phases are ordered so each builds on the last. A pragmatic first cut:
     identities, two individually rotatable Database-generated keys,
     granular management permissions, disable/enable, and irreversible
     soft deletion with both key slots cleared). F-15 supplies audit history.
+12. **F-13 → F-14 → F-27** — approval groups (named approver sets an
+    `approval` step references instead of individual users; membership
+    resolved at decision time; optional role references and N-of-M quorum).
 
 ---
 
@@ -1914,3 +2222,4 @@ Tick each feature off as it lands.
 - [x] F-24 Username/password authentication
 - [ ] F-25 API keys
 - [ ] F-26 Service accounts
+- [ ] F-27 Approval groups (named approver sets)
