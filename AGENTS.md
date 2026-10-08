@@ -5,9 +5,11 @@
 > (human or AI) starts from the same shared context.
 >
 > **Deep detail lives in `docs/`:** `docs/Architecture.md` (system design),
-> `docs/Features.md` (per-feature specs F-01…F-23 with acceptance criteria), and
-> `docs/HighAvailability.md` (the F-23 control plane). This file is the concise
-> orientation + conventions; consult the docs for the full spec of any feature.
+> `docs/features/` (one file per feature, F-01…F-28, each with acceptance
+> criteria), `docs/Features.md` (the summary index: baseline, per-phase feature
+> list, build order, checklist), and `docs/HighAvailability.md` (the F-23
+> control plane). This file is the concise orientation + conventions; consult
+> the docs for the full spec of any feature.
 
 ## Project Overview
 
@@ -129,7 +131,8 @@ value directly via `POST /api/secrets/encrypt` (body `{"value": "…"}` →
 declaration stores.
 
 **Feature index.** The detailed spec, acceptance criteria, and RPC/field changes
-for each feature are in `docs/Features.md`. Summary:
+for each feature are in `docs/features/` (one file per feature; `docs/Features.md`
+is the summary index). Summary:
 
 | ID | Feature |
 |----|---------|
@@ -155,7 +158,7 @@ for each feature are in `docs/Features.md`. Summary:
 | F-27 | Roadmap: approval groups (named sets of users an `approval` step (F-13) references via an `approvers` param instead of individual users; a decision is accepted only from a member of a referenced group / named individual who also holds the F-14 approve/reject permission; membership resolved at decision time; optional role references and N-of-M quorum; not yet implemented) |
 | F-28 | Roadmap: SCIM 2.0 user provisioning (a service-provider endpoint on the built-in IdP so an external IdP like Azure AD/Entra ID provisions, updates, and deprovisions users and groups into the IdP's user directory; SCIM Groups map to F-14 roles / F-27 approval groups; **users are soft-deleted, never hard-deleted**, so audit (F-15) / approval (F-13) / trigger (F-07/F-09) actor references stay resolvable after deprovisioning; provisioning is mutually exclusive — with SCIM **enabled** the corporate IdP is the sole source of users (no auto-provisioning on login), with SCIM **disabled** the IdP auto-provisions users just-in-time on first OIDC login; not yet implemented) |
 
-Cross-cutting execution concepts (full detail in `docs/Features.md` /
+Cross-cutting execution concepts (full detail in `docs/features/` /
 `docs/Architecture.md`):
 
 - **Fan-out (worker groups).** A job targeting a group runs on **every** worker
@@ -258,7 +261,8 @@ internal/
               gRPC API-only surface for job-token minting + user management; state via Database service)
 proto/        protobuf definitions (proto/cdrom/<service>/v1/)
 ui/           React frontend (separate from the Go module) + ui/tests/
-docs/         documentation (Architecture.md, Features.md, HighAvailability.md)
+docs/         documentation (Architecture.md, Features.md summary index,
+              features/ per-feature specs, HighAvailability.md)
 scripts/      build/release scripts (genproto.sh regenerates gRPC code)
 ```
 
