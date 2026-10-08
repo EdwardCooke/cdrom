@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 
 	"cdrom/internal/config"
+	idppb "cdrom/internal/gen/cdrom/idp/v1"
 )
 
 // JobTokenAuth verifies the job tokens the API hands to execution targets and
@@ -36,9 +36,9 @@ import (
 type JobTokenAuth struct {
 	verifier  *oidc.IDTokenVerifier
 	audiences []string
-	idpURL    string // base URL of the IdP, e.g. http://127.0.0.1:7104
+	idpURL    string          // base URL of the IdP (HTTP), for OIDC discovery, e.g. http://127.0.0.1:7104
+	idp       idppb.IdPClient // gRPC client for minting job tokens (over mTLS)
 	logger    *slog.Logger
-	http      *http.Client
 	// exchangedTokenLifetime is the default lifetime of an exchanged job token
 	// (one a job requests for a different audience, e.g. an outside resource).
 	// Unlike the main job token, an exchanged token is a scoped credential for
@@ -57,11 +57,14 @@ type JobTokenAuth struct {
 const jobTokenLifetime = 7 * 24 * time.Hour
 
 // NewJobTokenAuth builds the job-token verifier (via OIDC discovery against
-// the IdP) and the mint client. It performs a network call to the IdP. The
-// client is used for both discovery and minting; when it is an mTLS client
-// (see grpcutil.HTTPClient) the API authenticates to the IdP's job-token
-// endpoint with its client certificate. A nil client uses the default.
-func NewJobTokenAuth(ctx context.Context, cfg config.GRPCAuthConfig, client *http.Client, logger *slog.Logger) (*JobTokenAuth, error) {
+// the IdP's HTTP surface) and the mint client (the IdP's gRPC service). It
+// performs a network call to the IdP for discovery. The client is the HTTP
+// client used for discovery; when it is an mTLS client (see
+// grpcutil.HTTPClient) it can reach an IdP that serves TLS. idp is the gRPC
+// client the API uses to mint job tokens; when TLS is configured it
+// authenticates to the IdP with its mTLS client certificate, so only the API
+// can mint job tokens. A nil client uses the default.
+func NewJobTokenAuth(ctx context.Context, cfg config.GRPCAuthConfig, client *http.Client, idp idppb.IdPClient, logger *slog.Logger) (*JobTokenAuth, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -86,8 +89,8 @@ func NewJobTokenAuth(ctx context.Context, cfg config.GRPCAuthConfig, client *htt
 		verifier:               verifier,
 		audiences:              cfg.Audiences,
 		idpURL:                 base,
+		idp:                    idp,
 		logger:                 logger,
-		http:                   client,
 		exchangedTokenLifetime: cfg.EffectiveExchangedTokenLifetime(),
 	}, nil
 }
@@ -162,65 +165,42 @@ func (a *JobTokenAuth) Exchange(ctx context.Context, jobID, pipelineID int64, ta
 	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, audience, expiresIn)
 }
 
-// mint requests a job token from the IdP's job_token grant. When audience is
-// non-empty the token is stamped for that audience; otherwise the IdP uses
-// its default job-token audiences. The trigger that started the run and the
-// upstream OIDC claims a webhook caller presented (JSON-encoded, preserving
-// each claim's structure) are passed so the IdP can stamp them onto the token.
-// expiresIn is the token's lifetime (the IdP stamps exp to now + expiresIn);
-// it is a long placeholder for the main job token and a short window for an
-// exchanged token.
+// mint requests a job token from the IdP's gRPC MintJobToken RPC (over mTLS
+// when TLS is configured). When audience is non-empty the token is stamped
+// for that audience; otherwise the IdP uses its default job-token audiences.
+// The trigger that started the run and the upstream OIDC claims a webhook
+// caller presented (JSON-encoded, preserving each claim's structure) are
+// passed so the IdP can stamp them onto the token. The token's issuer is the
+// API's configured IdP base URL (a.idpURL), so the minted token verifies
+// against the API's OIDC discovery document. expiresIn is the token's
+// lifetime (the IdP stamps exp to now + expiresIn); it is a long placeholder
+// for the main job token and a short window for an exchanged token.
 func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType string, upstreamClaims map[string]any, audience string, expiresIn time.Duration) (string, error) {
-	form := url.Values{
-		"grant_type": {"job_token"},
-		"job_id":     {strconv.FormatInt(jobID, 10)},
-	}
-	if pipelineID != 0 {
-		form.Set("pipeline_id", strconv.FormatInt(pipelineID, 10))
-	}
-	if targetGroup != "" {
-		form.Set("target_group", targetGroup)
-	}
-	if triggerName != "" {
-		form.Set("trigger_name", triggerName)
-	}
-	if triggerType != "" {
-		form.Set("trigger_type", triggerType)
+	req := &idppb.MintJobTokenRequest{
+		JobId:       strconv.FormatInt(jobID, 10),
+		PipelineId:  pipelineID,
+		TargetGroup: targetGroup,
+		Audience:    audience,
+		TriggerName: triggerName,
+		TriggerType: triggerType,
+		Issuer:      a.idpURL,
 	}
 	if len(upstreamClaims) > 0 {
 		if encoded, err := json.Marshal(upstreamClaims); err == nil {
-			form.Set("upstream_claims", string(encoded))
+			req.UpstreamClaims = string(encoded)
 		}
 	}
-	if audience != "" {
-		form.Set("audience", audience)
-	}
 	if expiresIn > 0 {
-		form.Set("expires_in", expiresIn.String())
+		req.ExpiresIn = expiresIn.String()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.idpURL+"/token", strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("api: build mint request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := a.http.Do(req)
+	resp, err := a.idp.MintJobToken(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("api: mint job token: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("api: mint job token: status %d", resp.StatusCode)
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("api: decode mint response: %w", err)
-	}
-	if out.AccessToken == "" {
+	if resp.GetAccessToken() == "" {
 		return "", fmt.Errorf("api: mint response has no access_token")
 	}
-	return out.AccessToken, nil
+	return resp.GetAccessToken(), nil
 }
 
 // normalizeIDPURL ensures the IdP address is a full URL with a scheme, so it

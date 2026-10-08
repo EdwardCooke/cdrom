@@ -2,8 +2,6 @@ package database
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2034,13 +2032,8 @@ func (s *Server) CreateUser(ctx context.Context, req *dbpb.CreateIDPUserRequest)
 		return nil, grpcErr(err)
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// New user: mint a stable string ID and insert.
-		id, err := newUserID()
-		if err != nil {
-			return nil, grpcErr(err)
-		}
+		// New user: the database assigns the ID (auto-increment primary key).
 		user := &models.IDPUser{
-			ID:           id,
 			FirstName:    u.GetFirstName(),
 			LastName:     u.GetLastName(),
 			Email:        u.GetEmail(),
@@ -2074,7 +2067,11 @@ func (s *Server) CreateUser(ctx context.Context, req *dbpb.CreateIDPUserRequest)
 func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*dbpb.IDPUser, error) {
 	query := s.db.WithContext(ctx).Model(&models.IDPUser{})
 	if req.GetId() != "" {
-		query = query.Where("id = ?", req.GetId())
+		id, err := parseUserID(req.GetId())
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where("id = ?", id)
 	} else if req.GetEmail() != "" {
 		query = query.Where("email = ?", req.GetEmail())
 	} else {
@@ -2111,8 +2108,12 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 	if u == nil || u.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
+	id, err := parseUserID(u.GetId())
+	if err != nil {
+		return nil, err
+	}
 	var user models.IDPUser
-	if err := s.db.WithContext(ctx).Where("id = ?", u.GetId()).First(&user).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, status.Error(codes.NotFound, "user not found")
 		}
@@ -2145,8 +2146,12 @@ func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserReque
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
+	id, err := parseUserID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
 	var user models.IDPUser
-	if err := s.db.WithContext(ctx).Where("id = ?", req.GetId()).First(&user).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, status.Error(codes.NotFound, "user not found")
 		}
@@ -2158,15 +2163,14 @@ func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserReque
 	return &emptypb.Empty{}, nil
 }
 
-// newUserID returns a random 16-hex-character user identifier (the token's
-// subject). It is stable for the life of the user and unique with
-// overwhelming probability.
-func newUserID() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("database: generate user id: %w", err)
+// parseUserID parses a user ID (the string form used on the wire) into the
+// database's numeric primary key. A malformed ID is an InvalidArgument error.
+func parseUserID(id string) (uint, error) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, status.Error(codes.InvalidArgument, "invalid user id: "+id)
 	}
-	return hex.EncodeToString(b), nil
+	return uint(n), nil
 }
 
 // nonNilRoles returns a non-nil slice so that an empty role set is stored as
@@ -3510,7 +3514,7 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 
 func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
 	return &dbpb.IDPUser{
-		Id:           user.ID,
+		Id:           strconv.FormatUint(uint64(user.ID), 10),
 		FirstName:    user.FirstName,
 		LastName:     user.LastName,
 		Email:        user.Email,

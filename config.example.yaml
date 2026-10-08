@@ -84,35 +84,38 @@ db:
 #  # token_audience: cdrom-api
 
 # Local OIDC identity provider (used by the idp binary, cmd/idp). It acts as a
-# JWT issuer for the API's OIDC authentication: it serves the discovery doc, a
-# JWKS, an authorization endpoint (authorization-code + PKCE), and a token
-# endpoint that mints RS256 ID tokens. It signs with an RSA key and rotates it
-# automatically when the key is within rotate_before of its expiry; the JWKS
-# keeps serving predecessor keys until they expire so clients keep verifying
-# older tokens.
+# JWT issuer for the API's OIDC authentication. It serves the standard OIDC
+# surface over HTTP (the discovery doc, a JWKS, an authorization endpoint
+# (authorization-code + PKCE), and a token endpoint that mints RS256 ID
+# tokens) and its API-only surface over gRPC (job-token minting and user
+# management). It signs with an RSA key and rotates it automatically when the
+# key is within rotate_before of its expiry; the JWKS keeps serving predecessor
+# keys until they expire so clients keep verifying older tokens.
 #
-# The IdP's state — its signing keyring and its OIDC authorization codes — is
-# persisted through the Database service (db_address), not on the IdP's local
-# filesystem. This makes the IdP horizontally scalable: multiple IdP replicas
-# share the same keys and codes and can run behind a load balancer. The IdP
-# therefore requires the db service to be running.
-# Point the API's auth.issuer at this IdP's address (default 127.0.0.1:7104).
+# The IdP's state — its signing keyring, its OIDC authorization codes, and its
+# user directory — is persisted through the Database service (db_address), not
+# on the IdP's local filesystem. This makes the IdP horizontally scalable:
+# multiple IdP replicas share the same keys, codes, and users and can run
+# behind a load balancer. The IdP therefore requires the db service to be
+# running. Point the API's auth.issuer at this IdP's HTTP address (default
+# 127.0.0.1:7104) and the API's idp_grpc_address at its gRPC address (default
+# 127.0.0.1:7106).
 #
-# The IdP also mints job tokens on the job_token grant. When the tls section
-# is set the IdP serves TLS and the job_token grant requires the caller to
-# present a CA-signed client certificate (the API's mTLS identity); in
-# plaintext mode the grant is open. audiences are the default audience values
-# stamped on minted job tokens (a mint request may override them).
+# The IdP's gRPC surface (job-token minting and user management) is reached
+# only by the API, which authenticates with its mTLS client certificate when the
+# tls section is set — so only a CA-signed client (the API) can mint job tokens
+# or manage users. audiences are the default audience values stamped on minted
+# job tokens (a mint request may override them).
 #
-# The IdP also hosts the user directory for username/password authentication
-# (POST /register, POST /login, and the /users management endpoints). Its
-# state — the user directory (profiles, bcrypt password hashes, and roles) —
-# is persisted through the Database service, like its signing keys and auth
+# The IdP also hosts the user directory for username/password authentication.
+# Its state — the user directory (profiles, bcrypt password hashes, and roles)
+# — is persisted through the Database service, like its signing keys and auth
 # codes, so multiple IdP replicas share the same users. The API's /api/login
-# and /api/register proxy to these endpoints; the IdP verifies the password
-# and mints an OIDC token stamped with the user's roles.
+# and /api/register proxy to the IdP's gRPC user operations; the IdP verifies
+# the password and mints an OIDC token stamped with the user's roles.
 #idp:
 #  issuer: http://127.0.0.1:7104
+#  grpc_address: 127.0.0.1:7106   # gRPC API-only surface (job tokens + users)
 #  key_lifetime: 2160h      # 90 days
 #  rotate_before: 336h      # rotate 14 days before expiry
 #  token_lifetime: 1h
@@ -120,13 +123,19 @@ db:
 #  # Default audience values stamped on minted job tokens.
 #  audiences: [cdrom-api]
 
+# gRPC address of the IdP's API-only surface (job-token minting and user
+# management). The API dials it (over mTLS when the tls section is set) to
+# mint job tokens and to proxy the UI's username/password requests. Used by
+# the api binary; other binaries ignore it. Defaults to 127.0.0.1:7106.
+#idp_grpc_address: 127.0.0.1:7106
+
 # Job-token authentication on the API's gRPC surface (used by workers and
 # agents). Disabled by default: when enabled is false (or unset) the API
 # accepts gRPC calls without a job token. When enabled, the API mints a job
-# token from the IdP (via the job_token grant, authenticating with its mTLS
-# client certificate) for every job it dispatches or hands to an agent, and
-# requires callers to present it as a Bearer token on ReportJobStatus and
-# artifact operations. The token is scoped to a single job; a token for one
+# token from the IdP (via the IdP's gRPC MintJobToken RPC, authenticating with
+# its mTLS client certificate) for every job it dispatches or hands to an
+# agent, and requires callers to present it as a Bearer token on ReportJobStatus
+# and artifact operations. The token is scoped to a single job; a token for one
 # job is rejected on another. The main job token's exp is a long placeholder
 # (a week) so it effectively never expires: the API gates its validity on the
 # job's live status in the database, so a token is invalidated the moment the
@@ -134,6 +143,10 @@ db:
 # audience (e.g. an outside resource it must call) via the ExchangeJobToken
 # RPC; an exchanged token has a short lifetime (the request's expires_in, or
 # the default below when unset).
+#
+# idp_address is the IdP's HTTP address (for OIDC discovery of the IdP's JWKS,
+# used to verify job tokens); the minting itself goes to the IdP's gRPC surface
+# (idp_grpc_address).
 #grpc_auth:
 #  enabled: true
 #  idp_address: http://127.0.0.1:7104

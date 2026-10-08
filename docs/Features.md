@@ -745,7 +745,7 @@ just by humans.
   the wildcard-aware claim matcher.
 - `internal/api/jobsauth.go` — mints/exchanges job tokens stamped with the
   job's `trigger_name` / `trigger_type` and `upstream_*` claims.
-- `internal/idp` — the `job_token` grant stamps `trigger_name`,
+- `internal/idp` — the `MintJobToken` gRPC RPC stamps `trigger_name`,
   `trigger_type`, and `upstream_*` claims onto the token it mints.
 
 **Acceptance criteria.**
@@ -866,8 +866,8 @@ just by humans.
   list (e.g. GitLab's `user_identities` or `job_config`) is stamped as that
   object/list, not flattened to a string. The API reads these off the job
   (they are denormalized onto the job instance at run creation) and passes
-  them to the IdP's `job_token` grant, which stamps them onto the RS256 token
-  it signs. `ExchangeJobToken` re-stamps the same trigger context onto the
+  them to the IdP's `MintJobToken` gRPC RPC, which stamps them onto the RS256
+  token it signs. `ExchangeJobToken` re-stamps the same trigger context onto the
   exchanged token.
 - **New RPCs / fields.** `Database.TriggerRun` / `Scheduler.TriggerRun`;
   `Trigger` message + `TriggerType` enum (db); `triggers` on `Pipeline`,
@@ -1455,12 +1455,13 @@ pods per cluster, dual cluster).
 **What.** A password-based sign-in path alongside OIDC, so the UI can be
 exercised in local development without a full OIDC client. The API exposes
 unauthenticated `POST /api/login` and `POST /api/register` (plus admin-only
-`/api/users` for role management) that **proxy to the IdP**, where the real
-logic lives: the IdP verifies the password against a stored bcrypt hash and,
-on success, mints an OIDC token for the user (stamped with the user's roles).
-The API is a pure proxy — it never sees the password hash or verifies
-credentials itself. The returned token is the same OIDC token the API already
-verifies on every other request (against the IdP's JWKS).
+`/api/users` for role management) that **proxy to the IdP over gRPC** (the
+IdP's API-only surface, over mTLS when TLS is configured), where the real logic
+lives: the IdP verifies the password against a stored bcrypt hash and, on
+success, mints an OIDC token for the user (stamped with the user's roles). The
+API is a pure proxy — it never sees the password hash or verifies credentials
+itself. The returned token is the same OIDC token the API already verifies on
+every other request (against the IdP's JWKS).
 
 **Why.** The OIDC authorization-code + PKCE flow is the right production path
 but is awkward to drive from a browser-less local setup. A password login
@@ -1475,15 +1476,16 @@ identity provider is used.
   `UpdateIDPUser` / `DeleteIDPUser` RPCs. The user directory (profiles,
   bcrypt password hashes, roles) is persisted through the Database service, so
   multiple IdP replicas share it.
-- `internal/idp` — `UserStore` (DB-backed + in-memory) and the user endpoints:
-  `POST /register` (hash the password with bcrypt, store the user; the first
-  user becomes an `admin`, later users get the default `user` role),
-  `POST /login` (verify the password, mint an OIDC token stamped with the
-  user's roles), and `GET/POST/PUT/DELETE /users` (role management). The
-  endpoints are disabled (501) when no user store is attached.
+- `proto/cdrom/idp/v1/idp.proto` + `internal/idp` — the IdP's gRPC API-only
+  surface (`GRPCServer`): `Register` (hash the password with bcrypt, store the
+  user; the first user becomes an `admin`, later users get the default `user`
+  role), `Login` (verify the password, mint an OIDC token stamped with the
+  user's roles), and `ListUsers` / `CreateUser` / `UpdateUser` / `DeleteUser`
+  (role management). The RPCs are disabled (`Unimplemented`) when no user store
+  is attached. The user store is DB-backed + in-memory.
 - `internal/config` — `auth.userpass_enabled` (default `true`;
   `CDROM_AUTH_USERPASS_ENABLED`).
-- `internal/api` — `UserPassClient` (an HTTP proxy to the IdP) and the
+- `internal/api` — `UserPassClient` (a gRPC proxy to the IdP) and the
   `/api/login`, `/api/register`, and `/api/users` handlers. The login/register
   endpoints are exempted from the auth middleware (reachable without a token);
   the user-management endpoints require an authenticated caller with the

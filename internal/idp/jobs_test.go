@@ -2,26 +2,21 @@ package idp
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
-	"io"
-	"math/big"
 	"net"
-	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 
 	"cdrom/internal/config"
+	idppb "cdrom/internal/gen/cdrom/idp/v1"
 )
 
 // jobTestConfig returns a valid IdP config with job-token audiences.
@@ -31,59 +26,74 @@ func jobTestConfig() config.IdPConfig {
 	return cfg
 }
 
-// mintJobToken posts a job_token grant to the IdP's token endpoint using the
-// given HTTP client and returns the minted token. audience may be empty (the
-// IdP then stamps its default job-token audiences).
-func mintJobToken(t *testing.T, client *http.Client, tokenURL, audience, jobID string) (string, int, error) {
-	t.Helper()
-	form := url.Values{
-		"grant_type": {"job_token"},
-		"job_id":     {jobID},
-	}
-	if audience != "" {
-		form.Set("audience", audience)
-	}
-	resp, err := client.PostForm(tokenURL, form)
-	if err != nil {
-		return "", 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", resp.StatusCode, &tokenError{status: resp.StatusCode, body: string(body)}
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", resp.StatusCode, err
-	}
-	return out.AccessToken, resp.StatusCode, nil
+// testIDP is an in-process IdP: an HTTP server (the OIDC surface, used to
+// verify minted tokens via discovery + JWKS) and a gRPC server (the API-only
+// surface, used to mint job tokens and manage users).
+type testIDP struct {
+	httpURL string
+	client  idppb.IdPClient
+	users   UserStore
 }
 
-// TestE2E_MintJobToken mints a job token via the job_token grant and verifies
-// it with go-oidc (the same library the API uses), checking the job-scoped
-// claims and audience.
-func TestE2E_MintJobToken(t *testing.T) {
-	cfg := jobTestConfig()
+// startTestIDP starts an in-process IdP with the given config and user store
+// (nil for no user store) and returns its HTTP base URL (for token
+// verification) and gRPC client (for minting / user management). Both are
+// closed when the test finishes.
+func startTestIDP(t *testing.T, cfg config.IdPConfig, users UserStore) *testIDP {
+	t.Helper()
 	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
 	if err != nil {
 		t.Fatalf("NewKeyManager: %v", err)
 	}
 	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
 	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
+	t.Cleanup(ts.Close)
+	// Align the configured issuer with the test server's URL so a token minted
+	// over gRPC (iss = the configured issuer) verifies against the test
+	// server's discovery document (iss = the test server's URL).
+	cfg.Issuer = ts.URL
+	grpcSrv := grpc.NewServer()
+	idppb.RegisterIdPServer(grpcSrv, NewGRPCServer(cfg, km, users, testLogger()))
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go grpcSrv.Serve(lis)
+	t.Cleanup(grpcSrv.Stop)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return &testIDP{httpURL: ts.URL, client: idppb.NewIdPClient(conn), users: users}
+}
 
-	ctx := context.Background()
-	token, _, err := mintJobToken(t, http.DefaultClient, ts.URL+"/token", "", "42")
+// mintJobToken mints a job token for jobID from the IdP over gRPC. audience
+// may be empty (the IdP then stamps its default job-token audiences).
+func mintJobToken(t *testing.T, idp *testIDP, audience, jobID string) string {
+	t.Helper()
+	resp, err := idp.client.MintJobToken(context.Background(), &idppb.MintJobTokenRequest{
+		JobId:    jobID,
+		Audience: audience,
+	})
 	if err != nil {
 		t.Fatalf("mint job token: %v", err)
 	}
+	return resp.GetAccessToken()
+}
+
+// TestE2E_MintJobToken mints a job token over gRPC and verifies it with
+// go-oidc (the same library the API uses), checking the job-scoped claims and
+// audience.
+func TestE2E_MintJobToken(t *testing.T) {
+	idp := startTestIDP(t, jobTestConfig(), nil)
+	ctx := context.Background()
+	token := mintJobToken(t, idp, "", "42")
 	if token == "" {
 		t.Fatal("minted an empty token")
 	}
 
-	provider, err := oidc.NewProvider(ctx, ts.URL)
+	provider, err := oidc.NewProvider(ctx, idp.httpURL)
 	if err != nil {
 		t.Fatalf("oidc discovery: %v", err)
 	}
@@ -115,21 +125,11 @@ func TestE2E_MintJobToken(t *testing.T) {
 // confirms the token is stamped for that audience (the exchange path a job
 // uses to get a token for an outside resource).
 func TestJobTokenAudienceOverride(t *testing.T) {
-	cfg := jobTestConfig()
-	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
-	if err != nil {
-		t.Fatalf("NewKeyManager: %v", err)
-	}
-	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
+	idp := startTestIDP(t, jobTestConfig(), nil)
 	ctx := context.Background()
-	token, _, err := mintJobToken(t, http.DefaultClient, ts.URL+"/token", "outside-svc", "7")
-	if err != nil {
-		t.Fatalf("mint job token: %v", err)
-	}
-	provider, err := oidc.NewProvider(ctx, ts.URL)
+	token := mintJobToken(t, idp, "outside-svc", "7")
+
+	provider, err := oidc.NewProvider(ctx, idp.httpURL)
 	if err != nil {
 		t.Fatalf("oidc discovery: %v", err)
 	}
@@ -157,15 +157,7 @@ func TestJobTokenAudienceOverride(t *testing.T) {
 // presented, and confirms the token is stamped with trigger_name,
 // trigger_type, and the upstream claims (prefixed with upstream_) (F-09).
 func TestJobTokenTriggerAndUpstreamClaims(t *testing.T) {
-	cfg := jobTestConfig()
-	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
-	if err != nil {
-		t.Fatalf("NewKeyManager: %v", err)
-	}
-	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
+	idp := startTestIDP(t, jobTestConfig(), nil)
 	ctx := context.Background()
 	// The API passes the upstream claims JSON-encoded as a JSON object. A
 	// claim that is itself an object (job_config) keeps its structure.
@@ -174,35 +166,22 @@ func TestJobTokenTriggerAndUpstreamClaims(t *testing.T) {
 		"user":       "alice",
 		"job_config": map[string]any{"url": "https://gitlab.example.com/policy.yml", "sha": "abc"},
 	})
-	form := url.Values{
-		"grant_type":      {"job_token"},
-		"job_id":          {"42"},
-		"trigger_name":    {"github-push"},
-		"trigger_type":    {"webhook"},
-		"upstream_claims": {string(upstream)},
-	}
-	resp, err := http.DefaultClient.PostForm(ts.URL+"/token", form)
+	resp, err := idp.client.MintJobToken(ctx, &idppb.MintJobTokenRequest{
+		JobId:          "42",
+		TriggerName:    "github-push",
+		TriggerType:    "webhook",
+		UpstreamClaims: string(upstream),
+	})
 	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d (body %s), want 200", resp.StatusCode, body)
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
+		t.Fatalf("mint: %v", err)
 	}
 
-	provider, err := oidc.NewProvider(ctx, ts.URL)
+	provider, err := oidc.NewProvider(ctx, idp.httpURL)
 	if err != nil {
 		t.Fatalf("oidc discovery: %v", err)
 	}
 	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
-	idt, err := verifier.Verify(ctx, out.AccessToken)
+	idt, err := verifier.Verify(ctx, resp.GetAccessToken())
 	if err != nil {
 		t.Fatalf("verify job token: %v", err)
 	}
@@ -241,121 +220,6 @@ func TestJobTokenTriggerAndUpstreamClaims(t *testing.T) {
 	}
 }
 
-// TestJobTokenRequiresClientCert confirms that when the IdP serves TLS, the
-// job_token grant rejects a client that did not present a client certificate
-// and accepts one that did (the API's mTLS identity).
-func TestJobTokenRequiresClientCert(t *testing.T) {
-	cfg := jobTestConfig()
-	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
-	if err != nil {
-		t.Fatalf("NewKeyManager: %v", err)
-	}
-	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
-
-	serverTLS, clientWithCert, clientNoCert := genTestTLS(t)
-	ts := httptest.NewUnstartedServer(srv.Handler())
-	ts.TLS = serverTLS
-	ts.StartTLS()
-	defer ts.Close()
-
-	// A client without a client certificate is rejected.
-	if _, code, err := mintJobToken(t, clientNoCert, ts.URL+"/token", "", "42"); err == nil {
-		t.Error("expected an error for a client without a client certificate")
-	} else if code != http.StatusUnauthorized {
-		t.Errorf("status = %d, want %d", code, http.StatusUnauthorized)
-	}
-
-	// A client with a CA-signed client certificate is accepted.
-	token, _, err := mintJobToken(t, clientWithCert, ts.URL+"/token", "", "42")
-	if err != nil {
-		t.Fatalf("mint with client cert: %v", err)
-	}
-	if token == "" {
-		t.Fatal("minted an empty token")
-	}
-}
-
-// genTestTLS generates a CA plus a server and a client certificate, and
-// returns the IdP's TLS server config (RequestClientCert) and two HTTP
-// clients: one presenting the client certificate and one that does not.
-func genTestTLS(t *testing.T) (*tls.Config, *http.Client, *http.Client) {
-	t.Helper()
-
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("gen ca key: %v", err)
-	}
-	caTmpl := x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "cdrom-test-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, &caTmpl, &caTmpl, &caKey.PublicKey, caKey)
-	if err != nil {
-		t.Fatalf("create ca cert: %v", err)
-	}
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil {
-		t.Fatalf("parse ca cert: %v", err)
-	}
-	caPool := x509.NewCertPool()
-	caPool.AddCert(caCert)
-
-	mkCert := func(cn string, eku []x509.ExtKeyUsage) tls.Certificate {
-		key, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			t.Fatalf("gen key: %v", err)
-		}
-		tmpl := x509.Certificate{
-			SerialNumber: big.NewInt(2),
-			Subject:      pkix.Name{CommonName: cn},
-			NotBefore:    time.Now().Add(-time.Hour),
-			NotAfter:     time.Now().Add(24 * time.Hour),
-			KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-			ExtKeyUsage:  eku,
-			DNSNames:     []string{"localhost"},
-			IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-		}
-		der, err := x509.CreateCertificate(rand.Reader, &tmpl, caCert, &key.PublicKey, caKey)
-		if err != nil {
-			t.Fatalf("create cert: %v", err)
-		}
-		return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
-	}
-
-	serverCert := mkCert("cdrom-idp", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
-	clientCert := mkCert("cdrom-api", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
-
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{serverCert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequestClientCert,
-		MinVersion:   tls.VersionTLS12,
-	}
-	clientWithCert := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:      caPool,
-				Certificates: []tls.Certificate{clientCert},
-				MinVersion:   tls.VersionTLS12,
-			},
-		},
-	}
-	clientNoCert := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    caPool,
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-	}
-	return serverTLS, clientWithCert, clientNoCert
-}
-
 func containsString(haystack []string, needle string) bool {
 	for _, s := range haystack {
 		if s == needle {
@@ -386,70 +250,34 @@ func jobTokenExpSeconds(t *testing.T, token string) int64 {
 	return claims.Exp
 }
 
-// TestJobTokenExpiresIn confirms the job_token grant honors the request's
+// TestJobTokenExpiresIn confirms the gRPC MintJobToken honors the request's
 // expires_in (a duration string): the token's exp is stamped to now +
 // expires_in. This is how the API gives the main job token a long placeholder
 // lifetime (a week) and an exchanged token a short one.
 func TestJobTokenExpiresIn(t *testing.T) {
-	cfg := jobTestConfig()
-	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
-	if err != nil {
-		t.Fatalf("NewKeyManager: %v", err)
-	}
-	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-
+	idp := startTestIDP(t, jobTestConfig(), nil)
+	ctx := context.Background()
 	now := time.Now().Unix()
 
 	// A custom lifetime is honored.
-	form := url.Values{
-		"grant_type": {"job_token"},
-		"job_id":     {"42"},
-		"expires_in": {time.Hour.String()},
-	}
-	resp, err := http.DefaultClient.PostForm(ts.URL+"/token", form)
+	resp, err := idp.client.MintJobToken(ctx, &idppb.MintJobTokenRequest{JobId: "42", ExpiresIn: time.Hour.String()})
 	if err != nil {
-		t.Fatalf("post: %v", err)
+		t.Fatalf("mint: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d (body %s), want 200", resp.StatusCode, body)
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	exp := jobTokenExpSeconds(t, out.AccessToken)
+	exp := jobTokenExpSeconds(t, resp.GetAccessToken())
 	if exp < now+3590 || exp > now+3610 {
 		t.Errorf("custom lifetime: exp = %d, want ~%d (now+1h)", exp, now+3600)
 	}
-	if out.ExpiresIn != 3600 {
-		t.Errorf("response expires_in = %d, want 3600", out.ExpiresIn)
+	if resp.GetExpiresIn() != 3600 {
+		t.Errorf("response expires_in = %d, want 3600", resp.GetExpiresIn())
 	}
 
 	// Without expires_in the IdP falls back to its configured token lifetime.
-	form = url.Values{"grant_type": {"job_token"}, "job_id": {"43"}}
-	resp, err = http.DefaultClient.PostForm(ts.URL+"/token", form)
+	resp2, err := idp.client.MintJobToken(ctx, &idppb.MintJobTokenRequest{JobId: "43"})
 	if err != nil {
-		t.Fatalf("post: %v", err)
+		t.Fatalf("mint: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status = %d (body %s), want 200", resp.StatusCode, body)
-	}
-	var out2 struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out2); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	exp = jobTokenExpSeconds(t, out2.AccessToken)
+	exp = jobTokenExpSeconds(t, resp2.GetAccessToken())
 	// jobTestConfig sets TokenLifetime to an hour.
 	if exp < now+3590 || exp > now+3610 {
 		t.Errorf("default lifetime: exp = %d, want ~%d (now+1h)", exp, now+3600)

@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package cdrom.idp.v1;
+
+import "cdrom/db/v1/db.proto";
+
+option go_package = "cdrom/internal/gen/cdrom/idp/v1;idpv1";
+
+// IdP is the gRPC surface of the local OIDC identity provider. It carries the
+// IdP's API-only operations: minting job tokens and managing the user
+// directory (username/password authentication). The API is the sole caller and
+// authenticates to the IdP with its mTLS client certificate (when TLS is
+// configured), so only a CA-signed client (the API) can mint job tokens or
+// manage users.
+//
+// The standard OIDC surface (discovery, JWKS, the authorization endpoint, and
+// the authorization_code token grant) is served over HTTP, because it is a
+// browser-based protocol (redirects) that cannot be expressed as gRPC.
+service IdP {
+  // MintJobToken mints a job token for a dispatched job. The API is the only
+  // caller; it authenticates with its mTLS client certificate. The token is
+  // scoped to the job (job_id, pipeline_id, target_group) and to the API plus
+  // any outside resources a job may call (audience). An empty audience makes
+  // the IdP use its default job-token audiences. The token's lifetime is
+  // expires_in when set, else the IdP's configured token lifetime.
+  rpc MintJobToken(MintJobTokenRequest) returns (MintJobTokenResponse);
+
+  // Login verifies a user's credentials (email + password) and returns the
+  // OIDC token the IdP minted for the user (stamped with the user's roles)
+  // plus the user's profile. A bad password or unknown user is
+  // Unauthenticated.
+  rpc Login(LoginRequest) returns (LoginResponse);
+  // Register creates a new user from the request's profile and password. The
+  // password is hashed before it is stored. A duplicate email is
+  // AlreadyExists.
+  rpc Register(RegisterRequest) returns (cdrom.db.v1.IDPUser);
+  // ListUsers returns all registered users (profile + roles, no password).
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  // CreateUser creates a user (profile, password, and roles). A duplicate
+  // email is AlreadyExists.
+  rpc CreateUser(CreateUserRequest) returns (cdrom.db.v1.IDPUser);
+  // UpdateUser updates a user's profile and/or roles (and password when
+  // supplied), keyed by user ID. A missing user is NotFound.
+  rpc UpdateUser(UpdateUserRequest) returns (cdrom.db.v1.IDPUser);
+  // DeleteUser removes a user by ID. A missing user is NotFound.
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+}
+
+// MintJobTokenRequest is the request to mint a job token.
+message MintJobTokenRequest {
+  // job_id is the job the token is scoped to (required).
+  string job_id = 1;
+  // pipeline_id is the job's pipeline (0 when the job is not part of one).
+  int64 pipeline_id = 2;
+  // target_group is the group the job targets (empty for a single target).
+  string target_group = 3;
+  // audience is the audience to stamp on the token; empty makes the IdP use
+  // its default job-token audiences.
+  string audience = 4;
+  // trigger_name / trigger_type identify the trigger that started the run
+  // (F-09); empty when the run was not trigger-fired.
+  string trigger_name = 5;
+  string trigger_type = 6;
+  // upstream_claims is the JSON-encoded set of upstream OIDC claims a webhook
+  // caller presented (F-09); each is stamped onto the token prefixed with
+  // "upstream_". Empty when there are none.
+  string upstream_claims = 7;
+  // expires_in is the token's lifetime (a duration string, e.g. "24h"); empty
+  // makes the IdP use its configured token lifetime.
+  string expires_in = 8;
+  // issuer is the OIDC issuer to stamp on the token (the caller's configured
+  // issuer, so the token verifies against the caller's discovery document).
+  // Empty makes the IdP use its own configured issuer.
+  string issuer = 9;
+}
+
+// MintJobTokenResponse is the minted job token.
+message MintJobTokenResponse {
+  // access_token is the signed job token (a JWT).
+  string access_token = 1;
+  // token_type is the token's type ("Bearer").
+  string token_type = 2;
+  // expires_in is the token's lifetime in seconds.
+  int64 expires_in = 3;
+}
+
+// LoginRequest is the request to sign in with a username and password.
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+  // audience is the audience to stamp on the minted token (the caller's
+  // verifier audience, e.g. its client_id or token_audience); empty makes the
+  // IdP use its default audience.
+  string audience = 3;
+  // issuer is the OIDC issuer to stamp on the token (the caller's configured
+  // issuer, so the token verifies against the caller's discovery document).
+  string issuer = 4;
+}
+
+// LoginResponse is the result of a successful login: the OIDC token the IdP
+// minted for the user (present it as `Authorization: Bearer <access_token>`),
+// plus the user's profile and roles.
+message LoginResponse {
+  string access_token = 1;
+  string token_type = 2;
+  int64 expires_in = 3;
+  string id_token = 4;
+  // user is the signed-in user's profile (never the password hash).
+  cdrom.db.v1.IDPUser user = 5;
+}
+
+// RegisterRequest is the request to create a user: the required profile
+// fields (first/last/email) and password, plus an optional initial role set.
+message RegisterRequest {
+  string first_name = 1;
+  string last_name = 2;
+  string email = 3;
+  string password = 4;
+  repeated string roles = 5;
+}
+
+// ListUsersRequest is the request to list all registered users.
+message ListUsersRequest {}
+
+// ListUsersResponse is the set of registered users.
+message ListUsersResponse {
+  repeated cdrom.db.v1.IDPUser users = 1;
+}
+
+// CreateUserRequest is the request to create a user (profile, password, and
+// roles).
+message CreateUserRequest {
+  string first_name = 1;
+  string last_name = 2;
+  string email = 3;
+  string password = 4;
+  repeated string roles = 5;
+}
+
+// UpdateUserRequest is the request to update a user's profile and/or roles.
+// Empty fields are left unchanged; an empty password leaves the existing
+// password untouched.
+message UpdateUserRequest {
+  string id = 1;
+  string first_name = 2;
+  string last_name = 3;
+  string email = 4;
+  string password = 5;
+  repeated string roles = 6;
+}
+
+// DeleteUserRequest is the request to remove a user by ID.
+message DeleteUserRequest {
+  string id = 1;
+}
+
+// DeleteUserResponse is the result of removing a user.
+message DeleteUserResponse {
+  string status = 1;
+}

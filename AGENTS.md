@@ -42,9 +42,13 @@ N-tier architecture, top to bottom:
      namespace; it also stores streamed job logs. The store is an interface
      (`internal/services/artifacts/store.go`); the kind is configurable
      (`CDROM_ARTIFACTS_STORE`, default `filesystem`) so S3 / Azure Blob can be added later.
-   - **IdP** (`cmd/idp`) — a local OIDC identity provider / JWT issuer (HTTP, not
-     gRPC) for the API's OIDC auth and job-token minting; auto-rotates its RSA key.
-     Its state (keys + auth codes) lives in the Database service.
+   - **IdP** (`cmd/idp`) — a local OIDC identity provider / JWT issuer. It serves
+     the standard OIDC surface over **HTTP** (discovery, JWKS, `/auth`, the
+     `authorization_code` token grant — a browser-based protocol that cannot be
+     gRPC) and its **API-only** surface over **gRPC** (job-token minting and user
+     management), which the API dials over mTLS so only the API can reach it.
+     It auto-rotates its RSA key. Its state (keys + auth codes + users) lives in
+     the Database service.
 4. **Execution layer** — where jobs actually run (see Execution Model).
 
 **Topology rule:** execution targets (workers, agents) talk **only** to the API.
@@ -144,7 +148,7 @@ for each feature are in `docs/Features.md`. Summary:
 | F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
 | F-14…F-22 | Roadmap: RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
-| F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
+| F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
 
 Cross-cutting execution concepts (full detail in `docs/Features.md` /
 `docs/Architecture.md`):
@@ -211,7 +215,7 @@ cmd/
   db/         database service entrypoint (gRPC)
   scheduler/  scheduler service entrypoint (gRPC)
   artifacts/  artifacts service entrypoint (gRPC)
-  idp/        local OIDC IdP entrypoint (HTTP)
+  idp/        local OIDC IdP entrypoint (HTTP OIDC surface + gRPC API-only surface)
   worker/     long-lived worker entrypoint
   agent/      ephemeral Kubernetes agent entrypoint
 internal/
@@ -245,7 +249,8 @@ internal/
     database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
   worker/     long-lived worker (run context + status via internal/target; StepBarrier)
   agent/      ephemeral agent (run context + status via internal/target; unbarriered)
-  idp/        local OIDC IdP (JWT issuer, auto key rotation; state via Database service)
+  idp/        local OIDC IdP (JWT issuer, auto key rotation; HTTP OIDC surface +
+              gRPC API-only surface for job-token minting + user management; state via Database service)
 proto/        protobuf definitions (proto/cdrom/<service>/v1/)
 ui/           React frontend (separate from the Go module) + ui/tests/
 docs/         documentation (Architecture.md, Features.md, HighAvailability.md)
@@ -278,7 +283,8 @@ file → env vars.
 | Service      | Default address | Listen env var        |
 |--------------|-----------------|-----------------------|
 | db           | 127.0.0.1:7101  | `CDROM_LISTEN_ADDR`   |
-| idp          | 127.0.0.1:7104  | `CDROM_LISTEN_ADDR`   |
+| idp (HTTP)   | 127.0.0.1:7104  | `CDROM_LISTEN_ADDR`   |
+| idp (gRPC)   | 127.0.0.1:7106  | `CDROM_IDP_GRPC_ADDR` |
 | scheduler    | 127.0.0.1:7102  | `CDROM_LISTEN_ADDR`   |
 | artifacts    | 127.0.0.1:7103  | `CDROM_LISTEN_ADDR`   |
 | api (gRPC)   | 127.0.0.1:7105  | `CDROM_LISTEN_ADDR`   |
@@ -290,9 +296,11 @@ Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_P
 `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
 the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
 auth vars `CDROM_AUTH_*` (incl. `CDROM_AUTH_USERPASS_ENABLED`, username/password
-auth, default on), the IdP vars `CDROM_IDP_*`, the job-token auth vars
-`CDROM_GRPC_AUTH_*`, and the secrets vars `CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY`
-(base64 32-byte AES-256-GCM key; when unset, secrets are disabled).
+auth, default on), the IdP vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
+IdP's gRPC listen address; the API dials it via `CDROM_IDP_GRPC_ADDR`), the
+job-token auth vars `CDROM_GRPC_AUTH_*`, and the secrets vars
+`CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY` (base64 32-byte AES-256-GCM key;
+when unset, secrets are disabled).
 
 A minimal local run (plaintext, no certs):
 
@@ -305,8 +313,9 @@ make build
 ./bin/worker      # registers with the api, watches for jobs
 ```
 
-To exercise authentication, also run `./bin/idp` (OIDC IdP / JWT issuer on :7104,
-auto key rotation). For **username/password** sign-in (enabled by default), point
+To exercise authentication, also run `./bin/idp` (OIDC IdP / JWT issuer: HTTP
+OIDC surface on :7104 + gRPC API-only surface on :7106, auto key rotation). For
+**username/password** sign-in (enabled by default), point
 the API's `auth.issuer` at it (`http://127.0.0.1:7104`), then register the first
 user (`POST /api/register` — it becomes an `admin`) and sign in with
 `POST /api/login`. For the full **OIDC** authorization-code flow, additionally
@@ -338,11 +347,14 @@ implemented in `internal/auth`.
   `job_log` (F-02), and `run_status` (F-07). Events are published from the gRPC
   server and HTTP handlers through a shared `EventHub` (`internal/api/events.go`);
   slow subscribers drop events and resync from the snapshot on reconnect.
-- **Local IdP (`cmd/idp`):** a standalone HTTP OIDC IdP / JWT issuer (discovery
-  doc, JWKS, `/auth` authorization-code + PKCE, `/token` minting RS256 tokens).
-  It auto-rotates its RSA key near expiry and keeps serving predecessor keys
-  until they expire. Its state (signing keys + auth codes + the user directory
-  for username/password auth) lives in the Database service, so multiple IdP
+- **Local IdP (`cmd/idp`):** a standalone OIDC IdP / JWT issuer. Its **HTTP**
+  surface serves the standard OIDC protocol (discovery doc, JWKS, `/auth`
+  authorization-code + PKCE, and the `authorization_code` token grant minting
+  RS256 tokens); its **gRPC** surface serves the API-only operations (job-token
+  minting and user management), which the API dials over mTLS. It auto-rotates
+  its RSA key near expiry and keeps serving predecessor keys until they expire.
+  Its state (signing keys + auth codes + the user directory for
+  username/password auth) lives in the Database service, so multiple IdP
   replicas can share keys and users behind a load balancer — it requires
   `./bin/db` to be running.
 
@@ -353,7 +365,9 @@ testing of the UI. **Enabled by default** (`auth.userpass_enabled: true`,
 `CDROM_AUTH_USERPASS_ENABLED`); set it to `false` to disable (e.g. when using an
 external identity provider). All the real logic lives in the **IdP**; the API is
 a thin proxy (the API's gRPC/HTTP surface never sees the password hash or
-verifies credentials itself).
+verifies credentials itself). The API reaches the IdP's user operations over
+**gRPC** (the IdP's API-only surface, over mTLS when TLS is configured), so only
+the API can register users, log them in, or manage roles.
 
 - **Unauthenticated endpoints** (reachable without a token even when OIDC auth
   is on — they are exempted from the auth middleware): `POST /api/login`
@@ -365,7 +379,7 @@ verifies credentials itself).
 - **Role management** (require an authenticated caller with the `admin` role):
   `GET /api/users`, `POST /api/users` (create with explicit roles),
   `PUT /api/users/{id}` (update profile/roles/password), `DELETE /api/users/{id}`.
-  The API proxies these to the IdP's `/users` endpoints.
+  The API proxies these to the IdP's gRPC user-management RPCs.
 - **Tokens:** a login returns the same OIDC token the API verifies on every
   other request (against the IdP's JWKS); the user's roles are stamped onto the
   token and surfaced via `auth.User.Roles` (`User.HasRole`).
@@ -380,12 +394,13 @@ supports **job-token auth** (`internal/api/jobsauth.go`).
 
 - **Disabled by default.** Enable with `grpc_auth.enabled: true`
   (`CDROM_GRPC_AUTH_ENABLED=true`); `idp_address` and `audiences` are then required.
-- **Minting:** the API is the **only** caller of the IdP's `job_token` grant,
-  authenticating with its **mTLS client certificate** (no shared secret). It mints
-  one RS256 token per job (claims: `sub: "job:<jobID>"`, `aud`, `job_id`,
-  `pipeline_id`, `target_group`, `token_type: "job"`, plus the run's trigger
-  context when trigger-fired). The main token's `exp` is a long placeholder (a
-  week) — validity is gated on the job's live status, not `exp`.
+- **Minting:** the API is the **only** caller of the IdP's `MintJobToken` gRPC
+  RPC, authenticating with its **mTLS client certificate** (no shared secret), so
+  only a CA-signed client (the API) can mint job tokens. It mints one RS256
+  token per job (claims: `sub: "job:<jobID>"`, `aud`, `job_id`, `pipeline_id`,
+  `target_group`, `token_type: "job"`, plus the run's trigger context when
+  trigger-fired). The main token's `exp` is a long placeholder (a week) —
+  validity is gated on the job's live status, not `exp`.
 - **Exchange:** a job requests a new token for a different `audience` via
   `ExchangeJobToken` (presents its own token); the exchanged token has a short
   lifetime (`expires_in`, else `grpc_auth.exchanged_token_lifetime`, default 15m)

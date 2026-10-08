@@ -23,14 +23,18 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	idppb "cdrom/internal/gen/cdrom/idp/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/idp"
 	"cdrom/internal/logging"
@@ -77,19 +81,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := idp.NewServer(cfg.IdP, km, idp.NewDBAuthCodeStore(dbClient), logger).
-		WithUsers(idp.NewDBUserStore(dbClient))
+	// The HTTP server serves the standard OIDC surface (discovery, JWKS, the
+	// authorization endpoint, and the authorization_code token grant) to
+	// browsers and the API's discovery/code-exchange.
+	srv := idp.NewServer(cfg.IdP, km, idp.NewDBAuthCodeStore(dbClient), logger)
+	// The gRPC server serves the IdP's API-only surface (job-token minting and
+	// user management) to the API, which authenticates with its mTLS client
+	// certificate (when TLS is configured), so only the API can reach it.
+	userStore := idp.NewDBUserStore(dbClient)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go srv.StartRotation(ctx)
 
-	// When TLS is configured the IdP serves HTTPS: it presents its
-	// certificate and accepts clients with or without a client certificate
-	// (RequestClientCert). The OIDC flow (browsers, the API's discovery
-	// and code exchange) works without a client cert; job-token minting
-	// additionally requires the caller to have presented a CA-signed client
-	// certificate (the API's), which the token handler enforces.
+	// When TLS is configured the IdP's HTTP server serves HTTPS: it presents
+	// its certificate. The OIDC flow (browsers, the API's discovery and code
+	// exchange) does not present a client certificate. The gRPC server uses
+	// mTLS (grpcutil.ServerCreds), requiring the API's CA-signed client
+	// certificate.
 	var tlsCfg *tls.Config
 	if cfg.TLS.Enabled() {
 		tlsCfg, err = idp.TLSConfig(cfg.TLS)
@@ -107,7 +116,36 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	logger.Info("cdrom idp starting", "addr", addr, "issuer", cfg.IdP.EffectiveIssuer(),
+	// The gRPC server's listen address (the API dials it for job-token
+	// minting and user management). Empty means the default IdP gRPC address.
+	grpcAddr := cfg.IdP.GRPCAddress
+	if grpcAddr == "" {
+		grpcAddr = config.DefaultIdPGRPCAddress
+	}
+	creds, err := grpcutil.ServerCreds(cfg.TLS)
+	if err != nil {
+		logger.Error("idp: tls creds", "err", err)
+		os.Exit(1)
+	}
+	grpcSrv := grpc.NewServer(grpc.Creds(creds))
+	idppb.RegisterIdPServer(grpcSrv, idp.NewGRPCServer(cfg.IdP, km, userStore, logger))
+	grpcLis, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		logger.Error("idp: listen grpc", "addr", grpcAddr, "err", err)
+		os.Exit(1)
+	}
+	go func() {
+		<-ctx.Done()
+		grpcSrv.GracefulStop()
+	}()
+	go func() {
+		if err := grpcSrv.Serve(grpcLis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			logger.Error("idp: grpc serve", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	logger.Info("cdrom idp starting", "addr", addr, "grpc", grpcAddr, "issuer", cfg.IdP.EffectiveIssuer(),
 		"db", cfg.DBAddress, "key_lifetime", cfg.IdP.KeyLifetime,
 		"rotate_before", cfg.IdP.RotateBefore, "tls", cfg.TLS.Enabled())
 	var serveErr error

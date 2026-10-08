@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+
 	"cdrom/internal/auth"
 )
 
@@ -136,7 +138,7 @@ func TestAPILogin(t *testing.T) {
 	}
 
 	// A failed login (the IdP returns 401) is surfaced as a 401.
-	fake2 := &fakeUserPass{loginErr: &userPassError{status: http.StatusUnauthorized, body: "invalid credentials"}}
+	fake2 := &fakeUserPass{loginErr: &userPassError{code: codes.Unauthenticated, msg: "invalid credentials"}}
 	ts2 := userPassServer(t, fake2, auth.User{})
 	if code, _ := postJSONBody(t, ts2.URL+"/api/login", `{"email":"a","password":"b"}`); code != http.StatusUnauthorized {
 		t.Errorf("failed login status = %d, want 401", code)
@@ -166,7 +168,7 @@ func TestAPIRegister(t *testing.T) {
 	}
 
 	// A duplicate (the IdP returns 409) is surfaced as a 409.
-	fake2 := &fakeUserPass{registerErr: &userPassError{status: http.StatusConflict, body: "exists"}}
+	fake2 := &fakeUserPass{registerErr: &userPassError{code: codes.AlreadyExists, msg: "exists"}}
 	ts2 := userPassServer(t, fake2, auth.User{})
 	if code, _ := postJSONBody(t, ts2.URL+"/api/register", `{"email":"a","password":"b"}`); code != http.StatusConflict {
 		t.Errorf("duplicate register status = %d, want 409", code)

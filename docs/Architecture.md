@@ -20,7 +20,8 @@ The system is organized into four layers, top to bottom:
    targets and the scheduler. It holds no business logic of its own.
 3. **Service layer** — standalone Go services, one per concern, each exposing
    a gRPC interface: **Database**, **Scheduler**, **Artifacts**, and the local
-   **IdP** (an HTTP OIDC identity provider / JWT issuer).
+   **IdP** (an OIDC identity provider / JWT issuer: an HTTP OIDC surface plus a
+   gRPC API-only surface for job-token minting and user management).
 4. **Execution layer** — where jobs actually run: long-lived **workers** and
    ephemeral **agents**.
 
@@ -41,7 +42,7 @@ flowchart TB
         DB["Database service<br/>:7101"]
         SCHED["Scheduler service<br/>:7102"]
         ART["Artifacts service<br/>:7103"]
-        IDP["IdP (OIDC / JWT issuer)<br/>:7104 (HTTP)"]
+        IDP["IdP (OIDC / JWT issuer)<br/>:7104 (HTTP) + :7106 (gRPC)"]
     end
 
     subgraph EXEC["Execution layer (Go)"]
@@ -70,9 +71,9 @@ flowchart TB
     WORKER <-->|gRPC: register, watch, report| GRPC
     AGENT <-->|gRPC: get job, report| GRPC
 
-    JA -->|mTLS: mint job tokens| IDP
+    JA -->|gRPC mTLS: mint job tokens + users| IDP
     HTTP -->|OIDC discovery / exchange| IDP
-    IDP -->|signing keys + auth codes| DB
+    IDP -->|signing keys + auth codes + users| DB
 
     DB --> SQL
     ART --> FS
@@ -166,8 +167,9 @@ flowchart TB
         FS["Filesystem-backed, streamed upload/download"]
     end
 
-    subgraph IDP["IdP (cmd/idp) — HTTP, not gRPC"]
-        OIDC["Discovery, JWKS, /auth, /token<br/>RSA key with auto-rotation"]
+    subgraph IDP["IdP (cmd/idp) — HTTP OIDC + gRPC API-only"]
+        OIDC["HTTP: Discovery, JWKS, /auth, /token<br/>RSA key with auto-rotation"]
+        IDPG["gRPC: MintJobToken + user management"]
     end
 
     API["API"] --> DB
@@ -202,14 +204,17 @@ flowchart TB
   configurable (`artifacts_store` / `CDROM_ARTIFACTS_STORE`, default
   `filesystem`) so S3 / Azure Blob can be added later.
 - **IdP** (`cmd/idp`) — a local OIDC identity provider that acts as a JWT
-  issuer for the API's OIDC authentication. It is an **HTTP** service (not
-  gRPC) serving the discovery doc, JWKS, authorization, and token endpoints,
-  and it rotates its RSA signing key automatically. It also mints **job
-  tokens** (see §6). Unlike the other services, the IdP keeps **no state on
-  its local filesystem**: its signing keyring and its OIDC authorization
-  codes are persisted through the Database service, so multiple IdP replicas
-  share the same keys and codes and can run behind a load balancer (the IdP
-  requires the db service to be running).
+  issuer for the API's OIDC authentication. It serves the standard OIDC
+  surface over **HTTP** (discovery doc, JWKS, authorization, and the
+  `authorization_code` token endpoint — a browser-based protocol that cannot be
+  gRPC) and its **API-only** surface over **gRPC** (job-token minting and user
+  management), which the API dials over mTLS so only the API can reach it. It
+  rotates its RSA signing key automatically. Unlike the other services, the
+  IdP keeps **no state on its local filesystem**: its signing keyring, its OIDC
+  authorization codes, and its user directory are persisted through the
+  Database service, so multiple IdP replicas share the same keys, codes, and
+  users and can run behind a load balancer (the IdP requires the db service to
+  be running).
 
 ### gRPC conventions
 
@@ -706,21 +711,19 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
 
 - **Disabled by default.** Enable it with `grpc_auth.enabled: true`;
   `idp_address` and `audiences` are then required and validated at startup.
-- **Minting:** the API is the **only** caller of the IdP's `job_token` grant
-  on `/token`. It authenticates to the IdP with its **mTLS client
-  certificate** (the same `tls` section used for gRPC) — there is no shared
-  secret. When the IdP serves TLS, the `job_token` grant rejects any TLS
-  client that did not present a client certificate, so only a CA-signed client
-  (the API) can mint; in plaintext mode the grant is open. The API mints one
-  RS256 token per job: on dispatch it is delivered to workers inside the
-  `JobAssignment` (gRPC field `token`), and on `GetJob` it is returned in the
-  `Job` for ephemeral agents. Claims: `iss`, `sub: "job:<jobID>"`, `aud` (the
-  configured audiences), `exp`, `iat`, `job_id`, `pipeline_id`,
-  `target_group`, `token_type: "job"`. The main job token's `exp` is a **long
-  placeholder (a week)**: the token is meant to live as long as the job runs
-  (which can be days), so it effectively never expires — its validity is
-  gated on the job's live status in the database (see Verification), not on
-  `exp`.
+- **Minting:** the API is the **only** caller of the IdP's `MintJobToken` gRPC
+  RPC. It authenticates to the IdP with its **mTLS client certificate** (the
+  same `tls` section used for gRPC) — there is no shared secret, and the IdP's
+  gRPC server requires a CA-signed client certificate when TLS is configured,
+  so only the API can mint. The API mints one RS256 token per job: on dispatch
+  it is delivered to workers inside the `JobAssignment` (gRPC field `token`),
+  and on `GetJob` it is returned in the `Job` for ephemeral agents. Claims:
+  `iss`, `sub: "job:<jobID>"`, `aud` (the configured audiences), `exp`, `iat`,
+  `job_id`, `pipeline_id`, `target_group`, `token_type: "job"`. The main job
+  token's `exp` is a **long placeholder (a week)**: the token is meant to live
+  as long as the job runs (which can be days), so it effectively never expires
+  — its validity is gated on the job's live status in the database (see
+  Verification), not on `exp`.
 - **Exchange:** a job can request a **new token for a different audience**
   (e.g. an outside resource it must call) via the `ExchangeJobToken` RPC. The
   caller presents its existing job token (scoped to the job) and a target
@@ -759,15 +762,15 @@ sequenceDiagram
     participant W as Worker
 
     Note over API,IDP: API authenticates to IdP with its mTLS client certificate
-    API->>IDP: POST /token (grant_type=job_token, job_id, ...)
+    API->>IDP: MintJobToken (gRPC, job_id, ...)
     IDP-->>API: RS256 job token
     API-->>W: JobAssignment { job, token }
     W->>API: ReportJobStatus [Bearer token]
-    API->>IDP: verify against JWKS
+    API->>IDP: verify against JWKS (HTTP)
     IDP-->>API: valid (aud + job_id match)
     API-->>W: Job (updated status)
     W->>API: ExchangeJobToken (audience: outside-svc) [Bearer token]
-    API->>IDP: POST /token (audience=outside-svc)
+    API->>IDP: MintJobToken (gRPC, audience=outside-svc)
     IDP-->>API: new token (aud: outside-svc)
     API-->>W: token
 ```

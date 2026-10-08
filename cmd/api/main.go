@@ -21,6 +21,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	idppb "cdrom/internal/gen/cdrom/idp/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
@@ -108,21 +109,32 @@ func main() {
 	// (snapshot + stream) and the gRPC server (publish) share it.
 	hub := api.NewEventHub()
 
-	// HTTP client for talking to the IdP (OIDC discovery, code exchange, and
-	// job-token minting). When TLS is configured it trusts the shared CA and
-	// presents the API's client certificate, so it can reach an IdP that
-	// serves TLS and authenticate to its job-token endpoint.
-	idpClient, err := grpcutil.HTTPClient(cfg.TLS)
+	// HTTP client for talking to the IdP's OIDC surface (discovery and code
+	// exchange). When TLS is configured it trusts the shared CA and presents
+	// the API's client certificate, so it can reach an IdP that serves TLS.
+	idpHTTPClient, err := grpcutil.HTTPClient(cfg.TLS)
 	if err != nil {
 		logger.Error("idp: http client", "err", err)
 		os.Exit(1)
 	}
 
+	// gRPC client for the IdP's API-only surface (job-token minting and user
+	// management). When TLS is configured it uses mTLS, so only the API (a
+	// CA-signed client) can mint job tokens or manage users. The dial is lazy
+	// (grpc.NewClient), so it does not require the IdP to be up yet.
+	idpConn, err := grpcutil.Dial(ctx, cfg.IdPGRPCAddress, cfg.TLS)
+	if err != nil {
+		logger.Error("dial idp", "addr", cfg.IdPGRPCAddress, "err", err)
+		os.Exit(1)
+	}
+	defer idpConn.Close()
+	idpClient := idppb.NewIdPClient(idpConn)
+
 	// Authentication for the UI-facing HTTP surface. Disabled by default; when
 	// enabled it performs OIDC discovery (a network call) here. The API is a
 	// pure token verifier: clients present the OAuth token they obtained from
 	// the IdP as `Authorization: Bearer <token>`.
-	authBundle, err := auth.NewWithClient(ctx, cfg.Auth, idpClient)
+	authBundle, err := auth.NewWithClient(ctx, cfg.Auth, idpHTTPClient)
 	if err != nil {
 		logger.Error("auth: init", "err", err)
 		os.Exit(1)
@@ -136,6 +148,10 @@ func main() {
 	// auth issuer, falling back to the default IdP address.
 	apiServer := api.New(clients, hub, secretStore)
 	if cfg.Auth.UserPassEnabled {
+		// The OIDC issuer the API's verifier checks on a presented token
+		// (auth.issuer, falling back to the default IdP address). It is passed
+		// to the IdP so a login token is stamped with an issuer the API will
+		// accept.
 		idpBase := cfg.Auth.Issuer
 		if idpBase == "" {
 			idpBase = config.DefaultIdPAddress
@@ -147,7 +163,7 @@ func main() {
 		if audience == "" {
 			audience = cfg.Auth.ClientID
 		}
-		apiServer.SetUserPassClient(api.NewUserPassClient(idpBase, idpClient, audience))
+		apiServer.SetUserPassClient(api.NewUserPassClient(idpClient, audience, idpBase))
 	}
 
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
@@ -183,7 +199,7 @@ func main() {
 	// discovery against the IdP.
 	var jobAuth *api.JobTokenAuth
 	if cfg.GRPCAuth.Enabled {
-		jobAuth, err = api.NewJobTokenAuth(ctx, cfg.GRPCAuth, idpClient, logger)
+		jobAuth, err = api.NewJobTokenAuth(ctx, cfg.GRPCAuth, idpHTTPClient, idpClient, logger)
 		if err != nil {
 			logger.Error("grpc_auth: init", "err", err)
 			os.Exit(1)

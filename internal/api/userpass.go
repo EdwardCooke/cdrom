@@ -1,21 +1,24 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	idppb "cdrom/internal/gen/cdrom/idp/v1"
 )
 
-// UserPassClient is the API's proxy to the IdP's username/password
-// endpoints. The API is a thin bridge: it forwards the UI's login, register,
-// and user-management requests to the IdP (where the real logic — password
+// UserPassClient is the API's proxy to the IdP's username/password surface.
+// The API is a thin bridge: it forwards the UI's login, register, and
+// user-management requests to the IdP (where the real logic — password
 // verification, token minting, and user storage — lives) and returns the
 // IdP's response. The token a login returns is an OIDC token the API verifies
-// against the IdP's JWKS, the same way it verifies any other token.
+// against the IdP's JWKS, the same way it verifies any other token. The
+// requests go to the IdP over gRPC (mTLS when TLS is configured), so only the
+// API can reach them.
 type UserPassClient interface {
 	// Login verifies the user's credentials and returns the OIDC token the
 	// IdP minted for the user (plus the user's profile and roles).
@@ -79,148 +82,136 @@ type UpdateUserRequest struct {
 	Roles     []string `json:"roles,omitempty"`
 }
 
-// httpUserPassClient is a UserPassClient that talks to the IdP over HTTP.
-type httpUserPassClient struct {
-	base string
-	http *http.Client
+// grpcUserPassClient is a UserPassClient that talks to the IdP's gRPC service
+// (over mTLS when TLS is configured).
+type grpcUserPassClient struct {
+	idp idppb.IdPClient
 	// audience is the audience the API's OIDC verifier checks on a presented
 	// token (its client_id, or token_audience when set). It is passed to the
 	// IdP at login so the minted token's aud matches and the API accepts it.
 	audience string
+	// issuer is the OIDC issuer the API's verifier checks on a presented
+	// token (its configured IdP base URL). It is passed to the IdP at login
+	// so the minted token's iss matches the API's discovery document.
+	issuer string
 }
 
-// NewUserPassClient returns a UserPassClient that proxies to the IdP at
-// baseURL (the IdP's base URL, e.g. http://127.0.0.1:7104). httpClient is
-// used for the requests; when it is an mTLS client (see grpcutil.HTTPClient)
-// it can reach an IdP that serves TLS. A nil httpClient uses the default.
-// audience is the audience the API's verifier checks on a token (its
-// client_id, or token_audience when set); it is stamped on the login token so
-// the API accepts it. An empty audience lets the IdP use its default.
-func NewUserPassClient(baseURL string, httpClient *http.Client, audience string) UserPassClient {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-	return &httpUserPassClient{base: normalizeIDPURL(baseURL), http: httpClient, audience: audience}
+// NewUserPassClient returns a UserPassClient that proxies to the IdP's gRPC
+// service (idp). audience is the audience the API's verifier checks on a
+// token (its client_id, or token_audience when set); it is stamped on the
+// login token so the API accepts it. issuer is the OIDC issuer the API's
+// verifier checks (its configured IdP base URL); it is stamped on the login
+// token so it verifies against the API's discovery document. An empty
+// audience or issuer lets the IdP use its own defaults.
+func NewUserPassClient(idp idppb.IdPClient, audience, issuer string) UserPassClient {
+	return &grpcUserPassClient{idp: idp, audience: audience, issuer: issuer}
 }
 
-func (c *httpUserPassClient) Login(ctx context.Context, email, password string) (*LoginResult, error) {
-	body := map[string]string{"email": email, "password": password}
-	if c.audience != "" {
-		body["audience"] = c.audience
+func (c *grpcUserPassClient) Login(ctx context.Context, email, password string) (*LoginResult, error) {
+	resp, err := c.idp.Login(ctx, &idppb.LoginRequest{
+		Email:    email,
+		Password: password,
+		Audience: c.audience,
+		Issuer:   c.issuer,
+	})
+	if err != nil {
+		return nil, &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
 	}
-	var out LoginResult
-	if err := c.postJSON(ctx, "/login", body, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	u := resp.GetUser()
+	return &LoginResult{
+		AccessToken: resp.GetAccessToken(),
+		TokenType:   resp.GetTokenType(),
+		ExpiresIn:   int(resp.GetExpiresIn()),
+		IDToken:     resp.GetIdToken(),
+		ID:          u.GetId(),
+		FirstName:   u.GetFirstName(),
+		LastName:    u.GetLastName(),
+		Email:       u.GetEmail(),
+		Roles:       nonNil(u.GetRoles()),
+	}, nil
 }
 
-func (c *httpUserPassClient) Register(ctx context.Context, req RegisterRequest) (*UserResult, error) {
-	var out UserResult
-	if err := c.postJSON(ctx, "/register", req, &out); err != nil {
-		return nil, err
+func (c *grpcUserPassClient) Register(ctx context.Context, req RegisterRequest) (*UserResult, error) {
+	u, err := c.idp.Register(ctx, &idppb.RegisterRequest{
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+		Password:  req.Password,
+		Roles:     req.Roles,
+	})
+	if err != nil {
+		return nil, &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
 	}
-	return &out, nil
+	return userResult(u), nil
 }
 
-func (c *httpUserPassClient) ListUsers(ctx context.Context) ([]UserResult, error) {
-	var out []UserResult
-	if err := c.getJSON(ctx, "/users", &out); err != nil {
-		return nil, err
+func (c *grpcUserPassClient) ListUsers(ctx context.Context) ([]UserResult, error) {
+	resp, err := c.idp.ListUsers(ctx, &idppb.ListUsersRequest{})
+	if err != nil {
+		return nil, &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
+	}
+	out := make([]UserResult, 0, len(resp.GetUsers()))
+	for _, u := range resp.GetUsers() {
+		out = append(out, *userResult(u))
 	}
 	return out, nil
 }
 
-func (c *httpUserPassClient) CreateUser(ctx context.Context, req RegisterRequest) (*UserResult, error) {
-	var out UserResult
-	if err := c.postJSON(ctx, "/users", req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *httpUserPassClient) UpdateUser(ctx context.Context, id string, req UpdateUserRequest) (*UserResult, error) {
-	var out UserResult
-	if err := c.putJSON(ctx, "/users/"+id, req, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-func (c *httpUserPassClient) DeleteUser(ctx context.Context, id string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/users/"+id, nil, nil)
-}
-
-// postJSON posts body to base+path and decodes the JSON response into out.
-func (c *httpUserPassClient) postJSON(ctx context.Context, path string, body, out any) error {
-	return c.doJSON(ctx, http.MethodPost, path, body, out)
-}
-
-// putJSON PUTs body to base+path and decodes the JSON response into out.
-func (c *httpUserPassClient) putJSON(ctx context.Context, path string, body, out any) error {
-	return c.doJSON(ctx, http.MethodPut, path, body, out)
-}
-
-// getJSON GETs base+path and decodes the JSON response into out.
-func (c *httpUserPassClient) getJSON(ctx context.Context, path string, out any) error {
-	return c.doJSON(ctx, http.MethodGet, path, nil, out)
-}
-
-// doJSON performs a JSON request to the IdP and, on a 2xx response, decodes
-// the body into out (when out is non-nil). A non-2xx response is an error
-// carrying the IdP's message.
-func (c *httpUserPassClient) doJSON(ctx context.Context, method, path string, body, out any) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("api: encode userpass request: %w", err)
-		}
-		reader = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+func (c *grpcUserPassClient) CreateUser(ctx context.Context, req RegisterRequest) (*UserResult, error) {
+	u, err := c.idp.CreateUser(ctx, &idppb.CreateUserRequest{
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+		Password:  req.Password,
+		Roles:     req.Roles,
+	})
 	if err != nil {
-		return fmt.Errorf("api: build userpass request: %w", err)
+		return nil, &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
+	return userResult(u), nil
+}
+
+func (c *grpcUserPassClient) UpdateUser(ctx context.Context, id string, req UpdateUserRequest) (*UserResult, error) {
+	u, err := c.idp.UpdateUser(ctx, &idppb.UpdateUserRequest{
+		Id:        id,
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+		Password:  req.Password,
+		Roles:     req.Roles,
+	})
 	if err != nil {
-		return fmt.Errorf("api: userpass request %s %s: %w", method, path, err)
+		return nil, &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	return userResult(u), nil
+}
+
+func (c *grpcUserPassClient) DeleteUser(ctx context.Context, id string) error {
+	_, err := c.idp.DeleteUser(ctx, &idppb.DeleteUserRequest{Id: id})
 	if err != nil {
-		return fmt.Errorf("api: read userpass response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &userPassError{status: resp.StatusCode, body: messageFromJSON(data)}
-	}
-	if out != nil {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("api: decode userpass response: %w", err)
-		}
+		return &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
 	}
 	return nil
 }
 
-// userPassError is a non-2xx response from the IdP's userpass endpoints.
+// userResult renders a user's profile (never the password hash).
+func userResult(u *dbpb.IDPUser) *UserResult {
+	return &UserResult{
+		ID:        u.GetId(),
+		FirstName: u.GetFirstName(),
+		LastName:  u.GetLastName(),
+		Email:     u.GetEmail(),
+		Roles:     nonNil(u.GetRoles()),
+	}
+}
+
+// userPassError is an error from the IdP's userpass surface, carrying the
+// gRPC status code (so the API can map it to an HTTP status) and the message.
 type userPassError struct {
-	status int
-	body   string
+	code codes.Code
+	msg  string
 }
 
 func (e *userPassError) Error() string {
-	return fmt.Sprintf("idp userpass: status %d: %s", e.status, e.body)
-}
-
-// messageFromJSON extracts the "error" field from a JSON error body, falling
-// back to the raw body when it is not a JSON object.
-func messageFromJSON(data []byte) string {
-	var m struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(data, &m); err == nil && m.Error != "" {
-		return m.Error
-	}
-	return strings.TrimSpace(string(data))
+	return fmt.Sprintf("idp userpass: %s: %s", e.code, e.msg)
 }

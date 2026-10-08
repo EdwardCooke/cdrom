@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"cdrom/internal/auth"
@@ -1179,6 +1180,28 @@ func (s *Server) requireUserPass(w http.ResponseWriter) bool {
 	return true
 }
 
+// userPassStatus maps an error from the IdP's userpass surface to an HTTP
+// status: a userPassError is mapped from its gRPC status code, and any other
+// error (a transport failure reaching the IdP) is a 502.
+func userPassStatus(err error) int {
+	if e, ok := err.(*userPassError); ok {
+		switch e.code {
+		case codes.Unauthenticated:
+			return http.StatusUnauthorized
+		case codes.NotFound:
+			return http.StatusNotFound
+		case codes.AlreadyExists:
+			return http.StatusConflict
+		case codes.InvalidArgument:
+			return http.StatusBadRequest
+		case codes.Unimplemented:
+			return http.StatusNotImplemented
+		}
+		return http.StatusBadGateway
+	}
+	return http.StatusBadGateway
+}
+
 // requireAdmin verifies the caller is an authenticated user with the admin
 // role (used by the user/role management endpoints). It reports false (and
 // writes the response) when the caller is not an admin.
@@ -1221,11 +1244,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.userpass.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
-		if e, ok := err.(*userPassError); ok && e.status == http.StatusUnauthorized {
+		if userPassStatus(err) == http.StatusUnauthorized {
 			httpError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
-		httpError(w, http.StatusBadGateway, "login: %v", err)
+		httpError(w, userPassStatus(err), "login: %v", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1264,15 +1287,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		Password:  req.Password,
 	})
 	if err != nil {
-		if e, ok := err.(*userPassError); ok {
-			if e.status == http.StatusConflict {
-				httpError(w, http.StatusConflict, "a user with that email already exists")
-				return
-			}
-			httpError(w, http.StatusBadGateway, "register: %v", err)
+		if userPassStatus(err) == http.StatusConflict {
+			httpError(w, http.StatusConflict, "a user with that email already exists")
 			return
 		}
-		httpError(w, http.StatusBadGateway, "register: %v", err)
+		httpError(w, userPassStatus(err), "register: %v", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
@@ -1289,7 +1308,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	users, err := s.userpass.ListUsers(r.Context())
 	if err != nil {
-		httpError(w, http.StatusBadGateway, "list users: %v", err)
+		httpError(w, userPassStatus(err), "list users: %v", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nonNil(users))
@@ -1330,11 +1349,11 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		Roles:     req.Roles,
 	})
 	if err != nil {
-		if e, ok := err.(*userPassError); ok && e.status == http.StatusConflict {
+		if userPassStatus(err) == http.StatusConflict {
 			httpError(w, http.StatusConflict, "a user with that email already exists")
 			return
 		}
-		httpError(w, http.StatusBadGateway, "create user: %v", err)
+		httpError(w, userPassStatus(err), "create user: %v", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
@@ -1361,11 +1380,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.userpass.UpdateUser(r.Context(), id, req)
 	if err != nil {
-		if e, ok := err.(*userPassError); ok && e.status == http.StatusNotFound {
+		if userPassStatus(err) == http.StatusNotFound {
 			httpError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		httpError(w, http.StatusBadGateway, "update user: %v", err)
+		httpError(w, userPassStatus(err), "update user: %v", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -1385,11 +1404,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.userpass.DeleteUser(r.Context(), id); err != nil {
-		if e, ok := err.(*userPassError); ok && e.status == http.StatusNotFound {
+		if userPassStatus(err) == http.StatusNotFound {
 			httpError(w, http.StatusNotFound, "user not found")
 			return
 		}
-		httpError(w, http.StatusBadGateway, "delete user: %v", err)
+		httpError(w, userPassStatus(err), "delete user: %v", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

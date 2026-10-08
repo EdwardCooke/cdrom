@@ -806,13 +806,13 @@ type IDPAuthCode struct {
 // filesystem) so multiple IdP replicas share the same users and can run
 // behind a load balancer.
 //
-// The model does not embed gorm.Model because the user's primary key is a
-// string (a stable identifier used as the token's subject), not the numeric
-// gorm.Model ID; the timestamps are declared explicitly instead.
+// The model uses a numeric, database-assigned primary key (auto-increment),
+// like the other entities. It does not embed gorm.Model (so there is no
+// soft-delete column); the timestamps are declared explicitly instead.
 type IDPUser struct {
 	// ID is the user's stable identifier (the token's subject); it is the
-	// table's primary key.
-	ID        string `gorm:"primaryKey;not null" json:"id"`
+	// table's primary key, assigned by the database (auto-increment).
+	ID        uint   `gorm:"primaryKey" json:"id"`
 	FirstName string `gorm:"column:first_name" json:"first_name"`
 	LastName  string `gorm:"column:last_name" json:"last_name"`
 	// Email is the user's unique login identifier.

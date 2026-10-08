@@ -4,17 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"log/slog"
-	"net/http"
+	"net"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -22,13 +21,22 @@ import (
 	"cdrom/internal/config"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	idppb "cdrom/internal/gen/cdrom/idp/v1"
 	"cdrom/internal/idp"
 )
 
+// testIDP is an in-process IdP: an HTTP server (the OIDC surface, used to
+// verify minted tokens via discovery + JWKS) and a gRPC client (the API-only
+// surface, used to mint job tokens).
+type testIDP struct {
+	httpURL string
+	client  idppb.IdPClient
+}
+
 // startTestIDP starts an in-process IdP (with job-token audiences) backed by
-// in-memory stores, and returns its base URL. It is closed when the test
-// finishes.
-func startTestIDP(t *testing.T) string {
+// in-memory stores, and returns its HTTP base URL (for token verification) and
+// gRPC client (for minting). Both are closed when the test finishes.
+func startTestIDP(t *testing.T) *testIDP {
 	t.Helper()
 	cfg := config.IdPConfig{
 		Issuer:        "http://127.0.0.1:7104",
@@ -45,44 +53,46 @@ func startTestIDP(t *testing.T) string {
 	srv := idp.NewServer(cfg, km, idp.NewMemoryAuthCodeStore(), slog.Default())
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts.URL
+	// Align the configured issuer with the test server's URL so a token minted
+	// over gRPC (iss = the configured issuer) verifies against the test
+	// server's discovery document (iss = the test server's URL).
+	cfg.Issuer = ts.URL
+	grpcSrv := grpc.NewServer()
+	idppb.RegisterIdPServer(grpcSrv, idp.NewGRPCServer(cfg, km, nil, slog.Default()))
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go grpcSrv.Serve(lis)
+	t.Cleanup(grpcSrv.Stop)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return &testIDP{httpURL: ts.URL, client: idppb.NewIdPClient(conn)}
 }
 
-// mintTestJobToken mints a job token for jobID from the IdP at base.
-func mintTestJobToken(t *testing.T, base, jobID string) string {
+// mintTestJobToken mints a job token for jobID from the IdP over gRPC.
+func mintTestJobToken(t *testing.T, idp *testIDP, jobID string) string {
 	t.Helper()
-	form := url.Values{
-		"grant_type": {"job_token"},
-		"job_id":     {jobID},
-	}
-	resp, err := http.PostForm(base+"/token", form)
+	resp, err := idp.client.MintJobToken(context.Background(), &idppb.MintJobTokenRequest{JobId: jobID})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("mint: status %d body %s", resp.StatusCode, body)
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode mint: %v", err)
-	}
-	return out.AccessToken
+	return resp.GetAccessToken()
 }
 
 // TestJobTokenAuthVerify mints a job token from a real IdP and verifies it
 // with the API's JobTokenAuth (the same code path used on the gRPC surface).
 func TestJobTokenAuthVerify(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
@@ -90,7 +100,7 @@ func TestJobTokenAuthVerify(t *testing.T) {
 		t.Fatal("expected job-token auth to be enabled")
 	}
 
-	token := mintTestJobToken(t, base, "42")
+	token := mintTestJobToken(t, idp, "42")
 	jobID, err := jta.Verify(context.Background(), token)
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -104,13 +114,13 @@ func TestJobTokenAuthVerify(t *testing.T) {
 // missing token, accepts a token scoped to the job, and rejects a token scoped
 // to a different job.
 func TestCheckJobToken(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
@@ -122,7 +132,7 @@ func TestCheckJobToken(t *testing.T) {
 	}
 
 	// Valid token for job 42 -> ok.
-	token := mintTestJobToken(t, base, "42")
+	token := mintTestJobToken(t, idp, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 	if err := s.checkJobToken(ctx, 42, false); err != nil {
 		t.Errorf("valid token: %v", err)
@@ -147,13 +157,13 @@ func TestCheckJobTokenDisabled(t *testing.T) {
 // enabled it rejects a missing token, and with a valid token it mints a new
 // token for the requested audience. When disabled it is a no-op.
 func TestExchangeJobToken(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
@@ -166,7 +176,7 @@ func TestExchangeJobToken(t *testing.T) {
 	}
 
 	// Valid token for job 42 -> a new token for the requested audience.
-	token := mintTestJobToken(t, base, "42")
+	token := mintTestJobToken(t, idp, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 	resp, err := s.ExchangeJobToken(ctx, &apipb.ExchangeJobTokenRequest{JobId: 42, Audience: "outside-svc"})
 	if err != nil {
@@ -239,17 +249,17 @@ func jobTokenExpSeconds(t *testing.T, token string) int64 {
 // claim (a long placeholder) has not passed. This is what invalidates a job's
 // token when the job is no longer running.
 func TestCheckJobTokenStatusGate(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
-	token := mintTestJobToken(t, base, "42")
+	token := mintTestJobToken(t, idp, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 
 	cases := []struct {
@@ -289,17 +299,17 @@ func TestCheckJobTokenStatusGate(t *testing.T) {
 // for a finished job is accepted when allowTerminal is true and rejected when
 // it is false.
 func TestCheckJobTokenAllowTerminal(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
-	token := mintTestJobToken(t, base, "42")
+	token := mintTestJobToken(t, idp, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 
 	// A failed job (terminal): the token is rejected by default but accepted
@@ -326,13 +336,13 @@ func TestCheckJobTokenAllowTerminal(t *testing.T) {
 // request's expires_in when set, and the default (a short window) when unset.
 // The main job token is unaffected (it keeps its long placeholder lifetime).
 func TestExchangeJobTokenExpiresIn(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
@@ -340,7 +350,7 @@ func TestExchangeJobTokenExpiresIn(t *testing.T) {
 	db := &fakeDB{job: &dbpb.Job{Id: 42, Status: dbpb.JobStatus_JOB_STATUS_RUNNING}}
 	s := NewGRPCServer(db, nil, nil, jta, nil, slog.Default())
 
-	token := mintTestJobToken(t, base, "42")
+	token := mintTestJobToken(t, idp, "42")
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 	now := time.Now().Unix()
 
@@ -374,13 +384,13 @@ func TestExchangeJobTokenExpiresIn(t *testing.T) {
 // dispatch) carries a long placeholder exp (a week), so it effectively never
 // expires for the duration of a long-running job.
 func TestMainJobTokenLongLifetime(t *testing.T) {
-	base := startTestIDP(t)
+	idp := startTestIDP(t)
 	cfg := config.GRPCAuthConfig{
 		Enabled:    true,
-		IdPAddress: base,
+		IdPAddress: idp.httpURL,
 		Audiences:  []string{"cdrom-api"},
 	}
-	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, slog.Default())
+	jta, err := NewJobTokenAuth(context.Background(), cfg, nil, idp.client, slog.Default())
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}

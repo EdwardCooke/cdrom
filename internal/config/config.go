@@ -40,8 +40,12 @@ const (
 	// DefaultAPIHTTPAddress is the HTTP address the API binds for the UI.
 	DefaultAPIHTTPAddress = "127.0.0.1:8080"
 	// DefaultIdPAddress is the HTTP address the local OIDC identity provider
-	// (cmd/idp) binds to.
+	// (cmd/idp) binds to (its OIDC surface: discovery, JWKS, /auth, /token).
 	DefaultIdPAddress = "127.0.0.1:7104"
+	// DefaultIdPGRPCAddress is the gRPC address the local OIDC identity
+	// provider (cmd/idp) binds to for its API-only surface (job-token minting
+	// and user management), which the API dials over mTLS.
+	DefaultIdPGRPCAddress = "127.0.0.1:7106"
 )
 
 // Config is the shared configuration for every cdrom binary.
@@ -102,6 +106,12 @@ type Config struct {
 	// as a JWT issuer for the API's OIDC authentication. It is only used by
 	// the idp binary; other binaries ignore it.
 	IdP IdPConfig
+
+	// IdPGRPCAddress is the gRPC address of the IdP's API-only surface (job-
+	// token minting and user management). The API dials it (over mTLS when TLS
+	// is configured) to mint job tokens and to proxy the UI's username/password
+	// requests. It is used by the api binary; other binaries ignore it.
+	IdPGRPCAddress string
 
 	// GRPCAuth configures job-token authentication on the API's gRPC surface
 	// (the control plane that workers and agents talk to). When enabled, the
@@ -287,6 +297,10 @@ type IdPConfig struct {
 	// A job may also request a token for a specific audience via the API's
 	// ExchangeJobToken RPC; the IdP stamps whatever audience the API asks for.
 	Audiences []string
+	// GRPCAddress is the address the IdP's gRPC server (its API-only surface:
+	// job-token minting and user management) binds to. The API dials it over
+	// mTLS. Empty means the IdP uses DefaultIdPGRPCAddress.
+	GRPCAddress string
 }
 
 // defaultIdPIssuer is the issuer advertised when IdPConfig.Issuer is empty.
@@ -417,8 +431,9 @@ func LoadWithFile(file string) (*Config, error) {
 			TokenLifetime: time.Hour,
 			CheckInterval: time.Hour,
 		},
-		GRPCAuth: GRPCAuthConfig{},
-		Secrets:  SecretsConfig{},
+		IdPGRPCAddress: DefaultIdPGRPCAddress,
+		GRPCAuth:       GRPCAuthConfig{},
+		Secrets:        SecretsConfig{},
 	}
 	if file != "" {
 		if err := applyFile(cfg, file); err != nil {
@@ -483,8 +498,10 @@ type fileConfig struct {
 		TokenLifetime *string   `yaml:"token_lifetime"`
 		CheckInterval *string   `yaml:"check_interval"`
 		Audiences     *[]string `yaml:"audiences"`
+		GRPCAddress   *string   `yaml:"grpc_address"`
 	} `yaml:"idp"`
-	GRPCAuth *struct {
+	IdPGRPCAddress *string `yaml:"idp_grpc_address"`
+	GRPCAuth       *struct {
 		Enabled                *bool    `yaml:"enabled"`
 		IdPAddress             *string  `yaml:"idp_address"`
 		Audiences              []string `yaml:"audiences"`
@@ -622,6 +639,12 @@ func applyFile(cfg *Config, path string) error {
 		if f.IdP.Audiences != nil {
 			cfg.IdP.Audiences = *f.IdP.Audiences
 		}
+		if f.IdP.GRPCAddress != nil {
+			cfg.IdP.GRPCAddress = *f.IdP.GRPCAddress
+		}
+	}
+	if f.IdPGRPCAddress != nil {
+		cfg.IdPGRPCAddress = *f.IdPGRPCAddress
 	}
 	if f.GRPCAuth != nil {
 		if f.GRPCAuth.Enabled != nil {
@@ -683,6 +706,8 @@ func applyEnv(cfg *Config) {
 	cfg.Auth.RedirectURL = envOr("CDROM_AUTH_REDIRECT_URL", cfg.Auth.RedirectURL)
 	cfg.Auth.TokenAudience = envOr("CDROM_AUTH_TOKEN_AUDIENCE", cfg.Auth.TokenAudience)
 	cfg.IdP.Issuer = envOr("CDROM_IDP_ISSUER", cfg.IdP.Issuer)
+	cfg.IdP.GRPCAddress = envOr("CDROM_IDP_GRPC_ADDR", cfg.IdP.GRPCAddress)
+	cfg.IdPGRPCAddress = envOr("CDROM_IDP_GRPC_ADDR", cfg.IdPGRPCAddress)
 	if v := envOr("CDROM_IDP_KEY_LIFETIME", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.IdP.KeyLifetime = d
