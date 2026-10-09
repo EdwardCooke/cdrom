@@ -3671,3 +3671,384 @@ func grpcErr(err error) error {
 	}
 	return status.Error(codes.Internal, err.Error())
 }
+
+// ---------------------------------------------------------------------------
+// Roles (F-14, RBAC)
+// ---------------------------------------------------------------------------
+//
+// Roles are named sets of permissions; a principal's effective permissions are
+// the union of the permissions of every role bound to it (via a token's roles
+// claim, a configured claim mapping, or a stored binding). The role and
+// binding rows are owned by the Database service so every API replica sees the
+// same catalog; each API replica evaluates authorization locally against a
+// short-lived cache invalidated by role_change events on the shared event log
+// (F-23).
+
+// builtinRoleNames is the set of built-in role names. A custom role may not
+// take a built-in name (it would shadow the platform role).
+var builtinRoleNames = map[string]bool{
+	"admin":    true,
+	"operator": true,
+	"viewer":   true,
+	"user":     true,
+}
+
+// builtinRolePermissions is the built-in permission set for each built-in
+// role, used to seed the role catalog on startup. It mirrors the built-in
+// role definitions the authorization engine (internal/authz) uses.
+var builtinRolePermissions = map[string][]string{
+	"admin": {
+		"pipelines.can-view", "pipelines.can-create", "pipelines.can-edit",
+		"pipelines.can-delete", "runs.can-trigger", "runs.can-cancel",
+		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
+		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
+		"users.can-manage", "api-keys.can-manage", "audit.can-view",
+		"workers.can-view",
+	},
+	"operator": {
+		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",
+		"jobs.can-approve", "jobs.can-reject", "workers.can-view",
+	},
+	"viewer": {
+		"pipelines.can-view", "secrets.can-view", "workers.can-view",
+	},
+	"user": {
+		"pipelines.can-view", "secrets.can-view", "workers.can-view",
+		"api-keys.can-manage",
+	},
+}
+
+// SeedBuiltInRoles inserts the built-in roles (admin, operator, viewer, user)
+// into the role catalog if they are not already present. It is idempotent and
+// is called by the database service on startup (after migration) so every API
+// replica sees the same built-in roles. It never overwrites an existing
+// built-in role's permission set (built-in roles are fixed).
+func (s *Server) SeedBuiltInRoles(ctx context.Context) error {
+	for name, perms := range builtinRolePermissions {
+		var existing models.Role
+		err := s.db.WithContext(ctx).Where("name = ?", name).First(&existing).Error
+		if err == nil {
+			continue // already present
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return grpcErr(err)
+		}
+		role := &models.Role{
+			Name:        name,
+			Description: builtinRoleDescription(name),
+			BuiltIn:     true,
+			Permissions: nonNilStrings(perms),
+		}
+		if err := s.db.WithContext(ctx).Create(role).Error; err != nil {
+			return grpcErr(err)
+		}
+	}
+	return nil
+}
+
+// builtinRoleDescription returns the description of a built-in role.
+func builtinRoleDescription(name string) string {
+	switch name {
+	case "admin":
+		return "Platform administrator: every permission."
+	case "operator":
+		return "Runs a platform: view, trigger and cancel runs, approve/reject gated jobs."
+	case "viewer":
+		return "Read-only access to pipelines, runs, jobs, logs, artifacts, and workers."
+	case "user":
+		return "Default role of a registered user: viewer plus self-service (own API keys)."
+	default:
+		return ""
+	}
+}
+
+// validateRolePermissions checks that every permission in perms is a known
+// permission (a role that names an unknown permission is rejected).
+func validateRolePermissions(perms []string) error {
+	for _, p := range perms {
+		if !knownPermission(p) {
+			return status.Errorf(codes.InvalidArgument, "unknown permission %q", p)
+		}
+	}
+	return nil
+}
+
+// knownPermission reports whether p is a permission in the catalog. It is the
+// database service's local copy of the permission catalog (kept in sync with
+// internal/authz.AllPermissions).
+func knownPermission(p string) bool {
+	switch p {
+	case "pipelines.can-view", "pipelines.can-create", "pipelines.can-edit",
+		"pipelines.can-delete", "runs.can-trigger", "runs.can-cancel",
+		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
+		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
+		"users.can-manage", "api-keys.can-manage", "audit.can-view",
+		"workers.can-view":
+		return true
+	default:
+		return false
+	}
+}
+
+// CreateRole creates a custom role. It rejects a name that collides with a
+// built-in role or an existing role, and a permission set that names an
+// unknown permission.
+func (s *Server) CreateRole(ctx context.Context, req *dbpb.CreateRoleRequest) (*dbpb.Role, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "role name is required")
+	}
+	if builtinRoleNames[name] {
+		return nil, status.Errorf(codes.InvalidArgument, "role name %q is a built-in role", name)
+	}
+	if err := validateRolePermissions(req.GetPermissions()); err != nil {
+		return nil, err
+	}
+	var existing models.Role
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&existing).Error; err == nil {
+		return nil, status.Errorf(codes.AlreadyExists, "role %q already exists", name)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, grpcErr(err)
+	}
+	role := &models.Role{
+		Name:        name,
+		Description: req.GetDescription(),
+		BuiltIn:     false,
+		Permissions: nonNilStrings(req.GetPermissions()),
+		Includes:    nonNilStrings(req.GetIncludes()),
+	}
+	if err := s.db.WithContext(ctx).Create(role).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoRole(role), nil
+}
+
+// GetRole returns a role by name. A missing role returns NotFound.
+func (s *Server) GetRole(ctx context.Context, req *dbpb.GetRoleRequest) (*dbpb.Role, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "role name is required")
+	}
+	var role models.Role
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&role).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "role not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoRole(&role), nil
+}
+
+// ListRoles returns every role (built-in and custom), ordered by name.
+func (s *Server) ListRoles(ctx context.Context, _ *dbpb.ListRolesRequest) (*dbpb.ListRolesResponse, error) {
+	var roles []models.Role
+	if err := s.db.WithContext(ctx).Order("name").Find(&roles).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListRolesResponse{}
+	for i := range roles {
+		response.Roles = append(response.Roles, toProtoRole(&roles[i]))
+	}
+	return response, nil
+}
+
+// UpdateRole edits a custom role's description, permission set, and included
+// roles. It rejects built-in roles (their permission sets are fixed). A
+// missing role returns NotFound.
+func (s *Server) UpdateRole(ctx context.Context, req *dbpb.UpdateRoleRequest) (*dbpb.Role, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "role name is required")
+	}
+	var role models.Role
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&role).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "role not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if role.BuiltIn {
+		return nil, status.Errorf(codes.InvalidArgument, "role %q is built-in and cannot be edited", name)
+	}
+	if req.GetDescription() != "" {
+		role.Description = req.GetDescription()
+	}
+	if len(req.GetPermissions()) > 0 {
+		if err := validateRolePermissions(req.GetPermissions()); err != nil {
+			return nil, err
+		}
+		role.Permissions = nonNilStrings(req.GetPermissions())
+	}
+	if len(req.GetIncludes()) > 0 {
+		role.Includes = nonNilStrings(req.GetIncludes())
+	}
+	if err := s.db.WithContext(ctx).Save(&role).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoRole(&role), nil
+}
+
+// DeleteRole removes a custom role (and any bindings that reference it). It
+// rejects built-in roles. A missing role returns NotFound.
+func (s *Server) DeleteRole(ctx context.Context, req *dbpb.DeleteRoleRequest) (*emptypb.Empty, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "role name is required")
+	}
+	var role models.Role
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&role).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "role not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if role.BuiltIn {
+		return nil, status.Errorf(codes.InvalidArgument, "role %q is built-in and cannot be deleted", name)
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("role_name = ?", name).Delete(&models.RoleBinding{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&role).Error
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// AddRoleBinding attaches a role to a principal, optionally scoped to a
+// pipeline (pipeline_id of 0 means unscoped / platform-wide). It is idempotent
+// on (principal, role, scope): adding a binding that already exists is a
+// no-op that returns the existing binding.
+func (s *Server) AddRoleBinding(ctx context.Context, req *dbpb.AddRoleBindingRequest) (*dbpb.RoleBinding, error) {
+	if req.GetPrincipalKind() == "" {
+		return nil, status.Error(codes.InvalidArgument, "principal_kind is required")
+	}
+	if req.GetPrincipalId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "principal_id is required")
+	}
+	if req.GetRoleName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "role_name is required")
+	}
+	var existing models.RoleBinding
+	query := s.db.WithContext(ctx).
+		Where("principal_kind = ? AND principal_id = ? AND role_name = ?",
+			req.GetPrincipalKind(), req.GetPrincipalId(), req.GetRoleName())
+	if req.GetPipelineId() == 0 {
+		query = query.Where("pipeline_id IS NULL")
+	} else {
+		query = query.Where("pipeline_id = ?", req.GetPipelineId())
+	}
+	if err := query.First(&existing).Error; err == nil {
+		return toProtoRoleBinding(&existing), nil // idempotent: already bound
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, grpcErr(err)
+	}
+	binding := &models.RoleBinding{
+		PrincipalKind: req.GetPrincipalKind(),
+		PrincipalID:   req.GetPrincipalId(),
+		RoleName:      req.GetRoleName(),
+	}
+	if req.GetPipelineId() != 0 {
+		pid := uint(req.GetPipelineId())
+		binding.PipelineID = &pid
+	}
+	if err := s.db.WithContext(ctx).Create(binding).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoRoleBinding(binding), nil
+}
+
+// ListRoleBindings returns role bindings, optionally filtered by principal
+// kind, principal id, and/or role name.
+func (s *Server) ListRoleBindings(ctx context.Context, req *dbpb.ListRoleBindingsRequest) (*dbpb.ListRoleBindingsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.RoleBinding{})
+	if req.GetPrincipalKind() != "" {
+		query = query.Where("principal_kind = ?", req.GetPrincipalKind())
+	}
+	if req.GetPrincipalId() != "" {
+		query = query.Where("principal_id = ?", req.GetPrincipalId())
+	}
+	if req.GetRoleName() != "" {
+		query = query.Where("role_name = ?", req.GetRoleName())
+	}
+	var bindings []models.RoleBinding
+	if err := query.Order("id").Find(&bindings).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListRoleBindingsResponse{}
+	for i := range bindings {
+		response.Bindings = append(response.Bindings, toProtoRoleBinding(&bindings[i]))
+	}
+	return response, nil
+}
+
+// DeleteRoleBinding removes a role binding by id. A missing binding returns
+// NotFound.
+func (s *Server) DeleteRoleBinding(ctx context.Context, req *dbpb.DeleteRoleBindingRequest) (*emptypb.Empty, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "binding id is required")
+	}
+	var binding models.RoleBinding
+	if err := s.db.WithContext(ctx).First(&binding, req.GetId()).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "binding not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if err := s.db.WithContext(ctx).Delete(&binding).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// PublishRoleChange appends a "role_change" event to the shared event log: a
+// signal to every API replica to invalidate its local authorization cache
+// (F-14, F-23). The role/binding rows are persisted by the caller through the
+// role/binding RPCs; this only appends the event so the other replicas see
+// the change without a restart.
+func (s *Server) PublishRoleChange(ctx context.Context, _ *dbpb.PublishRoleChangeRequest) (*dbpb.PublishEventResponse, error) {
+	id, err := s.appendEvent(ctx, "role_change", "", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	return &dbpb.PublishEventResponse{Id: id}, nil
+}
+
+// toProtoRole renders a role as its Database-service form.
+func toProtoRole(role *models.Role) *dbpb.Role {
+	return &dbpb.Role{
+		Id:          int64(role.ID),
+		Name:        role.Name,
+		Description: role.Description,
+		BuiltIn:     role.BuiltIn,
+		Permissions: nonNilStrings(role.Permissions),
+		Includes:    nonNilStrings(role.Includes),
+		CreatedAt:   timestamppb.New(role.CreatedAt),
+		UpdatedAt:   timestamppb.New(role.UpdatedAt),
+	}
+}
+
+// toProtoRoleBinding renders a role binding as its Database-service form.
+func toProtoRoleBinding(b *models.RoleBinding) *dbpb.RoleBinding {
+	out := &dbpb.RoleBinding{
+		Id:            int64(b.ID),
+		PrincipalKind: b.PrincipalKind,
+		PrincipalId:   b.PrincipalID,
+		RoleName:      b.RoleName,
+		CreatedAt:     timestamppb.New(b.CreatedAt),
+	}
+	if b.PipelineID != nil {
+		out.PipelineId = int64(*b.PipelineID)
+	}
+	return out
+}
+
+// nonNilStrings returns a non-nil slice so that an empty set is stored as an
+// empty JSON array rather than null.
+func nonNilStrings(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}

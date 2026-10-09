@@ -138,8 +138,13 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 	})
 }
 
-// userFromIDToken extracts the principal from validated OIDC claims.
-func userFromIDToken(idToken *oidc.IDToken) User {
+// userFromIDToken extracts the principal from validated OIDC claims, applying
+// the configured JWT claim mapping (F-14) to derive additional roles from a
+// configurable claim (e.g. an enterprise IdP's group claim). The standard
+// roles claim (stamped by the built-in IdP) is always read; the configured
+// claim mapping is additive, so a principal can have token-stamped and
+// claim-mapped roles at once.
+func userFromIDToken(idToken *oidc.IDToken, roles config.RolesConfig) User {
 	var claims struct {
 		Subject string   `json:"sub"`
 		Name    string   `json:"name"`
@@ -147,7 +152,67 @@ func userFromIDToken(idToken *oidc.IDToken) User {
 		Roles   []string `json:"roles"`
 	}
 	_ = idToken.Claims(&claims)
-	return User{Subject: claims.Subject, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
+	user := User{Subject: claims.Subject, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
+	// JWT claim mapping (F-14): read the configured claim and map its values
+	// to role names, so group membership in an enterprise IdP drives Cdrom
+	// roles without Cdrom's user directory knowing the user at all. When the
+	// role claim is unset, claim mapping is disabled.
+	if roles.RoleClaim != "" {
+		for _, value := range claimValues(idToken, roles.RoleClaim) {
+			if role := mappedRole(roles, value); role != "" {
+				user.Roles = appendRole(user.Roles, role)
+			}
+		}
+	}
+	return user
+}
+
+// mappedRole returns the role name a claim value maps to under the configured
+// mapping: the explicit RoleMappings entry when present, otherwise the value
+// itself as a role name when RoleClaimAsNames is set, otherwise "" (ignored).
+func mappedRole(roles config.RolesConfig, value string) string {
+	if role, ok := roles.RoleMappings[value]; ok {
+		return role
+	}
+	if roles.RoleClaimAsNames {
+		return value
+	}
+	return ""
+}
+
+// claimValues returns the values of a token claim, handling both a scalar
+// string claim and a list-of-strings claim (e.g. an enterprise IdP's "groups"
+// claim). A missing or non-string claim yields no values.
+func claimValues(idToken *oidc.IDToken, name string) []string {
+	var raw map[string]any
+	_ = idToken.Claims(&raw)
+	if raw == nil {
+		return nil
+	}
+	switch v := raw[name].(type) {
+	case string:
+		return []string{v}
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// appendRole appends role to roles if it is not already present.
+func appendRole(roles []string, role string) []string {
+	for _, r := range roles {
+		if r == role {
+			return roles
+		}
+	}
+	return append(roles, role)
 }
 
 // DiscoveryDocument is the OIDC discovery document the API serves at

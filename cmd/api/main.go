@@ -17,6 +17,7 @@ import (
 
 	"cdrom/internal/api"
 	"cdrom/internal/auth"
+	"cdrom/internal/authz"
 	"cdrom/internal/config"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
@@ -147,6 +148,23 @@ func main() {
 	// user storage) lives in the IdP. The IdP's base URL is the configured
 	// auth issuer, falling back to the default IdP address.
 	apiServer := api.New(clients, hub, secretStore)
+
+	// Role-based access control (F-14). When authentication is enabled the API
+	// enforces RBAC: a request is allowed only if the authenticated
+	// principal's roles grant the required permission (with a scope that
+	// covers the target resource). The engine reads the role catalog from the
+	// Database service and caches it locally, invalidating the cache when a
+	// role_change event arrives on the shared event log (F-23), so a role or
+	// binding change takes effect on this replica without a restart. The same
+	// engine instance is shared by the HTTP server (which enforces it) and the
+	// gRPC server's tail loop (which invalidates it). When authentication is
+	// disabled the API is open (requests act as a synthetic admin) and RBAC is
+	// not enforced.
+	var authzEngine *authz.Engine
+	if authBundle.Enabled() {
+		authzEngine = authz.New(api.NewDBRoleSource(clients.Database))
+		apiServer.SetAuthz(authzEngine, true)
+	}
 	if cfg.Auth.UserPassEnabled {
 		// The OIDC issuer the API's verifier checks on a presented token
 		// (auth.issuer, falling back to the default IdP address). It is passed
@@ -219,6 +237,12 @@ func main() {
 	}
 	grpcSrv := grpc.NewServer(grpc.Creds(creds))
 	grpcServer := api.NewGRPCServer(clients.Database, clients.Artifacts, hub, jobAuth, secretStore, logger)
+	// Share the authorization engine (F-14) with the gRPC server's event-log
+	// tail loop so a role_change event invalidates this replica's cache (the
+	// same instance the HTTP server enforces).
+	if authzEngine != nil {
+		grpcServer.SetAuthz(authzEngine)
+	}
 	apipb.RegisterAPIServer(grpcSrv, grpcServer)
 
 	// Event-log tail loop (F-23): tails the shared event log and fans new

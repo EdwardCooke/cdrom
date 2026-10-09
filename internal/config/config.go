@@ -164,6 +164,32 @@ type AuthConfig struct {
 	// empty the API accepts the token's audience as-is (the verifier checks
 	// it against ClientID). Optional.
 	TokenAudience string
+	// Roles configures JWT claim mapping for role-based access control (F-14):
+	// a configurable claim (e.g. groups, roles, scope) is read from a token
+	// from any IdP and its values mapped to role names, so group membership in
+	// an enterprise IdP drives Cdrom roles without Cdrom's user directory
+	// knowing the user at all. When RoleClaim is empty, claim mapping is
+	// disabled.
+	Roles RolesConfig
+}
+
+// RolesConfig configures JWT claim mapping for role-based access control
+// (F-14). It is deployment config (env/config file), so an enterprise points
+// Cdrom at its IdP's group claim without per-group database rows; the mapping
+// is static and reviewed with the rest of the config.
+type RolesConfig struct {
+	// RoleClaim is the name of the token claim to read for role mapping (e.g.
+	// "groups", "roles", or "scope"). When empty, claim mapping is disabled
+	// and only the token's roles claim (and stored bindings) drive roles.
+	RoleClaim string
+	// RoleMappings maps a claim value to a role name (e.g. "platform-ops" ->
+	// "operator"). A claim value that is not in the mapping is ignored unless
+	// RoleClaimAsNames is true.
+	RoleMappings map[string]string
+	// RoleClaimAsNames, when true, treats each value of the role claim as a
+	// role name directly (in addition to any RoleMappings), so a claim value
+	// that is itself a role name grants that role without a mapping entry.
+	RoleClaimAsNames bool
 }
 
 // GRPCAuthConfig configures job-token authentication on the API's gRPC
@@ -490,6 +516,11 @@ type fileConfig struct {
 		RedirectURL     *string  `yaml:"redirect_url"`
 		Scopes          []string `yaml:"scopes"`
 		TokenAudience   *string  `yaml:"token_audience"`
+		Roles           *struct {
+			RoleClaim        *string           `yaml:"role_claim"`
+			RoleMappings     map[string]string `yaml:"role_mappings"`
+			RoleClaimAsNames *bool             `yaml:"role_claim_as_names"`
+		} `yaml:"roles"`
 	} `yaml:"auth"`
 	IdP *struct {
 		Issuer        *string   `yaml:"issuer"`
@@ -603,6 +634,17 @@ func applyFile(cfg *Config, path string) error {
 		if f.Auth.TokenAudience != nil {
 			cfg.Auth.TokenAudience = *f.Auth.TokenAudience
 		}
+		if f.Auth.Roles != nil {
+			if f.Auth.Roles.RoleClaim != nil {
+				cfg.Auth.Roles.RoleClaim = *f.Auth.Roles.RoleClaim
+			}
+			if f.Auth.Roles.RoleMappings != nil {
+				cfg.Auth.Roles.RoleMappings = f.Auth.Roles.RoleMappings
+			}
+			if f.Auth.Roles.RoleClaimAsNames != nil {
+				cfg.Auth.Roles.RoleClaimAsNames = *f.Auth.Roles.RoleClaimAsNames
+			}
+		}
 	}
 	if f.IdP != nil {
 		if f.IdP.Issuer != nil {
@@ -705,6 +747,16 @@ func applyEnv(cfg *Config) {
 	cfg.Auth.ClientID = envOr("CDROM_AUTH_CLIENT_ID", cfg.Auth.ClientID)
 	cfg.Auth.RedirectURL = envOr("CDROM_AUTH_REDIRECT_URL", cfg.Auth.RedirectURL)
 	cfg.Auth.TokenAudience = envOr("CDROM_AUTH_TOKEN_AUDIENCE", cfg.Auth.TokenAudience)
+	// JWT claim mapping for RBAC (F-14): a configurable claim is read from a
+	// token and its values mapped to role names. CDROM_AUTH_ROLE_MAPPINGS is a
+	// comma-separated list of "claimValue=roleName" pairs.
+	cfg.Auth.Roles.RoleClaim = envOr("CDROM_AUTH_ROLE_CLAIM", cfg.Auth.Roles.RoleClaim)
+	if v := os.Getenv("CDROM_AUTH_ROLE_CLAIM_AS_NAMES"); v != "" {
+		cfg.Auth.Roles.RoleClaimAsNames = v == "true" || v == "1"
+	}
+	if v := os.Getenv("CDROM_AUTH_ROLE_MAPPINGS"); v != "" {
+		cfg.Auth.Roles.RoleMappings = parseRoleMappings(v)
+	}
 	cfg.IdP.Issuer = envOr("CDROM_IDP_ISSUER", cfg.IdP.Issuer)
 	cfg.IdP.GRPCAddress = envOr("CDROM_IDP_GRPC_ADDR", cfg.IdP.GRPCAddress)
 	cfg.IdPGRPCAddress = envOr("CDROM_IDP_GRPC_ADDR", cfg.IdPGRPCAddress)
@@ -749,6 +801,25 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseRoleMappings parses a comma-separated list of "claimValue=roleName"
+// pairs (the CDROM_AUTH_ROLE_MAPPINGS env var) into a claim-value -> role-name
+// map (F-14). Entries without an "=" are ignored.
+func parseRoleMappings(s string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return out
 }
 
 // defaultAgentName is the default identity of an ephemeral agent: the host

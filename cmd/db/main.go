@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"os"
 
@@ -44,6 +45,13 @@ func main() {
 	defer database.Close(db)
 	if err := database.Migrate(db, logger); err != nil {
 		logger.Error("database: migrate", "err", err)
+		os.Exit(1)
+	}
+	// Seed the built-in roles (F-14, RBAC) into the role catalog so every API
+	// replica sees the same built-in roles (admin, operator, viewer, user).
+	// Idempotent: it only inserts a built-in role that is not already present.
+	if err := database.NewServer(db).SeedBuiltInRoles(context.Background()); err != nil {
+		logger.Error("database: seed built-in roles", "err", err)
 		os.Exit(1)
 	}
 

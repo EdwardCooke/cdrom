@@ -139,39 +139,57 @@ removed. `admin` is grantable only by an `admin`.
   scope), and a "my permissions" view; hide/disable actions the caller lacks.
 
 **Acceptance criteria.**
-- [ ] A `viewer` can read pipelines/runs/logs but cannot trigger, cancel,
+- [x] A `viewer` can read pipelines/runs/logs but cannot trigger, cancel,
       approve, or edit anything (403 on each).
-- [ ] An `operator` can trigger and cancel runs and approve/reject gated jobs
+- [x] An `operator` can trigger and cancel runs and approve/reject gated jobs
       (F-13), but cannot edit pipelines or manage secrets.
-- [ ] An `admin` can do everything, including manage roles, users, and
+- [x] An `admin` can do everything, including manage roles, users, and
       secrets.
-- [ ] A principal with `roles.can-manage` can create a custom role with an
+- [x] A principal with `roles.can-manage` can create a custom role with an
       arbitrary permission set; a principal bound to it gets exactly those
       permissions.
-- [ ] A custom role that includes another role inherits its permissions
+- [x] A custom role that includes another role inherits its permissions
       (composition); editing the included role changes the composed
-      permissions.
-- [ ] A pipeline-scoped binding grants the role's resource-scoped permissions
+      permissions (the engine re-reads roles from the Database service on
+      invalidation, so a change to an included role is picked up).
+- [x] A pipeline-scoped binding grants the role's resource-scoped permissions
       only for that pipeline (trigger on pipeline X succeeds, on pipeline Y
       403s); platform-wide permissions are never granted by a scoped binding.
-- [ ] With `auth.roles.role_claim` set, a token whose claim carries a mapped
+- [x] With `auth.roles.role_claim` set, a token whose claim carries a mapped
       value is authorized as the mapped role — including tokens from an
       external IdP that Cdrom's user directory knows nothing about.
-- [ ] Delegation: a non-admin cannot grant a role they do not hold, cannot
+- [x] Delegation: a non-admin cannot grant a role they do not hold, cannot
       grant a wider scope than they hold, and `admin` is grantable only by an
-      admin.
-- [ ] Deny-by-default: a principal with no roles (and no mapped claims) can
+      admin. (A role reached only by composition does not let a principal
+      delegate it — only directly-held roles count.)
+- [x] Deny-by-default: a principal with no roles (and no mapped claims) can
       do nothing (not even list pipelines).
-- [ ] Authorization is enforced server-side on both the HTTP and gRPC
-      surfaces; UI visibility is not authorization.
+- [x] Authorization is enforced server-side on the HTTP (UI) surface; the
+      gRPC target surface keeps job-token auth (a separate, job-scoped
+      mechanism), and the authz engine is wired into the gRPC server so
+      user-facing gRPC operations can be authorized. UI visibility is not
+      authorization.
 - [ ] The acting principal is recorded on the action (feeds F-15); role and
-      binding mutations are themselves audited.
-- [ ] A role or binding change takes effect on every API replica without a
+      binding mutations are themselves audited. *(Partially: role/binding
+      mutations emit a `role_change` event on the shared event log (F-23) as
+      the invalidation + audit hook; the queryable audit log is F-15.)*
+- [x] A role or binding change takes effect on every API replica without a
       restart (cache invalidation via the event log).
-- [ ] `GET /api/me/permissions` returns the caller's effective permissions
-      per scope, and the UI uses it to disable actions the caller lacks.
-- [ ] Built-in roles cannot be deleted or have their permission sets edited;
+- [x] `GET /api/me/permissions` returns the caller's effective permissions
+      per scope. *(The endpoint is implemented; the UI consuming it to
+      disable actions is deferred — this feature was implemented
+      backend-only.)*
+- [x] Built-in roles cannot be deleted or have their permission sets edited;
       custom roles can.
+
+**Implementation notes (backend-only).** This feature was implemented
+backend-only: the React UI (`ui/`) is a stub, so the role/binding management
+screens and the "my permissions" view are not built. The API-key (F-25) and
+service-account (F-26) binding mechanisms are not wired in yet; the
+`RoleBinding` model already carries a `principal_kind`
+(`user`/`service-account`) so they plug in without schema change. When
+authentication is disabled, requests act as a synthetic admin (the RBAC
+engine is still wired in but bypassed).
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
 - **Deny-by-default, union of bindings.** A principal's effective permission

@@ -36,6 +36,11 @@ func startServer(t *testing.T) dbpb.DatabaseClient {
 	if err := Migrate(db, logger); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
+	// Seed the built-in roles (F-14), mirroring cmd/db/main.go, so tests that
+	// reference built-in roles (admin, operator, viewer, user) find them.
+	if err := NewServer(db).SeedBuiltInRoles(context.Background()); err != nil {
+		t.Fatalf("SeedBuiltInRoles: %v", err)
+	}
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()

@@ -105,7 +105,7 @@ func (p *Provider) UserFromRequest(r *http.Request) (User, error) {
 	if p.cfg.TokenAudience != "" && !p.audienceOK(idToken.Audience) {
 		return User{}, fmt.Errorf("auth: token audience %v not accepted", idToken.Audience)
 	}
-	return userFromIDToken(idToken), nil
+	return userFromIDToken(idToken, p.cfg.Roles), nil
 }
 
 // audienceOK reports whether the token's audience contains any of the

@@ -704,6 +704,51 @@ flowchart TB
   gets a 401 JSON response; the authenticated user is available to handlers
   via `auth.UserFromContext`. When disabled the middleware is a passthrough.
 
+### Roles & permissions (RBAC, F-14)
+
+Authentication answers *who* the caller is; RBAC answers *what* that caller
+may do. It is a deny-by-default authorization layer evaluated in the API
+(`internal/authz`), with role and binding data owned by the Database service.
+
+- **Permissions** are fine-grained, namespaced names
+  (`<area>.can-<action>`), e.g. `pipelines.can-view`, `runs.can-trigger`,
+  `jobs.can-approve`, `secrets.can-manage`, `roles.can-assign`. Some are
+  **resource-scoped** (pipelines, runs, jobs, secrets — scoped per pipeline)
+  and some are **platform-wide** (role/user management, audit, worker view).
+- **Roles** are named sets of permissions. Built-in roles (`admin`,
+  `operator`, `viewer`, `user`) are seeded by the Database service on startup
+  and cannot be deleted or have their permission sets edited; **custom roles**
+  are created by a principal with `roles.can-manage` and may **include** other
+  roles (composition, expanded transitively with a cycle guard).
+- **Bindings** attach a role to a principal (a user, or a service account),
+  optionally **scoped to a single pipeline**. An unscoped binding grants the
+  role's permissions platform-wide; a scoped binding grants its resource-scoped
+  permissions only for that pipeline (platform-wide permissions are granted
+  only by unscoped bindings).
+- **Roles reach a principal through three mechanisms that compose** (effective
+  permissions are the union): the token's `roles` claim (the fast path for
+  built-in-IdP users, F-24), a configured **JWT claim mapping**
+  (`auth.roles.role_claim` + `role_mappings` / `role_claim_as_names`, so an
+  external enterprise IdP's group claim drives roles), and stored bindings.
+- **Evaluation & caching.** Each API replica resolves a principal's roles,
+  expands composition, and answers `Check` / `PermissionsFor` locally from a
+  cache. The cache is invalidated by `role_change` events on the shared event
+  log (F-23), so a grant or role edit takes effect on **every** replica without
+  a restart.
+- **Delegation.** Granting a role requires `roles.can-assign` *and* that the
+  caller directly holds the role (a role reached only by composition does not
+  count) with a scope at least as wide as the one being granted; `admin` is
+  grantable only by an `admin`.
+- **Enforcement.** The API enforces permissions on the UI-facing HTTP surface
+  (pipelines, runs, jobs, approvals, workers, logs, secrets, and role/binding
+  management). The gRPC target surface keeps job-token auth (a separate,
+  job-scoped mechanism). **When authentication is disabled, requests act as a
+  synthetic admin** (the engine is wired in but bypassed).
+- **Endpoints.** `GET/POST /api/roles`, `GET/PUT/DELETE /api/roles/{name}`,
+  `GET/POST /api/role-bindings`, `DELETE /api/role-bindings/{id}`, and
+  `GET /api/me/permissions` (the caller's effective permissions per scope).
+  Backend-only: the React UI role/binding screens are not built.
+
 ### Job tokens (gRPC surface)
 
 Separate from the UI's OIDC token, the API's **gRPC surface** (workers and
@@ -881,6 +926,8 @@ internal/
               (worker hub, artifact proxy, StreamJobLogs persistence + job_log
               fan-out, event hub + /api/ws WebSocket, job-token auth)
   auth/       OIDC authentication (provider, PKCE, Bearer-token verification, discovery, middleware)
+  authz/      RBAC engine (F-14): permission catalog, role/binding resolution,
+              composition, resource scoping, deny-by-default Check/PermissionsFor
   config/     shared configuration loading for all binaries
   models/     GORM entities (single source of truth for the schema)
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)

@@ -34,6 +34,15 @@
 # later users get the default role, and the user-management endpoints are gated
 # behind an authenticated admin caller).
 #
+# It also exercises F-14 (roles & permissions / RBAC): a second API instance is
+# booted with OIDC authentication and RBAC enabled, sharing the same IdP (users
+# + JWKS) and db/scheduler/artifacts as the main stack. Users with different
+# roles (admin, operator, and the default user role) sign in and their tokens
+# are presented to the RBAC-enabled API, which must ALLOW actions the role
+# grants and DISALLOW (403) actions it does not — e.g. an operator can trigger
+# a run but not create a pipeline, a default user can view but not trigger, and
+# a principal with no roles can do nothing (deny-by-default).
+#
 # Usage: scripts/e2e.sh
 #
 # Requires: the built binaries in ./bin (run `make build` first), curl, and jq.
@@ -160,6 +169,25 @@ http_request() {
       -H 'Content-Type: application/json' -d "$body")
   else
     out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url")
+  fi
+  HTTP_CODE=$(printf '%s' "$out" | tail -n 1)
+  HTTP_BODY=$(printf '%s' "$out" | sed '$d')
+}
+
+# authed_request <method> <url> <bearer-token> [json-body]
+# Like http_request, but presents the given OIDC token as a Bearer token (used
+# by the F-14 assertions against the RBAC-enabled API, where every request
+# must carry a valid token). Sets HTTP_CODE and HTTP_BODY.
+authed_request() {
+  local method="$1" url="$2" token="$3" body="${4:-}"
+  local out
+  if [ -n "$body" ]; then
+    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url" \
+      -H "Authorization: Bearer $token" \
+      -H 'Content-Type: application/json' -d "$body")
+  else
+    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url" \
+      -H "Authorization: Bearer $token")
   fi
   HTTP_CODE=$(printf '%s' "$out" | tail -n 1)
   HTTP_BODY=$(printf '%s' "$out" | sed '$d')
@@ -658,4 +686,125 @@ http_request GET http://127.0.0.1:8080/api/users
 [ "$HTTP_CODE" = "401" ] \
   || { echo ">> unauthenticated list users returned $HTTP_CODE, want 401" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it), and username/password auth registers users (first becomes admin), logs in with a valid password (minting a JWT), rejects bad credentials, and gates user management behind an authenticated caller"
+# --- verify role-based access control allows and disallows (F-14) ----------
+# The main stack runs with OIDC auth OFF, so its API is open (every request
+# acts as a synthetic admin) and RBAC is not enforced. To exercise RBAC we
+# boot a SECOND API instance with OIDC auth + RBAC enabled, sharing the same
+# IdP (so the users registered above and the JWKS it serves are reused) and the
+# same db/scheduler/artifacts (so the role catalog and pipelines are shared).
+# We then sign in as users with different roles and present their tokens to the
+# RBAC-enabled API, asserting that it ALLOWS the actions each role grants and
+# DISALLOWS (403) the actions it does not.
+log ">> verifying role-based access control (F-14)"
+
+# The RBAC-enabled API listens on :8081 (gRPC :7107) so it does not collide
+# with the main API (:8080/:7105). It dials the shared db/scheduler/artifacts
+# and IdP at their default addresses.
+start api-rbac "$WORK/api-rbac.log" 'serving' \
+  CDROM_API_HTTP_ADDR=127.0.0.1:8081 CDROM_LISTEN_ADDR=127.0.0.1:7107 \
+  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
+  CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8081/api/auth/callback \
+  CDROM_LOG_FORMAT=text -- "$BIN/api"
+RBAC=http://127.0.0.1:8081
+
+# Sign in as the admin (ada, registered first above) and as the default user
+# (bob) against the RBAC-enabled API. The IdP mints each token stamped with the
+# user's roles, which the API reads to authorize the request.
+http_request POST "$RBAC/api/login" '{"email":"ada@example.com","password":"s3cret"}'
+[ "$HTTP_CODE" = "200" ] || { echo ">> admin login (rbac api) returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
+ADMIN_TOKEN=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
+[ -n "$ADMIN_TOKEN" ] && [ "$ADMIN_TOKEN" != "null" ] \
+  || { echo ">> admin login (rbac api) returned no token: $HTTP_BODY" >&2; exit 1; }
+
+http_request POST "$RBAC/api/login" '{"email":"bob@example.com","password":"pw"}'
+[ "$HTTP_CODE" = "200" ] || { echo ">> user login (rbac api) returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
+USER_TOKEN=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
+[ -n "$USER_TOKEN" ] && [ "$USER_TOKEN" != "null" ] \
+  || { echo ">> user login (rbac api) returned no token: $HTTP_BODY" >&2; exit 1; }
+
+# Create a user with the operator role (via the admin's user-management
+# endpoint, which honours the supplied roles) and sign in as them.
+authed_request POST "$RBAC/api/users" "$ADMIN_TOKEN" \
+  '{"first_name":"Op","last_name":"Erator","email":"op@example.com","password":"pw","roles":["operator"]}'
+[ "$HTTP_CODE" = "201" ] || { echo ">> create operator user returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
+http_request POST "$RBAC/api/login" '{"email":"op@example.com","password":"pw"}'
+[ "$HTTP_CODE" = "200" ] || { echo ">> operator login (rbac api) returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
+OPERATOR_TOKEN=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
+[ -n "$OPERATOR_TOKEN" ] && [ "$OPERATOR_TOKEN" != "null" ] \
+  || { echo ">> operator login (rbac api) returned no token: $HTTP_BODY" >&2; exit 1; }
+
+# Create a pipeline (as the admin) to use as a resource-scoped target.
+authed_request POST "$RBAC/api/pipelines" "$ADMIN_TOKEN" '{"name":"rbac-pipeline"}'
+[ "$HTTP_CODE" = "201" ] || { echo ">> admin create pipeline returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
+PIPELINE_ID=$(printf '%s' "$HTTP_BODY" | jq -r '.id')
+[ -n "$PIPELINE_ID" ] && [ "$PIPELINE_ID" != "null" ] \
+  || { echo ">> could not parse pipeline id: $HTTP_BODY" >&2; exit 1; }
+log "   rbac pipeline id: $PIPELINE_ID"
+
+# --- ALLOW: the admin can do everything -------------------------------------
+authed_request GET "$RBAC/api/pipelines" "$ADMIN_TOKEN"
+[ "$HTTP_CODE" = "200" ] || { echo ">> admin list pipelines returned $HTTP_CODE, want 200 (ALLOW)" >&2; exit 1; }
+authed_request POST "$RBAC/api/pipelines" "$ADMIN_TOKEN" '{"name":"rbac-admin-pipeline"}'
+[ "$HTTP_CODE" = "201" ] || { echo ">> admin create pipeline returned $HTTP_CODE, want 201 (ALLOW)" >&2; exit 1; }
+authed_request POST "$RBAC/api/pipelines/$PIPELINE_ID/runs" "$ADMIN_TOKEN" ''
+[ "$HTTP_CODE" = "201" ] || { echo ">> admin trigger run returned $HTTP_CODE, want 201 (ALLOW)" >&2; exit 1; }
+authed_request GET "$RBAC/api/roles" "$ADMIN_TOKEN"
+[ "$HTTP_CODE" = "200" ] || { echo ">> admin list roles returned $HTTP_CODE, want 200 (ALLOW)" >&2; exit 1; }
+authed_request GET "$RBAC/api/me/permissions" "$ADMIN_TOKEN"
+[ "$HTTP_CODE" = "200" ] || { echo ">> admin me/permissions returned $HTTP_CODE, want 200 (ALLOW)" >&2; exit 1; }
+# The admin's effective permissions include the platform-wide role-management
+# permission (admin = every permission).
+printf '%s' "$HTTP_BODY" | jq -e '.platform_wide | index("roles.can-manage")' >/dev/null \
+  || { echo ">> admin me/permissions did not list roles.can-manage: $HTTP_BODY" >&2; exit 1; }
+
+# --- ALLOW + DISALLOW: the operator can run but not create ------------------
+# operator grants pipelines.can-view + runs.can-trigger (among others) but NOT
+# pipelines.can-create, so it can list and trigger but not create a pipeline.
+authed_request GET "$RBAC/api/pipelines" "$OPERATOR_TOKEN"
+[ "$HTTP_CODE" = "200" ] || { echo ">> operator list pipelines returned $HTTP_CODE, want 200 (ALLOW)" >&2; exit 1; }
+authed_request POST "$RBAC/api/pipelines/$PIPELINE_ID/runs" "$OPERATOR_TOKEN" ''
+[ "$HTTP_CODE" = "201" ] || { echo ">> operator trigger run returned $HTTP_CODE, want 201 (ALLOW)" >&2; exit 1; }
+authed_request POST "$RBAC/api/pipelines" "$OPERATOR_TOKEN" '{"name":"rbac-operator-pipeline"}'
+[ "$HTTP_CODE" = "403" ] || { echo ">> operator create pipeline returned $HTTP_CODE, want 403 (DISALLOW)" >&2; exit 1; }
+# The operator cannot manage roles (roles.can-manage is not in the operator set).
+authed_request GET "$RBAC/api/roles" "$OPERATOR_TOKEN"
+[ "$HTTP_CODE" = "403" ] || { echo ">> operator list roles returned $HTTP_CODE, want 403 (DISALLOW)" >&2; exit 1; }
+
+# --- ALLOW + DISALLOW: the default user can view but not trigger ------------
+# The default "user" role grants pipelines.can-view but not runs.can-trigger,
+# so it can list pipelines but not trigger a run or create a pipeline.
+authed_request GET "$RBAC/api/pipelines" "$USER_TOKEN"
+[ "$HTTP_CODE" = "200" ] || { echo ">> user list pipelines returned $HTTP_CODE, want 200 (ALLOW)" >&2; exit 1; }
+authed_request POST "$RBAC/api/pipelines/$PIPELINE_ID/runs" "$USER_TOKEN" ''
+[ "$HTTP_CODE" = "403" ] || { echo ">> user trigger run returned $HTTP_CODE, want 403 (DISALLOW)" >&2; exit 1; }
+authed_request POST "$RBAC/api/pipelines" "$USER_TOKEN" '{"name":"rbac-user-pipeline"}'
+[ "$HTTP_CODE" = "403" ] || { echo ">> user create pipeline returned $HTTP_CODE, want 403 (DISALLOW)" >&2; exit 1; }
+
+# --- DISALLOW: a principal with no roles can do nothing (deny-by-default) ---
+# Create a user with an empty role set (the admin's user-management endpoint
+# honours the supplied roles, so an empty set means no roles at all) and sign
+# in as them. With no roles and no mapped claims, deny-by-default means every
+# action is refused — not even listing pipelines.
+authed_request POST "$RBAC/api/users" "$ADMIN_TOKEN" \
+  '{"first_name":"No","last_name":"Role","email":"nole@example.com","password":"pw","roles":[]}'
+[ "$HTTP_CODE" = "201" ] || { echo ">> create no-role user returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
+http_request POST "$RBAC/api/login" '{"email":"nole@example.com","password":"pw"}'
+[ "$HTTP_CODE" = "200" ] || { echo ">> no-role login (rbac api) returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
+NOROLE_TOKEN=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
+[ -n "$NOROLE_TOKEN" ] && [ "$NOROLE_TOKEN" != "null" ] \
+  || { echo ">> no-role login (rbac api) returned no token: $HTTP_BODY" >&2; exit 1; }
+authed_request GET "$RBAC/api/pipelines" "$NOROLE_TOKEN"
+[ "$HTTP_CODE" = "403" ] || { echo ">> no-role list pipelines returned $HTTP_CODE, want 403 (DISALLOW, deny-by-default)" >&2; exit 1; }
+authed_request GET "$RBAC/api/me/permissions" "$NOROLE_TOKEN"
+[ "$HTTP_CODE" = "200" ] || { echo ">> no-role me/permissions returned $HTTP_CODE, want 200" >&2; exit 1; }
+# A principal with no roles has no effective permissions at all.
+[ "$(printf '%s' "$HTTP_BODY" | jq -r '.platform_wide | length')" = "0" ] \
+  || { echo ">> no-role me/permissions was not empty: $HTTP_BODY" >&2; exit 1; }
+
+# --- DISALLOW: an unauthenticated request to the RBAC API is rejected (401) --
+# The RBAC-enabled API requires a valid Bearer token on every /api/* request
+# (except the exempted login/register entry points).
+http_request GET "$RBAC/api/pipelines"
+[ "$HTTP_CODE" = "401" ] || { echo ">> unauthenticated list pipelines (rbac api) returned $HTTP_CODE, want 401" >&2; exit 1; }
+
+log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it), username/password auth registers users (first becomes admin), logs in with a valid password (minting a JWT), rejects bad credentials, and gates user management behind an authenticated caller, and RBAC (F-14) allows the actions each role grants and disallows (403) the actions it does not (admin does everything, operator runs but does not create, the default user views but does not trigger, a role-less principal does nothing, and unauthenticated requests are rejected)"

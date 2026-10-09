@@ -82,6 +82,30 @@ db:
 #  # Audience accepted on verified tokens. When set, the verifier checks the
 #  # token's aud against this value; when empty it checks against client_id.
 #  # token_audience: cdrom-api
+#
+#  # Role-based access control (F-14). RBAC is enforced whenever auth is
+#  # enabled: a request is allowed only if the caller's roles grant the
+#  # required permission (with a scope that covers the target resource). Roles
+#  # reach a principal through the token's roles claim (stamped by the built-in
+#  # IdP), the claim mapping below, and stored role bindings (managed via
+#  # /api/roles and /api/role-bindings).
+#  #
+#  # JWT claim mapping: read a configurable claim from a token from ANY IdP
+#  # (including an external enterprise IdP) and map its values to role names,
+#  # so group membership in the corporate IdP drives Cdrom roles without
+#  # Cdrom's user directory knowing the user at all. When role_claim is empty,
+#  # claim mapping is disabled.
+#  #roles:
+#  #  # The token claim to read (e.g. "groups", "roles", or "scope").
+#  #  role_claim: groups
+#  #  # Map a claim value to a role name (unmapped values are ignored unless
+#  #  # role_claim_as_names is true).
+#  #  role_mappings:
+#  #    platform-ops: operator
+#  #    platform-admins: admin
+#  #  # Treat each claim value as a role name directly (in addition to any
+#  #  # role_mappings).
+#  #  role_claim_as_names: false
 
 # Local OIDC identity provider (used by the idp binary, cmd/idp). It acts as a
 # JWT issuer for the API's OIDC authentication. It serves the standard OIDC

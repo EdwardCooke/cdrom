@@ -21,6 +21,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/authz"
 	"cdrom/internal/secrets"
 )
 
@@ -77,6 +78,12 @@ type GRPCServer struct {
 	// production the built-in AES store is always available. A job whose
 	// pipeline has no secrets needs no store.
 	secretStore secrets.Store
+	// authz is the shared authorization engine (F-14, RBAC). The HTTP server
+	// uses it to enforce role-based access; the gRPC server's event-log tail
+	// loop uses it to invalidate its cache when a role_change event arrives
+	// (F-23), so a role or binding change takes effect on this replica without
+	// a restart. It is the same engine instance the HTTP server holds.
+	authz *authz.Engine
 
 	mu       sync.Mutex
 	live     map[string]*liveWorker // worker name -> live worker
@@ -133,6 +140,15 @@ func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient
 		coalescer:   newLogCoalescer(logCoalesceWindow),
 		published:   make(map[int64]struct{}),
 	}
+}
+
+// SetAuthz attaches the shared authorization engine (F-14, RBAC). The
+// event-log tail loop uses it to invalidate the engine's cache when a
+// role_change event arrives (F-23), so a role or binding change takes effect
+// on this replica without a restart. It is the same engine instance the HTTP
+// server uses.
+func (s *GRPCServer) SetAuthz(e *authz.Engine) {
+	s.authz = e
 }
 
 // ---------------------------------------------------------------------------

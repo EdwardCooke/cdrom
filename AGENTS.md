@@ -149,7 +149,8 @@ is the summary index). Summary:
 | F-11 | Pipeline versioning (immutable `PipelineVersion` snapshots; a run binds to the version active at start; run against a specific version) |
 | F-12 | Secrets management (pipeline-level named secrets; AES-256-GCM with a configured key; DB-backed nonce counter; API decrypts at dispatch; log redaction) |
 | F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
-| F-14…F-22 | Roadmap: RBAC, audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-14 | Roles & permissions (RBAC) (fine-grained permissions, built-in + custom roles with composition, user/service-account bindings optionally scoped per pipeline; deny-by-default; roles live in the Database service, evaluated in the API via `internal/authz` with a cache invalidated by `role_change` events on the shared event log; JWT claim mapping via `auth.roles`; delegation rules; synthetic admin when auth is off; backend-only — UI screens deferred) |
+| F-15…F-22 | Roadmap: audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 | F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
 | F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
@@ -230,6 +231,8 @@ internal/
   api/        API/controller: HTTP routing + gRPC control-plane server (worker hub,
               artifact proxy, StreamJobLogs persistence + job_log fan-out, event hub + /api/ws)
   auth/       OIDC auth (provider, PKCE, Bearer verification, discovery, middleware)
+  authz/      RBAC engine (F-14): permission catalog, role/binding resolution,
+              composition, resource scoping, deny-by-default Check/PermissionsFor
   config/     shared config loading for all binaries
   models/     GORM entities (single source of truth for the schema)
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)
@@ -305,7 +308,9 @@ Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_P
 `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
 the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
 auth vars `CDROM_AUTH_*` (incl. `CDROM_AUTH_USERPASS_ENABLED`, username/password
-auth, default on), the IdP vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
+auth, default on; and the RBAC claim-mapping vars `CDROM_AUTH_ROLE_CLAIM`,
+`CDROM_AUTH_ROLE_MAPPINGS` (comma-separated `claimValue=roleName`), and
+`CDROM_AUTH_ROLE_CLAIM_AS_NAMES`, F-14), the IdP vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
 IdP's gRPC listen address; the API dials it via `CDROM_IDP_GRPC_ADDR`), the
 job-token auth vars `CDROM_GRPC_AUTH_*`, and the secrets vars
 `CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY` (base64 32-byte AES-256-GCM key;
@@ -395,6 +400,46 @@ the API can register users, log them in, or manage roles.
 - The user directory (profiles, bcrypt password hashes, roles) is persisted
   through the Database service (`internal/models.IDPUser`), like the IdP's keys
   and auth codes, so multiple IdP replicas share it.
+
+### Roles & permissions (RBAC, F-14)
+
+A deny-by-default authorization layer. A principal's effective permissions are
+the union of the permissions of every role it holds, expanded through role
+composition, then filtered by resource scope per request. Roles reach a
+principal through three mechanisms that compose:
+
+- **Token `roles` claim** — the built-in IdP stamps the user's registered roles
+  (F-24) onto the token; the API reads them from the verified token (the fast
+  path, no per-request DB lookup).
+- **JWT claim mapping** — `auth.roles.role_claim` names a token claim (e.g.
+  `groups`) whose values are mapped to role names via `auth.roles.role_mappings`
+  (or treated as role names directly when `role_claim_as_names` is set), so an
+  external enterprise IdP's group membership drives Cdrom roles.
+- **Stored bindings** — `RoleBinding` rows in the Database service attach a role
+  to a principal, optionally scoped to a single pipeline (a scoped binding grants
+  the role's resource-scoped permissions only for that pipeline; platform-wide
+  permissions are granted only by unscoped bindings).
+
+- **Engine.** `internal/authz` resolves a principal's roles, expands composition,
+  and answers `Check(ctx, principal, permission, resource)` /
+  `PermissionsFor(ctx, principal)`. Roles and bindings are owned by the Database
+  service (seeded built-in roles `admin`/`operator`/`viewer`/`user` on startup);
+  each API replica evaluates locally with a cache that is invalidated by
+  `role_change` events on the shared event log (F-23), so a grant takes effect on
+  every pod without a restart.
+- **Enforcement.** The API enforces permissions on the UI-facing HTTP surface
+  (pipelines, runs, jobs, approvals, workers, logs, secrets, role/binding
+  management). The gRPC target surface keeps job-token auth (a separate,
+  job-scoped mechanism). **When authentication is disabled, requests act as a
+  synthetic admin** (the engine is wired in but bypassed).
+- **Delegation.** Granting a role requires `roles.can-assign` *and* that the
+  caller directly holds the role (a role reached only by composition does not
+  count) with a scope at least as wide as the one being granted; `admin` is
+  grantable only by an `admin`.
+- **Endpoints.** `GET/POST /api/roles`, `GET/PUT/DELETE /api/roles/{name}`,
+  `GET/POST /api/role-bindings`, `DELETE /api/role-bindings/{id}`, and
+  `GET /api/me/permissions` (the caller's effective permissions per scope).
+  Backend-only: the React UI role/binding screens are not built.
 
 ### Job Tokens (gRPC surface)
 

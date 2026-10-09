@@ -333,6 +333,12 @@ func (s *GRPCServer) handleEvent(ctx context.Context, event *dbpb.Event) {
 			return
 		}
 		s.handleLogUpdated(ctx, &p)
+	case "role_change":
+		// A role or binding changed (F-14, F-23): invalidate this replica's
+		// authorization cache so the change takes effect without a restart.
+		if s.authz != nil {
+			s.authz.Invalidate()
+		}
 	}
 }
 

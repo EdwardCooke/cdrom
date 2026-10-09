@@ -78,6 +78,15 @@ const (
 	Database_UpdateIDPUser_FullMethodName           = "/cdrom.db.v1.Database/UpdateIDPUser"
 	Database_DeleteIDPUser_FullMethodName           = "/cdrom.db.v1.Database/DeleteIDPUser"
 	Database_NextSecretNonce_FullMethodName         = "/cdrom.db.v1.Database/NextSecretNonce"
+	Database_CreateRole_FullMethodName              = "/cdrom.db.v1.Database/CreateRole"
+	Database_GetRole_FullMethodName                 = "/cdrom.db.v1.Database/GetRole"
+	Database_ListRoles_FullMethodName               = "/cdrom.db.v1.Database/ListRoles"
+	Database_UpdateRole_FullMethodName              = "/cdrom.db.v1.Database/UpdateRole"
+	Database_DeleteRole_FullMethodName              = "/cdrom.db.v1.Database/DeleteRole"
+	Database_AddRoleBinding_FullMethodName          = "/cdrom.db.v1.Database/AddRoleBinding"
+	Database_ListRoleBindings_FullMethodName        = "/cdrom.db.v1.Database/ListRoleBindings"
+	Database_DeleteRoleBinding_FullMethodName       = "/cdrom.db.v1.Database/DeleteRoleBinding"
+	Database_PublishRoleChange_FullMethodName       = "/cdrom.db.v1.Database/PublishRoleChange"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -333,6 +342,38 @@ type DatabaseClient interface {
 	// unique (key, nonce) pair is what makes AES-GCM safe. The counter is
 	// persisted here so it survives API restarts and is shared by all replicas.
 	NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error)
+	// Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
+	// effective permissions are the union of the permissions of every role
+	// bound to it (via a token's roles claim, a configured claim mapping, or a
+	// stored binding). Role and binding rows are owned by the Database service
+	// so every API replica sees the same catalog; each API replica evaluates
+	// authorization locally against a short-lived cache invalidated by
+	// role_change events on the shared event log.
+	//
+	// CreateRole creates a custom role (a name, description, permission set,
+	// and optional included roles). It rejects a name that collides with a
+	// built-in role or an existing role. UpdateRole edits a custom role's
+	// description, permission set, and included roles; it rejects built-in
+	// roles (their permission sets are fixed). DeleteRole removes a custom
+	// role (and any bindings that reference it); it rejects built-in roles.
+	CreateRole(ctx context.Context, in *CreateRoleRequest, opts ...grpc.CallOption) (*Role, error)
+	GetRole(ctx context.Context, in *GetRoleRequest, opts ...grpc.CallOption) (*Role, error)
+	ListRoles(ctx context.Context, in *ListRolesRequest, opts ...grpc.CallOption) (*ListRolesResponse, error)
+	UpdateRole(ctx context.Context, in *UpdateRoleRequest, opts ...grpc.CallOption) (*Role, error)
+	DeleteRole(ctx context.Context, in *DeleteRoleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// AddRoleBinding attaches a role to a principal, optionally scoped to a
+	// pipeline (pipeline_id of 0 means unscoped / platform-wide). It is
+	// idempotent on (principal, role, scope): adding a binding that already
+	// exists is a no-op.
+	AddRoleBinding(ctx context.Context, in *AddRoleBindingRequest, opts ...grpc.CallOption) (*RoleBinding, error)
+	ListRoleBindings(ctx context.Context, in *ListRoleBindingsRequest, opts ...grpc.CallOption) (*ListRoleBindingsResponse, error)
+	DeleteRoleBinding(ctx context.Context, in *DeleteRoleBindingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// PublishRoleChange appends a "role_change" event to the shared event log:
+	// a signal to every API replica to invalidate its local authorization
+	// cache (F-14, F-23). The role/binding rows themselves are persisted by
+	// the caller through the role/binding RPCs; this only appends the event so
+	// the other replicas see the change without a restart.
+	PublishRoleChange(ctx context.Context, in *PublishRoleChangeRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 }
 
 type databaseClient struct {
@@ -923,6 +964,96 @@ func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonc
 	return out, nil
 }
 
+func (c *databaseClient) CreateRole(ctx context.Context, in *CreateRoleRequest, opts ...grpc.CallOption) (*Role, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Role)
+	err := c.cc.Invoke(ctx, Database_CreateRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetRole(ctx context.Context, in *GetRoleRequest, opts ...grpc.CallOption) (*Role, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Role)
+	err := c.cc.Invoke(ctx, Database_GetRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListRoles(ctx context.Context, in *ListRolesRequest, opts ...grpc.CallOption) (*ListRolesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRolesResponse)
+	err := c.cc.Invoke(ctx, Database_ListRoles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateRole(ctx context.Context, in *UpdateRoleRequest, opts ...grpc.CallOption) (*Role, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Role)
+	err := c.cc.Invoke(ctx, Database_UpdateRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteRole(ctx context.Context, in *DeleteRoleRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) AddRoleBinding(ctx context.Context, in *AddRoleBindingRequest, opts ...grpc.CallOption) (*RoleBinding, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RoleBinding)
+	err := c.cc.Invoke(ctx, Database_AddRoleBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListRoleBindings(ctx context.Context, in *ListRoleBindingsRequest, opts ...grpc.CallOption) (*ListRoleBindingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRoleBindingsResponse)
+	err := c.cc.Invoke(ctx, Database_ListRoleBindings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteRoleBinding(ctx context.Context, in *DeleteRoleBindingRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteRoleBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PublishRoleChange(ctx context.Context, in *PublishRoleChangeRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishEventResponse)
+	err := c.cc.Invoke(ctx, Database_PublishRoleChange_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -1176,6 +1307,38 @@ type DatabaseServer interface {
 	// unique (key, nonce) pair is what makes AES-GCM safe. The counter is
 	// persisted here so it survives API restarts and is shared by all replicas.
 	NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error)
+	// Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
+	// effective permissions are the union of the permissions of every role
+	// bound to it (via a token's roles claim, a configured claim mapping, or a
+	// stored binding). Role and binding rows are owned by the Database service
+	// so every API replica sees the same catalog; each API replica evaluates
+	// authorization locally against a short-lived cache invalidated by
+	// role_change events on the shared event log.
+	//
+	// CreateRole creates a custom role (a name, description, permission set,
+	// and optional included roles). It rejects a name that collides with a
+	// built-in role or an existing role. UpdateRole edits a custom role's
+	// description, permission set, and included roles; it rejects built-in
+	// roles (their permission sets are fixed). DeleteRole removes a custom
+	// role (and any bindings that reference it); it rejects built-in roles.
+	CreateRole(context.Context, *CreateRoleRequest) (*Role, error)
+	GetRole(context.Context, *GetRoleRequest) (*Role, error)
+	ListRoles(context.Context, *ListRolesRequest) (*ListRolesResponse, error)
+	UpdateRole(context.Context, *UpdateRoleRequest) (*Role, error)
+	DeleteRole(context.Context, *DeleteRoleRequest) (*emptypb.Empty, error)
+	// AddRoleBinding attaches a role to a principal, optionally scoped to a
+	// pipeline (pipeline_id of 0 means unscoped / platform-wide). It is
+	// idempotent on (principal, role, scope): adding a binding that already
+	// exists is a no-op.
+	AddRoleBinding(context.Context, *AddRoleBindingRequest) (*RoleBinding, error)
+	ListRoleBindings(context.Context, *ListRoleBindingsRequest) (*ListRoleBindingsResponse, error)
+	DeleteRoleBinding(context.Context, *DeleteRoleBindingRequest) (*emptypb.Empty, error)
+	// PublishRoleChange appends a "role_change" event to the shared event log:
+	// a signal to every API replica to invalidate its local authorization
+	// cache (F-14, F-23). The role/binding rows themselves are persisted by
+	// the caller through the role/binding RPCs; this only appends the event so
+	// the other replicas see the change without a restart.
+	PublishRoleChange(context.Context, *PublishRoleChangeRequest) (*PublishEventResponse, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -1359,6 +1522,33 @@ func (UnimplementedDatabaseServer) DeleteIDPUser(context.Context, *DeleteIDPUser
 }
 func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
+}
+func (UnimplementedDatabaseServer) CreateRole(context.Context, *CreateRoleRequest) (*Role, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateRole not implemented")
+}
+func (UnimplementedDatabaseServer) GetRole(context.Context, *GetRoleRequest) (*Role, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRole not implemented")
+}
+func (UnimplementedDatabaseServer) ListRoles(context.Context, *ListRolesRequest) (*ListRolesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRoles not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateRole(context.Context, *UpdateRoleRequest) (*Role, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateRole not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteRole(context.Context, *DeleteRoleRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteRole not implemented")
+}
+func (UnimplementedDatabaseServer) AddRoleBinding(context.Context, *AddRoleBindingRequest) (*RoleBinding, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddRoleBinding not implemented")
+}
+func (UnimplementedDatabaseServer) ListRoleBindings(context.Context, *ListRoleBindingsRequest) (*ListRoleBindingsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRoleBindings not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteRoleBinding(context.Context, *DeleteRoleBindingRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteRoleBinding not implemented")
+}
+func (UnimplementedDatabaseServer) PublishRoleChange(context.Context, *PublishRoleChangeRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishRoleChange not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -2425,6 +2615,168 @@ func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateRole(ctx, req.(*CreateRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetRole(ctx, req.(*GetRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListRoles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRolesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListRoles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListRoles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListRoles(ctx, req.(*ListRolesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateRole(ctx, req.(*UpdateRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteRole(ctx, req.(*DeleteRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_AddRoleBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddRoleBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AddRoleBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AddRoleBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AddRoleBinding(ctx, req.(*AddRoleBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListRoleBindings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRoleBindingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListRoleBindings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListRoleBindings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListRoleBindings(ctx, req.(*ListRoleBindingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteRoleBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRoleBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteRoleBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteRoleBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteRoleBinding(ctx, req.(*DeleteRoleBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PublishRoleChange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishRoleChangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PublishRoleChange(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PublishRoleChange_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PublishRoleChange(ctx, req.(*PublishRoleChangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2663,6 +3015,42 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "NextSecretNonce",
 			Handler:    _Database_NextSecretNonce_Handler,
+		},
+		{
+			MethodName: "CreateRole",
+			Handler:    _Database_CreateRole_Handler,
+		},
+		{
+			MethodName: "GetRole",
+			Handler:    _Database_GetRole_Handler,
+		},
+		{
+			MethodName: "ListRoles",
+			Handler:    _Database_ListRoles_Handler,
+		},
+		{
+			MethodName: "UpdateRole",
+			Handler:    _Database_UpdateRole_Handler,
+		},
+		{
+			MethodName: "DeleteRole",
+			Handler:    _Database_DeleteRole_Handler,
+		},
+		{
+			MethodName: "AddRoleBinding",
+			Handler:    _Database_AddRoleBinding_Handler,
+		},
+		{
+			MethodName: "ListRoleBindings",
+			Handler:    _Database_ListRoleBindings_Handler,
+		},
+		{
+			MethodName: "DeleteRoleBinding",
+			Handler:    _Database_DeleteRoleBinding_Handler,
+		},
+		{
+			MethodName: "PublishRoleChange",
+			Handler:    _Database_PublishRoleChange_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

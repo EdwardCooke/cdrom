@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"cdrom/internal/auth"
+	"cdrom/internal/authz"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
@@ -50,6 +51,18 @@ type Server struct {
 	// when username/password authentication is disabled, in which case the
 	// /api/login, /api/register, and /api/users endpoints respond 501.
 	userpass UserPassClient
+	// authz is the authorization engine (F-14, RBAC). It enforces role-based
+	// access on the UI-facing HTTP surface: a request is allowed only if the
+	// authenticated principal's roles grant the required permission (with a
+	// scope that covers the target resource). It is nil when RBAC is not
+	// enforced (authentication disabled), in which case requests act as a
+	// synthetic admin.
+	authz *authz.Engine
+	// rbacEnabled reports whether role-based access control is enforced on the
+	// UI-facing HTTP surface (authentication enabled). When false, requests
+	// act as a synthetic admin (everything is allowed), so a local run with
+	// authentication disabled keeps working.
+	rbacEnabled bool
 }
 
 // SetUserPassClient attaches the IdP username/password proxy client, enabling
@@ -57,6 +70,17 @@ type Server struct {
 // endpoints are disabled (they respond 501).
 func (s *Server) SetUserPassClient(c UserPassClient) {
 	s.userpass = c
+}
+
+// SetAuthz attaches the authorization engine (F-14, RBAC) and enables
+// role-based access control on the UI-facing HTTP surface. When enabled, every
+// request is checked against the authenticated principal's roles before the
+// handler acts; a request the principal's roles do not permit is rejected with
+// 403. When left unset (authentication disabled), requests act as a synthetic
+// admin and RBAC is not enforced.
+func (s *Server) SetAuthz(e *authz.Engine, enabled bool) {
+	s.authz = e
+	s.rbacEnabled = enabled
 }
 
 // New creates an API server over the given gRPC clients. hub is the event
@@ -127,6 +151,20 @@ func (s *Server) Handler() http.Handler {
 	// secret store. The returned ciphertext is what a pipeline's secret
 	// declaration stores; the plaintext is never persisted or returned.
 	mux.HandleFunc("POST /api/secrets/encrypt", s.encryptSecret)
+
+	// Roles (F-14, RBAC): custom role CRUD (built-in roles cannot be edited or
+	// deleted), role bindings (principal + role + optional pipeline scope), and
+	// the caller's effective permissions (the UI uses it to disable actions the
+	// caller lacks).
+	mux.HandleFunc("GET /api/roles", s.listRoles)
+	mux.HandleFunc("POST /api/roles", s.createRole)
+	mux.HandleFunc("GET /api/roles/{name}", s.getRole)
+	mux.HandleFunc("PUT /api/roles/{name}", s.updateRole)
+	mux.HandleFunc("DELETE /api/roles/{name}", s.deleteRole)
+	mux.HandleFunc("GET /api/role-bindings", s.listBindings)
+	mux.HandleFunc("POST /api/role-bindings", s.addBinding)
+	mux.HandleFunc("DELETE /api/role-bindings/{id}", s.deleteBinding)
+	mux.HandleFunc("GET /api/me/permissions", s.myPermissions)
 
 	// Username/password authentication (proxied to the IdP). These are the
 	// unauthenticated entry points: login and register require no token, and
@@ -231,6 +269,9 @@ type pipelineJobRequest struct {
 }
 
 func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermPipelinesCreate, authz.Resource{}) {
+		return
+	}
 	var req pipelineRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
@@ -264,6 +305,9 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 	pipelineID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermPipelinesEdit, authz.Resource{PipelineID: pipelineID}) {
 		return
 	}
 	var req pipelineRequest
@@ -433,6 +477,9 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 }
 
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
+		return
+	}
 	response, err := s.clients.Database.ListPipelines(r.Context(), &dbpb.ListPipelinesRequest{})
 	if err != nil {
 		grpcError(w, err)
@@ -467,6 +514,9 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requirePermission(w, r, authz.PermRunsTrigger, authz.Resource{PipelineID: pipelineID}) {
+		return
+	}
 	var req runRequest
 	// An empty body is allowed (a run with the default trigger and no params);
 	// json.Decoder reports io.EOF for one, which we treat as "no body".
@@ -494,6 +544,9 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{PipelineID: pipelineID}) {
+		return
+	}
 	response, err := s.clients.Database.ListRuns(r.Context(), &dbpb.ListRunsRequest{PipelineId: pipelineID})
 	if err != nil {
 		grpcError(w, err)
@@ -506,6 +559,9 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	runID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
 	run, err := s.clients.Database.GetRun(r.Context(), &dbpb.GetRunRequest{Id: runID})
@@ -524,6 +580,9 @@ func (s *Server) listPipelineVersions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{PipelineID: pipelineID}) {
+		return
+	}
 	response, err := s.clients.Database.ListPipelineVersions(r.Context(), &dbpb.ListPipelineVersionsRequest{PipelineId: pipelineID})
 	if err != nil {
 		grpcError(w, err)
@@ -537,6 +596,9 @@ func (s *Server) listPipelineVersions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getPipelineVersion(w http.ResponseWriter, r *http.Request) {
 	pipelineID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{PipelineID: pipelineID}) {
 		return
 	}
 	version, err := strconv.ParseInt(r.PathValue("version"), 10, 32)
@@ -849,6 +911,17 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
+	// A job that belongs to a pipeline is a job definition (pipelines.can-edit);
+	// a standalone job triggers work (runs.can-trigger).
+	if req.PipelineID > 0 {
+		if !s.requirePermission(w, r, authz.PermPipelinesEdit, authz.Resource{PipelineID: req.PipelineID}) {
+			return
+		}
+	} else {
+		if !s.requirePermission(w, r, authz.PermRunsTrigger, authz.Resource{}) {
+			return
+		}
+	}
 	spec, err := req.Spec.toProtoSpec()
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "invalid spec: %v", err)
@@ -895,6 +968,9 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
+		return
+	}
 	query := r.URL.Query()
 	req := &schedpb.ListJobsRequest{}
 	if value := query.Get("pipeline_id"); value != "" {
@@ -918,6 +994,9 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
+		return
+	}
 	job, err := s.clients.Scheduler.GetJob(r.Context(), &schedpb.GetJobRequest{Id: jobID})
 	if err != nil {
 		grpcError(w, err)
@@ -929,6 +1008,9 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 	jobID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermRunsCancel, authz.Resource{}) {
 		return
 	}
 	job, err := s.clients.Scheduler.CancelJob(r.Context(), &schedpb.CancelJobRequest{Id: jobID})
@@ -946,6 +1028,9 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) rerunJob(w http.ResponseWriter, r *http.Request) {
 	jobID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermRunsTrigger, authz.Resource{}) {
 		return
 	}
 	job, err := s.clients.Scheduler.RerunJob(r.Context(), &schedpb.RerunJobRequest{Id: jobID})
@@ -996,6 +1081,14 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decisio
 	if !ok {
 		return
 	}
+	// Approving requires jobs.can-approve; rejecting requires jobs.can-reject.
+	permission := authz.PermJobsApprove
+	if decision == "rejected" {
+		permission = authz.PermJobsReject
+	}
+	if !s.requirePermission(w, r, permission, authz.Resource{}) {
+		return
+	}
 	var req approvalRequest
 	// The body is optional (a reason is not required); an empty or absent body
 	// is fine.
@@ -1022,6 +1115,9 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decisio
 // ---------------------------------------------------------------------------
 
 func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermWorkersView, authz.Resource{}) {
+		return
+	}
 	response, err := s.clients.Database.ListWorkers(r.Context(), &dbpb.ListWorkersRequest{
 		Group: r.URL.Query().Get("group"),
 	})
@@ -1039,6 +1135,9 @@ func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listJobArtifacts(w http.ResponseWriter, r *http.Request) {
 	jobID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
 	response, err := s.clients.Artifacts.ListArtifacts(r.Context(), &artifactspb.ListArtifactsRequest{
@@ -1062,6 +1161,9 @@ func (s *Server) listJobLogs(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
+		return
+	}
 	response, err := s.clients.Artifacts.ListLogs(r.Context(), &artifactspb.ListLogsRequest{
 		Namespace: strconv.FormatInt(jobID, 10),
 	})
@@ -1078,6 +1180,9 @@ func (s *Server) listJobLogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getJobLog(w http.ResponseWriter, r *http.Request) {
 	jobID, ok := pathID(w, r)
 	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
 	name := r.PathValue("name")
@@ -1145,6 +1250,9 @@ type encryptSecretResponse struct {
 // for a secret value without it ever being persisted by the API. When no
 // secrets key is configured the API cannot encrypt and rejects the request.
 func (s *Server) encryptSecret(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermSecretsManage, authz.Resource{}) {
+		return
+	}
 	var req encryptSecretRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
@@ -1202,10 +1310,16 @@ func userPassStatus(err error) int {
 	return http.StatusBadGateway
 }
 
-// requireAdmin verifies the caller is an authenticated user with the admin
-// role (used by the user/role management endpoints). It reports false (and
-// writes the response) when the caller is not an admin.
+// requireAdmin verifies the caller may manage users (used by the user
+// management endpoints). When RBAC is enabled it requires the users.can-manage
+// permission (F-14) — which the admin role grants, but a custom role could
+// also grant. When RBAC is not enabled it falls back to requiring the admin
+// role (the pre-F-14 behavior). It reports false (and writes the response)
+// when the caller is not allowed.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if s.rbacEnabled && s.authz != nil {
+		return s.requirePermission(w, r, authz.PermUsersManage, authz.Resource{})
+	}
 	user := auth.UserFromContext(r.Context())
 	if user.Subject == "" {
 		httpError(w, http.StatusUnauthorized, "authentication required")

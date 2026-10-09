@@ -268,6 +268,39 @@ service Database {
   // unique (key, nonce) pair is what makes AES-GCM safe. The counter is
   // persisted here so it survives API restarts and is shared by all replicas.
   rpc NextSecretNonce(NextSecretNonceRequest) returns (NextSecretNonceResponse);
+
+  // Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
+  // effective permissions are the union of the permissions of every role
+  // bound to it (via a token's roles claim, a configured claim mapping, or a
+  // stored binding). Role and binding rows are owned by the Database service
+  // so every API replica sees the same catalog; each API replica evaluates
+  // authorization locally against a short-lived cache invalidated by
+  // role_change events on the shared event log.
+  //
+  // CreateRole creates a custom role (a name, description, permission set,
+  // and optional included roles). It rejects a name that collides with a
+  // built-in role or an existing role. UpdateRole edits a custom role's
+  // description, permission set, and included roles; it rejects built-in
+  // roles (their permission sets are fixed). DeleteRole removes a custom
+  // role (and any bindings that reference it); it rejects built-in roles.
+  rpc CreateRole(CreateRoleRequest) returns (Role);
+  rpc GetRole(GetRoleRequest) returns (Role);
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
+  rpc UpdateRole(UpdateRoleRequest) returns (Role);
+  rpc DeleteRole(DeleteRoleRequest) returns (google.protobuf.Empty);
+  // AddRoleBinding attaches a role to a principal, optionally scoped to a
+  // pipeline (pipeline_id of 0 means unscoped / platform-wide). It is
+  // idempotent on (principal, role, scope): adding a binding that already
+  // exists is a no-op.
+  rpc AddRoleBinding(AddRoleBindingRequest) returns (RoleBinding);
+  rpc ListRoleBindings(ListRoleBindingsRequest) returns (ListRoleBindingsResponse);
+  rpc DeleteRoleBinding(DeleteRoleBindingRequest) returns (google.protobuf.Empty);
+  // PublishRoleChange appends a "role_change" event to the shared event log:
+  // a signal to every API replica to invalidate its local authorization
+  // cache (F-14, F-23). The role/binding rows themselves are persisted by
+  // the caller through the role/binding RPCs; this only appends the event so
+  // the other replicas see the change without a restart.
+  rpc PublishRoleChange(PublishRoleChangeRequest) returns (PublishEventResponse);
 }
 
 // Parameter is a named, typed input a pipeline declares (F-10): a name, an
@@ -1736,3 +1769,132 @@ message NextSecretNonceResponse {
   // value).
   int64 nonce = 1;
 }
+
+// ---------------------------------------------------------------------------
+// Roles (F-14, RBAC)
+// ---------------------------------------------------------------------------
+
+// Role is a named set of permissions. A role is either built-in (shipped with
+// the platform; it cannot be deleted or have its permission set edited) or
+// custom (created by a principal holding roles.can-manage). A role's effective
+// permissions are the union of its own permissions and the effective
+// permissions of the roles it includes (composition, expanded transitively).
+message Role {
+  int64 id = 1;
+  // name is the role's unique name (e.g. "admin", "operator", "viewer",
+  // "user", or a custom name such as "pipeline-owner").
+  string name = 2;
+  // description is a human-readable description of the role.
+  string description = 3;
+  // built_in marks a role that ships with the platform. Built-in roles cannot
+  // be deleted or have their permission set edited.
+  bool built_in = 4;
+  // permissions are the permission names the role grants directly (e.g.
+  // "pipelines.can-view"). The role's full permission set is the union of
+  // these and the effective permissions of every role it includes.
+  repeated string permissions = 5;
+  // includes lists the names of other roles this role composes: the role's
+  // effective permissions are the union of its own permissions and the
+  // effective permissions of every included role (expanded transitively).
+  repeated string includes = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// CreateRoleRequest is the request to create a custom role.
+message CreateRoleRequest {
+  // name is the role's unique name; it must not collide with a built-in or
+  // existing role.
+  string name = 1;
+  // description is a human-readable description of the role.
+  string description = 2;
+  // permissions are the permission names the role grants directly.
+  repeated string permissions = 3;
+  // includes are the names of other roles this role composes.
+  repeated string includes = 4;
+}
+
+message GetRoleRequest {
+  // name is the role's name.
+  string name = 1;
+}
+
+message ListRolesRequest {}
+
+message ListRolesResponse {
+  repeated Role roles = 1;
+}
+
+// UpdateRoleRequest edits a custom role. Only the fields set on the request
+// are changed; an empty description leaves the existing description
+// unchanged. Built-in roles are rejected (their permission sets are fixed).
+message UpdateRoleRequest {
+  // name is the role to update.
+  string name = 1;
+  // description, when non-empty, replaces the role's description.
+  string description = 2;
+  // permissions, when present, replace the role's permission set.
+  repeated string permissions = 3;
+  // includes, when present, replace the role's included roles.
+  repeated string includes = 4;
+}
+
+message DeleteRoleRequest {
+  // name is the role to delete. Built-in roles are rejected.
+  string name = 1;
+}
+
+// RoleBinding attaches a role to a principal, optionally scoped to a pipeline.
+message RoleBinding {
+  int64 id = 1;
+  // principal_kind is the kind of principal the role is bound to: "user" or
+  // "service-account".
+  string principal_kind = 2;
+  // principal_id is the principal's identifier (a user's id / the token's
+  // subject, or a service account's id).
+  string principal_id = 3;
+  // role_name is the name of the role bound to the principal.
+  string role_name = 4;
+  // pipeline_id is the pipeline the binding is scoped to; 0 means the binding
+  // is unscoped (platform-wide).
+  int64 pipeline_id = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// AddRoleBindingRequest attaches a role to a principal.
+message AddRoleBindingRequest {
+  // principal_kind is the kind of principal: "user" or "service-account".
+  string principal_kind = 1;
+  // principal_id is the principal's identifier.
+  string principal_id = 2;
+  // role_name is the name of the role to bind.
+  string role_name = 3;
+  // pipeline_id is the pipeline the binding is scoped to; 0 means unscoped
+  // (platform-wide).
+  int64 pipeline_id = 4;
+}
+
+// ListRoleBindingsRequest lists role bindings, optionally filtered by
+// principal and/or role.
+message ListRoleBindingsRequest {
+  // principal_kind, when set, filters to bindings on that kind of principal.
+  string principal_kind = 1;
+  // principal_id, when set, filters to bindings on that principal.
+  string principal_id = 2;
+  // role_name, when set, filters to bindings of that role.
+  string role_name = 3;
+}
+
+message ListRoleBindingsResponse {
+  repeated RoleBinding bindings = 1;
+}
+
+// DeleteRoleBindingRequest removes a role binding by id.
+message DeleteRoleBindingRequest {
+  // id is the binding's id.
+  int64 id = 1;
+}
+
+// PublishRoleChangeRequest is the (empty) request for PublishRoleChange; it is
+// present so the RPC has a request message and can grow a scope filter later.
+message PublishRoleChangeRequest {}

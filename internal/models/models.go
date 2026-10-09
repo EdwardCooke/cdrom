@@ -890,6 +890,64 @@ type Lease struct {
 	LastHeartbeat time.Time `gorm:"not null" json:"last_heartbeat"`
 }
 
+// Role is a named set of permissions (F-14, RBAC). A role is either a
+// built-in role (shipped with the platform; it cannot be deleted or have its
+// permission set edited) or a custom role (created by a principal holding
+// roles.can-manage). A role's effective permissions are the union of its own
+// Permissions and the effective permissions of the roles it Includes
+// (composition, expanded transitively).
+//
+// Roles are stored in the Database service (like the IdP's user directory) so
+// every API replica sees the same role catalog; each API replica evaluates
+// authorization locally against a short-lived cache that is invalidated by
+// role/binding change events on the shared event log (F-23).
+type Role struct {
+	gorm.Model
+	// Name is the role's unique name (e.g. "admin", "operator", "viewer",
+	// "user", or a custom name such as "pipeline-owner").
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
+	// Description is a human-readable description of the role.
+	Description string `json:"description"`
+	// BuiltIn marks a role that ships with the platform. Built-in roles cannot
+	// be deleted or have their permission set edited; only custom roles can.
+	BuiltIn bool `gorm:"not null;default:false" json:"built_in"`
+	// Permissions is the set of permission names the role grants directly
+	// (e.g. "pipelines.can-view"). A role's full permission set is the union
+	// of these and the effective permissions of every role it Includes.
+	Permissions []string `gorm:"type:text;serializer:json" json:"permissions,omitempty"`
+	// Includes lists the names of other roles this role composes: the role's
+	// effective permissions are the union of its own Permissions and the
+	// effective permissions of every included role (expanded transitively, so
+	// a role that includes a role that includes another inherits all three).
+	Includes []string `gorm:"type:text;serializer:json" json:"includes,omitempty"`
+}
+
+// RoleBinding attaches a role to a principal (F-14, RBAC), optionally scoped
+// to a single pipeline. An unscoped binding (PipelineID nil) grants the
+// role's permissions platform-wide; a pipeline-scoped binding grants them only
+// for that pipeline (resource-scoped permissions only — platform-wide
+// permissions such as role/user management are never granted by a scoped
+// binding).
+//
+// A principal's effective permissions are the union of the permissions of
+// every role bound to it (via a token's roles claim, a configured claim
+// mapping, or a stored binding like this one), expanded through role
+// composition and filtered by resource scope per request.
+type RoleBinding struct {
+	gorm.Model
+	// PrincipalKind is the kind of principal the role is bound to: "user" or
+	// "service-account".
+	PrincipalKind string `gorm:"index;not null" json:"principal_kind"`
+	// PrincipalID is the principal's identifier: for a user it is the user's
+	// id (the token's subject); for a service account it is the account's id.
+	PrincipalID string `gorm:"index;not null" json:"principal_id"`
+	// RoleName is the name of the role bound to the principal.
+	RoleName string `gorm:"index;not null" json:"role_name"`
+	// PipelineID is the pipeline the binding is scoped to; nil means the
+	// binding is unscoped (platform-wide).
+	PipelineID *uint `gorm:"index" json:"pipeline_id,omitempty"`
+}
+
 // All lists every model the database service must migrate. Add new entities
 // here so AutoMigrate always sees the complete set.
 func All() []any {
@@ -907,5 +965,7 @@ func All() []any {
 		&Event{},
 		&Lease{},
 		&SecretNonce{},
+		&Role{},
+		&RoleBinding{},
 	}
 }
