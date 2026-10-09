@@ -218,7 +218,11 @@ curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 
 # for the worker (audience cdrom-api, the IdP's default) and verifies it on
 # the worker's job-scoped calls, including the token_exchange step's
 # ExchangeJobToken RPC.
-start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_LOG_FORMAT=text -- "$BIN/api"
+# The audit log (F-15) is written to a file separate from the process's
+# default log (CDROM_AUDIT_FILE), in JSON (CDROM_AUDIT_FORMAT). Each audited
+# action is also appended to the shared audit log in the database (queryable
+# via GET /api/audit), which both API instances share.
+start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
 start worker    "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
 
 # Gate on the API having the worker's WatchJobs stream open before dispatching.
@@ -704,6 +708,7 @@ start api-rbac "$WORK/api-rbac.log" 'serving' \
   CDROM_API_HTTP_ADDR=127.0.0.1:8081 CDROM_LISTEN_ADDR=127.0.0.1:7107 \
   CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
   CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8081/api/auth/callback \
+  CDROM_AUDIT_FILE="$WORK/audit-rbac.log" CDROM_AUDIT_FORMAT=json \
   CDROM_LOG_FORMAT=text -- "$BIN/api"
 RBAC=http://127.0.0.1:8081
 
@@ -807,4 +812,75 @@ authed_request GET "$RBAC/api/me/permissions" "$NOROLE_TOKEN"
 http_request GET "$RBAC/api/pipelines"
 [ "$HTTP_CODE" = "401" ] || { echo ">> unauthenticated list pipelines (rbac api) returned $HTTP_CODE, want 401" >&2; exit 1; }
 
-log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it), username/password auth registers users (first becomes admin), logs in with a valid password (minting a JWT), rejects bad credentials, and gates user management behind an authenticated caller, and RBAC (F-14) allows the actions each role grants and disallows (403) the actions it does not (admin does everything, operator runs but does not create, the default user views but does not trigger, a role-less principal does nothing, and unauthenticated requests are rejected)"
+# --- verify the audit log (F-15) -------------------------------------------
+# Every audited action (a job trigger, an approval decision, a login, a
+# pipeline/role/user mutation, a worker lifecycle change, a token exchange) is
+# recorded both to a local audit log file (separate from the process's default
+# log) and to the shared audit log in the database (queryable via
+# GET /api/audit). The main API runs with auth off (a synthetic admin), so
+# /api/audit is reachable without a token. Both API instances share the same
+# database, so the shared audit log holds events from both.
+log ">> verifying the audit log (F-15)"
+
+# The local audit log file exists, is separate from the process's default log,
+# and holds JSON records (CDROM_AUDIT_FORMAT=json).
+[ -s "$WORK/audit.log" ] \
+  || { echo ">> local audit log file is missing or empty" >&2; exit 1; }
+# Every line of the local audit log is a JSON object (the configured format).
+BAD_LINES=$(grep -vcE '^\{"time":' "$WORK/audit.log" || true)
+[ "$BAD_LINES" = "0" ] \
+  || { echo ">> $BAD_LINES audit log lines are not JSON objects" >&2; exit 1; }
+# The audit records did not leak into the process's default log (api.log is
+# text-format key=value; the JSON audit records carry a quoted "actor" key).
+grep -q '"actor":' "$WORK/api.log" \
+  && { echo ">> audit records leaked into the default log (api.log)" >&2; exit 1; }
+
+# The shared audit log (in the database) is queryable via GET /api/audit.
+AUDIT_ALL=$(curl -s "http://127.0.0.1:8080/api/audit")
+printf '%s' "$AUDIT_ALL" | jq -e 'type == "array" and length > 0' >/dev/null \
+  || { echo ">> GET /api/audit returned no events: $AUDIT_ALL" >&2; exit 1; }
+
+# A job approval decision is recorded with a success outcome.
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="job.approve") | select(.outcome=="success")' >/dev/null \
+  || { echo ">> no job.approve audit event recorded" >&2; exit 1; }
+# A job rejection is recorded too.
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="job.reject")' >/dev/null \
+  || { echo ">> no job.reject audit event recorded" >&2; exit 1; }
+# A login is recorded with the user's email as the actor.
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="auth.login") | select(.actor=="ada@example.com")' >/dev/null \
+  || { echo ">> no auth.login audit event for ada@example.com" >&2; exit 1; }
+# A run trigger (a standalone job submit) is recorded.
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="run.trigger")' >/dev/null \
+  || { echo ">> no run.trigger audit event recorded" >&2; exit 1; }
+# A worker registration is recorded (the worker registered with the API).
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="worker.register")' >/dev/null \
+  || { echo ">> no worker.register audit event recorded" >&2; exit 1; }
+# A job status report from the worker is recorded.
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="job.status")' >/dev/null \
+  || { echo ">> no job.status audit event recorded" >&2; exit 1; }
+
+# The audit log can be filtered by action (F-15 acceptance: filter by actor,
+# target, and time range).
+AUDIT_FILTERED=$(curl -s "http://127.0.0.1:8080/api/audit?action=job.approve")
+printf '%s' "$AUDIT_FILTERED" | jq -e 'type == "array" and length > 0 and all(.[]; .action=="job.approve")' >/dev/null \
+  || { echo ">> action filter did not return only job.approve events: $AUDIT_FILTERED" >&2; exit 1; }
+
+# A pipeline's secrets are represented by name only in the audit log: the
+# secret's value is never stored or displayed (F-15). Create a pipeline with a
+# secret (via the RBAC admin API) and verify the audit event's new_value names
+# the secret but never its value.
+SECRET_VALUE="super-secret-value-123"
+authed_request POST "$RBAC/api/pipelines" "$ADMIN_TOKEN" \
+  "{\"name\":\"audit-secret-pipeline\",\"secrets\":[{\"name\":\"api_token\",\"value\":\"$SECRET_VALUE\"}]}"
+[ "$HTTP_CODE" = "201" ] || { echo ">> create secret pipeline returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
+
+AUDIT_SECRET=$(curl -s "http://127.0.0.1:8080/api/audit?action=pipeline.create&target_kind=pipeline")
+NEW_VALUE=$(printf '%s' "$AUDIT_SECRET" | jq -r '.[] | select(.target_name=="audit-secret-pipeline") | .new_value' | head -n 1)
+[ -n "$NEW_VALUE" ] && [ "$NEW_VALUE" != "null" ] \
+  || { echo ">> no pipeline.create audit event for the secret pipeline: $AUDIT_SECRET" >&2; exit 1; }
+printf '%s' "$NEW_VALUE" | grep -q 'api_token' \
+  || { echo ">> audit new_value did not name the secret: $NEW_VALUE" >&2; exit 1; }
+printf '%s' "$NEW_VALUE" | grep -q "$SECRET_VALUE" \
+  && { echo ">> audit new_value leaked the secret value: $NEW_VALUE" >&2; exit 1; }
+
+log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it), username/password auth registers users (first becomes admin), logs in with a valid password (minting a JWT), rejects bad credentials, and gates user management behind an authenticated caller, RBAC (F-14) allows the actions each role grants and disallows (403) the actions it does not (admin does everything, operator runs but does not create, the default user views but does not trigger, a role-less principal does nothing, and unauthenticated requests are rejected), and the audit log (F-15) records each audited action (job trigger, approval, login, worker lifecycle, status report) to a separate JSON file and the shared database log (queryable/filterable via GET /api/audit) with the actor, and never stores or displays a secret's value"

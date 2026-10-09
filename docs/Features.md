@@ -80,7 +80,7 @@ Control who can do what, protect secrets, and keep an accountable record.
 | F-12 | Secrets management | done | [F-12](features/f-12-secrets-management.md) |
 | F-13 | Approval gates | done | [F-13](features/f-13-approval-gates.md) |
 | F-14 | Roles & permissions (RBAC) | done | [F-14](features/f-14-rbac.md) |
-| F-15 | Audit log | planned | [F-15](features/f-15-audit-log.md) |
+| F-15 | Audit log | done | [F-15](features/f-15-audit-log.md) |
 | F-16 | Concurrency control & queueing | planned | [F-16](features/f-16-concurrency-queueing.md) |
 | F-17 | Environments & deployment targets | planned | [F-17](features/f-17-environments.md) |
 
@@ -174,7 +174,7 @@ Tick each feature off as it lands.
 - [x] F-12 Secrets management
 - [x] F-13 Approval gates
 - [x] F-14 Roles & permissions (RBAC)
-- [ ] F-15 Audit log
+- [x] F-15 Audit log
 - [ ] F-16 Concurrency control & queueing
 - [ ] F-17 Environments & deployment targets
 - [ ] F-18 Notifications

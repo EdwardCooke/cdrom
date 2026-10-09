@@ -175,7 +175,7 @@ func (s *Server) fireEventTrigger(ctx context.Context, db eventTriggerDB, rule e
 	}
 	params[models.ParamKeySourceRun] = strconv.FormatInt(sourceRunID, 10)
 	params[models.ParamKeySourcePipeline] = sourcePipeline
-	_, err := db.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+	resp, err := db.TriggerRun(ctx, &dbpb.TriggerRunRequest{
 		PipelineId:  rule.targetPipelineID,
 		TriggerName: rule.triggerName,
 		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_EVENT,
@@ -186,4 +186,9 @@ func (s *Server) fireEventTrigger(ctx context.Context, db eventTriggerDB, rule e
 		return
 	}
 	s.logger.Info("scheduler: event trigger fired", "pipeline", rule.targetPipelineID, "trigger", rule.triggerName, "source_run", sourceRunID, "source_pipeline", sourcePipeline)
+	// Record an audit event only when this call created the run (a re-fire
+	// that the database's dedup suppresses is a no-op and is not re-audited).
+	if resp.GetCreated() {
+		s.recordTriggerRun(ctx, resp.GetRun(), rule.triggerName, dbpb.TriggerType_TRIGGER_TYPE_EVENT)
+	}
 }

@@ -157,7 +157,7 @@ func (s *Server) processCronTriggers(ctx context.Context, db cronDB, mu *sync.Mu
 // same scheduled time twice. A failure to claim is logged and left to the next
 // tick (or the database's dedup) to reconcile.
 func (s *Server) fireCronTrigger(ctx context.Context, db cronDB, pipelineID int64, triggerName string, params map[string]string) {
-	_, err := db.TriggerRun(ctx, &dbpb.TriggerRunRequest{
+	resp, err := db.TriggerRun(ctx, &dbpb.TriggerRunRequest{
 		PipelineId:  pipelineID,
 		TriggerName: triggerName,
 		TriggerType: dbpb.TriggerType_TRIGGER_TYPE_CRON,
@@ -169,6 +169,11 @@ func (s *Server) fireCronTrigger(ctx context.Context, db cronDB, pipelineID int6
 		return
 	}
 	s.logger.Info("scheduler: cron trigger fired", "pipeline", pipelineID, "trigger", triggerName)
+	// Record an audit event only when this call created the run (a racing
+	// replica that lost the dedup claim is a no-op and is not re-audited).
+	if resp.GetCreated() {
+		s.recordTriggerRun(ctx, resp.GetRun(), triggerName, dbpb.TriggerType_TRIGGER_TYPE_CRON)
+	}
 }
 
 // cronStateKey is the in-memory state key for a pipeline's cron trigger.

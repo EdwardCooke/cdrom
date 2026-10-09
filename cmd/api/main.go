@@ -243,6 +243,29 @@ func main() {
 	if authzEngine != nil {
 		grpcServer.SetAuthz(authzEngine)
 	}
+
+	// The audit log (F-15): an append-only record of significant actions (who
+	// did what, when, from where, with what outcome, and what changed). Each
+	// audited action is recorded both to a local audit log file (separate from
+	// the process's default log; stdout when the configured path is "-") and
+	// to the shared audit log in the database (the queryable, cross-replica
+	// store the UI reads via GET /api/audit). The same recorder is attached to
+	// both the HTTP server (UI-facing actions) and the gRPC server (worker
+	// lifecycle, job status reports, token exchanges). Old database entries
+	// are pruned by age on a schedule (audit.retention / audit.prune_interval).
+	auditRecorder, err := api.NewAuditRecorder(cfg.Audit, clients.Database, logger)
+	if err != nil {
+		logger.Error("audit: init", "err", err)
+		os.Exit(1)
+	}
+	apiServer.SetAudit(auditRecorder)
+	grpcServer.SetAudit(auditRecorder)
+	// Prune the database's audit log of entries older than the retention, on
+	// a schedule, so the table does not grow without bound. It runs until the
+	// gRPC server shuts down (signal received).
+	auditRecorder.StartPruning(ctx, cfg.Audit.EffectiveRetention(), cfg.Audit.EffectivePruneInterval())
+	defer func() { _ = auditRecorder.Close() }()
+
 	apipb.RegisterAPIServer(grpcSrv, grpcServer)
 
 	// Event-log tail loop (F-23): tails the shared event log and fans new

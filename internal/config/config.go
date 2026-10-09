@@ -129,6 +129,99 @@ type Config struct {
 	// works without secrets; a pipeline that declares secrets requires the
 	// key to be set.
 	Secrets SecretsConfig
+
+	// Audit configures the audit log (F-15): an append-only record of
+	// significant actions (who did what to which resource, when, from where,
+	// with what outcome, and what changed). The API records each audited
+	// action both to a local audit log file (separate from the process's
+	// default log) and to the shared audit log in the database (which the UI
+	// queries via GET /api/audit). Only the API (and the scheduler, for
+	// trigger-fired runs) records audit events; other binaries ignore this.
+	Audit AuditConfig
+}
+
+// AuditConfig configures the audit log (F-15).
+type AuditConfig struct {
+	// File is the path of the current audit log file. It is separate from the
+	// process's default log (CDROM_LOG_FILE). A value of "-" writes the audit
+	// log to stdout instead of a file (no rotation). The default is
+	// "audit.log".
+	File string
+	// Format is the audit log's record format: "json" (the default) or "text".
+	Format string
+	// Rotation is the file rotation interval: "hourly" or "daily" (the
+	// default). The current file keeps the stable name File; on rotation the
+	// file being closed is renamed with the day (daily) or day+hour (hourly)
+	// appended. It is ignored when File is "-".
+	Rotation string
+	// Retention is the maximum age of audit entries kept in the database
+	// before they are pruned (e.g. 90 * 24 * time.Hour). The default is 90
+	// days. Zero means entries are never pruned by age.
+	Retention time.Duration
+	// PruneInterval is how often the database's audit log is pruned of entries
+	// older than Retention. The default is 24 hours. Zero means no periodic
+	// pruning.
+	PruneInterval time.Duration
+}
+
+// EffectiveFile returns the configured audit log file path, or the default
+// ("audit.log") when empty.
+func (a AuditConfig) EffectiveFile() string {
+	if a.File == "" {
+		return "audit.log"
+	}
+	return a.File
+}
+
+// EffectiveFormat returns the configured audit log format, or "json" when
+// empty.
+func (a AuditConfig) EffectiveFormat() string {
+	if a.Format == "" {
+		return "json"
+	}
+	return a.Format
+}
+
+// EffectiveRotation returns the configured rotation interval, or "daily" when
+// empty.
+func (a AuditConfig) EffectiveRotation() string {
+	if a.Rotation == "" {
+		return "daily"
+	}
+	return a.Rotation
+}
+
+// EffectiveRetention returns the configured retention, or the default (90
+// days) when zero.
+func (a AuditConfig) EffectiveRetention() time.Duration {
+	if a.Retention <= 0 {
+		return 90 * 24 * time.Hour
+	}
+	return a.Retention
+}
+
+// EffectivePruneInterval returns the configured prune interval, or the default
+// (24 hours) when zero.
+func (a AuditConfig) EffectivePruneInterval() time.Duration {
+	if a.PruneInterval <= 0 {
+		return 24 * time.Hour
+	}
+	return a.PruneInterval
+}
+
+// Validate checks that the audit configuration is sane.
+func (a AuditConfig) Validate() error {
+	switch a.EffectiveFormat() {
+	case "json", "text":
+	default:
+		return fmt.Errorf("audit: unknown format %q (want json or text)", a.Format)
+	}
+	switch a.EffectiveRotation() {
+	case "hourly", "daily":
+	default:
+		return fmt.Errorf("audit: unknown rotation %q (want hourly or daily)", a.Rotation)
+	}
+	return nil
 }
 
 // AuthConfig configures OIDC authentication for the API's HTTP surface (the
@@ -460,6 +553,16 @@ func LoadWithFile(file string) (*Config, error) {
 		IdPGRPCAddress: DefaultIdPGRPCAddress,
 		GRPCAuth:       GRPCAuthConfig{},
 		Secrets:        SecretsConfig{},
+		// The audit log (F-15) defaults to a local file (audit.log) in JSON,
+		// rotated daily, with a 90-day retention pruned hourly. Only the API
+		// (and the scheduler, for trigger-fired runs) records audit events.
+		Audit: AuditConfig{
+			File:          "audit.log",
+			Format:        "json",
+			Rotation:      "daily",
+			Retention:     90 * 24 * time.Hour,
+			PruneInterval: 24 * time.Hour,
+		},
 	}
 	if file != "" {
 		if err := applyFile(cfg, file); err != nil {
@@ -477,6 +580,9 @@ func LoadWithFile(file string) (*Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.Secrets.Validate(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	if err := cfg.Audit.Validate(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
@@ -542,6 +648,13 @@ type fileConfig struct {
 		Kind *string `yaml:"kind"`
 		Key  *string `yaml:"key"`
 	} `yaml:"secrets"`
+	Audit *struct {
+		File          *string `yaml:"file"`
+		Format        *string `yaml:"format"`
+		Rotation      *string `yaml:"rotation"`
+		Retention     *string `yaml:"retention"`
+		PruneInterval *string `yaml:"prune_interval"`
+	} `yaml:"audit"`
 }
 
 // applyFile overlays the values from the YAML file at path onto cfg.
@@ -714,6 +827,31 @@ func applyFile(cfg *Config, path string) error {
 			cfg.Secrets.Key = *f.Secrets.Key
 		}
 	}
+	if f.Audit != nil {
+		if f.Audit.File != nil {
+			cfg.Audit.File = *f.Audit.File
+		}
+		if f.Audit.Format != nil {
+			cfg.Audit.Format = *f.Audit.Format
+		}
+		if f.Audit.Rotation != nil {
+			cfg.Audit.Rotation = *f.Audit.Rotation
+		}
+		if f.Audit.Retention != nil {
+			if d, err := time.ParseDuration(*f.Audit.Retention); err == nil {
+				cfg.Audit.Retention = d
+			} else {
+				return fmt.Errorf("config: parse audit.retention %q: %w", *f.Audit.Retention, err)
+			}
+		}
+		if f.Audit.PruneInterval != nil {
+			if d, err := time.ParseDuration(*f.Audit.PruneInterval); err == nil {
+				cfg.Audit.PruneInterval = d
+			} else {
+				return fmt.Errorf("config: parse audit.prune_interval %q: %w", *f.Audit.PruneInterval, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -794,6 +932,20 @@ func applyEnv(cfg *Config) {
 	}
 	cfg.Secrets.Kind = envOr("CDROM_SECRETS_KIND", cfg.Secrets.Kind)
 	cfg.Secrets.Key = envOr("CDROM_SECRETS_KEY", cfg.Secrets.Key)
+	// Audit log (F-15).
+	cfg.Audit.File = envOr("CDROM_AUDIT_FILE", cfg.Audit.File)
+	cfg.Audit.Format = envOr("CDROM_AUDIT_FORMAT", cfg.Audit.Format)
+	cfg.Audit.Rotation = envOr("CDROM_AUDIT_ROTATION", cfg.Audit.Rotation)
+	if v := envOr("CDROM_AUDIT_RETENTION", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Audit.Retention = d
+		}
+	}
+	if v := envOr("CDROM_AUDIT_PRUNE_INTERVAL", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Audit.PruneInterval = d
+		}
+	}
 }
 
 func envOr(key, def string) string {

@@ -16,7 +16,9 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"cdrom/internal/audit"
 	"cdrom/internal/auth"
 	"cdrom/internal/authz"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
@@ -63,6 +65,12 @@ type Server struct {
 	// act as a synthetic admin (everything is allowed), so a local run with
 	// authentication disabled keeps working.
 	rbacEnabled bool
+	// audit records an audit event (F-15) for each audited action the server
+	// handles (a pipeline/run/job/secret/role/user mutation, an approval
+	// decision, a login). It is nil when the audit log is not configured (or
+	// in tests), in which case no audit events are recorded on the HTTP
+	// surface.
+	audit *audit.Recorder
 }
 
 // SetUserPassClient attaches the IdP username/password proxy client, enabling
@@ -151,6 +159,12 @@ func (s *Server) Handler() http.Handler {
 	// secret store. The returned ciphertext is what a pipeline's secret
 	// declaration stores; the plaintext is never persisted or returned.
 	mux.HandleFunc("POST /api/secrets/encrypt", s.encryptSecret)
+
+	// Audit log (F-15): an authenticated caller with the audit.can-view
+	// permission queries the shared audit log (who did what, when, with what
+	// outcome and what changed). Events are filtered by actor, action, target,
+	// pipeline, and time range.
+	mux.HandleFunc("GET /api/audit", s.listAudit)
 
 	// Roles (F-14, RBAC): custom role CRUD (built-in roles cannot be edited or
 	// deleted), role bindings (principal + role + optional pipeline scope), and
@@ -299,6 +313,15 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionPipelineCreate,
+		TargetKind: audit.TargetPipeline,
+		TargetID:   strconv.FormatInt(pipeline.GetId(), 10),
+		TargetName: pipeline.GetName(),
+		PipelineID: pipeline.GetId(),
+		Outcome:    audit.OutcomeSuccess,
+		NewValue:   auditPipelineValue(pipeline),
+	})
 	writeJSON(w, http.StatusCreated, pipeline)
 }
 
@@ -325,6 +348,10 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid secrets: %v", err)
 		return
 	}
+	// Fetch the pipeline's current state so the audit event can record what
+	// changed (old value vs new value, F-15). A failure to fetch it (the
+	// pipeline was deleted concurrently) does not block the update.
+	oldPipeline, _ := s.clients.Database.GetPipeline(r.Context(), &dbpb.GetPipelineRequest{Id: pipelineID})
 	pipeline, err := s.clients.Database.UpdatePipeline(r.Context(), &dbpb.UpdatePipelineRequest{
 		Id:          pipelineID,
 		Name:        req.Name,
@@ -338,6 +365,16 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionPipelineUpdate,
+		TargetKind: audit.TargetPipeline,
+		TargetID:   strconv.FormatInt(pipeline.GetId(), 10),
+		TargetName: pipeline.GetName(),
+		PipelineID: pipeline.GetId(),
+		Outcome:    audit.OutcomeSuccess,
+		OldValue:   auditPipelineValue(oldPipeline),
+		NewValue:   auditPipelineValue(pipeline),
+	})
 	writeJSON(w, http.StatusOK, pipeline)
 }
 
@@ -534,6 +571,19 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	trigger := req.Trigger
+	if trigger == "" {
+		trigger = "manual"
+	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRunTrigger,
+		TargetKind: audit.TargetRun,
+		TargetID:   strconv.FormatInt(run.GetId(), 10),
+		PipelineID: pipelineID,
+		RunID:      run.GetId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"trigger": trigger, "params": req.Params, "pipeline_version": req.PipelineVersion}),
+	})
 	s.publish(Event{Type: EventRunStatus, RunID: run.GetId(), Status: runStatusName(run.GetStatus())})
 	writeJSON(w, http.StatusCreated, run)
 }
@@ -713,6 +763,26 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	// The webhook's actor is the caller's OIDC subject (when the trigger
+	// authenticated with an OIDC token) or a synthetic "system:webhook"
+	// identity (a secret-authenticated or open trigger).
+	webhookActor := "system:webhook"
+	webhookActorKind := audit.ActorKindSystem
+	if subject, ok := upstreamClaims["sub"].(string); ok && subject != "" {
+		webhookActor = subject
+		webhookActorKind = audit.ActorKindUser
+	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRunTrigger,
+		TargetKind: audit.TargetRun,
+		TargetID:   strconv.FormatInt(run.GetId(), 10),
+		PipelineID: pipelineID,
+		RunID:      run.GetId(),
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      webhookActor,
+		ActorKind:  webhookActorKind,
+		Details:    auditJSON(map[string]any{"trigger": matched.GetName(), "params": params}),
+	})
 	s.publish(Event{Type: EventRunStatus, RunID: run.GetId(), Status: runStatusName(run.GetStatus())})
 	writeJSON(w, http.StatusCreated, run)
 }
@@ -963,6 +1033,18 @@ func (s *Server) submitJob(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	// A standalone job submit triggers work (F-15): record it as a run trigger
+	// with the job as the target.
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRunTrigger,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(job.GetId(), 10),
+		TargetName: job.GetName(),
+		PipelineID: job.GetPipelineId(),
+		RunID:      job.GetRunId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"trigger": "manual", "target_group": req.TargetGroup}),
+	})
 	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
 	writeJSON(w, http.StatusCreated, job)
 }
@@ -1018,6 +1100,16 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionJobCancel,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(job.GetId(), 10),
+		TargetName: job.GetName(),
+		PipelineID: job.GetPipelineId(),
+		RunID:      job.GetRunId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"status": jobStatusName(job.GetStatus())}),
+	})
 	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
 	writeJSON(w, http.StatusOK, job)
 }
@@ -1038,6 +1130,16 @@ func (s *Server) rerunJob(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionJobRerun,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(job.GetId(), 10),
+		TargetName: job.GetName(),
+		PipelineID: job.GetPipelineId(),
+		RunID:      job.GetRunId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"status": jobStatusName(job.GetStatus()), "attempt": job.GetAttempt()}),
+	})
 	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
 	writeJSON(w, http.StatusOK, job)
 }
@@ -1106,6 +1208,20 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decisio
 		grpcError(w, err)
 		return
 	}
+	action := audit.ActionJobApprove
+	if decision == "rejected" {
+		action = audit.ActionJobReject
+	}
+	s.recordAudit(r, audit.Event{
+		Action:     action,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(job.GetId(), 10),
+		TargetName: job.GetName(),
+		PipelineID: job.GetPipelineId(),
+		RunID:      job.GetRunId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"decision": decision, "reason": req.Reason, "status": jobStatusName(job.GetStatus())}),
+	})
 	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
 	writeJSON(w, http.StatusOK, job)
 }
@@ -1267,7 +1383,69 @@ func (s *Server) encryptSecret(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, "encrypt: %v", err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionSecretEncrypt,
+		TargetKind: audit.TargetSecret,
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"value": "[REDACTED]"}),
+	})
 	writeJSON(w, http.StatusOK, encryptSecretResponse{Ciphertext: ciphertext})
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (F-15)
+// ---------------------------------------------------------------------------
+
+// listAudit queries the shared audit log (F-15) via the Database service. It
+// requires the audit.can-view permission (F-14). The log is append-only: past
+// events are immutable (they are only ever pruned by age, by the API's
+// retention schedule). Events are returned most recent first, filtered by
+// actor, action, target kind, target id, pipeline, and a time range (all
+// optional; an empty filter matches everything).
+func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermAuditView, authz.Resource{}) {
+		return
+	}
+	query := r.URL.Query()
+	req := &dbpb.ListAuditEventsRequest{}
+	if value := query.Get("actor"); value != "" {
+		req.Actor = value
+	}
+	if value := query.Get("action"); value != "" {
+		req.Action = value
+	}
+	if value := query.Get("target_kind"); value != "" {
+		req.TargetKind = value
+	}
+	if value := query.Get("target_id"); value != "" {
+		req.TargetId = value
+	}
+	if value := query.Get("pipeline_id"); value != "" {
+		if id, err := strconv.ParseInt(value, 10, 64); err == nil {
+			req.PipelineId = id
+		}
+	}
+	if value := query.Get("from"); value != "" {
+		if t, err := time.Parse(time.RFC3339, value); err == nil {
+			req.From = timestamppb.New(t)
+		}
+	}
+	if value := query.Get("to"); value != "" {
+		if t, err := time.Parse(time.RFC3339, value); err == nil {
+			req.To = timestamppb.New(t)
+		}
+	}
+	if value := query.Get("limit"); value != "" {
+		if n, err := strconv.ParseInt(value, 10, 32); err == nil {
+			req.Limit = int32(n)
+		}
+	}
+	response, err := s.clients.Database.ListAuditEvents(r.Context(), req)
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(response.GetEvents()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1358,6 +1536,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.userpass.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
+		// A failed login is audited too (F-15): the actor is the email the
+		// caller presented, and the outcome is failure.
+		s.recordAudit(r, audit.Event{
+			Action:     audit.ActionLogin,
+			TargetKind: audit.TargetLogin,
+			TargetID:   req.Email,
+			Outcome:    audit.OutcomeFailure,
+			Actor:      req.Email,
+			ActorKind:  audit.ActorKindUser,
+		})
 		if userPassStatus(err) == http.StatusUnauthorized {
 			httpError(w, http.StatusUnauthorized, "invalid credentials")
 			return
@@ -1365,6 +1553,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		httpError(w, userPassStatus(err), "login: %v", err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionLogin,
+		TargetKind: audit.TargetLogin,
+		TargetID:   result.Email,
+		TargetName: result.Email,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      result.Email,
+		ActorKind:  audit.ActorKindUser,
+		Details:    auditJSON(map[string]any{"roles": result.Roles}),
+	})
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -1408,6 +1606,18 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		httpError(w, userPassStatus(err), "register: %v", err)
 		return
 	}
+	// The actor is the user being created (a register is an unauthenticated
+	// entry point, so there is no caller identity to attribute it to).
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRegister,
+		TargetKind: audit.TargetUser,
+		TargetID:   result.ID,
+		TargetName: result.Email,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      result.Email,
+		ActorKind:  audit.ActorKindUser,
+		Details:    auditJSON(map[string]any{"roles": result.Roles}),
+	})
 	writeJSON(w, http.StatusCreated, result)
 }
 
@@ -1470,6 +1680,14 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, userPassStatus(err), "create user: %v", err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionUserCreate,
+		TargetKind: audit.TargetUser,
+		TargetID:   result.ID,
+		TargetName: result.Email,
+		Outcome:    audit.OutcomeSuccess,
+		NewValue:   auditJSON(map[string]any{"email": result.Email, "roles": result.Roles}),
+	})
 	writeJSON(w, http.StatusCreated, result)
 }
 
@@ -1492,6 +1710,18 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
+	// Fetch the user's current profile so the audit event can record what
+	// changed (old value vs new value, F-15). A failure to fetch it does not
+	// block the update.
+	oldValue := ""
+	if users, err := s.userpass.ListUsers(r.Context()); err == nil {
+		for i := range users {
+			if users[i].ID == id {
+				oldValue = auditJSON(map[string]any{"email": users[i].Email, "roles": users[i].Roles})
+				break
+			}
+		}
+	}
 	result, err := s.userpass.UpdateUser(r.Context(), id, req)
 	if err != nil {
 		if userPassStatus(err) == http.StatusNotFound {
@@ -1501,6 +1731,15 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, userPassStatus(err), "update user: %v", err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionUserUpdate,
+		TargetKind: audit.TargetUser,
+		TargetID:   result.ID,
+		TargetName: result.Email,
+		Outcome:    audit.OutcomeSuccess,
+		OldValue:   oldValue,
+		NewValue:   auditJSON(map[string]any{"email": result.Email, "roles": result.Roles}),
+	})
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -1517,6 +1756,18 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "user id is required")
 		return
 	}
+	// Fetch the user's profile before deleting it so the audit event can
+	// record the user that was removed (F-15). A failure to fetch it does not
+	// block the delete.
+	oldValue := ""
+	if users, err := s.userpass.ListUsers(r.Context()); err == nil {
+		for i := range users {
+			if users[i].ID == id {
+				oldValue = auditJSON(map[string]any{"email": users[i].Email, "roles": users[i].Roles})
+				break
+			}
+		}
+	}
 	if err := s.userpass.DeleteUser(r.Context(), id); err != nil {
 		if userPassStatus(err) == http.StatusNotFound {
 			httpError(w, http.StatusNotFound, "user not found")
@@ -1525,6 +1776,13 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, userPassStatus(err), "delete user: %v", err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionUserDelete,
+		TargetKind: audit.TargetUser,
+		TargetID:   id,
+		Outcome:    audit.OutcomeSuccess,
+		OldValue:   oldValue,
+	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

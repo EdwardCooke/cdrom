@@ -4015,6 +4015,137 @@ func (s *Server) PublishRoleChange(ctx context.Context, _ *dbpb.PublishRoleChang
 	return &dbpb.PublishEventResponse{Id: id}, nil
 }
 
+// ---------------------------------------------------------------------------
+// Audit log (F-15)
+// ---------------------------------------------------------------------------
+
+// defaultAuditListLimit bounds a ListAuditEvents call when the request sets
+// no limit.
+const defaultAuditListLimit = 100
+
+// AppendAuditEvent appends one audit event to the append-only audit log
+// (F-15). The log has no update or delete path: past events are immutable
+// (they are only ever pruned by age, via PruneAuditEvents, which is a
+// retention policy, not an edit). The caller (the API) is responsible for
+// redacting secret values from old_value/new_value before calling; the
+// database service stores the values opaquely.
+func (s *Server) AppendAuditEvent(ctx context.Context, req *dbpb.AppendAuditEventRequest) (*dbpb.AuditEvent, error) {
+	if req.GetAction() == "" {
+		return nil, status.Error(codes.InvalidArgument, "action is required")
+	}
+	if req.GetActor() == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor is required")
+	}
+	event := &models.AuditEvent{
+		Actor:      req.GetActor(),
+		ActorKind:  req.GetActorKind(),
+		Action:     req.GetAction(),
+		TargetKind: req.GetTargetKind(),
+		TargetID:   req.GetTargetId(),
+		TargetName: req.GetTargetName(),
+		Outcome:    req.GetOutcome(),
+		SourceIP:   req.GetSourceIp(),
+		OldValue:   req.GetOldValue(),
+		NewValue:   req.GetNewValue(),
+		Details:    req.GetDetails(),
+	}
+	if req.GetPipelineId() > 0 {
+		event.PipelineID = uint(req.GetPipelineId())
+	}
+	if req.GetRunId() > 0 {
+		event.RunID = uint(req.GetRunId())
+	}
+	if err := s.db.WithContext(ctx).Create(event).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoAuditEvent(event), nil
+}
+
+// ListAuditEvents returns audit events (F-15), optionally filtered by actor,
+// action, target kind, target id, pipeline, and a time range (created_at
+// within [from, to)), most recent first, up to limit. This is how the UI's
+// audit view (GET /api/audit) queries the log.
+func (s *Server) ListAuditEvents(ctx context.Context, req *dbpb.ListAuditEventsRequest) (*dbpb.ListAuditEventsResponse, error) {
+	limit := int(req.GetLimit())
+	if limit <= 0 {
+		limit = defaultAuditListLimit
+	}
+	query := s.db.WithContext(ctx).Model(&models.AuditEvent{})
+	if req.GetActor() != "" {
+		query = query.Where("actor = ?", req.GetActor())
+	}
+	if req.GetAction() != "" {
+		query = query.Where("action = ?", req.GetAction())
+	}
+	if req.GetTargetKind() != "" {
+		query = query.Where("target_kind = ?", req.GetTargetKind())
+	}
+	if req.GetTargetId() != "" {
+		query = query.Where("target_id = ?", req.GetTargetId())
+	}
+	if req.GetPipelineId() > 0 {
+		query = query.Where("pipeline_id = ?", req.GetPipelineId())
+	}
+	if ts := req.GetFrom(); ts != nil {
+		query = query.Where("created_at >= ?", ts.AsTime())
+	}
+	if ts := req.GetTo(); ts != nil {
+		query = query.Where("created_at < ?", ts.AsTime())
+	}
+	var events []models.AuditEvent
+	if err := query.Order("id DESC").Limit(limit).Find(&events).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListAuditEventsResponse{}
+	for i := range events {
+		response.Events = append(response.Events, toProtoAuditEvent(&events[i]))
+	}
+	return response, nil
+}
+
+// PruneAuditEvents deletes audit events older than the given instant (F-15).
+// The API's retention config (audit.retention) drives it: the API prunes
+// periodically so the table does not grow without bound. Pruning is a
+// retention policy, not an edit: it only drops whole old entries, never
+// changes one.
+func (s *Server) PruneAuditEvents(ctx context.Context, req *dbpb.PruneAuditEventsRequest) (*dbpb.PruneAuditEventsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.AuditEvent{})
+	if ts := req.GetCreatedBefore(); ts != nil {
+		query = query.Where("created_at < ?", ts.AsTime())
+	}
+	result := query.Delete(&models.AuditEvent{})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.PruneAuditEventsResponse{Pruned: result.RowsAffected}, nil
+}
+
+// toProtoAuditEvent converts a model AuditEvent into its proto form.
+func toProtoAuditEvent(event *models.AuditEvent) *dbpb.AuditEvent {
+	out := &dbpb.AuditEvent{
+		Id:          int64(event.ID),
+		Actor:       event.Actor,
+		ActorKind:   event.ActorKind,
+		Action:      event.Action,
+		TargetKind:  event.TargetKind,
+		TargetId:    event.TargetID,
+		TargetName:  event.TargetName,
+		Outcome:     event.Outcome,
+		SourceIp:    event.SourceIP,
+		OldValue:    event.OldValue,
+		NewValue:    event.NewValue,
+		Details:     event.Details,
+		CreatedAt:   timestamppb.New(event.CreatedAt),
+	}
+	if event.PipelineID > 0 {
+		out.PipelineId = int64(event.PipelineID)
+	}
+	if event.RunID > 0 {
+		out.RunId = int64(event.RunID)
+	}
+	return out
+}
+
 // toProtoRole renders a role as its Database-service form.
 func toProtoRole(role *models.Role) *dbpb.Role {
 	return &dbpb.Role{

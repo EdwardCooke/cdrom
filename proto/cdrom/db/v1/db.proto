@@ -301,6 +301,31 @@ service Database {
   // the caller through the role/binding RPCs; this only appends the event so
   // the other replicas see the change without a restart.
   rpc PublishRoleChange(PublishRoleChangeRequest) returns (PublishEventResponse);
+
+  // Audit log (F-15). The audit log is an append-only record of significant
+  // actions: who (actor) did what (action) to which resource (target), when,
+  // from where, with what outcome, and what changed (old/new value). The API
+  // (and the scheduler, for trigger-fired runs) records an event for each
+  // audited action; the database service owns the rows and is the only
+  // component that can read or prune them.
+  //
+  // AppendAuditEvent appends one audit event. The log is append-only: there
+  // is no update or delete RPC for past events. The caller (the API) is
+  // responsible for redacting secret values from old_value/new_value before
+  // calling — the database service stores the values opaquely.
+  rpc AppendAuditEvent(AppendAuditEventRequest) returns (AuditEvent);
+  // ListAuditEvents returns audit events, optionally filtered by actor,
+  // action, target kind, target id, pipeline, and a time range (created_at
+  // within [from, to)), most recent first, up to limit (0 means the
+  // server's default). This is how the UI's audit view (GET /api/audit)
+  // queries the log.
+  rpc ListAuditEvents(ListAuditEventsRequest) returns (ListAuditEventsResponse);
+  // PruneAuditEvents deletes audit events older than the given instant. The
+  // API's retention config (audit.retention) drives it: the API prunes
+  // periodically so the table does not grow without bound. Pruning is a
+  // retention policy, not an edit: it only drops whole old entries, never
+  // changes one.
+  rpc PruneAuditEvents(PruneAuditEventsRequest) returns (PruneAuditEventsResponse);
 }
 
 // Parameter is a named, typed input a pipeline declares (F-10): a name, an
@@ -1898,3 +1923,140 @@ message DeleteRoleBindingRequest {
 // PublishRoleChangeRequest is the (empty) request for PublishRoleChange; it is
 // present so the RPC has a request message and can grow a scope filter later.
 message PublishRoleChangeRequest {}
+
+// ---------------------------------------------------------------------------
+// Audit log (F-15)
+// ---------------------------------------------------------------------------
+
+// AuditEvent is one entry in the append-only audit log: a record of a
+// significant action (who did what to which resource, when, from where, with
+// what outcome, and what changed).
+message AuditEvent {
+  // id is the event's id (its position in the append-only log).
+  int64 id = 1;
+  // actor is the identity of the principal that performed the action (the
+  // user's subject, or a synthetic identity such as "system:scheduler").
+  string actor = 2;
+  // actor_kind is the kind of actor: "user", "service-account", or "system".
+  string actor_kind = 3;
+  // action is the action that was performed (e.g. "pipeline.create",
+  // "run.trigger", "job.cancel", "job.approve", "secret.encrypt",
+  // "role.create", "binding.add", "user.create", "login", "register").
+  string action = 4;
+  // target_kind is the kind of resource the action acted on (e.g.
+  // "pipeline", "run", "job", "role", "role-binding", "user", "secret",
+  // "worker", "login").
+  string target_kind = 5;
+  // target_id is the id (or name, for name-keyed resources such as roles) of
+  // the resource the action acted on; empty when the action has no single
+  // target (e.g. a login).
+  string target_id = 6;
+  // target_name is a human-readable name of the target (e.g. the pipeline's
+  // name); empty when unknown.
+  string target_name = 7;
+  // pipeline_id is the pipeline the action is scoped to, when it is
+  // pipeline-scoped (a run, job, or secret of a pipeline); 0 otherwise.
+  int64 pipeline_id = 8;
+  // run_id is the pipeline run the action is scoped to, when it is run-scoped
+  // (triggering or cancelling a run's job); 0 otherwise.
+  int64 run_id = 9;
+  // outcome is the action's outcome: "success" or "failure" (a failed action
+  // is recorded too, so an audit trail shows what was attempted and what was
+  // rejected).
+  string outcome = 10;
+  // source_ip is the client's IP address (the HTTP request's remote address,
+  // or the gRPC peer's address); empty when the action did not come from a
+  // network client (e.g. a scheduler loop).
+  string source_ip = 11;
+  // old_value is the resource's state before the action, as a compact JSON
+  // document (secret values redacted); empty when the action has no
+  // before-state (a create, a trigger, a login).
+  string old_value = 12;
+  // new_value is the resource's state after the action, as a compact JSON
+  // document (secret values redacted); empty when the action has no
+  // after-state (a delete, a cancel).
+  string new_value = 13;
+  // details is a free-form JSON document carrying action-specific context
+  // that does not fit the structured fields (e.g. a trigger's name and
+  // params, an approval's decision and reason, a login's email).
+  string details = 14;
+  // created_at is when the action was recorded.
+  google.protobuf.Timestamp created_at = 15;
+}
+
+// AppendAuditEventRequest is the request to append one audit event. The
+// caller (the API) redacts secret values from old_value/new_value before
+// calling; the database service stores the values opaquely.
+message AppendAuditEventRequest {
+  // actor is the identity of the principal that performed the action.
+  string actor = 1;
+  // actor_kind is the kind of actor: "user", "service-account", or "system".
+  string actor_kind = 2;
+  // action is the action that was performed.
+  string action = 3;
+  // target_kind is the kind of resource the action acted on.
+  string target_kind = 4;
+  // target_id is the id (or name) of the resource the action acted on.
+  string target_id = 5;
+  // target_name is a human-readable name of the target.
+  string target_name = 6;
+  // pipeline_id is the pipeline the action is scoped to, when it is
+  // pipeline-scoped; 0 otherwise.
+  int64 pipeline_id = 7;
+  // run_id is the pipeline run the action is scoped to, when it is run-scoped;
+  // 0 otherwise.
+  int64 run_id = 8;
+  // outcome is the action's outcome: "success" or "failure".
+  string outcome = 9;
+  // source_ip is the client's IP address; empty when the action did not come
+  // from a network client.
+  string source_ip = 10;
+  // old_value is the resource's state before the action (a compact JSON
+  // document, secret values redacted).
+  string old_value = 11;
+  // new_value is the resource's state after the action (a compact JSON
+  // document, secret values redacted).
+  string new_value = 12;
+  // details is a free-form JSON document carrying action-specific context.
+  string details = 13;
+}
+
+// ListAuditEventsRequest filters the audit log. Every filter is optional; an
+// empty filter matches everything.
+message ListAuditEventsRequest {
+  // actor, when set, matches events recorded by that actor (exact match).
+  string actor = 1;
+  // action, when set, matches events with that action (exact match).
+  string action = 2;
+  // target_kind, when set, matches events on that kind of resource.
+  string target_kind = 3;
+  // target_id, when set, matches events on that resource (exact match).
+  string target_id = 4;
+  // pipeline_id, when > 0, matches events scoped to that pipeline.
+  int64 pipeline_id = 5;
+  // from, when set, matches events created at or after this instant.
+  google.protobuf.Timestamp from = 6;
+  // to, when set, matches events created strictly before this instant.
+  google.protobuf.Timestamp to = 7;
+  // limit bounds how many events are returned; 0 means the server's default.
+  int32 limit = 8;
+}
+
+message ListAuditEventsResponse {
+  // events are the matching audit events, most recent first.
+  repeated AuditEvent events = 1;
+}
+
+// PruneAuditEventsRequest asks the database to delete audit events older than
+// the given instant (a retention policy, driven by the API's audit config).
+message PruneAuditEventsRequest {
+  // created_before drops events created before this instant; when unset, all
+  // events are pruned.
+  google.protobuf.Timestamp created_before = 1;
+}
+
+// PruneAuditEventsResponse is the result of a PruneAuditEvents call.
+message PruneAuditEventsResponse {
+  // pruned is the number of events deleted.
+  int64 pruned = 1;
+}

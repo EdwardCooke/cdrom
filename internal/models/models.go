@@ -948,6 +948,80 @@ type RoleBinding struct {
 	PipelineID *uint `gorm:"index" json:"pipeline_id,omitempty"`
 }
 
+// AuditEvent is one entry in the audit log (F-15): an append-only record of a
+// significant action — who (Actor) did what (Action) to which resource
+// (TargetKind/TargetID), when (CreatedAt), from where (SourceIP), with what
+// outcome (Outcome), and what changed (OldValue/NewValue, plus free-form
+// Details).
+//
+// The log is append-only: the database service only ever inserts rows; there
+// is no update or delete path for past events. Old entries are pruned by age
+// (the database service's PruneAuditEvents, driven by the API's retention
+// config), which is a retention policy, not an edit of the record.
+//
+// Actor is the identity of the principal that performed the action: the
+// authenticated user's subject (e.g. an email or user id) for a human, or a
+// synthetic identity for a non-human actor (e.g. "system:scheduler" for a
+// cron- or event-fired run, "system:webhook" for a webhook caller that
+// authenticated with a shared secret rather than a token). ActorKind is the
+// kind of actor ("user", "service-account", or "system").
+//
+// OldValue and NewValue are the resource's state before and after the action,
+// as compact JSON documents (or empty when the action has no before/after
+// state, e.g. a trigger or a login). They are the raw values with secret
+// values redacted by the API before the event is recorded: a secret's name is
+// recorded, but its value is never stored or displayed.
+type AuditEvent struct {
+	gorm.Model
+	// Actor is the identity of the principal that performed the action (the
+	// user's subject, or a synthetic identity such as "system:scheduler").
+	Actor string `gorm:"index;not null" json:"actor"`
+	// ActorKind is the kind of actor: "user", "service-account", or "system".
+	ActorKind string `json:"actor_kind,omitempty"`
+	// Action is the action that was performed (e.g. "pipeline.create",
+	// "run.trigger", "job.cancel", "job.approve", "secret.encrypt",
+	// "role.create", "binding.add", "user.create", "login", "register").
+	Action string `gorm:"index;not null" json:"action"`
+	// TargetKind is the kind of resource the action acted on (e.g.
+	// "pipeline", "run", "job", "role", "role-binding", "user", "secret",
+	// "worker", "login").
+	TargetKind string `gorm:"index" json:"target_kind,omitempty"`
+	// TargetID is the id (or name, for name-keyed resources such as roles) of
+	// the resource the action acted on; empty when the action has no single
+	// target (e.g. a login).
+	TargetID string `gorm:"index" json:"target_id,omitempty"`
+	// TargetName is a human-readable name of the target (e.g. the pipeline's
+	// name); empty when unknown.
+	TargetName string `json:"target_name,omitempty"`
+	// PipelineID is the pipeline the action is scoped to, when it is
+	// pipeline-scoped (a run, job, or secret of a pipeline); 0 otherwise. It
+	// is denormalized from the target so events can be filtered by pipeline.
+	PipelineID uint `gorm:"index" json:"pipeline_id,omitempty"`
+	// RunID is the pipeline run the action is scoped to, when it is run-scoped
+	// (triggering or cancelling a run's job); 0 otherwise.
+	RunID uint `gorm:"index" json:"run_id,omitempty"`
+	// Outcome is the action's outcome: "success" or "failure" (a failed
+	// action is recorded too, so an audit trail shows what was attempted and
+	// what was rejected).
+	Outcome string `gorm:"index" json:"outcome"`
+	// SourceIP is the client's IP address (the HTTP request's remote address,
+	// or the gRPC peer's address); empty when the action did not come from a
+	// network client (e.g. a scheduler loop).
+	SourceIP string `json:"source_ip,omitempty"`
+	// OldValue is the resource's state before the action, as a compact JSON
+	// document (secret values redacted); empty when the action has no
+	// before-state (a create, a trigger, a login).
+	OldValue string `gorm:"type:text" json:"old_value,omitempty"`
+	// NewValue is the resource's state after the action, as a compact JSON
+	// document (secret values redacted); empty when the action has no
+	// after-state (a delete, a cancel).
+	NewValue string `gorm:"type:text" json:"new_value,omitempty"`
+	// Details is a free-form JSON document carrying action-specific context
+	// that does not fit the structured fields (e.g. a trigger's name and
+	// params, an approval's decision and reason, a login's email).
+	Details string `gorm:"type:text" json:"details,omitempty"`
+}
+
 // All lists every model the database service must migrate. Add new entities
 // here so AutoMigrate always sees the complete set.
 func All() []any {
@@ -967,5 +1041,6 @@ func All() []any {
 		&SecretNonce{},
 		&Role{},
 		&RoleBinding{},
+		&AuditEvent{},
 	}
 }

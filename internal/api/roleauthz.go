@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"cdrom/internal/audit"
 	"cdrom/internal/auth"
 	"cdrom/internal/authz"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -166,6 +167,14 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRoleCreate,
+		TargetKind: audit.TargetRole,
+		TargetID:   role.GetName(),
+		TargetName: role.GetName(),
+		Outcome:    audit.OutcomeSuccess,
+		NewValue:   auditJSON(map[string]any{"description": role.GetDescription(), "permissions": role.GetPermissions(), "includes": role.GetIncludes()}),
+	})
 	s.publishRoleChange()
 	writeJSON(w, http.StatusCreated, role)
 }
@@ -186,6 +195,13 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
+	// Fetch the role's current state so the audit event can record what
+	// changed (old value vs new value, F-15). A failure to fetch it does not
+	// block the update.
+	var oldRole *dbpb.Role
+	if old, err := s.clients.Database.GetRole(r.Context(), &dbpb.GetRoleRequest{Name: name}); err == nil {
+		oldRole = old
+	}
 	role, err := s.clients.Database.UpdateRole(r.Context(), &dbpb.UpdateRoleRequest{
 		Name:        name,
 		Description: req.Description,
@@ -196,6 +212,15 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRoleUpdate,
+		TargetKind: audit.TargetRole,
+		TargetID:   role.GetName(),
+		TargetName: role.GetName(),
+		Outcome:    audit.OutcomeSuccess,
+		OldValue:   auditRoleValue(oldRole),
+		NewValue:   auditRoleValue(role),
+	})
 	s.publishRoleChange()
 	writeJSON(w, http.StatusOK, role)
 }
@@ -211,10 +236,24 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "role name is required")
 		return
 	}
+	// Fetch the role's current state so the audit event can record what was
+	// removed (F-15). A failure to fetch it does not block the delete.
+	var oldRole *dbpb.Role
+	if old, err := s.clients.Database.GetRole(r.Context(), &dbpb.GetRoleRequest{Name: name}); err == nil {
+		oldRole = old
+	}
 	if _, err := s.clients.Database.DeleteRole(r.Context(), &dbpb.DeleteRoleRequest{Name: name}); err != nil {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRoleDelete,
+		TargetKind: audit.TargetRole,
+		TargetID:   name,
+		TargetName: name,
+		Outcome:    audit.OutcomeSuccess,
+		OldValue:   auditRoleValue(oldRole),
+	})
 	s.publishRoleChange()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -299,6 +338,20 @@ func (s *Server) addBinding(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionBindingAdd,
+		TargetKind: audit.TargetRoleBinding,
+		TargetID:   strconv.FormatInt(binding.GetId(), 10),
+		TargetName: binding.GetRoleName(),
+		PipelineID: binding.GetPipelineId(),
+		Outcome:    audit.OutcomeSuccess,
+		NewValue: auditJSON(map[string]any{
+			"principal_kind": binding.GetPrincipalKind(),
+			"principal_id":   binding.GetPrincipalId(),
+			"role_name":      binding.GetRoleName(),
+			"pipeline_id":    binding.GetPipelineId(),
+		}),
+	})
 	s.publishRoleChange()
 	writeJSON(w, http.StatusCreated, binding)
 }
@@ -313,10 +366,35 @@ func (s *Server) deleteBinding(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid binding id %q", r.PathValue("id"))
 		return
 	}
+	// Fetch the binding's current state so the audit event can record what
+	// was removed (F-15). A failure to fetch it does not block the delete.
+	var oldBinding *dbpb.RoleBinding
+	if resp, err := s.clients.Database.ListRoleBindings(r.Context(), &dbpb.ListRoleBindingsRequest{}); err == nil {
+		for _, b := range resp.GetBindings() {
+			if b.GetId() == id {
+				oldBinding = b
+				break
+			}
+		}
+	}
 	if _, err := s.clients.Database.DeleteRoleBinding(r.Context(), &dbpb.DeleteRoleBindingRequest{Id: id}); err != nil {
 		grpcError(w, err)
 		return
 	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionBindingDelete,
+		TargetKind: audit.TargetRoleBinding,
+		TargetID:   strconv.FormatInt(id, 10),
+		TargetName: oldBinding.GetRoleName(),
+		PipelineID: oldBinding.GetPipelineId(),
+		Outcome:    audit.OutcomeSuccess,
+		OldValue: auditJSON(map[string]any{
+			"principal_kind": oldBinding.GetPrincipalKind(),
+			"principal_id":   oldBinding.GetPrincipalId(),
+			"role_name":      oldBinding.GetRoleName(),
+			"pipeline_id":    oldBinding.GetPipelineId(),
+		}),
+	})
 	s.publishRoleChange()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

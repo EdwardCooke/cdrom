@@ -150,7 +150,8 @@ is the summary index). Summary:
 | F-12 | Secrets management (pipeline-level named secrets; AES-256-GCM with a configured key; DB-backed nonce counter; API decrypts at dispatch; log redaction) |
 | F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
 | F-14 | Roles & permissions (RBAC) (fine-grained permissions, built-in + custom roles with composition, user/service-account bindings optionally scoped per pipeline; deny-by-default; roles live in the Database service, evaluated in the API via `internal/authz` with a cache invalidated by `role_change` events on the shared event log; JWT claim mapping via `auth.roles`; delegation rules; synthetic admin when auth is off; backend-only — UI screens deferred) |
-| F-15…F-22 | Roadmap: audit log, queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-15 | Audit log (append-only record of who did what to which resource, when, from where, with what outcome and what changed; written to a local rotating file — separate from the default log, JSON or text, hourly/daily, `-` for stdout — and to the shared audit log in the Database service; queryable via `GET /api/audit` (requires `audit.can-view`); old entries pruned by age on a schedule; a secret's value is never stored or displayed (name only, redacted); the API records UI/gRPC actions and the scheduler records trigger-fired runs) |
+| F-16…F-22 | Roadmap: queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 | F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
 | F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
@@ -251,6 +252,9 @@ internal/
               `approval` (F-13); extend via executor.RegisterStepType
   secrets/    secret store: `Store` interface + built-in AES-256-GCM store; nonces
               come from the Database service's `NextSecretNonce` (F-12)
+  audit/      audit log (F-15): rotating file/stdout Logger (json/text), Recorder
+              (fans events to the local log + a durable Sink, best-effort), Pruner
+              (age-based retention), Redactor (secret values -> marker)
   services/
     data/     pipeline/job data service
     artifacts/ namespaced file store (artifacts + job logs; gRPC server; store interface)
@@ -312,9 +316,13 @@ auth, default on; and the RBAC claim-mapping vars `CDROM_AUTH_ROLE_CLAIM`,
 `CDROM_AUTH_ROLE_MAPPINGS` (comma-separated `claimValue=roleName`), and
 `CDROM_AUTH_ROLE_CLAIM_AS_NAMES`, F-14), the IdP vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
 IdP's gRPC listen address; the API dials it via `CDROM_IDP_GRPC_ADDR`), the
-job-token auth vars `CDROM_GRPC_AUTH_*`, and the secrets vars
+job-token auth vars `CDROM_GRPC_AUTH_*`, the secrets vars
 `CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY` (base64 32-byte AES-256-GCM key;
-when unset, secrets are disabled).
+when unset, secrets are disabled), and the audit-log vars `CDROM_AUDIT_FILE`
+(path of the current audit log file, separate from `CDROM_LOG_FILE`; `-` for
+stdout), `CDROM_AUDIT_FORMAT` (`json`/`text`), `CDROM_AUDIT_ROTATION`
+(`hourly`/`daily`), `CDROM_AUDIT_RETENTION` (max age of database audit
+entries), and `CDROM_AUDIT_PRUNE_INTERVAL` (F-15).
 
 A minimal local run (plaintext, no certs):
 

@@ -196,3 +196,35 @@ db:
 #secrets:
 #  kind: aes
 #  key: <base64-encoded 32-byte AES-256 key>
+
+# Audit log (used by the API, F-15). An append-only record of significant
+# actions — who (actor) did what (action) to which resource (target), when,
+# from where (source IP), with what outcome, and what changed (old/new value).
+# Each audited action is written both to a local audit log file (separate from
+# the process's default log) and to the shared audit log in the database
+# (queryable via GET /api/audit). A secret's value is never stored or
+# displayed: a secret is represented by its name only.
+#
+# file is the path of the current audit log file (default: audit.log). It is
+# separate from the process's default log (log_file / CDROM_LOG_FILE). A value
+# of "-" writes the audit log to stdout instead of a file (no rotation).
+#
+# format is the record format: "json" (the default) or "text".
+#
+# rotation is the file rotation interval: "hourly" or "daily" (the default).
+# The current file keeps a stable name (file); on rotation the file being
+# closed is renamed with the day/hour appended (e.g. audit.log ->
+# audit.log-20261009 for a daily rotation, or audit.log-2026100914 for an
+# hourly one) and a fresh file is opened at the stable path.
+#
+# retention is the maximum age of audit entries kept in the database before
+# they are pruned (default: 2160h / 90 days). Zero disables age-based pruning.
+#
+# prune_interval is how often the database's audit log is pruned of entries
+# older than retention (default: 24h).
+#audit:
+#  file: audit.log
+#  format: json
+#  rotation: daily
+#  retention: 2160h
+#  prune_interval: 24h

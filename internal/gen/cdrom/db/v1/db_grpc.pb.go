@@ -87,6 +87,9 @@ const (
 	Database_ListRoleBindings_FullMethodName        = "/cdrom.db.v1.Database/ListRoleBindings"
 	Database_DeleteRoleBinding_FullMethodName       = "/cdrom.db.v1.Database/DeleteRoleBinding"
 	Database_PublishRoleChange_FullMethodName       = "/cdrom.db.v1.Database/PublishRoleChange"
+	Database_AppendAuditEvent_FullMethodName        = "/cdrom.db.v1.Database/AppendAuditEvent"
+	Database_ListAuditEvents_FullMethodName         = "/cdrom.db.v1.Database/ListAuditEvents"
+	Database_PruneAuditEvents_FullMethodName        = "/cdrom.db.v1.Database/PruneAuditEvents"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -374,6 +377,30 @@ type DatabaseClient interface {
 	// the caller through the role/binding RPCs; this only appends the event so
 	// the other replicas see the change without a restart.
 	PublishRoleChange(ctx context.Context, in *PublishRoleChangeRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// Audit log (F-15). The audit log is an append-only record of significant
+	// actions: who (actor) did what (action) to which resource (target), when,
+	// from where, with what outcome, and what changed (old/new value). The API
+	// (and the scheduler, for trigger-fired runs) records an event for each
+	// audited action; the database service owns the rows and is the only
+	// component that can read or prune them.
+	//
+	// AppendAuditEvent appends one audit event. The log is append-only: there
+	// is no update or delete RPC for past events. The caller (the API) is
+	// responsible for redacting secret values from old_value/new_value before
+	// calling — the database service stores the values opaquely.
+	AppendAuditEvent(ctx context.Context, in *AppendAuditEventRequest, opts ...grpc.CallOption) (*AuditEvent, error)
+	// ListAuditEvents returns audit events, optionally filtered by actor,
+	// action, target kind, target id, pipeline, and a time range (created_at
+	// within [from, to)), most recent first, up to limit (0 means the
+	// server's default). This is how the UI's audit view (GET /api/audit)
+	// queries the log.
+	ListAuditEvents(ctx context.Context, in *ListAuditEventsRequest, opts ...grpc.CallOption) (*ListAuditEventsResponse, error)
+	// PruneAuditEvents deletes audit events older than the given instant. The
+	// API's retention config (audit.retention) drives it: the API prunes
+	// periodically so the table does not grow without bound. Pruning is a
+	// retention policy, not an edit: it only drops whole old entries, never
+	// changes one.
+	PruneAuditEvents(ctx context.Context, in *PruneAuditEventsRequest, opts ...grpc.CallOption) (*PruneAuditEventsResponse, error)
 }
 
 type databaseClient struct {
@@ -1054,6 +1081,36 @@ func (c *databaseClient) PublishRoleChange(ctx context.Context, in *PublishRoleC
 	return out, nil
 }
 
+func (c *databaseClient) AppendAuditEvent(ctx context.Context, in *AppendAuditEventRequest, opts ...grpc.CallOption) (*AuditEvent, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AuditEvent)
+	err := c.cc.Invoke(ctx, Database_AppendAuditEvent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListAuditEvents(ctx context.Context, in *ListAuditEventsRequest, opts ...grpc.CallOption) (*ListAuditEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAuditEventsResponse)
+	err := c.cc.Invoke(ctx, Database_ListAuditEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PruneAuditEvents(ctx context.Context, in *PruneAuditEventsRequest, opts ...grpc.CallOption) (*PruneAuditEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PruneAuditEventsResponse)
+	err := c.cc.Invoke(ctx, Database_PruneAuditEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -1339,6 +1396,30 @@ type DatabaseServer interface {
 	// the caller through the role/binding RPCs; this only appends the event so
 	// the other replicas see the change without a restart.
 	PublishRoleChange(context.Context, *PublishRoleChangeRequest) (*PublishEventResponse, error)
+	// Audit log (F-15). The audit log is an append-only record of significant
+	// actions: who (actor) did what (action) to which resource (target), when,
+	// from where, with what outcome, and what changed (old/new value). The API
+	// (and the scheduler, for trigger-fired runs) records an event for each
+	// audited action; the database service owns the rows and is the only
+	// component that can read or prune them.
+	//
+	// AppendAuditEvent appends one audit event. The log is append-only: there
+	// is no update or delete RPC for past events. The caller (the API) is
+	// responsible for redacting secret values from old_value/new_value before
+	// calling — the database service stores the values opaquely.
+	AppendAuditEvent(context.Context, *AppendAuditEventRequest) (*AuditEvent, error)
+	// ListAuditEvents returns audit events, optionally filtered by actor,
+	// action, target kind, target id, pipeline, and a time range (created_at
+	// within [from, to)), most recent first, up to limit (0 means the
+	// server's default). This is how the UI's audit view (GET /api/audit)
+	// queries the log.
+	ListAuditEvents(context.Context, *ListAuditEventsRequest) (*ListAuditEventsResponse, error)
+	// PruneAuditEvents deletes audit events older than the given instant. The
+	// API's retention config (audit.retention) drives it: the API prunes
+	// periodically so the table does not grow without bound. Pruning is a
+	// retention policy, not an edit: it only drops whole old entries, never
+	// changes one.
+	PruneAuditEvents(context.Context, *PruneAuditEventsRequest) (*PruneAuditEventsResponse, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -1549,6 +1630,15 @@ func (UnimplementedDatabaseServer) DeleteRoleBinding(context.Context, *DeleteRol
 }
 func (UnimplementedDatabaseServer) PublishRoleChange(context.Context, *PublishRoleChangeRequest) (*PublishEventResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishRoleChange not implemented")
+}
+func (UnimplementedDatabaseServer) AppendAuditEvent(context.Context, *AppendAuditEventRequest) (*AuditEvent, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendAuditEvent not implemented")
+}
+func (UnimplementedDatabaseServer) ListAuditEvents(context.Context, *ListAuditEventsRequest) (*ListAuditEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAuditEvents not implemented")
+}
+func (UnimplementedDatabaseServer) PruneAuditEvents(context.Context, *PruneAuditEventsRequest) (*PruneAuditEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PruneAuditEvents not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -2777,6 +2867,60 @@ func _Database_PublishRoleChange_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_AppendAuditEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AppendAuditEventRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AppendAuditEvent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AppendAuditEvent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AppendAuditEvent(ctx, req.(*AppendAuditEventRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListAuditEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAuditEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListAuditEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListAuditEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListAuditEvents(ctx, req.(*ListAuditEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PruneAuditEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PruneAuditEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PruneAuditEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PruneAuditEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PruneAuditEvents(ctx, req.(*PruneAuditEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3051,6 +3195,18 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PublishRoleChange",
 			Handler:    _Database_PublishRoleChange_Handler,
+		},
+		{
+			MethodName: "AppendAuditEvent",
+			Handler:    _Database_AppendAuditEvent_Handler,
+		},
+		{
+			MethodName: "ListAuditEvents",
+			Handler:    _Database_ListAuditEvents_Handler,
+		},
+		{
+			MethodName: "PruneAuditEvents",
+			Handler:    _Database_PruneAuditEvents_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

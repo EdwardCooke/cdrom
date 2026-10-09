@@ -18,10 +18,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"cdrom/internal/audit"
+	"cdrom/internal/authz"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
-	"cdrom/internal/authz"
 	"cdrom/internal/secrets"
 )
 
@@ -104,6 +105,12 @@ type GRPCServer struct {
 	// them directly when it observed the state change).
 	publishedMu sync.Mutex
 	published   map[int64]struct{}
+
+	// audit records an audit event (F-15) for each audited action the gRPC
+	// surface handles (worker lifecycle, job status reports, token exchanges).
+	// It is nil when the audit log is not configured (or in tests), in which
+	// case no audit events are recorded on the gRPC surface.
+	audit *audit.Recorder
 }
 
 // liveWorker is a worker with an open WatchJobs stream.
@@ -186,6 +193,14 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	}
 	s.mu.Unlock()
 	s.logger.Info("api: worker registered", "worker", registered.GetName(), "group", registered.GetGroup())
+	s.recordAuditGRPC(audit.Event{
+		Action:     audit.ActionWorkerRegister,
+		TargetKind: audit.TargetWorker,
+		TargetID:   registered.GetName(),
+		TargetName: registered.GetName(),
+		Outcome:    audit.OutcomeSuccess,
+		NewValue:   auditJSON(map[string]any{"group": registered.GetGroup(), "address": registered.GetAddress()}),
+	}, registered.GetName(), audit.ActorKindWorker, auditPeerAddr(ctx))
 	s.publish(Event{Type: EventWorker, Worker: registered.GetName(), Group: registered.GetGroup(), Action: WorkerRegistered})
 	s.publishWorkerEvent(ctx, registered.GetName(), registered.GetGroup(), WorkerRegistered)
 	return &apipb.Worker{
@@ -207,6 +222,13 @@ func (s *GRPCServer) DeregisterWorker(ctx context.Context, req *apipb.Deregister
 	}
 	s.removeLive(req.GetName())
 	s.logger.Info("api: worker deregistered", "worker", req.GetName())
+	s.recordAuditGRPC(audit.Event{
+		Action:     audit.ActionWorkerDeregister,
+		TargetKind: audit.TargetWorker,
+		TargetID:   req.GetName(),
+		TargetName: req.GetName(),
+		Outcome:    audit.OutcomeSuccess,
+	}, req.GetName(), audit.ActorKindWorker, auditPeerAddr(ctx))
 	s.publish(Event{Type: EventWorker, Worker: req.GetName(), Action: WorkerDeregistered})
 	s.publishWorkerEvent(ctx, req.GetName(), "", WorkerDeregistered)
 	return &emptypb.Empty{}, nil
@@ -401,6 +423,13 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			return nil, err
 		}
 		s.logger.Info("api: job awaiting approval", "job", req.GetJobId())
+		s.recordAuditGRPC(audit.Event{
+			Action:     audit.ActionJobStatus,
+			TargetKind: audit.TargetJob,
+			TargetID:   strconv.FormatInt(req.GetJobId(), 10),
+			Outcome:    audit.OutcomeSuccess,
+			Details:    auditJSON(map[string]any{"status": jobStatusName(updated.GetStatus()), "approval_message": req.GetApprovalMessage()}),
+		}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
 		s.publish(Event{
 			Type:        EventJobStatus,
 			JobID:       req.GetJobId(),
@@ -433,6 +462,13 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 				return nil, err
 			}
 			s.logger.Info("api: job execution status reported", "job", req.GetJobId(), "worker", req.GetWorkerName(), "status", req.GetStatus())
+			s.recordAuditGRPC(audit.Event{
+				Action:     audit.ActionJobStatus,
+				TargetKind: audit.TargetJob,
+				TargetID:   strconv.FormatInt(req.GetJobId(), 10),
+				Outcome:    audit.OutcomeSuccess,
+				Details:    auditJSON(map[string]any{"status": jobStatusName(req.GetStatus()), "worker": req.GetWorkerName()}),
+			}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
 			return toAPIJob(job), nil
 		}
 	}
@@ -454,6 +490,13 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	// (e.g. cancelled, F-05) is a no-op, and the event should reflect the
 	// status the job is actually in.
 	s.logger.Info("api: job status reported", "job", req.GetJobId(), "status", updated.GetStatus())
+	s.recordAuditGRPC(audit.Event{
+		Action:     audit.ActionJobStatus,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(req.GetJobId(), 10),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"status": jobStatusName(updated.GetStatus())}),
+	}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
 	s.publish(Event{
 		Type:        EventJobStatus,
 		JobID:       req.GetJobId(),
@@ -797,7 +840,25 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		return nil, status.Errorf(codes.Internal, "api: exchange job token: %v", err)
 	}
 	s.logger.Info("api: job token exchanged", "job", req.GetJobId(), "audience", req.GetAudience(), "expires_in", expiresIn)
+	s.recordAuditGRPC(audit.Event{
+		Action:     audit.ActionTokenExchange,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(req.GetJobId(), 10),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"audience": req.GetAudience(), "expires_in": expiresIn.String()}),
+	}, s.reportActor("", req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
 	return &apipb.ExchangeJobTokenResponse{Token: token}, nil
+}
+
+// reportActor returns the actor identity for a job status report or token
+// exchange from an execution target: the worker's name when the report names
+// a worker (a long-lived worker), or the job's identity ("job:<id>") when it
+// does not (an ephemeral agent reports against the job row directly).
+func (s *GRPCServer) reportActor(workerName string, jobID int64) string {
+	if workerName != "" {
+		return workerName
+	}
+	return "job:" + strconv.FormatInt(jobID, 10)
 }
 
 // ---------------------------------------------------------------------------

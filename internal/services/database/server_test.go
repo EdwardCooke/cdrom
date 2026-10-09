@@ -3547,3 +3547,190 @@ func TestRunAgainstSpecificVersionReproducesSecrets(t *testing.T) {
 		t.Errorf("current instance secret = %q, want v2", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Audit log (F-15)
+// ---------------------------------------------------------------------------
+
+// TestAuditAppendAndList verifies that audit events are appended and can be
+// queried back, most recent first, with all fields intact (including the
+// old/new value documents).
+func TestAuditAppendAndList(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	old := &dbpb.AppendAuditEventRequest{
+		Actor:      "alice",
+		ActorKind:  "user",
+		Action:     "pipeline.update",
+		TargetKind: "pipeline",
+		TargetId:   "1",
+		TargetName: "build",
+		PipelineId: 1,
+		Outcome:    "success",
+		SourceIp:   "10.0.0.1",
+		OldValue:   `{"name":"build"}`,
+		NewValue:   `{"name":"build2"}`,
+		Details:    `{"changed":["name"]}`,
+	}
+	if _, err := client.AppendAuditEvent(ctx, old); err != nil {
+		t.Fatalf("AppendAuditEvent: %v", err)
+	}
+	new := &dbpb.AppendAuditEventRequest{
+		Actor:      "bob",
+		ActorKind:  "user",
+		Action:     "run.trigger",
+		TargetKind: "run",
+		TargetId:   "5",
+		PipelineId: 1,
+		RunId:      5,
+		Outcome:    "success",
+	}
+	if _, err := client.AppendAuditEvent(ctx, new); err != nil {
+		t.Fatalf("AppendAuditEvent: %v", err)
+	}
+
+	resp, err := client.ListAuditEvents(ctx, &dbpb.ListAuditEventsRequest{})
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	events := resp.GetEvents()
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	// Most recent first: the second append comes back first.
+	if events[0].GetActor() != "bob" || events[1].GetActor() != "alice" {
+		t.Errorf("order = [%s, %s], want [bob, alice]", events[0].GetActor(), events[1].GetActor())
+	}
+	// Fields round-trip intact.
+	a := events[1]
+	if a.GetAction() != "pipeline.update" || a.GetTargetName() != "build" || a.GetSourceIp() != "10.0.0.1" {
+		t.Errorf("fields = %v, want action=pipeline.update target=build ip=10.0.0.1", a)
+	}
+	if a.GetOldValue() != `{"name":"build"}` || a.GetNewValue() != `{"name":"build2"}` || a.GetDetails() != `{"changed":["name"]}` {
+		t.Errorf("values = old=%q new=%q details=%q, want the appended documents", a.GetOldValue(), a.GetNewValue(), a.GetDetails())
+	}
+	if a.GetPipelineId() != 1 {
+		t.Errorf("pipeline_id = %d, want 1", a.GetPipelineId())
+	}
+	if a.GetCreatedAt() == nil {
+		t.Error("created_at = nil, want set")
+	}
+}
+
+// TestAuditListFilters verifies ListAuditEvents filters by actor, action,
+// target, pipeline, and time range.
+func TestAuditListFilters(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	mk := func(actor, action, targetID string, pipelineID int64) {
+		_, err := client.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{
+			Actor:      actor,
+			ActorKind:  "user",
+			Action:     action,
+			TargetKind: "job",
+			TargetId:   targetID,
+			PipelineId: pipelineID,
+			Outcome:    "success",
+		})
+		if err != nil {
+			t.Fatalf("AppendAuditEvent: %v", err)
+		}
+	}
+	mk("alice", "job.cancel", "1", 10)
+	mk("alice", "job.approve", "2", 10)
+	mk("bob", "job.cancel", "3", 20)
+
+	count := func(req *dbpb.ListAuditEventsRequest) int {
+		resp, err := client.ListAuditEvents(ctx, req)
+		if err != nil {
+			t.Fatalf("ListAuditEvents: %v", err)
+		}
+		return len(resp.GetEvents())
+	}
+	if got := count(&dbpb.ListAuditEventsRequest{Actor: "alice"}); got != 2 {
+		t.Errorf("actor=alice -> %d, want 2", got)
+	}
+	if got := count(&dbpb.ListAuditEventsRequest{Action: "job.cancel"}); got != 2 {
+		t.Errorf("action=job.cancel -> %d, want 2", got)
+	}
+	if got := count(&dbpb.ListAuditEventsRequest{TargetId: "3"}); got != 1 {
+		t.Errorf("target_id=3 -> %d, want 1", got)
+	}
+	if got := count(&dbpb.ListAuditEventsRequest{PipelineId: 20}); got != 1 {
+		t.Errorf("pipeline_id=20 -> %d, want 1", got)
+	}
+	// A time range in the far future matches everything; a range before now
+	// matches nothing.
+	if got := count(&dbpb.ListAuditEventsRequest{From: timestamppb.New(time.Now().Add(-time.Hour))}); got != 3 {
+		t.Errorf("from=1h ago -> %d, want 3", got)
+	}
+	if got := count(&dbpb.ListAuditEventsRequest{From: timestamppb.New(time.Now().Add(time.Hour))}); got != 0 {
+		t.Errorf("from=+1h -> %d, want 0", got)
+	}
+	// A limit bounds the result.
+	if got := count(&dbpb.ListAuditEventsRequest{Limit: 2}); got != 2 {
+		t.Errorf("limit=2 -> %d, want 2", got)
+	}
+}
+
+// TestAuditAppendValidation verifies AppendAuditEvent rejects an event with no
+// action or no actor.
+func TestAuditAppendValidation(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	if _, err := client.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{Actor: "alice"}); err == nil {
+		t.Error("AppendAuditEvent(no action) = nil error, want error")
+	}
+	if _, err := client.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{Action: "job.cancel"}); err == nil {
+		t.Error("AppendAuditEvent(no actor) = nil error, want error")
+	}
+}
+
+// TestAuditPrune verifies PruneAuditEvents deletes only events older than the
+// cutoff and reports how many it pruned.
+func TestAuditPrune(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	_, err := client.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{
+		Actor: "alice", ActorKind: "user", Action: "job.cancel", TargetKind: "job", TargetId: "1", Outcome: "success",
+	})
+	if err != nil {
+		t.Fatalf("AppendAuditEvent: %v", err)
+	}
+
+	// A cutoff in the future prunes everything.
+	resp, err := client.PruneAuditEvents(ctx, &dbpb.PruneAuditEventsRequest{
+		CreatedBefore: timestamppb.New(time.Now().Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatalf("PruneAuditEvents: %v", err)
+	}
+	if resp.GetPruned() != 1 {
+		t.Errorf("pruned = %d, want 1", resp.GetPruned())
+	}
+	list, err := client.ListAuditEvents(ctx, &dbpb.ListAuditEventsRequest{})
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if got := len(list.GetEvents()); got != 0 {
+		t.Errorf("events after prune = %d, want 0", got)
+	}
+
+	// A cutoff in the past prunes nothing.
+	_, _ = client.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{
+		Actor: "bob", ActorKind: "user", Action: "job.cancel", TargetKind: "job", TargetId: "2", Outcome: "success",
+	})
+	resp, err = client.PruneAuditEvents(ctx, &dbpb.PruneAuditEventsRequest{
+		CreatedBefore: timestamppb.New(time.Now().Add(-time.Hour)),
+	})
+	if err != nil {
+		t.Fatalf("PruneAuditEvents: %v", err)
+	}
+	if resp.GetPruned() != 0 {
+		t.Errorf("pruned = %d, want 0 (cutoff in the past)", resp.GetPruned())
+	}
+}
