@@ -5,7 +5,7 @@ services:
     - 8443:8443
     depends_on:
     - mailcrab
-    - rauthy
+    - oidc-toolkit
 
   mailcrab:
     image: marlonb/mailcrab:latest
@@ -14,18 +14,23 @@ services:
     ports:
     - 1080:1080
 
-  rauthy:
-    image: ghcr.io/sebadob/rauthy:latest
+  oidc-toolkit:
+    image: ghcr.io/businesssimulations/dev-oidc-toolkit:latest
     environment:
-      - LOCAL_TEST=true
-      - SMTP_URL=mailcrab
-      - SMTP_PORT=1025
-      - SMTP_DANGER_INSECURE=true
-      - SMTP_USERNAME=test
+      - ASPNETCORE_URLS=http://+:8443/auth/
+      - DevOidcToolkit__Port=8443
+      - DevOidcToolkit__Database__SqliteFile=/app/data/oidc-toolkit.db
+      - DevOidcToolkit__Users__0__Email=test@localhost
+      - DevOidcToolkit__Users__0__FirstName=Test
+      - DevOidcToolkit__Users__0__LastName=User
+      - DevOidcToolkit__Users__1__Email=test2@localhost
+      - DevOidcToolkit__Users__1__FirstName=Test2
+      - DevOidcToolkit__Users__1__LastName=User2
+      - DevOidcToolkit__Clients__0__Id=client
+      - DevOidcToolkit__Clients__0__Secret=secret
+      - DevOidcToolkit__Clients__0__RedirectUris__INDEX=http://localhost:3000/auth/callback
     volumes:
       - data:/app/data
-#    ports:
-#      - "8443:8443"
     depends_on:
       - mailcrab
 
