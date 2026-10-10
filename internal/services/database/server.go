@@ -4123,19 +4123,19 @@ func (s *Server) PruneAuditEvents(ctx context.Context, req *dbpb.PruneAuditEvent
 // toProtoAuditEvent converts a model AuditEvent into its proto form.
 func toProtoAuditEvent(event *models.AuditEvent) *dbpb.AuditEvent {
 	out := &dbpb.AuditEvent{
-		Id:          int64(event.ID),
-		Actor:       event.Actor,
-		ActorKind:   event.ActorKind,
-		Action:      event.Action,
-		TargetKind:  event.TargetKind,
-		TargetId:    event.TargetID,
-		TargetName:  event.TargetName,
-		Outcome:     event.Outcome,
-		SourceIp:    event.SourceIP,
-		OldValue:    event.OldValue,
-		NewValue:    event.NewValue,
-		Details:     event.Details,
-		CreatedAt:   timestamppb.New(event.CreatedAt),
+		Id:         int64(event.ID),
+		Actor:      event.Actor,
+		ActorKind:  event.ActorKind,
+		Action:     event.Action,
+		TargetKind: event.TargetKind,
+		TargetId:   event.TargetID,
+		TargetName: event.TargetName,
+		Outcome:    event.Outcome,
+		SourceIp:   event.SourceIP,
+		OldValue:   event.OldValue,
+		NewValue:   event.NewValue,
+		Details:    event.Details,
+		CreatedAt:  timestamppb.New(event.CreatedAt),
 	}
 	if event.PipelineID > 0 {
 		out.PipelineId = int64(event.PipelineID)

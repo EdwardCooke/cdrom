@@ -270,7 +270,12 @@ proto/        protobuf definitions (proto/cdrom/<service>/v1/)
 ui/           React frontend (separate from the Go module) + ui/tests/
 docs/         documentation (Architecture.md, Features.md summary index,
               features/ per-feature specs, HighAvailability.md)
-scripts/      build/release scripts (genproto.sh regenerates gRPC code)
+scripts/      build/release scripts (genproto.sh regenerates gRPC code);
+              e2e.sh is the end-to-end test main script (boots the stack once,
+              runs scripts/e2e/*.sh in order); scripts/e2e/ holds the
+              single-purpose e2e test scripts (01-shell-job … 07-audit, each
+              executable on its own) + lib.sh (shared helpers: stack boot,
+              wait/poll, HTTP, job submission)
 ```
 
 Rules:

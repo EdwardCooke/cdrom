@@ -37,20 +37,20 @@ func (f *fakeAuditDB) ListAuditEvents(ctx context.Context, in *dbpb.ListAuditEve
 	out := &dbpb.ListAuditEventsResponse{}
 	for i, e := range f.appended {
 		out.Events = append(out.Events, &dbpb.AuditEvent{
-			Id:          int64(i + 1),
-			Actor:       e.Actor,
-			ActorKind:   e.ActorKind,
-			Action:      e.Action,
-			TargetKind:  e.TargetKind,
-			TargetId:    e.TargetId,
-			TargetName:  e.TargetName,
-			PipelineId:  e.PipelineId,
-			RunId:       e.RunId,
-			Outcome:     e.Outcome,
-			SourceIp:    e.SourceIp,
-			OldValue:    e.OldValue,
-			NewValue:    e.NewValue,
-			Details:     e.Details,
+			Id:         int64(i + 1),
+			Actor:      e.Actor,
+			ActorKind:  e.ActorKind,
+			Action:     e.Action,
+			TargetKind: e.TargetKind,
+			TargetId:   e.TargetId,
+			TargetName: e.TargetName,
+			PipelineId: e.PipelineId,
+			RunId:      e.RunId,
+			Outcome:    e.Outcome,
+			SourceIp:   e.SourceIp,
+			OldValue:   e.OldValue,
+			NewValue:   e.NewValue,
+			Details:    e.Details,
 		})
 	}
 	return out, nil
