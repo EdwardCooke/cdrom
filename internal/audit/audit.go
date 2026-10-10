@@ -155,7 +155,17 @@ const (
 	ActionAPIKeyRotate       = "api-key.rotate"
 	ActionAPIKeyDelete       = "api-key.delete"
 	ActionAPIKeyResetLockout = "api-key.reset-lockout"
-	ActionLogin              = "auth.login"
+	// ActionServiceAccount* are the service-account management actions (F-26).
+	ActionServiceAccountCreate       = "service-account.create"
+	ActionServiceAccountUpdate       = "service-account.update"
+	ActionServiceAccountRotate       = "service-account.rotate-key"
+	ActionServiceAccountDisable      = "service-account.disable"
+	ActionServiceAccountEnable       = "service-account.enable"
+	ActionServiceAccountDelete       = "service-account.delete"
+	ActionServiceAccountAssignRole   = "service-account.assign-role"
+	ActionServiceAccountRemoveRole   = "service-account.remove-role"
+	ActionServiceAccountResetLockout = "service-account.reset-lockout"
+	ActionLogin                      = "auth.login"
 	ActionRegister           = "auth.register"
 	ActionWorkerRegister     = "worker.register"
 	ActionWorkerDeregister   = "worker.deregister"
@@ -178,9 +188,10 @@ const (
 	TargetRoleBinding = "role-binding"
 	TargetUser        = "user"
 	TargetSecret      = "secret"
-	TargetWorker      = "worker"
-	TargetLogin       = "login"
-	TargetAPIKey      = "api-key"
+	TargetWorker         = "worker"
+	TargetLogin          = "login"
+	TargetAPIKey         = "api-key"
+	TargetServiceAccount = "service-account"
 )
 
 // Outcomes (F-15).

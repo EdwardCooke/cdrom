@@ -58,6 +58,12 @@ type Server struct {
 	// lockout) lives. It is nil when API-key authentication is disabled, in
 	// which case the /api/api-keys endpoints respond 501.
 	apikey APIKeyClient
+	// serviceAccounts proxies the UI's service-account management requests
+	// (F-26) to the IdP, where the real logic (key generation, salted hashing,
+	// verification, and lockout) lives. It is nil when service-account
+	// authentication is disabled, in which case the /api/service-accounts
+	// endpoints respond 501.
+	serviceAccounts ServiceAccountClient
 	// authz is the authorization engine (F-14, RBAC). It enforces role-based
 	// access on the UI-facing HTTP surface: a request is allowed only if the
 	// authenticated principal's roles grant the required permission (with a
@@ -90,6 +96,13 @@ func (s *Server) SetUserPassClient(c UserPassClient) {
 // respond 501).
 func (s *Server) SetAPIKeyClient(c APIKeyClient) {
 	s.apikey = c
+}
+
+// SetServiceAccountClient attaches the IdP service-account proxy client (F-26),
+// enabling the /api/service-accounts endpoints. When left nil the endpoints
+// are disabled (they respond 501).
+func (s *Server) SetServiceAccountClient(c ServiceAccountClient) {
+	s.serviceAccounts = c
 }
 
 // SetAuthz attaches the authorization engine (F-14, RBAC) and enables
@@ -218,6 +231,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/api-keys/{id}/rotate", s.rotateAPIKey)
 	mux.HandleFunc("DELETE /api/api-keys/{id}", s.deleteAPIKey)
 	mux.HandleFunc("POST /api/api-keys/lockout/reset", s.resetAPIKeyLockout)
+
+	// Service accounts (F-26, proxied to the IdP). A principal with the
+	// service-accounts.can-* permissions manages service accounts (non-human
+	// identities with two API-key slots). The create and rotate responses
+	// return the plaintext key(s) exactly once. They are disabled (501) when
+	// service-account auth is not enabled.
+	mux.HandleFunc("POST /api/service-accounts", s.createServiceAccount)
+	mux.HandleFunc("GET /api/service-accounts", s.listServiceAccounts)
+	mux.HandleFunc("GET /api/service-accounts/{id}", s.getServiceAccount)
+	mux.HandleFunc("PATCH /api/service-accounts/{id}", s.updateServiceAccount)
+	mux.HandleFunc("POST /api/service-accounts/{id}/keys/{slot}/rotate", s.rotateServiceAccountKey)
+	mux.HandleFunc("POST /api/service-accounts/{id}/disable", s.disableServiceAccount)
+	mux.HandleFunc("POST /api/service-accounts/{id}/enable", s.enableServiceAccount)
+	mux.HandleFunc("POST /api/service-accounts/{id}/roles", s.assignServiceAccountRoles)
+	mux.HandleFunc("DELETE /api/service-accounts/{id}/roles/{role}", s.removeServiceAccountRole)
+	mux.HandleFunc("DELETE /api/service-accounts/{id}", s.deleteServiceAccount)
+	mux.HandleFunc("POST /api/service-accounts/{id}/lockout/reset", s.resetServiceAccountLockout)
 
 	// Live event stream (WebSocket).
 	if s.hub != nil {
@@ -2253,6 +2283,527 @@ func (s *Server) resetAPIKeyLockout(w http.ResponseWriter, r *http.Request) {
 		ActorKind:  audit.ActorKindUser,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
+}
+
+// ---------------------------------------------------------------------------
+// Service accounts (F-26, proxied to the IdP)
+// ---------------------------------------------------------------------------
+
+// requireServiceAccount reports whether service-account authentication is
+// enabled (a service-account client is attached). When it is not, the
+// endpoints respond 501.
+func (s *Server) requireServiceAccount(w http.ResponseWriter) bool {
+	if s.serviceAccounts == nil {
+		httpError(w, http.StatusNotImplemented, "service account authentication is not enabled")
+		return false
+	}
+	return true
+}
+
+// serviceAccountStatus maps an error from the IdP's service-account surface to
+// an HTTP status: a serviceAccountError is mapped from its gRPC status code,
+// and any other error (a transport failure reaching the IdP) is a 502.
+func serviceAccountStatus(err error) int {
+	if e, ok := err.(*serviceAccountError); ok {
+		switch e.code {
+		case codes.Unauthenticated:
+			return http.StatusUnauthorized
+		case codes.NotFound:
+			return http.StatusNotFound
+		case codes.InvalidArgument:
+			return http.StatusBadRequest
+		case codes.AlreadyExists, codes.Aborted:
+			return http.StatusConflict
+		case codes.Unimplemented:
+			return http.StatusNotImplemented
+		}
+		return http.StatusBadGateway
+	}
+	return http.StatusBadGateway
+}
+
+// serviceAccountRevision fetches an account's current revision (for the
+// optimistic-concurrency guard on a mutation). It returns 0 when the account
+// cannot be fetched (the mutation will then fail with a clear error).
+func (s *Server) serviceAccountRevision(ctx context.Context, id string) int64 {
+	acc, err := s.serviceAccounts.GetServiceAccount(ctx, id)
+	if err != nil {
+		return 0
+	}
+	return acc.Revision
+}
+
+// serviceAccountActorKind returns the actor kind for an audit event: the
+// caller's principal kind (a service account acting on another account is
+// recorded as a service-account actor, a human user as a user actor).
+func serviceAccountActorKind(user auth.User) string {
+	if user.Kind == "service-account" {
+		return audit.ActorKindServiceAccount
+	}
+	return audit.ActorKindUser
+}
+
+// createServiceAccountRequest is the body of POST /api/service-accounts: the
+// account's identity and optional initial roles.
+type createServiceAccountRequest struct {
+	LoginName   string   `json:"login_name"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Roles       []string `json:"roles,omitempty"`
+}
+
+// createServiceAccount creates a service account and its two freshly generated
+// key slots (and binds its roles). The response returns both plaintext keys
+// exactly once; the stored record holds only their salted hashes. Creating an
+// account requires service-accounts.can-create; creating it with roles
+// additionally requires service-accounts.can-assign-roles (and the F-14
+// delegation rule for each role).
+func (s *Server) createServiceAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	var req createServiceAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if req.LoginName == "" {
+		httpError(w, http.StatusBadRequest, "login_name is required")
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsCreate, authz.Resource{}) {
+		return
+	}
+	// Creating with roles additionally requires the assignment permission and
+	// the F-14 delegation rule for each role (a caller cannot grant a role it
+	// does not hold with sufficient scope).
+	if len(req.Roles) > 0 {
+		if !s.requirePermission(w, r, authz.PermServiceAccountsAssign, authz.Resource{}) {
+			return
+		}
+		if s.rbacEnabled && s.authz != nil {
+			caller := s.principalFromContext(r.Context())
+			for _, role := range req.Roles {
+				ok, err := s.authz.CanGrantWithPermission(r.Context(), caller, role, 0, authz.PermServiceAccountsAssign)
+				if err != nil {
+					httpError(w, http.StatusInternalServerError, "authorization: %v", err)
+					return
+				}
+				if !ok {
+					httpError(w, http.StatusForbidden, "cannot grant role %q: caller does not hold it with sufficient scope", role)
+					return
+				}
+			}
+		}
+	}
+	result, keys, err := s.serviceAccounts.CreateServiceAccount(r.Context(), req.LoginName, req.DisplayName, req.Description, req.Roles)
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "create service account: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountCreate,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+		NewValue:   auditJSON(map[string]any{"login_name": result.LoginName, "roles": result.Roles}),
+	})
+	// The two plaintext keys are returned exactly once (at creation); they are
+	// never returned by list/get. The response must not be cached.
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusCreated, map[string]any{"account": result, "keys": keys})
+}
+
+// listServiceAccounts returns service accounts (metadata only, never the
+// plaintext or hash). Deleted accounts are excluded unless the caller passes
+// ?include_deleted=true. It requires service-accounts.can-view.
+func (s *Server) listServiceAccounts(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsView, authz.Resource{}) {
+		return
+	}
+	includeDeleted := r.URL.Query().Get("include_deleted") == "true"
+	accounts, err := s.serviceAccounts.ListServiceAccounts(r.Context(), includeDeleted)
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "list service accounts: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, nonNil(accounts))
+}
+
+// getServiceAccount returns a single account's metadata and both slots'
+// non-secret metadata (never the plaintext or hash). A deleted account is
+// returned only when the caller passes ?include_deleted=true. It requires
+// service-accounts.can-view.
+func (s *Server) getServiceAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsView, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	result, err := s.serviceAccounts.GetServiceAccount(r.Context(), id)
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "get service account: %v", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// updateServiceAccountRequest is the body of PATCH /api/service-accounts/{id}:
+// the account's new display name/description. Only the fields present are
+// changed; a field whose pointer is nil is left unchanged. Protected fields
+// (login name, roles, status, keys) cannot be changed here.
+type updateServiceAccountRequest struct {
+	DisplayName *string `json:"display_name"`
+	Description *string `json:"description"`
+}
+
+// updateServiceAccount edits an account's display name/description (never its
+// roles, status, or keys). It requires service-accounts.can-edit.
+func (s *Server) updateServiceAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsEdit, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	var req updateServiceAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	result, err := s.serviceAccounts.UpdateServiceAccount(r.Context(), id, UpdateServiceAccountRequest{
+		DisplayName:    derefString(req.DisplayName),
+		HasDisplayName: req.DisplayName != nil,
+		Description:    derefString(req.Description),
+		HasDescription: req.Description != nil,
+		Revision:       s.serviceAccountRevision(r.Context(), id),
+	})
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "update service account: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountUpdate,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+		NewValue:   auditJSON(map[string]any{"display_name": result.DisplayName, "description": result.Description}),
+	})
+	writeJSON(w, http.StatusOK, result)
+}
+
+// rotateServiceAccountKey generates a brand-new `cdrom-sa-…` secret for the
+// selected slot (1 or 2) and returns it exactly once; the previous key stops
+// working and the other slot is unchanged. It requires
+// service-accounts.can-rotate-keys.
+func (s *Server) rotateServiceAccountKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsRotate, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	slot, ok := parseServiceAccountSlot(r.PathValue("slot"))
+	if !ok {
+		httpError(w, http.StatusBadRequest, "slot must be 1 or 2")
+		return
+	}
+	result, key, err := s.serviceAccounts.RotateServiceAccountKey(r.Context(), id, slot, s.serviceAccountRevision(r.Context(), id))
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "rotate service account key: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountRotate,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+		NewValue:   auditJSON(map[string]any{"slot": slot}),
+	})
+	// The new plaintext key is returned exactly once; the previous key stops
+	// working. The response must not be cached.
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"account": result, "key": key})
+}
+
+// disableServiceAccount temporarily disables an account (rejecting both keys
+// while preserving the hashes and role bindings). It requires
+// service-accounts.can-disable.
+func (s *Server) disableServiceAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsDisable, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	result, err := s.serviceAccounts.DisableServiceAccount(r.Context(), id, s.serviceAccountRevision(r.Context(), id))
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "disable service account: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountDisable,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+	})
+	writeJSON(w, http.StatusOK, result)
+}
+
+// enableServiceAccount re-enables a disabled, non-deleted account (restoring
+// both keys with the same keys and current roles). It requires
+// service-accounts.can-enable.
+func (s *Server) enableServiceAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsEnable, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	result, err := s.serviceAccounts.EnableServiceAccount(r.Context(), id, s.serviceAccountRevision(r.Context(), id))
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "enable service account: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountEnable,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+	})
+	writeJSON(w, http.StatusOK, result)
+}
+
+// assignServiceAccountRolesRequest is the body of POST
+// /api/service-accounts/{id}/roles: the role names to bind to the account.
+type assignServiceAccountRolesRequest struct {
+	Roles []string `json:"roles"`
+}
+
+// assignServiceAccountRoles adds role bindings to an account. It requires
+// service-accounts.can-assign-roles and the F-14 delegation rule for each role
+// (a caller cannot grant a role it does not hold with sufficient scope).
+func (s *Server) assignServiceAccountRoles(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsAssign, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	var req assignServiceAccountRolesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if len(req.Roles) == 0 {
+		httpError(w, http.StatusBadRequest, "roles is required")
+		return
+	}
+	// Delegation rule: the caller must hold each role being granted, with a
+	// scope at least as wide as the one being granted (unscoped here).
+	if s.rbacEnabled && s.authz != nil {
+		caller := s.principalFromContext(r.Context())
+		for _, role := range req.Roles {
+			ok, err := s.authz.CanGrantWithPermission(r.Context(), caller, role, 0, authz.PermServiceAccountsAssign)
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, "authorization: %v", err)
+				return
+			}
+			if !ok {
+				httpError(w, http.StatusForbidden, "cannot grant role %q: caller does not hold it with sufficient scope", role)
+				return
+			}
+		}
+	}
+	result, err := s.serviceAccounts.AssignServiceAccountRoles(r.Context(), id, req.Roles)
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "assign service account roles: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountAssignRole,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+		NewValue:   auditJSON(map[string]any{"roles": req.Roles}),
+	})
+	s.publishRoleChange()
+	writeJSON(w, http.StatusOK, result)
+}
+
+// removeServiceAccountRole removes a role binding from an account (by role
+// name). It requires service-accounts.can-remove-roles.
+func (s *Server) removeServiceAccountRole(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsRemove, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	role := r.PathValue("role")
+	if role == "" {
+		httpError(w, http.StatusBadRequest, "role is required")
+		return
+	}
+	result, err := s.serviceAccounts.RemoveServiceAccountRole(r.Context(), id, role)
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "remove service account role: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountRemoveRole,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+		OldValue:   auditJSON(map[string]any{"role": role}),
+	})
+	s.publishRoleChange()
+	writeJSON(w, http.StatusOK, result)
+}
+
+// deleteServiceAccount permanently soft-deletes an account (tombstone + zeroed
+// key slots). Repeated delete is idempotent. It requires
+// service-accounts.can-delete.
+func (s *Server) deleteServiceAccount(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsDelete, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	result, err := s.serviceAccounts.DeleteServiceAccount(r.Context(), id)
+	if err != nil {
+		httpError(w, serviceAccountStatus(err), "delete service account: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountDelete,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   result.ID,
+		TargetName: result.LoginName,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+	})
+	// 204 No Content after the tombstone and key clearing commit (the spec
+	// requires no body on delete).
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resetServiceAccountLockout clears an account's key lockout state. It requires
+// service-accounts.can-disable (lockout is a form of disabling key access).
+func (s *Server) resetServiceAccountLockout(w http.ResponseWriter, r *http.Request) {
+	if !s.requireServiceAccount(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermServiceAccountsDisable, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "service account id is required")
+		return
+	}
+	if err := s.serviceAccounts.ResetServiceAccountLockout(r.Context(), id); err != nil {
+		httpError(w, serviceAccountStatus(err), "reset service account lockout: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionServiceAccountResetLockout,
+		TargetKind: audit.TargetServiceAccount,
+		TargetID:   id,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  serviceAccountActorKind(user),
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
+}
+
+// parseServiceAccountSlot parses a key slot from the path and reports whether
+// it is a valid slot (1 or 2).
+func parseServiceAccountSlot(value string) (int, bool) {
+	slot, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	if slot != 1 && slot != 2 {
+		return 0, false
+	}
+	return slot, true
 }
 
 // ---------------------------------------------------------------------------

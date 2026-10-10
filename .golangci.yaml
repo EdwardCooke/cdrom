@@ -1,0 +1,9 @@
+version: "2"
+linters:
+  exclusions:
+    rules:
+      - path-except: '(.+)_test\.go'
+        settings:
+          staticcheck:
+            checks:
+              - '-SA4000' # disable the rule SA4000

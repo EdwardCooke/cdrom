@@ -452,3 +452,230 @@ func copyAPIKey(k *APIKey) *APIKey {
 	}
 	return &out
 }
+
+// MemoryServiceAccountStore is an in-memory ServiceAccountStore. It is used by
+// tests and is suitable for running a single IdP without a Database service;
+// it does not share state across processes, so it does not support multiple
+// IdP replicas.
+type MemoryServiceAccountStore struct {
+	mu       sync.Mutex
+	accounts map[string]*ServiceAccount // keyed by account id
+	byLogin  map[string]*ServiceAccount // keyed by login name
+	nextID   int
+}
+
+// NewMemoryServiceAccountStore returns an empty in-memory ServiceAccountStore.
+func NewMemoryServiceAccountStore() *MemoryServiceAccountStore {
+	return &MemoryServiceAccountStore{
+		accounts: make(map[string]*ServiceAccount),
+		byLogin:  make(map[string]*ServiceAccount),
+		nextID:   1,
+	}
+}
+
+// copyServiceAccount returns a deep copy of an account (with copied keys and
+// roles) so callers cannot mutate the store's state.
+func copyServiceAccount(a *ServiceAccount) *ServiceAccount {
+	out := *a
+	out.Roles = append([]string(nil), a.Roles...)
+	out.Keys = make([]*ServiceAccountKey, len(a.Keys))
+	for i, k := range a.Keys {
+		ck := *k
+		out.Keys[i] = &ck
+	}
+	return &out
+}
+
+func (s *MemoryServiceAccountStore) Create(_ context.Context, acc *ServiceAccount, roles []string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.byLogin[acc.LoginName]; ok {
+		return nil, status.Error(codes.AlreadyExists, "a service account with that login name already exists")
+	}
+	id := strconv.Itoa(s.nextID)
+	s.nextID++
+	stored := copyServiceAccount(acc)
+	stored.ID = id
+	stored.Roles = append([]string(nil), roles...)
+	s.accounts[id] = stored
+	s.byLogin[acc.LoginName] = stored
+	return copyServiceAccount(stored), nil
+}
+
+func (s *MemoryServiceAccountStore) Get(_ context.Context, id, loginName string, includeDeleted bool) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var acc *ServiceAccount
+	if id != "" {
+		acc = s.accounts[id]
+	} else {
+		acc = s.byLogin[loginName]
+	}
+	if acc == nil || (!includeDeleted && acc.Deleted) {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) List(_ context.Context, includeDeleted bool) ([]*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*ServiceAccount, 0, len(s.accounts))
+	for _, a := range s.accounts {
+		if !includeDeleted && a.Deleted {
+			continue
+		}
+		out = append(out, copyServiceAccount(a))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (s *MemoryServiceAccountStore) Update(_ context.Context, id, displayName, description string, hasDisplayName, hasDescription bool, revision int64, _ string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok || acc.Deleted {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if int64(acc.Revision) != revision {
+		return nil, status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+	}
+	if hasDisplayName {
+		acc.DisplayName = displayName
+	}
+	if hasDescription {
+		acc.Description = description
+	}
+	acc.Revision++
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) RotateKey(_ context.Context, id string, slot int, keyHash, keySalt, keyPrefix string, revision int64, _ string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok || acc.Deleted {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if int64(acc.Revision) != revision {
+		return nil, status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+	}
+	for _, k := range acc.Keys {
+		if k.Slot == slot {
+			k.KeyHash = keyHash
+			k.KeySalt = keySalt
+			k.KeyPrefix = keyPrefix
+			break
+		}
+	}
+	acc.Revision++
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) SetDisabled(_ context.Context, id string, disabled bool, revision int64, _ string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok || acc.Deleted {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if int64(acc.Revision) != revision {
+		return nil, status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+	}
+	acc.Disabled = disabled
+	acc.Revision++
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) Delete(_ context.Context, id, _ string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if !acc.Deleted {
+		acc.Deleted = true
+		acc.Disabled = true
+		acc.Revision++
+		// Zero out both key slots: clear the credential-bearing fields so no
+		// usable verifier remains.
+		for _, k := range acc.Keys {
+			k.KeyHash = ""
+			k.KeySalt = ""
+			k.KeyPrefix = ""
+		}
+	}
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) AssignRole(_ context.Context, id, role string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok || acc.Deleted {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	for _, r := range acc.Roles {
+		if r == role {
+			return copyServiceAccount(acc), nil // idempotent: already bound
+		}
+	}
+	acc.Roles = append(acc.Roles, role)
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) RemoveRole(_ context.Context, id, role string) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok || acc.Deleted {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	out := make([]string, 0, len(acc.Roles))
+	for _, r := range acc.Roles {
+		if r != role {
+			out = append(out, r)
+		}
+	}
+	acc.Roles = out
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) RecordKeyAttempt(_ context.Context, id string, success bool, maxFailures int, lockoutDuration time.Duration) (*ServiceAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if success {
+		acc.KeyFailedCount = 0
+		return copyServiceAccount(acc), nil
+	}
+	if maxFailures > 0 {
+		acc.KeyFailedCount++
+		if acc.KeyFailedCount >= maxFailures {
+			if lockoutDuration > 0 {
+				acc.KeyLockedUntil = time.Now().Add(lockoutDuration)
+			} else {
+				acc.KeyLockedUntil = apiKeyLockoutForever
+			}
+			acc.KeyFailedCount = 0
+		}
+	}
+	return copyServiceAccount(acc), nil
+}
+
+func (s *MemoryServiceAccountStore) ResetLockout(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	acc, ok := s.accounts[id]
+	if !ok {
+		return status.Error(codes.NotFound, "service account not found")
+	}
+	acc.KeyFailedCount = 0
+	acc.KeyLockedUntil = time.Time{}
+	return nil
+}

@@ -78,6 +78,52 @@ service IdP {
   // ResetAPIKeyLockout clears a user's API-key lockout state (the failed
   // counter and the lockout instant). A missing user is NotFound.
   rpc ResetAPIKeyLockout(ResetAPIKeyLockoutRequest) returns (ResetAPIKeyLockoutResponse);
+
+  // CreateServiceAccount creates a service account (F-26) and its two freshly
+  // generated key slots, and binds its roles. The IdP generates each key's
+  // plaintext (`cdrom-sa-…`), hashes it (mixing in a per-key salt and the
+  // request's pepper), and persists the salted hashes through the Database
+  // service. The response returns both plaintext keys exactly once. The RPC
+  // is Unimplemented when no service-account store is attached.
+  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (CreateServiceAccountResponse);
+  // GetServiceAccount returns an account's metadata and both slots' non-secret
+  // metadata (never the plaintext or hash) by id or login name. A missing
+  // account is NotFound.
+  rpc GetServiceAccount(GetServiceAccountRequest) returns (cdrom.db.v1.ServiceAccount);
+  // ListServiceAccounts returns service accounts. When include_deleted is
+  // false (the default) deleted accounts are excluded.
+  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse);
+  // UpdateServiceAccount edits an account's display name/description (never
+  // its roles, status, or keys). A stale revision is Aborted.
+  rpc UpdateServiceAccount(UpdateServiceAccountRequest) returns (cdrom.db.v1.ServiceAccount);
+  // RotateServiceAccountKey generates a brand-new `cdrom-sa-…` secret for the
+  // selected slot (hashing it, mixing in the request's pepper), returns it
+  // exactly once (in the response's plaintext field), and invalidates the
+  // previous one. A stale revision is Aborted.
+  rpc RotateServiceAccountKey(RotateServiceAccountKeyRequest) returns (RotateServiceAccountKeyResponse);
+  // DisableServiceAccount temporarily disables an account (rejecting both
+  // keys). A stale revision is Aborted.
+  rpc DisableServiceAccount(ServiceAccountStateRequest) returns (cdrom.db.v1.ServiceAccount);
+  // EnableServiceAccount re-enables a disabled, non-deleted account (restoring
+  // both keys). A stale revision is Aborted.
+  rpc EnableServiceAccount(ServiceAccountStateRequest) returns (cdrom.db.v1.ServiceAccount);
+  // DeleteServiceAccount permanently soft-deletes an account (tombstone +
+  // zeroed key slots). Repeated delete is idempotent.
+  rpc DeleteServiceAccount(DeleteServiceAccountRequest) returns (cdrom.db.v1.ServiceAccount);
+  // AssignServiceAccountRoles adds role bindings to an account (validated
+  // against the role catalog).
+  rpc AssignServiceAccountRoles(AssignServiceAccountRolesRequest) returns (cdrom.db.v1.ServiceAccount);
+  // RemoveServiceAccountRole removes a role binding from an account.
+  rpc RemoveServiceAccountRole(RemoveServiceAccountRoleRequest) returns (cdrom.db.v1.ServiceAccount);
+  // VerifyServiceAccountKey checks a presented `login-name:cdrom-sa-…`
+  // credential against the account's two key slots (salted hash, disabled,
+  // and deleted state). On a miss it increments the account's failure counter
+  // and locks the account out at the configured maximum. A miss is
+  // Unauthenticated.
+  rpc VerifyServiceAccountKey(VerifyServiceAccountKeyRequest) returns (VerifyServiceAccountKeyResponse);
+  // ResetServiceAccountLockout clears an account's key lockout state (the
+  // failed counter and the lockout instant). A missing account is NotFound.
+  rpc ResetServiceAccountLockout(ResetServiceAccountLockoutRequest) returns (ResetServiceAccountLockoutResponse);
 }
 
 // MintJobTokenRequest is the request to mint a job token.
@@ -335,5 +381,204 @@ message ResetAPIKeyLockoutRequest {
 }
 
 message ResetAPIKeyLockoutResponse {
+  string status = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Service accounts (F-26)
+// ---------------------------------------------------------------------------
+
+// CreateServiceAccountRequest is the request to create a service account and
+// its two key slots. The IdP generates both keys' plaintexts (each a
+// `cdrom-sa-…` secret), hashes them (mixing in a per-key salt and the
+// request's pepper), and persists the salted hashes through the Database
+// service. The response returns both plaintext keys exactly once.
+message CreateServiceAccountRequest {
+  // login_name is the account's unique, immutable login identifier.
+  string login_name = 1;
+  // display_name is a human-readable name for the account.
+  string display_name = 2;
+  // description is a human-readable description of the account.
+  string description = 3;
+  // roles are the role names to bind to the account at creation.
+  repeated string roles = 4;
+  // pepper is the secret the caller mixes into each key's hash (alongside the
+  // per-key salt); empty hashes the key with its salt alone. The caller (the
+  // API) supplies it from its auth.service_account config so the IdP hashes
+  // keys consistently.
+  string pepper = 5;
+  // created_by is the identity of the principal creating the account.
+  string created_by = 6;
+}
+
+// CreateServiceAccountResponse is the result of creating a service account:
+// the account's metadata (never the hashes) plus both plaintext keys,
+// returned exactly once.
+message CreateServiceAccountResponse {
+  // account is the created account's metadata (with its two slots' non-secret
+  // metadata).
+  cdrom.db.v1.ServiceAccount account = 1;
+  // keys are the two plaintext keys, one per slot (shown to the caller exactly
+  // once, at creation).
+  repeated ServiceAccountPlaintextKey keys = 2;
+}
+
+// ServiceAccountPlaintextKey is a slot number and its plaintext key (returned
+// exactly once at creation or rotation).
+message ServiceAccountPlaintextKey {
+  // slot is the key's slot number (1 or 2).
+  int32 slot = 1;
+  // key is the plaintext `cdrom-sa-…` key.
+  string key = 2;
+}
+
+message GetServiceAccountRequest {
+  // id is the account's identifier; when empty, login_name is used.
+  string id = 1;
+  // login_name is the account's login identifier (used when id is empty).
+  string login_name = 2;
+  // include_deleted, when true, returns a deleted (tombstoned) account.
+  bool include_deleted = 3;
+}
+
+message ListServiceAccountsRequest {
+  // include_deleted, when true, includes deleted (tombstoned) accounts.
+  bool include_deleted = 1;
+}
+
+message ListServiceAccountsResponse {
+  repeated cdrom.db.v1.ServiceAccount accounts = 1;
+}
+
+// UpdateServiceAccountRequest edits an account's display name/description.
+// The has_* flags indicate which fields are applied (a field whose flag is
+// false is left unchanged). revision is the concurrency guard (a stale
+// revision is Aborted).
+message UpdateServiceAccountRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // display_name is the new display name.
+  string display_name = 2;
+  // description is the new description.
+  string description = 3;
+  // has_display_name indicates whether display_name should be applied (true)
+  // or left unchanged (false).
+  bool has_display_name = 4;
+  // has_description indicates whether description should be applied (true) or
+  // left unchanged (false).
+  bool has_description = 5;
+  // revision is the account's revision the caller last saw; a mismatch is
+  // Aborted (a concurrent mutation).
+  int64 revision = 6;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 7;
+}
+
+// RotateServiceAccountKeyRequest rotates one of an account's key slots. The
+// IdP generates the new key's plaintext, hashes it (mixing in the request's
+// pepper and a fresh per-key salt), and persists it; the response returns the
+// new plaintext exactly once.
+message RotateServiceAccountKeyRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // slot is the slot to rotate (1 or 2).
+  int32 slot = 2;
+  // pepper is the secret mixed into the new key's hash (alongside the per-key
+  // salt); empty hashes the key with its salt alone.
+  string pepper = 3;
+  // revision is the account's revision the caller last saw; a mismatch is
+  // Aborted (a concurrent mutation).
+  int64 revision = 4;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 5;
+}
+
+// RotateServiceAccountKeyResponse is the result of rotating a slot: the
+// account's metadata (never the hash) plus the new plaintext key, returned
+// exactly once.
+message RotateServiceAccountKeyResponse {
+  // account is the account's metadata (with its two slots' non-secret
+  // metadata).
+  cdrom.db.v1.ServiceAccount account = 1;
+  // key is the new plaintext `cdrom-sa-…` key for the rotated slot (shown to
+  // the caller exactly once); the previous key stops working.
+  ServiceAccountPlaintextKey key = 2;
+}
+
+// ServiceAccountStateRequest is the request to disable or enable an account.
+message ServiceAccountStateRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // revision is the account's revision the caller last saw; a mismatch is
+  // Aborted (a concurrent mutation).
+  int64 revision = 2;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 3;
+}
+
+// DeleteServiceAccountRequest permanently soft-deletes an account.
+message DeleteServiceAccountRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 2;
+}
+
+// AssignServiceAccountRolesRequest adds role bindings to an account.
+message AssignServiceAccountRolesRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // roles are the role names to bind to the account.
+  repeated string roles = 2;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 3;
+}
+
+// RemoveServiceAccountRoleRequest removes a role binding from an account.
+message RemoveServiceAccountRoleRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // role is the name of the role to remove.
+  string role = 2;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 3;
+}
+
+// VerifyServiceAccountKeyRequest is a presented `login-name:cdrom-sa-…`
+// credential to check against the account's two key slots. The caller (the
+// API) supplies the pepper (mixed into each key's salted hash) and the lockout
+// policy (max_failures and lockout_duration) from its auth.service_account
+// config.
+message VerifyServiceAccountKeyRequest {
+  // login_name is the account's login identifier.
+  string login_name = 1;
+  // api_key is the presented key's plaintext (the `cdrom-sa-…` value).
+  string api_key = 2;
+  // pepper is the secret mixed into each key's salted hash; empty hashes the
+  // key with its salt alone.
+  string pepper = 3;
+  // max_failures is the failure count that triggers a lockout; 0 disables the
+  // lockout (failed attempts are counted but never lock the account out).
+  int32 max_failures = 4;
+  // lockout_duration is how long a lockout lasts; 0 means the lockout is
+  // permanent (until an admin resets it).
+  google.protobuf.Duration lockout_duration = 5;
+}
+
+// VerifyServiceAccountKeyResponse is the result of a successful service-
+// account key verification: the account (with its roles) so the caller can
+// establish the authenticated service-account principal.
+message VerifyServiceAccountKeyResponse {
+  cdrom.db.v1.ServiceAccount account = 1;
+  // slot is the key slot that matched (1 or 2).
+  int32 slot = 2;
+}
+
+message ResetServiceAccountLockoutRequest {
+  // id is the account's identifier.
+  string id = 1;
+}
+
+message ResetServiceAccountLockoutResponse {
   string status = 1;
 }

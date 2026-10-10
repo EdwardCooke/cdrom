@@ -873,6 +873,100 @@ type IDPAPIKey struct {
 	PipelineScope []uint `gorm:"type:text;serializer:json" json:"pipeline_scope,omitempty"`
 }
 
+// ServiceAccount is a non-human identity for automation (F-26), independent
+// of any user's login or employment lifecycle. It has assignable F-14 roles
+// and exactly two API-key slots (ServiceAccountKey), both usable concurrently
+// and individually rotatable. The IdP generates and hashes the keys; only the
+// (salted) hashes are stored. An account can be temporarily disabled to stop
+// access, or permanently soft-deleted (DeletedAt), which retains its identity
+// while zeroing out both key slots.
+//
+// The account directory is stored in the database (like the IdP's user
+// directory) so multiple IdP replicas share it. The Database service stores
+// the key hashes opaquely and never sees the plaintext; the IdP generates and
+// hashes the secrets.
+type ServiceAccount struct {
+	gorm.Model
+	// LoginName is the account's unique, immutable login identifier. It is
+	// separate from the human email namespace and is the identity a client
+	// presents in `Authorization: Bearer <login-name>:cdrom-sa-…`.
+	LoginName string `gorm:"uniqueIndex;not null" json:"login_name"`
+	// DisplayName is a human-readable name for the account.
+	DisplayName string `json:"display_name"`
+	// Description is a human-readable description of the account.
+	Description string `json:"description"`
+	// Disabled, when true, rejects both of the account's keys (and any access)
+	// while preserving the hashes and role bindings. Enabling restores access
+	// with the same keys.
+	Disabled bool `gorm:"not null;default:false" json:"disabled"`
+	// DeletedAt is the irreversible tombstone (a soft delete, not a hard
+	// delete): once set, the account is permanently deleted — its identity,
+	// role history, and audit references are retained for attribution, but
+	// both key slots are zeroed and no key can authenticate. The login name
+	// stays reserved so a new identity cannot impersonate the deleted one.
+	DeletedAt *time.Time `gorm:"index" json:"deleted_at,omitempty"`
+	// CreatedBy is the identity of the principal that created the account.
+	CreatedBy string `json:"created_by,omitempty"`
+	// UpdatedBy is the identity of the principal that last mutated the
+	// account.
+	UpdatedBy string `json:"updated_by,omitempty"`
+	// Revision is a concurrency guard for mutations: it is incremented on
+	// every mutation, and a mutation that carries a stale revision is rejected
+	// (so a conflicting rotation or lifecycle change is not silently
+	// overwritten).
+	Revision int `gorm:"not null;default:0" json:"revision"`
+	// KeyFailedCount is the number of consecutive failed service-account key
+	// verification attempts for this account (F-26, F-25-style throttling). It
+	// is reset to zero on a successful verification and is separate from any
+	// human user's lockout, so brute-forcing a service account's keys does not
+	// lock a human out of password sign-in (and vice versa).
+	KeyFailedCount int `gorm:"column:key_failed_count;not null;default:0" json:"-"`
+	// KeyLockedUntil is when the account's key lockout expires (F-26); zero
+	// means the account is not locked out. When the configured lockout duration
+	// is zero the lockout is permanent (until an admin resets it).
+	KeyLockedUntil time.Time `gorm:"column:key_locked_until" json:"-"`
+}
+
+// ServiceAccountKey is one of a service account's two API-key slots (F-26).
+// A key is a string `cdrom-sa-` followed by 64 random alphanumeric characters;
+// only its salted hash (and a short non-secret prefix) is stored — the
+// plaintext is shown to the caller exactly once (at creation and at each
+// rotation) and is never persisted.
+//
+// Every account retains exactly two slot records (Slot 1 and 2); callers
+// cannot add a third or delete one. A slot's hash is a salted hash: the salt
+// is unique to the key (generated with the key) and is stored alongside the
+// hash, so two keys with the same plaintext (or two keys of the same account)
+// never collide. When a pepper is configured it is mixed in as well (kept out
+// of the database). On delete, both slots' hashes and prefixes are cleared so
+// no usable verifier remains; an empty hash never matches a credential.
+type ServiceAccountKey struct {
+	gorm.Model
+	// ServiceAccountID is the account this key slot belongs to.
+	ServiceAccountID uint `gorm:"uniqueIndex:idx_sa_key_unique,priority:1;not null" json:"service_account_id"`
+	// Slot is the key's slot number: 1 or 2. It is unique within the account
+	// (the composite unique index with ServiceAccountID).
+	Slot int `gorm:"uniqueIndex:idx_sa_key_unique,priority:2;not null" json:"slot"`
+	// KeyHash is the salted hash of the key's plaintext (optionally mixed with
+	// a configured pepper). It is never returned to the API, IdP, or UI. On
+	// delete it is cleared to the empty value, which never matches a
+	// credential.
+	KeyHash string `gorm:"column:key_hash;type:text" json:"-"`
+	// KeySalt is the per-key salt mixed into KeyHash. It is unique to the key
+	// (generated with the key) and is stored alongside the hash. On delete it
+	// is cleared.
+	KeySalt string `gorm:"column:key_salt;type:text" json:"-"`
+	// KeyPrefix is a short, non-secret prefix of the key (e.g. the first dozen
+	// characters) shown in listings so a caller can tell keys apart without
+	// the plaintext. On delete it is cleared.
+	KeyPrefix string `gorm:"column:key_prefix" json:"key_prefix"`
+	// Generation is a counter bumped on each rotation, so the UI can show how
+	// many times a slot's key has been rotated.
+	Generation int `gorm:"not null;default:1" json:"generation"`
+	// RotatedAt is when the slot's key was last generated or rotated.
+	RotatedAt time.Time `json:"rotated_at"`
+}
+
 // Event is a row in the shared, append-only event log (F-23, high
 // availability). The event log is the coordination bus that makes the control
 // plane horizontally scalable: every API pod tails it and fans the events out
@@ -1083,6 +1177,8 @@ func All() []any {
 		&IDPAuthCode{},
 		&IDPUser{},
 		&IDPAPIKey{},
+		&ServiceAccount{},
+		&ServiceAccountKey{},
 		&Event{},
 		&Lease{},
 		&SecretNonce{},

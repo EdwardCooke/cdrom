@@ -8,7 +8,7 @@
 of any user's login or employment lifecycle. It has assignable F-14 roles and
 **exactly two API-key slots**, numbered `1` and `2`, both usable concurrently
 and individually rotatable. Creation returns both plaintext keys; rotation
-returns only the replacement key for the selected slot. The Database service
+returns only the replacement key for the selected slot. The IdP service
 generates and hashes the keys; plaintext is never persisted and is returned
 only in these successful mutation responses for one-time display in the UI.
 An account can be temporarily **disabled** to stop access, or permanently
@@ -46,14 +46,22 @@ create identities, delete them, or grant privileges.
   independent secret (`cdrom-sa-` plus 64 uniformly random alphanumeric
   characters); fail the whole operation if randomness, hashing, or storage
   fails. A service-account-specific prefix distinguishes F-26 from F-25.
-- Store only SHA-512 hashes of these high-entropy keys and non-secret
-  metadata. Compare hashes in constant time. If a pepper is configured, use
-  HMAC-SHA-512 and keep the pepper out of the database; all Database replicas
-  must share it. Never return stored hashes to the API, IdP, or UI.
-- Unlike F-25, which proposes generation/hashing in the IdP, **F-26 key
-  generation, hashing, and verification belong to the Database service**.
-  The IdP coordinates identity operations over gRPC; it does not generate
-  these secrets or read their hashes. All persistence remains DB-owned.
+- Store only salted SHA-512 hashes of these high-entropy keys and non-secret
+  metadata. Each key gets a **unique per-key salt** (32 random bytes), mixed
+  into the hash so two keys with the same plaintext never collide. Compare
+  hashes in constant time. If a pepper is configured it is mixed into the hash
+  as added security (the hash is `SHA-512(pepper + salt + key)`); the pepper is
+  kept out of the database and, when unset, the API logs a security warning at
+  startup (like the secrets-encryption-key warning). Never return stored hashes
+  to the API, IdP, or UI.
+- **F-26 key generation, hashing, and verification belong to the IdP** (the
+  same process that does F-24 username/password hashing and verification, for
+  consistency). The IdP generates each key's plaintext, hashes it (mixing in a
+  fresh per-key salt and the configured pepper), and — on a presented
+  credential — fetches the stored salted hash+salt from the Database service,
+  recomputes the presented key's salted hash, and compares in constant time,
+  exactly like password verification. The Database service owns persistence and
+  manages the lockout state; it does not do the hash comparison.
 - Rotating slot `1` or `2` atomically replaces only that slot's hash and
   metadata. The old value stops authenticating as soon as the transaction
   commits; the other slot remains valid and unchanged. Never rotate both

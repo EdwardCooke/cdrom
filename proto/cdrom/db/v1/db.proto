@@ -277,6 +277,47 @@ service Database {
   // counter and the lockout instant); an admin uses it to un-lock a user.
   rpc ResetAPIKeyLockout(ResetIDPAPIKeyLockoutRequest) returns (google.protobuf.Empty);
 
+  // Service accounts (F-26). A service account is a non-human identity with
+  // two API-key slots. The IdP generates and hashes the keys (mixing in a
+  // per-key salt and an optional pepper) and persists them here; the Database
+  // service stores the salted hashes opaquely and never sees the plaintext.
+  // CreateServiceAccount atomically creates the account and both freshly
+  // generated key slots (the caller supplies both slots' salted hashes and
+  // prefixes) in one transaction. The other RPCs key on the account id.
+  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (ServiceAccount);
+  rpc GetServiceAccount(GetServiceAccountRequest) returns (ServiceAccount);
+  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse);
+  // UpdateServiceAccount edits an account's display name/description (and
+  // bumps its revision); a stale revision is Aborted.
+  rpc UpdateServiceAccount(UpdateServiceAccountRequest) returns (ServiceAccount);
+  // RotateServiceAccountKey replaces one slot's salted hash and prefix (the
+  // caller generated and hashed the new plaintext), bumping the slot's
+  // generation and the account's revision; a stale revision is Aborted.
+  rpc RotateServiceAccountKey(RotateServiceAccountKeyRequest) returns (ServiceAccount);
+  // DisableServiceAccount sets the account's disabled flag (rejecting both
+  // keys); a stale revision is Aborted.
+  rpc DisableServiceAccount(ServiceAccountStateRequest) returns (ServiceAccount);
+  // EnableServiceAccount clears the account's disabled flag (restoring both
+  // keys); a stale revision is Aborted.
+  rpc EnableServiceAccount(ServiceAccountStateRequest) returns (ServiceAccount);
+  // DeleteServiceAccount permanently soft-deletes the account: it sets the
+  // tombstone, marks it disabled, and zeros out both key slots (clearing
+  // hashes, salts, and prefixes) in one transaction. Repeated delete is
+  // idempotent.
+  rpc DeleteServiceAccount(DeleteServiceAccountRequest) returns (ServiceAccount);
+  // RecordServiceAccountKeyAttempt atomically updates an account's key
+  // lockout state after the IdP has verified (or failed to verify) a
+  // presented key: on a success it resets the failure counter; on a miss it
+  // increments the counter and, at the configured maximum, locks the account
+  // out (for the configured duration, or permanently when it is zero) and
+  // resets the counter. The IdP does the salted-hash comparison itself (like
+  // password verification) and calls this to persist the lockout outcome.
+  rpc RecordServiceAccountKeyAttempt(RecordServiceAccountKeyAttemptRequest) returns (ServiceAccount);
+  // ResetServiceAccountLockout clears an account's key lockout state (the
+  // failed counter and the lockout instant); an admin uses it to un-lock an
+  // account.
+  rpc ResetServiceAccountLockout(ResetServiceAccountLockoutRequest) returns (google.protobuf.Empty);
+
   // Secrets (F-12). NextSecretNonce returns the next value of the named
   // secret-nonce counter and atomically increments it. The counter is what
   // keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1921,6 +1962,206 @@ message VerifyIDPAPIKeyResponse {
 message ResetIDPAPIKeyLockoutRequest {
   // user_id is the user's identifier.
   string user_id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Service accounts (F-26)
+// ---------------------------------------------------------------------------
+
+// ServiceAccountKey is one of a service account's two API-key slots. Only the
+// key's salted hash, salt, and a short non-secret prefix are stored; the
+// plaintext is shown to the caller exactly once (at creation and at each
+// rotation) and is never persisted.
+message ServiceAccountKey {
+  // id is the slot's stable identifier (the database's auto-increment primary
+  // key, rendered as a string on the wire).
+  string id = 1;
+  // service_account_id is the account the slot belongs to.
+  string service_account_id = 2;
+  // slot is the slot number (1 or 2).
+  int32 slot = 3;
+  // key_hash is the salted hash of the key's plaintext (optionally mixed with
+  // a configured pepper). It is never returned by the API to the UI.
+  string key_hash = 4;
+  // key_salt is the per-key salt mixed into key_hash.
+  string key_salt = 5;
+  // key_prefix is a short, non-secret prefix of the key shown in listings so
+  // a caller can tell keys apart without the plaintext.
+  string key_prefix = 6;
+  // generation is how many times the slot's key has been generated/rotated.
+  int32 generation = 7;
+  // rotated_at is when the slot's key was last generated or rotated.
+  google.protobuf.Timestamp rotated_at = 8;
+}
+
+// ServiceAccount is a non-human identity for automation (F-26): a unique
+// login name, an editable display name/description, role memberships (via
+// RoleBinding rows), a disabled flag, a soft-delete tombstone, and a revision
+// for concurrent mutations. It has no password or interactive OIDC login.
+message ServiceAccount {
+  // id is the account's stable identifier (the database's auto-increment
+  // primary key, rendered as a string on the wire).
+  string id = 1;
+  // login_name is the account's unique, immutable login identifier (the
+  // identity a client presents in `Bearer <login-name>:cdrom-sa-…`).
+  string login_name = 2;
+  // display_name is a human-readable name for the account.
+  string display_name = 3;
+  // description is a human-readable description of the account.
+  string description = 4;
+  // disabled, when true, rejects both of the account's keys.
+  bool disabled = 5;
+  // deleted_at is the irreversible soft-delete tombstone; unset means the
+  // account is not deleted.
+  google.protobuf.Timestamp deleted_at = 6;
+  // created_by is the identity of the principal that created the account.
+  string created_by = 7;
+  // updated_by is the identity of the principal that last mutated the
+  // account.
+  string updated_by = 8;
+  // revision is the concurrency guard for mutations (a stale revision is
+  // rejected).
+  int64 revision = 9;
+  // keys are the account's two key slots (slot 1 and 2).
+  repeated ServiceAccountKey keys = 10;
+  // roles are the names of the roles bound to the account (via RoleBinding
+  // rows); they determine the account's own permissions.
+  repeated string roles = 11;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp updated_at = 13;
+  // key_locked_until is when the account's key lockout expires (F-26,
+  // F-25-style throttling); unset means the account is not locked out. It is
+  // internal state the IdP reads to fail fast while locked; it is never
+  // returned to the UI.
+  google.protobuf.Timestamp key_locked_until = 14;
+}
+
+// CreateServiceAccountRequest atomically creates a service account and both of
+// its freshly generated key slots (the caller supplies both slots' salted
+// hashes, salts, and prefixes — it generated and hashed the plaintexts). The
+// database assigns the account's id.
+message CreateServiceAccountRequest {
+  // account is the account to create (login_name, display_name, description,
+  // and created_by).
+  ServiceAccount account = 1;
+  // keys are the account's two key slots (slot 1 and 2), each carrying its
+  // salted hash, salt, and prefix.
+  repeated ServiceAccountKey keys = 2;
+  // roles are the role names to bind to the account at creation (via
+  // RoleBinding rows).
+  repeated string roles = 3;
+}
+
+message GetServiceAccountRequest {
+  // id is the account's identifier; when empty, login_name is used.
+  string id = 1;
+  // login_name is the account's login identifier (used when id is empty).
+  string login_name = 2;
+  // include_deleted, when true, returns a deleted (tombstoned) account; when
+  // false a deleted account is NotFound.
+  bool include_deleted = 3;
+}
+
+// ListServiceAccountsRequest lists service accounts. When include_deleted is
+// false (the default) deleted (tombstoned) accounts are excluded.
+message ListServiceAccountsRequest {
+  bool include_deleted = 1;
+}
+
+message ListServiceAccountsResponse {
+  repeated ServiceAccount accounts = 1;
+}
+
+// UpdateServiceAccountRequest edits an account's display name/description.
+// Only the fields set on account are changed. revision is the concurrency
+// guard: a stale revision is Aborted.
+message UpdateServiceAccountRequest {
+  // account carries the account's id and the fields to change (display_name,
+  // description).
+  ServiceAccount account = 1;
+  // has_display_name indicates whether account.display_name should be applied
+  // (true) or left unchanged (false).
+  bool has_display_name = 2;
+  // has_description indicates whether account.description should be applied
+  // (true) or left unchanged (false).
+  bool has_description = 3;
+  // revision is the account's revision the caller last saw; a mismatch is
+  // Aborted (a concurrent mutation).
+  int64 revision = 4;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 5;
+}
+
+// RotateServiceAccountKeyRequest replaces one slot's secret: the caller (the
+// IdP) supplies the new key's salted hash, salt, and prefix (it generated and
+// hashed the new plaintext); the previous secret stops working. The slot's
+// generation is bumped and the account's revision is checked (a stale
+// revision is Aborted).
+message RotateServiceAccountKeyRequest {
+  // service_account_id is the account the slot belongs to.
+  string service_account_id = 1;
+  // slot is the slot to rotate (1 or 2).
+  int32 slot = 2;
+  // key_hash is the new key's salted hash.
+  string key_hash = 3;
+  // key_salt is the new key's salt.
+  string key_salt = 4;
+  // key_prefix is the new key's non-secret prefix.
+  string key_prefix = 5;
+  // revision is the account's revision the caller last saw; a mismatch is
+  // Aborted (a concurrent mutation).
+  int64 revision = 6;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 7;
+}
+
+// ServiceAccountStateRequest is the request to disable or enable an account.
+message ServiceAccountStateRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // revision is the account's revision the caller last saw; a mismatch is
+  // Aborted (a concurrent mutation).
+  int64 revision = 2;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 3;
+}
+
+// DeleteServiceAccountRequest permanently soft-deletes an account (setting the
+// tombstone, marking it disabled, and zeroing both key slots).
+message DeleteServiceAccountRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // updated_by is the identity of the principal making the change.
+  string updated_by = 2;
+}
+
+// RecordServiceAccountKeyAttemptRequest is the request to record the outcome
+// of a service-account key verification on the account's lockout state. The
+// IdP does the salted-hash comparison itself (like password verification,
+// against the stored hash+salt returned by GetServiceAccount) and calls this
+// to persist the lockout outcome: on a success it resets the failure counter,
+// and on a miss it increments it and locks the account out at the configured
+// maximum.
+message RecordServiceAccountKeyAttemptRequest {
+  // id is the account's identifier.
+  string id = 1;
+  // success is true when the presented key matched a slot (resetting the
+  // failure counter) and false when it did not (incrementing it).
+  bool success = 2;
+  // max_failures is the failure count that triggers a lockout (the caller's
+  // configured value); 0 disables the lockout (failed attempts are counted
+  // but never lock the account out).
+  int32 max_failures = 3;
+  // lockout_duration is how long a lockout lasts; 0 means the lockout is
+  // permanent (until an admin resets it).
+  google.protobuf.Duration lockout_duration = 4;
+}
+
+// ResetServiceAccountLockoutRequest clears an account's key lockout state (the
+// failed counter and the lockout instant).
+message ResetServiceAccountLockoutRequest {
+  // id is the account's identifier.
+  string id = 1;
 }
 
 // ---------------------------------------------------------------------------

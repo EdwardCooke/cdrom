@@ -24,11 +24,12 @@ import (
 // a browser-based protocol that cannot be expressed as gRPC.
 type GRPCServer struct {
 	idppb.UnimplementedIdPServer
-	cfg    config.IdPConfig
-	km     *KeyManager
-	users  UserStore
-	keys   APIKeyStore
-	logger *slog.Logger
+	cfg             config.IdPConfig
+	km              *KeyManager
+	users           UserStore
+	keys            APIKeyStore
+	serviceAccounts ServiceAccountStore
+	logger          *slog.Logger
 }
 
 // NewGRPCServer creates the IdP's gRPC server over the given key manager and
@@ -45,6 +46,12 @@ func NewGRPCServer(cfg config.IdPConfig, km *KeyManager, users UserStore, logger
 // API-key RPCs respond with Unimplemented.
 func (s *GRPCServer) SetAPIKeyStore(keys APIKeyStore) {
 	s.keys = keys
+}
+
+// SetServiceAccountStore attaches the service-account store (F-26). When left
+// nil the service-account RPCs respond with Unimplemented.
+func (s *GRPCServer) SetServiceAccountStore(store ServiceAccountStore) {
+	s.serviceAccounts = store
 }
 
 // MintJobToken mints a job token for a dispatched job. The token is scoped to
@@ -534,4 +541,306 @@ func userToProto(u *User) *dbpb.IDPUser {
 		Roles:        u.Roles,
 		CreatedAt:    timestamppb.New(u.CreatedAt),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Service accounts (F-26)
+// ---------------------------------------------------------------------------
+
+// CreateServiceAccount creates a service account and its two freshly generated
+// key slots, and binds its roles. The IdP generates each key's plaintext
+// (`cdrom-sa-…`), hashes it (mixing in a fresh per-key salt and the request's
+// pepper), and persists the salted hashes through the Database service. The
+// response returns both plaintext keys exactly once. The RPC is Unimplemented
+// when no service-account store is attached.
+func (s *GRPCServer) CreateServiceAccount(ctx context.Context, req *idppb.CreateServiceAccountRequest) (*idppb.CreateServiceAccountResponse, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetLoginName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "login_name is required")
+	}
+	// Generate both keys' plaintexts and their salted hashes. A failure of
+	// randomness, hashing, or storage fails the whole operation.
+	keys := make([]*ServiceAccountKey, 0, 2)
+	plaintexts := make([]*idppb.ServiceAccountPlaintextKey, 0, 2)
+	for slot := 1; slot <= 2; slot++ {
+		plaintext, err := NewServiceAccountKey()
+		if err != nil {
+			return nil, err
+		}
+		salt, err := NewServiceAccountKeySalt()
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, &ServiceAccountKey{
+			Slot:      slot,
+			KeyHash:   HashServiceAccountKey(req.GetPepper(), salt, plaintext),
+			KeySalt:   salt,
+			KeyPrefix: serviceAccountKeyPrefixOf(plaintext),
+		})
+		plaintexts = append(plaintexts, &idppb.ServiceAccountPlaintextKey{Slot: int32(slot), Key: plaintext})
+	}
+	acc := &ServiceAccount{
+		LoginName:   req.GetLoginName(),
+		DisplayName: req.GetDisplayName(),
+		Description: req.GetDescription(),
+		CreatedBy:   req.GetCreatedBy(),
+		UpdatedBy:   req.GetCreatedBy(),
+		Keys:        keys,
+	}
+	created, err := s.serviceAccounts.Create(ctx, acc, req.GetRoles())
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("idp: created service account", "login", created.LoginName, "roles", created.Roles)
+	return &idppb.CreateServiceAccountResponse{
+		Account: serviceAccountToProto(created),
+		Keys:    plaintexts,
+	}, nil
+}
+
+// GetServiceAccount returns an account's metadata and both slots' non-secret
+// metadata (never the plaintext or hash) by id or login name. A missing
+// account is NotFound.
+func (s *GRPCServer) GetServiceAccount(ctx context.Context, req *idppb.GetServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" && req.GetLoginName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id or login_name is required")
+	}
+	acc, err := s.serviceAccounts.Get(ctx, req.GetId(), req.GetLoginName(), req.GetIncludeDeleted())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: get service account: %v", err)
+	}
+	return serviceAccountToProto(acc), nil
+}
+
+// ListServiceAccounts returns service accounts. When include_deleted is false
+// (the default) deleted accounts are excluded.
+func (s *GRPCServer) ListServiceAccounts(ctx context.Context, req *idppb.ListServiceAccountsRequest) (*idppb.ListServiceAccountsResponse, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	accounts, err := s.serviceAccounts.List(ctx, req.GetIncludeDeleted())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "idp: list service accounts: %v", err)
+	}
+	out := &idppb.ListServiceAccountsResponse{Accounts: make([]*dbpb.ServiceAccount, 0, len(accounts))}
+	for _, a := range accounts {
+		out.Accounts = append(out.Accounts, serviceAccountToProto(a))
+	}
+	return out, nil
+}
+
+// UpdateServiceAccount edits an account's display name/description (never its
+// roles, status, or keys). A stale revision is Aborted.
+func (s *GRPCServer) UpdateServiceAccount(ctx context.Context, req *idppb.UpdateServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	acc, err := s.serviceAccounts.Update(ctx, req.GetId(), req.GetDisplayName(), req.GetDescription(), req.GetHasDisplayName(), req.GetHasDescription(), req.GetRevision(), req.GetUpdatedBy())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		if status.Code(err) == codes.Aborted {
+			return nil, status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: update service account: %v", err)
+	}
+	return serviceAccountToProto(acc), nil
+}
+
+// RotateServiceAccountKey generates a brand-new `cdrom-sa-…` secret for the
+// selected slot (hashing it, mixing in the request's pepper and a fresh
+// per-key salt), returns it exactly once (in the response's key field), and
+// invalidates the previous one. A stale revision is Aborted.
+func (s *GRPCServer) RotateServiceAccountKey(ctx context.Context, req *idppb.RotateServiceAccountKeyRequest) (*idppb.RotateServiceAccountKeyResponse, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	if req.GetSlot() != 1 && req.GetSlot() != 2 {
+		return nil, status.Error(codes.InvalidArgument, "slot must be 1 or 2")
+	}
+	plaintext, err := NewServiceAccountKey()
+	if err != nil {
+		return nil, err
+	}
+	salt, err := NewServiceAccountKeySalt()
+	if err != nil {
+		return nil, err
+	}
+	acc, err := s.serviceAccounts.RotateKey(ctx, req.GetId(), int(req.GetSlot()), HashServiceAccountKey(req.GetPepper(), salt, plaintext), salt, serviceAccountKeyPrefixOf(plaintext), req.GetRevision(), req.GetUpdatedBy())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		if status.Code(err) == codes.Aborted {
+			return nil, status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: rotate service account key: %v", err)
+	}
+	s.logger.Info("idp: rotated service account key", "login", acc.LoginName, "slot", req.GetSlot())
+	return &idppb.RotateServiceAccountKeyResponse{
+		Account: serviceAccountToProto(acc),
+		Key:     &idppb.ServiceAccountPlaintextKey{Slot: req.GetSlot(), Key: plaintext},
+	}, nil
+}
+
+// DisableServiceAccount temporarily disables an account (rejecting both keys
+// while preserving the hashes and role bindings). A stale revision is Aborted.
+func (s *GRPCServer) DisableServiceAccount(ctx context.Context, req *idppb.ServiceAccountStateRequest) (*dbpb.ServiceAccount, error) {
+	return s.setServiceAccountState(ctx, req, true)
+}
+
+// EnableServiceAccount re-enables a disabled, non-deleted account (restoring
+// both keys with the same keys and current roles). A stale revision is Aborted.
+func (s *GRPCServer) EnableServiceAccount(ctx context.Context, req *idppb.ServiceAccountStateRequest) (*dbpb.ServiceAccount, error) {
+	return s.setServiceAccountState(ctx, req, false)
+}
+
+// setServiceAccountState sets (or clears) an account's disabled flag.
+func (s *GRPCServer) setServiceAccountState(ctx context.Context, req *idppb.ServiceAccountStateRequest, disabled bool) (*dbpb.ServiceAccount, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	acc, err := s.serviceAccounts.SetDisabled(ctx, req.GetId(), disabled, req.GetRevision(), req.GetUpdatedBy())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		if status.Code(err) == codes.Aborted {
+			return nil, status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: set service account state: %v", err)
+	}
+	return serviceAccountToProto(acc), nil
+}
+
+// DeleteServiceAccount permanently soft-deletes an account (tombstone + zeroed
+// key slots). Repeated delete is idempotent.
+func (s *GRPCServer) DeleteServiceAccount(ctx context.Context, req *idppb.DeleteServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	acc, err := s.serviceAccounts.Delete(ctx, req.GetId(), req.GetUpdatedBy())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: delete service account: %v", err)
+	}
+	s.logger.Info("idp: deleted service account", "login", acc.LoginName)
+	return serviceAccountToProto(acc), nil
+}
+
+// AssignServiceAccountRoles adds role bindings to an account.
+func (s *GRPCServer) AssignServiceAccountRoles(ctx context.Context, req *idppb.AssignServiceAccountRolesRequest) (*dbpb.ServiceAccount, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	var acc *ServiceAccount
+	var err error
+	for _, role := range req.GetRoles() {
+		if role == "" {
+			continue
+		}
+		acc, err = s.serviceAccounts.AssignRole(ctx, req.GetId(), role)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil, status.Error(codes.NotFound, "service account not found")
+			}
+			return nil, status.Errorf(codes.Internal, "idp: assign service account role: %v", err)
+		}
+	}
+	if acc == nil {
+		acc, err = s.serviceAccounts.Get(ctx, req.GetId(), "", false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return serviceAccountToProto(acc), nil
+}
+
+// RemoveServiceAccountRole removes a role binding from an account.
+func (s *GRPCServer) RemoveServiceAccountRole(ctx context.Context, req *idppb.RemoveServiceAccountRoleRequest) (*dbpb.ServiceAccount, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	if req.GetRole() == "" {
+		return nil, status.Error(codes.InvalidArgument, "role is required")
+	}
+	acc, err := s.serviceAccounts.RemoveRole(ctx, req.GetId(), req.GetRole())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: remove service account role: %v", err)
+	}
+	return serviceAccountToProto(acc), nil
+}
+
+// VerifyServiceAccountKey checks a presented `login-name:cdrom-sa-…`
+// credential against the account's two key slots (salted hash, disabled, and
+// deleted state). On a miss it increments the account's failure counter and
+// locks the account out at the configured maximum. A miss is Unauthenticated.
+func (s *GRPCServer) VerifyServiceAccountKey(ctx context.Context, req *idppb.VerifyServiceAccountKeyRequest) (*idppb.VerifyServiceAccountKeyResponse, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetLoginName() == "" || req.GetApiKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "login_name and api_key are required")
+	}
+	acc, slot, err := verifyServiceAccountKey(ctx, s.serviceAccounts, req.GetLoginName(), req.GetApiKey(), req.GetPepper(), int(req.GetMaxFailures()), req.GetLockoutDuration().AsDuration())
+	if err != nil {
+		if status.Code(err) == codes.Unauthenticated {
+			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: verify service account key: %v", err)
+	}
+	return &idppb.VerifyServiceAccountKeyResponse{
+		Account: serviceAccountToProto(acc),
+		Slot:    int32(slot),
+	}, nil
+}
+
+// ResetServiceAccountLockout clears an account's key lockout state (the failed
+// counter and the lockout instant). A missing account is NotFound.
+func (s *GRPCServer) ResetServiceAccountLockout(ctx context.Context, req *idppb.ResetServiceAccountLockoutRequest) (*idppb.ResetServiceAccountLockoutResponse, error) {
+	if s.serviceAccounts == nil {
+		return nil, status.Error(codes.Unimplemented, "service account store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	if err := s.serviceAccounts.ResetLockout(ctx, req.GetId()); err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: reset service account lockout: %v", err)
+	}
+	return &idppb.ResetServiceAccountLockoutResponse{Status: "reset"}, nil
 }

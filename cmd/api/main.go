@@ -197,6 +197,32 @@ func main() {
 		authBundle.SetAPIKeyVerifier(api.NewAPIKeyVerifier(apiKeyClient), true)
 	}
 
+	// Service-account authentication (F-26). When enabled the API attaches a
+	// proxy client to the IdP so the UI can manage service accounts (the real
+	// logic — key generation, salted hashing, verification, and lockout —
+	// lives in the IdP), and the auth middleware accepts
+	// `Authorization: Bearer <login-name>:cdrom-sa-…` credentials in place of
+	// a JWT. The pepper, failure threshold, and lockout duration come from the
+	// API's auth.service_account config and are supplied to the IdP on each
+	// operation.
+	if cfg.Auth.ServiceAccount.Enabled {
+		if cfg.Auth.ServiceAccount.Pepper == "" {
+			logger.Error("================================================================")
+			logger.Error("SECURITY WARNING: NO SERVICE-ACCOUNT KEY PEPPER IS CONFIGURED")
+			logger.Error("================================================================")
+			logger.Error("Service-account keys are hashed with their per-key salt only.")
+			logger.Error("A pepper is mixed into each key's salted hash as added security,")
+			logger.Error("so a database leak does not reveal usable keys. Set")
+			logger.Error("CDROM_AUTH_SERVICEACCOUNT_PEPPER (or the")
+			logger.Error("'auth.service_account.pepper' config) to a long random secret")
+			logger.Error("before running in production.")
+			logger.Error("================================================================")
+		}
+		serviceAccountClient := api.NewServiceAccountClient(idpClient, cfg.Auth.ServiceAccount.Pepper, cfg.Auth.ServiceAccount.MaxFailures, cfg.Auth.ServiceAccount.LockoutDuration)
+		apiServer.SetServiceAccountClient(serviceAccountClient)
+		authBundle.SetServiceAccountVerifier(api.NewServiceAccountVerifier(serviceAccountClient), true)
+	}
+
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
 	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
 	// endpoint is registered on a parent mux so it is reachable without a

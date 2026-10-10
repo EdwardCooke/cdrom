@@ -32,7 +32,8 @@ import (
 // It is always non-nil; when authentication is disabled the Provider is nil
 // and Enabled reports false. It may also carry an API-key verifier (F-25),
 // which authenticates `Authorization: Bearer <username>:<apikey>` credentials
-// in place of a JWT.
+// in place of a JWT, and a service-account verifier (F-26), which
+// authenticates `Authorization: Bearer <login-name>:cdrom-sa-…` credentials.
 type Auth struct {
 	Provider *Provider
 	// apiKeys verifies API-key credentials (F-25). It is nil when API-key
@@ -40,6 +41,12 @@ type Auth struct {
 	apiKeys APIKeyVerifier
 	// apiKeyEnabled reports whether API-key authentication is active.
 	apiKeyEnabled bool
+	// serviceAccounts verifies service-account credentials (F-26). It is nil
+	// when service-account authentication is disabled.
+	serviceAccounts ServiceAccountVerifier
+	// serviceAccountEnabled reports whether service-account authentication is
+	// active.
+	serviceAccountEnabled bool
 }
 
 // APIKeyVerifier authenticates an API-key credential (F-25): it checks a
@@ -70,6 +77,37 @@ func (a *Auth) APIKeyEnabled() bool {
 	return a != nil && a.apiKeyEnabled && a.apiKeys != nil
 }
 
+// ServiceAccountVerifier authenticates a service-account credential (F-26): it
+// checks a presented `login-name:cdrom-sa-…` credential against the account's
+// two key slots (salted hashes) and, on success, returns the account's
+// authenticated principal (a service-account kind with the account's roles).
+// The API implements it as a gRPC proxy to the IdP (the real logic — salted
+// hashing, verification, and lockout — lives there).
+type ServiceAccountVerifier interface {
+	// Verify checks the presented `login-name:cdrom-sa-…` credential and
+	// returns the account's authenticated principal (a service-account kind
+	// with the account's roles). A miss (wrong key, unknown account, or a
+	// disabled/deleted/locked-out account) returns an error.
+	Verify(ctx context.Context, loginName, apiKey string) (User, error)
+}
+
+// SetServiceAccountVerifier attaches the service-account verifier (F-26) and
+// enables service-account authentication on the HTTP surface. When enabled, a
+// bearer credential of the form `<login-name>:cdrom-sa-…` is verified against
+// the service-account directory instead of being treated as a JWT or an API
+// key. When left unset (or disabled) service-account credentials are not
+// accepted.
+func (a *Auth) SetServiceAccountVerifier(v ServiceAccountVerifier, enabled bool) {
+	a.serviceAccounts = v
+	a.serviceAccountEnabled = enabled
+}
+
+// ServiceAccountEnabled reports whether service-account authentication is
+// active.
+func (a *Auth) ServiceAccountEnabled() bool {
+	return a != nil && a.serviceAccountEnabled && a.serviceAccounts != nil
+}
+
 // New builds the auth components from config. When auth is disabled it
 // returns an Auth with a nil Provider. It performs OIDC discovery (a network
 // call) when enabled. It uses the default HTTP client; use NewWithClient to
@@ -98,11 +136,16 @@ func (a *Auth) Enabled() bool {
 }
 
 // User is the authenticated principal extracted from a verified token (or an
-// API key).
+// API key / service-account key).
 type User struct {
 	Subject string `json:"sub"`
-	Name    string `json:"name,omitempty"`
-	Email   string `json:"email,omitempty"`
+	// Kind is the principal's kind: "user" (a human user, the default when
+	// empty) or "service-account" (F-26). It is how the API distinguishes a
+	// service-account principal from a human user for authorization (the
+	// principal's role bindings are looked up by kind + id).
+	Kind  string `json:"kind,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
 	// Roles are the user's role names, stamped onto the token by the IdP
 	// (from the user's registered roles). They are empty when the token was
 	// not minted for a registered user (e.g. the local OIDC dev flow).
@@ -166,7 +209,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 // provider. When OIDC is disabled, a request that is not an API-key credential
 // passes through unchanged (synthetic admin).
 func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handler {
-	if !a.Enabled() && !a.APIKeyEnabled() {
+	if !a.Enabled() && !a.APIKeyEnabled() && !a.ServiceAccountEnabled() {
 		return next
 	}
 	exemptSet := make(map[string]bool, len(exempt))
@@ -177,6 +220,24 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 		if exemptSet[r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
+		}
+		// Service-account credential (F-26): a bearer value of the form
+		// `<login-name>:cdrom-sa-…` is verified against the service-account
+		// directory instead of being treated as a JWT or an API key. It is
+		// checked before the API-key branch because a service-account key
+		// (`cdrom-sa-…`) also starts with the API-key prefix (`cdrom-`).
+		if a.ServiceAccountEnabled() {
+			if loginName, apiKey, ok := parseServiceAccountBearer(r); ok {
+				user, err := a.serviceAccounts.Verify(r.Context(), loginName, apiKey)
+				if err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
+				return
+			}
 		}
 		// API-key credential (F-25): a bearer value of the form
 		// `<username>:cdrom-…` is verified against the key directory instead
@@ -195,8 +256,9 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 				return
 			}
 		}
-		// OIDC is disabled: a request that is not an API-key credential passes
-		// through unchanged (it acts as a synthetic admin).
+		// OIDC is disabled: a request that is not a service-account or
+		// API-key credential passes through unchanged (it acts as a synthetic
+		// admin).
 		if !a.Enabled() {
 			next.ServeHTTP(w, r)
 			return
@@ -238,6 +300,36 @@ func parseAPIKeyBearer(r *http.Request) (username, apiKey string, ok bool) {
 		return "", "", false
 	}
 	return username, apiKey, true
+}
+
+// serviceAccountKeyPrefix is the shape marker of a service-account key (F-26):
+// a bearer value of the form `<login-name>:cdrom-sa-…` is a service-account
+// credential. It is a distinct, longer prefix than the API-key prefix
+// (`cdrom-`), so the two credential types are told apart by the key's prefix.
+const serviceAccountKeyPrefix = "cdrom-sa-"
+
+// parseServiceAccountBearer reports whether the request's Authorization header
+// carries a service-account credential (a bearer value of the form
+// `<login-name>:cdrom-sa-…`), and if so returns the login name and the key's
+// plaintext. It reports false when the header is absent, is not a Bearer
+// token, or the bearer value is not of the service-account shape (no colon, or
+// the part after the colon does not start with the service-account key
+// prefix).
+func parseServiceAccountBearer(r *http.Request) (loginName, apiKey string, ok bool) {
+	token, ok := bearerToken(r)
+	if !ok {
+		return "", "", false
+	}
+	idx := strings.IndexByte(token, ':')
+	if idx <= 0 {
+		return "", "", false
+	}
+	loginName = token[:idx]
+	apiKey = token[idx+1:]
+	if !strings.HasPrefix(apiKey, serviceAccountKeyPrefix) {
+		return "", "", false
+	}
+	return loginName, apiKey, true
 }
 
 // userFromIDToken extracts the principal from validated OIDC claims, applying

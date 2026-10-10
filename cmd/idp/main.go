@@ -94,6 +94,11 @@ func main() {
 	// and the owner's lockout state) through the Database service, so multiple
 	// IdP replicas share it.
 	apiKeyStore := idp.NewDBAPIKeyStore(dbClient)
+	// The service-account store (F-26) persists the service-account directory
+	// (accounts, their two key slots' salted hashes, role bindings, and
+	// lockout state) through the Database service, so multiple IdP replicas
+	// share it.
+	serviceAccountStore := idp.NewDBServiceAccountStore(dbClient)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -135,6 +140,7 @@ func main() {
 	grpcSrv := grpc.NewServer(grpc.Creds(creds))
 	idpGRPC := idp.NewGRPCServer(cfg.IdP, km, userStore, logger)
 	idpGRPC.SetAPIKeyStore(apiKeyStore)
+	idpGRPC.SetServiceAccountStore(serviceAccountStore)
 	idppb.RegisterIdPServer(grpcSrv, idpGRPC)
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {

@@ -52,8 +52,9 @@ func TestAPIKeyGenerateAndHash(t *testing.T) {
 	if key == other {
 		t.Error("two generated keys are identical")
 	}
-	// The hash is deterministic and pepper-sensitive.
-	if HashAPIKey("p", key) != HashAPIKey("p", key) {
+	var key1 = HashAPIKey("p", key)
+	var key2 = HashAPIKey("p", key)
+	if key1 != key2 {
 		t.Error("hash is not deterministic")
 	}
 	if HashAPIKey("p", key) == HashAPIKey("q", key) {

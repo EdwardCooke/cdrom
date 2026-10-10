@@ -272,6 +272,46 @@ type AuthConfig struct {
 	// to false to disable API-key authentication and the /api/api-keys
 	// endpoints (they respond 501).
 	APIKey APIKeyConfig
+	// ServiceAccount configures service-account authentication (F-26):
+	// non-human identities with two API-key slots, presented as
+	// `Authorization: Bearer <login-name>:cdrom-sa-…`. Enabled by default so a
+	// local run can create and use service accounts without a full OIDC client;
+	// set it to false to disable service-account authentication and the
+	// /api/service-accounts endpoints (they respond 501). The real logic (key
+	// generation, salted hashing, verification, and lockout) lives in the IdP;
+	// the API is a thin proxy.
+	ServiceAccount ServiceAccountConfig
+}
+
+// ServiceAccountConfig configures service-account authentication (F-26).
+// Service accounts are non-human identities with two API-key slots that
+// authenticate to the API in place of a JWT, presented as
+// `Authorization: Bearer <login-name>:cdrom-sa-…`. The real logic (key
+// generation, salted hashing, verification, and lockout) lives in the IdP; the
+// API is a thin proxy. The pepper is mixed into each key's salted hash (along
+// with the per-key salt) so a database leak does not reveal usable keys; it is
+// passed from the API to the IdP on each key operation (over the mTLS-protected
+// gRPC channel). When the pepper is empty the API logs a security warning at
+// startup (like the secrets-encryption-key warning).
+type ServiceAccountConfig struct {
+	// Enabled turns service-account authentication on. When false the API does
+	// not accept `Bearer <login-name>:cdrom-sa-…` credentials and the
+	// /api/service-accounts endpoints respond 501.
+	Enabled bool
+	// MaxFailures is the number of consecutive failed service-account key
+	// attempts for an account that triggers a lockout of that account's key
+	// access. A value of 0 disables the lockout (failed attempts are counted
+	// but never lock an account out). It is separate from any human user's
+	// lockout.
+	MaxFailures int
+	// LockoutDuration is how long a service-account key lockout lasts. A value
+	// of 0 means the lockout is permanent (until an admin resets it).
+	LockoutDuration time.Duration
+	// Pepper is an optional secret mixed into each key's salted hash (alongside
+	// the per-key salt). When empty the key is hashed with its salt alone, and
+	// the API logs a security warning at startup. It is passed from the API to
+	// the IdP on each key operation.
+	Pepper string
 }
 
 // APIKeyConfig configures API-key authentication (F-25). API keys are
@@ -577,9 +617,12 @@ func LoadWithFile(file string) (*Config, error) {
 		// OIDC client; deployments using an external identity provider can
 		// disable it. APIKey.Enabled defaults to true so a local run can mint
 		// and use API keys (F-25) without a full OIDC client.
+		// ServiceAccount.Enabled defaults to true so a local run can create and
+		// use service accounts (F-26) without a full OIDC client.
 		Auth: AuthConfig{
-			UserPassEnabled: true,
-			APIKey:          APIKeyConfig{Enabled: true},
+			UserPassEnabled:  true,
+			APIKey:           APIKeyConfig{Enabled: true},
+			ServiceAccount:   ServiceAccountConfig{Enabled: true},
 		},
 		IdP: IdPConfig{
 			Issuer:        defaultIdPIssuer,
@@ -671,6 +714,12 @@ type fileConfig struct {
 			LockoutDuration *string `yaml:"lockout_duration"`
 			Pepper          *string `yaml:"pepper"`
 		} `yaml:"api_key"`
+		ServiceAccount *struct {
+			Enabled         *bool   `yaml:"enabled"`
+			MaxFailures     *int    `yaml:"max_failures"`
+			LockoutDuration *string `yaml:"lockout_duration"`
+			Pepper          *string `yaml:"pepper"`
+		} `yaml:"service_account"`
 	} `yaml:"auth"`
 	IdP *struct {
 		Issuer        *string   `yaml:"issuer"`
@@ -820,6 +869,24 @@ func applyFile(cfg *Config, path string) error {
 				cfg.Auth.APIKey.Pepper = *f.Auth.APIKey.Pepper
 			}
 		}
+		if f.Auth.ServiceAccount != nil {
+			if f.Auth.ServiceAccount.Enabled != nil {
+				cfg.Auth.ServiceAccount.Enabled = *f.Auth.ServiceAccount.Enabled
+			}
+			if f.Auth.ServiceAccount.MaxFailures != nil {
+				cfg.Auth.ServiceAccount.MaxFailures = *f.Auth.ServiceAccount.MaxFailures
+			}
+			if f.Auth.ServiceAccount.LockoutDuration != nil {
+				if d, err := time.ParseDuration(*f.Auth.ServiceAccount.LockoutDuration); err == nil {
+					cfg.Auth.ServiceAccount.LockoutDuration = d
+				} else {
+					return fmt.Errorf("config: parse auth.service_account.lockout_duration %q: %w", *f.Auth.ServiceAccount.LockoutDuration, err)
+				}
+			}
+			if f.Auth.ServiceAccount.Pepper != nil {
+				cfg.Auth.ServiceAccount.Pepper = *f.Auth.ServiceAccount.Pepper
+			}
+		}
 	}
 	if f.IdP != nil {
 		if f.IdP.Issuer != nil {
@@ -958,6 +1025,21 @@ func applyEnv(cfg *Config) {
 		}
 	}
 	cfg.Auth.APIKey.Pepper = envOr("CDROM_AUTH_APIKEY_PEPPER", cfg.Auth.APIKey.Pepper)
+	// Service-account authentication (F-26).
+	if v := os.Getenv("CDROM_AUTH_SERVICEACCOUNT_ENABLED"); v != "" {
+		cfg.Auth.ServiceAccount.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("CDROM_AUTH_SERVICEACCOUNT_MAX_FAILURES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.ServiceAccount.MaxFailures = n
+		}
+	}
+	if v := os.Getenv("CDROM_AUTH_SERVICEACCOUNT_LOCKOUT_DURATION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Auth.ServiceAccount.LockoutDuration = d
+		}
+	}
+	cfg.Auth.ServiceAccount.Pepper = envOr("CDROM_AUTH_SERVICEACCOUNT_PEPPER", cfg.Auth.ServiceAccount.Pepper)
 	cfg.Auth.Issuer = envOr("CDROM_AUTH_ISSUER", cfg.Auth.Issuer)
 	cfg.Auth.ClientID = envOr("CDROM_AUTH_CLIENT_ID", cfg.Auth.ClientID)
 	cfg.Auth.RedirectURL = envOr("CDROM_AUTH_REDIRECT_URL", cfg.Auth.RedirectURL)

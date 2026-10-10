@@ -2495,6 +2495,506 @@ func nonNilRoles(roles []string) []string {
 }
 
 // ---------------------------------------------------------------------------
+// Service accounts (F-26)
+// ---------------------------------------------------------------------------
+//
+// A service account is a non-human identity with two API-key slots. The IdP
+// generates and hashes the keys (mixing in a per-key salt and an optional
+// pepper) and persists the salted hashes here; the Database service stores
+// them opaquely and never sees the plaintext. The IdP does the salted-hash
+// comparison itself (like password verification, against the stored
+// hash+salt); this service only persists state and manages the lockout.
+
+// saPrincipalKind is the RoleBinding principal kind for a service account.
+const saPrincipalKind = "service-account"
+
+// saLockoutForever is the instant used to record a permanent service-account
+// key lockout (one whose configured duration is zero): a far-future time that
+// keeps the account locked out until an admin resets the lockout.
+var saLockoutForever = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+
+// parseServiceAccountID parses an account ID (the string form used on the
+// wire) into the database's numeric primary key. A malformed ID is an
+// InvalidArgument error.
+func parseServiceAccountID(id string) (uint, error) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, status.Error(codes.InvalidArgument, "invalid service account id: "+id)
+	}
+	return uint(n), nil
+}
+
+// serviceAccountPrincipalID renders an account's numeric primary key as the
+// string principal id used on RoleBinding rows and the wire.
+func serviceAccountPrincipalID(id uint) string {
+	return strconv.FormatUint(uint64(id), 10)
+}
+
+// serviceAccountKeyToProto renders a key slot as its Database-service form.
+func serviceAccountKeyToProto(k *models.ServiceAccountKey) *dbpb.ServiceAccountKey {
+	out := &dbpb.ServiceAccountKey{
+		Id:               strconv.FormatUint(uint64(k.ID), 10),
+		ServiceAccountId: strconv.FormatUint(uint64(k.ServiceAccountID), 10),
+		Slot:             int32(k.Slot),
+		KeyHash:          k.KeyHash,
+		KeySalt:          k.KeySalt,
+		KeyPrefix:        k.KeyPrefix,
+		Generation:       int32(k.Generation),
+	}
+	if !k.RotatedAt.IsZero() {
+		out.RotatedAt = timestamppb.New(k.RotatedAt)
+	}
+	return out
+}
+
+// serviceAccountToProto renders an account (loading its key slots and role
+// bindings) as its Database-service form.
+func (s *Server) serviceAccountToProto(ctx context.Context, acc *models.ServiceAccount) (*dbpb.ServiceAccount, error) {
+	var keys []models.ServiceAccountKey
+	if err := s.db.WithContext(ctx).Where("service_account_id = ?", acc.ID).Order("slot").Find(&keys).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	var bindings []models.RoleBinding
+	if err := s.db.WithContext(ctx).
+		Where("principal_kind = ? AND principal_id = ?", saPrincipalKind, serviceAccountPrincipalID(acc.ID)).
+		Find(&bindings).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	roles := make([]string, 0, len(bindings))
+	for i := range bindings {
+		roles = append(roles, bindings[i].RoleName)
+	}
+	out := &dbpb.ServiceAccount{
+		Id:          serviceAccountPrincipalID(acc.ID),
+		LoginName:   acc.LoginName,
+		DisplayName: acc.DisplayName,
+		Description: acc.Description,
+		Disabled:    acc.Disabled,
+		CreatedBy:   acc.CreatedBy,
+		UpdatedBy:   acc.UpdatedBy,
+		Revision:    int64(acc.Revision),
+		Roles:       roles,
+		CreatedAt:   timestamppb.New(acc.CreatedAt),
+		UpdatedAt:   timestamppb.New(acc.UpdatedAt),
+	}
+	if acc.DeletedAt != nil {
+		out.DeletedAt = timestamppb.New(*acc.DeletedAt)
+	}
+	if !acc.KeyLockedUntil.IsZero() {
+		out.KeyLockedUntil = timestamppb.New(acc.KeyLockedUntil)
+	}
+	for i := range keys {
+		out.Keys = append(out.Keys, serviceAccountKeyToProto(&keys[i]))
+	}
+	return out, nil
+}
+
+// getServiceAccount loads an account by id or login name. When includeDeleted
+// is false a deleted (tombstoned) account is treated as NotFound.
+func (s *Server) getServiceAccount(ctx context.Context, id, loginName string, includeDeleted bool) (*models.ServiceAccount, error) {
+	query := s.db.WithContext(ctx).Model(&models.ServiceAccount{})
+	if id != "" {
+		aid, err := parseServiceAccountID(id)
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where("id = ?", aid)
+	} else {
+		query = query.Where("login_name = ?", loginName)
+	}
+	var acc models.ServiceAccount
+	if err := query.First(&acc).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if !includeDeleted && acc.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	return &acc, nil
+}
+
+// checkServiceAccountRevision rejects a mutation that carries a stale revision
+// (a concurrent mutation), so a conflicting rotation or lifecycle change is
+// not silently overwritten.
+func checkServiceAccountRevision(acc *models.ServiceAccount, revision int64) error {
+	if int64(acc.Revision) != revision {
+		return status.Error(codes.Aborted, "revision mismatch: the account was modified concurrently")
+	}
+	return nil
+}
+
+// CreateServiceAccount atomically creates a service account, both of its key
+// slots, and its role bindings in one transaction. The caller (the IdP)
+// supplies both slots' salted hashes, salts, and prefixes (it generated and
+// hashed the plaintexts); the database assigns the account's id. A duplicate
+// login name is AlreadyExists.
+func (s *Server) CreateServiceAccount(ctx context.Context, req *dbpb.CreateServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	acc := req.GetAccount()
+	if acc == nil || acc.GetLoginName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "login_name is required")
+	}
+	keys := req.GetKeys()
+	if len(keys) != 2 {
+		return nil, status.Error(codes.InvalidArgument, "exactly two key slots are required")
+	}
+	// A duplicate login name is rejected (the name is immutable and reserved
+	// after deletion, so a new identity cannot impersonate an old one).
+	var existing models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("login_name = ?", acc.GetLoginName()).First(&existing).Error; err == nil {
+		return nil, status.Error(codes.AlreadyExists, "a service account with that login name already exists")
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, grpcErr(err)
+	}
+	account := &models.ServiceAccount{
+		LoginName:   acc.GetLoginName(),
+		DisplayName: acc.GetDisplayName(),
+		Description: acc.GetDescription(),
+		CreatedBy:   acc.GetCreatedBy(),
+		UpdatedBy:   acc.GetCreatedBy(),
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(account).Error; err != nil {
+			return err
+		}
+		for _, k := range keys {
+			slot := &models.ServiceAccountKey{
+				ServiceAccountID: account.ID,
+				Slot:             int(k.GetSlot()),
+				KeyHash:          k.GetKeyHash(),
+				KeySalt:          k.GetKeySalt(),
+				KeyPrefix:        k.GetKeyPrefix(),
+				Generation:       1,
+				RotatedAt:        time.Now(),
+			}
+			if err := tx.Create(slot).Error; err != nil {
+				return err
+			}
+		}
+		for _, role := range req.GetRoles() {
+			if role == "" {
+				continue
+			}
+			binding := &models.RoleBinding{
+				PrincipalKind: saPrincipalKind,
+				PrincipalID:   serviceAccountPrincipalID(account.ID),
+				RoleName:      role,
+			}
+			if err := tx.Create(binding).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	return s.serviceAccountToProto(ctx, account)
+}
+
+// GetServiceAccount returns an account (with its key slots and roles) by id or
+// login name. A missing account is NotFound; a deleted account is NotFound
+// unless include_deleted is set.
+func (s *Server) GetServiceAccount(ctx context.Context, req *dbpb.GetServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	if req.GetId() == "" && req.GetLoginName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id or login_name is required")
+	}
+	acc, err := s.getServiceAccount(ctx, req.GetId(), req.GetLoginName(), req.GetIncludeDeleted())
+	if err != nil {
+		return nil, err
+	}
+	return s.serviceAccountToProto(ctx, acc)
+}
+
+// ListServiceAccounts returns service accounts (with their key slots and
+// roles). When include_deleted is false (the default) deleted accounts are
+// excluded.
+func (s *Server) ListServiceAccounts(ctx context.Context, req *dbpb.ListServiceAccountsRequest) (*dbpb.ListServiceAccountsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.ServiceAccount{})
+	if !req.GetIncludeDeleted() {
+		query = query.Where("deleted_at IS NULL")
+	}
+	var accounts []models.ServiceAccount
+	if err := query.Order("id").Find(&accounts).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListServiceAccountsResponse{}
+	for i := range accounts {
+		proto, err := s.serviceAccountToProto(ctx, &accounts[i])
+		if err != nil {
+			return nil, err
+		}
+		response.Accounts = append(response.Accounts, proto)
+	}
+	return response, nil
+}
+
+// UpdateServiceAccount edits an account's display name/description (never its
+// roles, status, or keys) and bumps its revision. A stale revision is Aborted.
+func (s *Server) UpdateServiceAccount(ctx context.Context, req *dbpb.UpdateServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	acc := req.GetAccount()
+	if acc == nil || acc.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseServiceAccountID(acc.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var account models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&account).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if account.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if err := checkServiceAccountRevision(&account, req.GetRevision()); err != nil {
+		return nil, err
+	}
+	if req.GetHasDisplayName() {
+		account.DisplayName = acc.GetDisplayName()
+	}
+	if req.GetHasDescription() {
+		account.Description = acc.GetDescription()
+	}
+	account.Revision++
+	account.UpdatedBy = req.GetUpdatedBy()
+	account.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return s.serviceAccountToProto(ctx, &account)
+}
+
+// RotateServiceAccountKey replaces one slot's salted hash, salt, and prefix
+// (the caller generated and hashed the new plaintext), bumping the slot's
+// generation and the account's revision. A stale revision is Aborted. The
+// other slot is unchanged.
+func (s *Server) RotateServiceAccountKey(ctx context.Context, req *dbpb.RotateServiceAccountKeyRequest) (*dbpb.ServiceAccount, error) {
+	if req.GetKeyHash() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key_hash is required")
+	}
+	id, err := parseServiceAccountID(req.GetServiceAccountId())
+	if err != nil {
+		return nil, err
+	}
+	var account models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&account).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if account.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if err := checkServiceAccountRevision(&account, req.GetRevision()); err != nil {
+		return nil, err
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var slot models.ServiceAccountKey
+		if err := tx.Where("service_account_id = ? AND slot = ?", id, req.GetSlot()).First(&slot).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return status.Error(codes.InvalidArgument, "slot not found")
+			}
+			return err
+		}
+		slot.KeyHash = req.GetKeyHash()
+		slot.KeySalt = req.GetKeySalt()
+		slot.KeyPrefix = req.GetKeyPrefix()
+		slot.Generation++
+		slot.RotatedAt = time.Now()
+		if err := tx.Save(&slot).Error; err != nil {
+			return err
+		}
+		account.Revision++
+		account.UpdatedBy = req.GetUpdatedBy()
+		account.UpdatedAt = time.Now()
+		return tx.Save(&account).Error
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	return s.serviceAccountToProto(ctx, &account)
+}
+
+// DisableServiceAccount sets the account's disabled flag (rejecting both keys
+// while preserving the hashes and role bindings) and bumps its revision. A
+// stale revision is Aborted.
+func (s *Server) DisableServiceAccount(ctx context.Context, req *dbpb.ServiceAccountStateRequest) (*dbpb.ServiceAccount, error) {
+	return s.setServiceAccountDisabled(ctx, req, true)
+}
+
+// EnableServiceAccount clears the account's disabled flag (restoring both keys
+// with the same keys and current roles) and bumps its revision. A stale
+// revision is Aborted.
+func (s *Server) EnableServiceAccount(ctx context.Context, req *dbpb.ServiceAccountStateRequest) (*dbpb.ServiceAccount, error) {
+	return s.setServiceAccountDisabled(ctx, req, false)
+}
+
+// setServiceAccountDisabled sets (or clears) the account's disabled flag. A
+// deleted account cannot be mutated. A stale revision is Aborted.
+func (s *Server) setServiceAccountDisabled(ctx context.Context, req *dbpb.ServiceAccountStateRequest, disabled bool) (*dbpb.ServiceAccount, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseServiceAccountID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var account models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&account).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if account.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "service account not found")
+	}
+	if err := checkServiceAccountRevision(&account, req.GetRevision()); err != nil {
+		return nil, err
+	}
+	account.Disabled = disabled
+	account.Revision++
+	account.UpdatedBy = req.GetUpdatedBy()
+	account.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return s.serviceAccountToProto(ctx, &account)
+}
+
+// DeleteServiceAccount permanently soft-deletes the account: it sets the
+// tombstone, marks it disabled, and zeros out both key slots (clearing hashes,
+// salts, and prefixes) in one transaction, leaving no usable verifier. The
+// account's identity, role history, and audit references are retained. Repeated
+// delete is idempotent.
+func (s *Server) DeleteServiceAccount(ctx context.Context, req *dbpb.DeleteServiceAccountRequest) (*dbpb.ServiceAccount, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseServiceAccountID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var account models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&account).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	// Idempotent: an already-deleted account is returned unchanged.
+	if account.DeletedAt != nil {
+		return s.serviceAccountToProto(ctx, &account)
+	}
+	now := time.Now()
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		account.DeletedAt = &now
+		account.Disabled = true
+		account.Revision++
+		account.UpdatedBy = req.GetUpdatedBy()
+		account.UpdatedAt = now
+		if err := tx.Save(&account).Error; err != nil {
+			return err
+		}
+		// Zero out both key slots: clear the credential-bearing fields so no
+		// usable verifier remains.
+		return tx.Model(&models.ServiceAccountKey{}).
+			Where("service_account_id = ?", id).
+			Updates(map[string]any{
+				"key_hash":   "",
+				"key_salt":   "",
+				"key_prefix": "",
+			}).Error
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	return s.serviceAccountToProto(ctx, &account)
+}
+
+// RecordServiceAccountKeyAttempt atomically updates an account's key lockout
+// state after the IdP has verified (or failed to verify) a presented key: on a
+// success it resets the failure counter; on a miss it increments the counter
+// and, at the configured maximum, locks the account out (for the configured
+// duration, or permanently when it is zero) and resets the counter.
+func (s *Server) RecordServiceAccountKeyAttempt(ctx context.Context, req *dbpb.RecordServiceAccountKeyAttemptRequest) (*dbpb.ServiceAccount, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseServiceAccountID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var account models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&account).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	now := time.Now()
+	if req.GetSuccess() {
+		if account.KeyFailedCount != 0 {
+			account.KeyFailedCount = 0
+			account.UpdatedAt = now
+			if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
+				return nil, grpcErr(err)
+			}
+		}
+		return s.serviceAccountToProto(ctx, &account)
+	}
+	// A miss: increment the failure counter and, at the configured maximum,
+	// lock the account out (for the configured duration, or permanently when
+	// it is zero) and reset the counter.
+	maxFailures := int(req.GetMaxFailures())
+	if maxFailures > 0 {
+		account.KeyFailedCount++
+		if account.KeyFailedCount >= maxFailures {
+			if d := req.GetLockoutDuration().AsDuration(); d > 0 {
+				account.KeyLockedUntil = now.Add(d)
+			} else {
+				account.KeyLockedUntil = saLockoutForever
+			}
+			account.KeyFailedCount = 0
+		}
+		account.UpdatedAt = now
+		if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	return s.serviceAccountToProto(ctx, &account)
+}
+
+// ResetServiceAccountLockout clears an account's key lockout state (the failed
+// counter and the lockout instant). A missing account is NotFound.
+func (s *Server) ResetServiceAccountLockout(ctx context.Context, req *dbpb.ResetServiceAccountLockoutRequest) (*emptypb.Empty, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseServiceAccountID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var account models.ServiceAccount
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&account).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "service account not found")
+		}
+		return nil, grpcErr(err)
+	}
+	account.KeyFailedCount = 0
+	account.KeyLockedUntil = time.Time{}
+	account.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
 // Secrets (F-12)
 // ---------------------------------------------------------------------------
 
@@ -4046,6 +4546,11 @@ var builtinRolePermissions = map[string][]string{
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
 		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
 		"api-keys.can-manage-all", "audit.can-view", "workers.can-view",
+		"service-accounts.can-view", "service-accounts.can-create",
+		"service-accounts.can-edit", "service-accounts.can-rotate-keys",
+		"service-accounts.can-disable", "service-accounts.can-enable",
+		"service-accounts.can-delete", "service-accounts.can-assign-roles",
+		"service-accounts.can-remove-roles",
 	},
 	"operator": {
 		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",
@@ -4124,8 +4629,13 @@ func knownPermission(p string) bool {
 		"pipelines.can-delete", "runs.can-trigger", "runs.can-cancel",
 		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
-		"users.can-manage", "api-keys.can-manage", "audit.can-view",
-		"workers.can-view":
+		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
+		"api-keys.can-manage-all", "audit.can-view", "workers.can-view",
+		"service-accounts.can-view", "service-accounts.can-create",
+		"service-accounts.can-edit", "service-accounts.can-rotate-keys",
+		"service-accounts.can-disable", "service-accounts.can-enable",
+		"service-accounts.can-delete", "service-accounts.can-assign-roles",
+		"service-accounts.can-remove-roles":
 		return true
 	default:
 		return false

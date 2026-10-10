@@ -38,6 +38,17 @@ const (
 	PermAPIKeysManageAll = "api-keys.can-manage-all"
 	PermAuditView        = "audit.can-view"
 	PermWorkersView      = "workers.can-view"
+	// Service-account management permissions (F-26). Roles contain granular
+	// permissions; these are permission names, not hard-coded roles.
+	PermServiceAccountsView    = "service-accounts.can-view"
+	PermServiceAccountsCreate  = "service-accounts.can-create"
+	PermServiceAccountsEdit    = "service-accounts.can-edit"
+	PermServiceAccountsRotate  = "service-accounts.can-rotate-keys"
+	PermServiceAccountsDisable = "service-accounts.can-disable"
+	PermServiceAccountsEnable  = "service-accounts.can-enable"
+	PermServiceAccountsDelete  = "service-accounts.can-delete"
+	PermServiceAccountsAssign  = "service-accounts.can-assign-roles"
+	PermServiceAccountsRemove  = "service-accounts.can-remove-roles"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -61,6 +72,15 @@ var AllPermissions = []string{
 	PermAPIKeysManageAll,
 	PermAuditView,
 	PermWorkersView,
+	PermServiceAccountsView,
+	PermServiceAccountsCreate,
+	PermServiceAccountsEdit,
+	PermServiceAccountsRotate,
+	PermServiceAccountsDisable,
+	PermServiceAccountsEnable,
+	PermServiceAccountsDelete,
+	PermServiceAccountsAssign,
+	PermServiceAccountsRemove,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

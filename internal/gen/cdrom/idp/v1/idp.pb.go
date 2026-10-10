@@ -1607,6 +1607,1105 @@ func (x *ResetAPIKeyLockoutResponse) GetStatus() string {
 	return ""
 }
 
+// CreateServiceAccountRequest is the request to create a service account and
+// its two key slots. The IdP generates both keys' plaintexts (each a
+// `cdrom-sa-…` secret), hashes them (mixing in a per-key salt and the
+// request's pepper), and persists the salted hashes through the Database
+// service. The response returns both plaintext keys exactly once.
+type CreateServiceAccountRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// login_name is the account's unique, immutable login identifier.
+	LoginName string `protobuf:"bytes,1,opt,name=login_name,json=loginName,proto3" json:"login_name,omitempty"`
+	// display_name is a human-readable name for the account.
+	DisplayName string `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	// description is a human-readable description of the account.
+	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	// roles are the role names to bind to the account at creation.
+	Roles []string `protobuf:"bytes,4,rep,name=roles,proto3" json:"roles,omitempty"`
+	// pepper is the secret the caller mixes into each key's hash (alongside the
+	// per-key salt); empty hashes the key with its salt alone. The caller (the
+	// API) supplies it from its auth.service_account config so the IdP hashes
+	// keys consistently.
+	Pepper string `protobuf:"bytes,5,opt,name=pepper,proto3" json:"pepper,omitempty"`
+	// created_by is the identity of the principal creating the account.
+	CreatedBy     string `protobuf:"bytes,6,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateServiceAccountRequest) Reset() {
+	*x = CreateServiceAccountRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateServiceAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateServiceAccountRequest) ProtoMessage() {}
+
+func (x *CreateServiceAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateServiceAccountRequest.ProtoReflect.Descriptor instead.
+func (*CreateServiceAccountRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *CreateServiceAccountRequest) GetLoginName() string {
+	if x != nil {
+		return x.LoginName
+	}
+	return ""
+}
+
+func (x *CreateServiceAccountRequest) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *CreateServiceAccountRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *CreateServiceAccountRequest) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *CreateServiceAccountRequest) GetPepper() string {
+	if x != nil {
+		return x.Pepper
+	}
+	return ""
+}
+
+func (x *CreateServiceAccountRequest) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
+// CreateServiceAccountResponse is the result of creating a service account:
+// the account's metadata (never the hashes) plus both plaintext keys,
+// returned exactly once.
+type CreateServiceAccountResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// account is the created account's metadata (with its two slots' non-secret
+	// metadata).
+	Account *v1.ServiceAccount `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	// keys are the two plaintext keys, one per slot (shown to the caller exactly
+	// once, at creation).
+	Keys          []*ServiceAccountPlaintextKey `protobuf:"bytes,2,rep,name=keys,proto3" json:"keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateServiceAccountResponse) Reset() {
+	*x = CreateServiceAccountResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateServiceAccountResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateServiceAccountResponse) ProtoMessage() {}
+
+func (x *CreateServiceAccountResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateServiceAccountResponse.ProtoReflect.Descriptor instead.
+func (*CreateServiceAccountResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *CreateServiceAccountResponse) GetAccount() *v1.ServiceAccount {
+	if x != nil {
+		return x.Account
+	}
+	return nil
+}
+
+func (x *CreateServiceAccountResponse) GetKeys() []*ServiceAccountPlaintextKey {
+	if x != nil {
+		return x.Keys
+	}
+	return nil
+}
+
+// ServiceAccountPlaintextKey is a slot number and its plaintext key (returned
+// exactly once at creation or rotation).
+type ServiceAccountPlaintextKey struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// slot is the key's slot number (1 or 2).
+	Slot int32 `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
+	// key is the plaintext `cdrom-sa-…` key.
+	Key           string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ServiceAccountPlaintextKey) Reset() {
+	*x = ServiceAccountPlaintextKey{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ServiceAccountPlaintextKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ServiceAccountPlaintextKey) ProtoMessage() {}
+
+func (x *ServiceAccountPlaintextKey) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ServiceAccountPlaintextKey.ProtoReflect.Descriptor instead.
+func (*ServiceAccountPlaintextKey) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ServiceAccountPlaintextKey) GetSlot() int32 {
+	if x != nil {
+		return x.Slot
+	}
+	return 0
+}
+
+func (x *ServiceAccountPlaintextKey) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+type GetServiceAccountRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier; when empty, login_name is used.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// login_name is the account's login identifier (used when id is empty).
+	LoginName string `protobuf:"bytes,2,opt,name=login_name,json=loginName,proto3" json:"login_name,omitempty"`
+	// include_deleted, when true, returns a deleted (tombstoned) account.
+	IncludeDeleted bool `protobuf:"varint,3,opt,name=include_deleted,json=includeDeleted,proto3" json:"include_deleted,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GetServiceAccountRequest) Reset() {
+	*x = GetServiceAccountRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetServiceAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetServiceAccountRequest) ProtoMessage() {}
+
+func (x *GetServiceAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetServiceAccountRequest.ProtoReflect.Descriptor instead.
+func (*GetServiceAccountRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *GetServiceAccountRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *GetServiceAccountRequest) GetLoginName() string {
+	if x != nil {
+		return x.LoginName
+	}
+	return ""
+}
+
+func (x *GetServiceAccountRequest) GetIncludeDeleted() bool {
+	if x != nil {
+		return x.IncludeDeleted
+	}
+	return false
+}
+
+type ListServiceAccountsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// include_deleted, when true, includes deleted (tombstoned) accounts.
+	IncludeDeleted bool `protobuf:"varint,1,opt,name=include_deleted,json=includeDeleted,proto3" json:"include_deleted,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ListServiceAccountsRequest) Reset() {
+	*x = ListServiceAccountsRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListServiceAccountsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListServiceAccountsRequest) ProtoMessage() {}
+
+func (x *ListServiceAccountsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListServiceAccountsRequest.ProtoReflect.Descriptor instead.
+func (*ListServiceAccountsRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ListServiceAccountsRequest) GetIncludeDeleted() bool {
+	if x != nil {
+		return x.IncludeDeleted
+	}
+	return false
+}
+
+type ListServiceAccountsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accounts      []*v1.ServiceAccount   `protobuf:"bytes,1,rep,name=accounts,proto3" json:"accounts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListServiceAccountsResponse) Reset() {
+	*x = ListServiceAccountsResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListServiceAccountsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListServiceAccountsResponse) ProtoMessage() {}
+
+func (x *ListServiceAccountsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListServiceAccountsResponse.ProtoReflect.Descriptor instead.
+func (*ListServiceAccountsResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ListServiceAccountsResponse) GetAccounts() []*v1.ServiceAccount {
+	if x != nil {
+		return x.Accounts
+	}
+	return nil
+}
+
+// UpdateServiceAccountRequest edits an account's display name/description.
+// The has_* flags indicate which fields are applied (a field whose flag is
+// false is left unchanged). revision is the concurrency guard (a stale
+// revision is Aborted).
+type UpdateServiceAccountRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// display_name is the new display name.
+	DisplayName string `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	// description is the new description.
+	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	// has_display_name indicates whether display_name should be applied (true)
+	// or left unchanged (false).
+	HasDisplayName bool `protobuf:"varint,4,opt,name=has_display_name,json=hasDisplayName,proto3" json:"has_display_name,omitempty"`
+	// has_description indicates whether description should be applied (true) or
+	// left unchanged (false).
+	HasDescription bool `protobuf:"varint,5,opt,name=has_description,json=hasDescription,proto3" json:"has_description,omitempty"`
+	// revision is the account's revision the caller last saw; a mismatch is
+	// Aborted (a concurrent mutation).
+	Revision int64 `protobuf:"varint,6,opt,name=revision,proto3" json:"revision,omitempty"`
+	// updated_by is the identity of the principal making the change.
+	UpdatedBy     string `protobuf:"bytes,7,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateServiceAccountRequest) Reset() {
+	*x = UpdateServiceAccountRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateServiceAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateServiceAccountRequest) ProtoMessage() {}
+
+func (x *UpdateServiceAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateServiceAccountRequest.ProtoReflect.Descriptor instead.
+func (*UpdateServiceAccountRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *UpdateServiceAccountRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *UpdateServiceAccountRequest) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
+func (x *UpdateServiceAccountRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *UpdateServiceAccountRequest) GetHasDisplayName() bool {
+	if x != nil {
+		return x.HasDisplayName
+	}
+	return false
+}
+
+func (x *UpdateServiceAccountRequest) GetHasDescription() bool {
+	if x != nil {
+		return x.HasDescription
+	}
+	return false
+}
+
+func (x *UpdateServiceAccountRequest) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *UpdateServiceAccountRequest) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// RotateServiceAccountKeyRequest rotates one of an account's key slots. The
+// IdP generates the new key's plaintext, hashes it (mixing in the request's
+// pepper and a fresh per-key salt), and persists it; the response returns the
+// new plaintext exactly once.
+type RotateServiceAccountKeyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// slot is the slot to rotate (1 or 2).
+	Slot int32 `protobuf:"varint,2,opt,name=slot,proto3" json:"slot,omitempty"`
+	// pepper is the secret mixed into the new key's hash (alongside the per-key
+	// salt); empty hashes the key with its salt alone.
+	Pepper string `protobuf:"bytes,3,opt,name=pepper,proto3" json:"pepper,omitempty"`
+	// revision is the account's revision the caller last saw; a mismatch is
+	// Aborted (a concurrent mutation).
+	Revision int64 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
+	// updated_by is the identity of the principal making the change.
+	UpdatedBy     string `protobuf:"bytes,5,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RotateServiceAccountKeyRequest) Reset() {
+	*x = RotateServiceAccountKeyRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RotateServiceAccountKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RotateServiceAccountKeyRequest) ProtoMessage() {}
+
+func (x *RotateServiceAccountKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RotateServiceAccountKeyRequest.ProtoReflect.Descriptor instead.
+func (*RotateServiceAccountKeyRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *RotateServiceAccountKeyRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RotateServiceAccountKeyRequest) GetSlot() int32 {
+	if x != nil {
+		return x.Slot
+	}
+	return 0
+}
+
+func (x *RotateServiceAccountKeyRequest) GetPepper() string {
+	if x != nil {
+		return x.Pepper
+	}
+	return ""
+}
+
+func (x *RotateServiceAccountKeyRequest) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *RotateServiceAccountKeyRequest) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// RotateServiceAccountKeyResponse is the result of rotating a slot: the
+// account's metadata (never the hash) plus the new plaintext key, returned
+// exactly once.
+type RotateServiceAccountKeyResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// account is the account's metadata (with its two slots' non-secret
+	// metadata).
+	Account *v1.ServiceAccount `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	// key is the new plaintext `cdrom-sa-…` key for the rotated slot (shown to
+	// the caller exactly once); the previous key stops working.
+	Key           *ServiceAccountPlaintextKey `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RotateServiceAccountKeyResponse) Reset() {
+	*x = RotateServiceAccountKeyResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RotateServiceAccountKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RotateServiceAccountKeyResponse) ProtoMessage() {}
+
+func (x *RotateServiceAccountKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RotateServiceAccountKeyResponse.ProtoReflect.Descriptor instead.
+func (*RotateServiceAccountKeyResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *RotateServiceAccountKeyResponse) GetAccount() *v1.ServiceAccount {
+	if x != nil {
+		return x.Account
+	}
+	return nil
+}
+
+func (x *RotateServiceAccountKeyResponse) GetKey() *ServiceAccountPlaintextKey {
+	if x != nil {
+		return x.Key
+	}
+	return nil
+}
+
+// ServiceAccountStateRequest is the request to disable or enable an account.
+type ServiceAccountStateRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// revision is the account's revision the caller last saw; a mismatch is
+	// Aborted (a concurrent mutation).
+	Revision int64 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	// updated_by is the identity of the principal making the change.
+	UpdatedBy     string `protobuf:"bytes,3,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ServiceAccountStateRequest) Reset() {
+	*x = ServiceAccountStateRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ServiceAccountStateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ServiceAccountStateRequest) ProtoMessage() {}
+
+func (x *ServiceAccountStateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ServiceAccountStateRequest.ProtoReflect.Descriptor instead.
+func (*ServiceAccountStateRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ServiceAccountStateRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ServiceAccountStateRequest) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *ServiceAccountStateRequest) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// DeleteServiceAccountRequest permanently soft-deletes an account.
+type DeleteServiceAccountRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// updated_by is the identity of the principal making the change.
+	UpdatedBy     string `protobuf:"bytes,2,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteServiceAccountRequest) Reset() {
+	*x = DeleteServiceAccountRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteServiceAccountRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteServiceAccountRequest) ProtoMessage() {}
+
+func (x *DeleteServiceAccountRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteServiceAccountRequest.ProtoReflect.Descriptor instead.
+func (*DeleteServiceAccountRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *DeleteServiceAccountRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *DeleteServiceAccountRequest) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// AssignServiceAccountRolesRequest adds role bindings to an account.
+type AssignServiceAccountRolesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// roles are the role names to bind to the account.
+	Roles []string `protobuf:"bytes,2,rep,name=roles,proto3" json:"roles,omitempty"`
+	// updated_by is the identity of the principal making the change.
+	UpdatedBy     string `protobuf:"bytes,3,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AssignServiceAccountRolesRequest) Reset() {
+	*x = AssignServiceAccountRolesRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AssignServiceAccountRolesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AssignServiceAccountRolesRequest) ProtoMessage() {}
+
+func (x *AssignServiceAccountRolesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AssignServiceAccountRolesRequest.ProtoReflect.Descriptor instead.
+func (*AssignServiceAccountRolesRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *AssignServiceAccountRolesRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AssignServiceAccountRolesRequest) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *AssignServiceAccountRolesRequest) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// RemoveServiceAccountRoleRequest removes a role binding from an account.
+type RemoveServiceAccountRoleRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// role is the name of the role to remove.
+	Role string `protobuf:"bytes,2,opt,name=role,proto3" json:"role,omitempty"`
+	// updated_by is the identity of the principal making the change.
+	UpdatedBy     string `protobuf:"bytes,3,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveServiceAccountRoleRequest) Reset() {
+	*x = RemoveServiceAccountRoleRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveServiceAccountRoleRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveServiceAccountRoleRequest) ProtoMessage() {}
+
+func (x *RemoveServiceAccountRoleRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveServiceAccountRoleRequest.ProtoReflect.Descriptor instead.
+func (*RemoveServiceAccountRoleRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *RemoveServiceAccountRoleRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RemoveServiceAccountRoleRequest) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *RemoveServiceAccountRoleRequest) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+// VerifyServiceAccountKeyRequest is a presented `login-name:cdrom-sa-…`
+// credential to check against the account's two key slots. The caller (the
+// API) supplies the pepper (mixed into each key's salted hash) and the lockout
+// policy (max_failures and lockout_duration) from its auth.service_account
+// config.
+type VerifyServiceAccountKeyRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// login_name is the account's login identifier.
+	LoginName string `protobuf:"bytes,1,opt,name=login_name,json=loginName,proto3" json:"login_name,omitempty"`
+	// api_key is the presented key's plaintext (the `cdrom-sa-…` value).
+	ApiKey string `protobuf:"bytes,2,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
+	// pepper is the secret mixed into each key's salted hash; empty hashes the
+	// key with its salt alone.
+	Pepper string `protobuf:"bytes,3,opt,name=pepper,proto3" json:"pepper,omitempty"`
+	// max_failures is the failure count that triggers a lockout; 0 disables the
+	// lockout (failed attempts are counted but never lock the account out).
+	MaxFailures int32 `protobuf:"varint,4,opt,name=max_failures,json=maxFailures,proto3" json:"max_failures,omitempty"`
+	// lockout_duration is how long a lockout lasts; 0 means the lockout is
+	// permanent (until an admin resets it).
+	LockoutDuration *durationpb.Duration `protobuf:"bytes,5,opt,name=lockout_duration,json=lockoutDuration,proto3" json:"lockout_duration,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *VerifyServiceAccountKeyRequest) Reset() {
+	*x = VerifyServiceAccountKeyRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyServiceAccountKeyRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyServiceAccountKeyRequest) ProtoMessage() {}
+
+func (x *VerifyServiceAccountKeyRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyServiceAccountKeyRequest.ProtoReflect.Descriptor instead.
+func (*VerifyServiceAccountKeyRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *VerifyServiceAccountKeyRequest) GetLoginName() string {
+	if x != nil {
+		return x.LoginName
+	}
+	return ""
+}
+
+func (x *VerifyServiceAccountKeyRequest) GetApiKey() string {
+	if x != nil {
+		return x.ApiKey
+	}
+	return ""
+}
+
+func (x *VerifyServiceAccountKeyRequest) GetPepper() string {
+	if x != nil {
+		return x.Pepper
+	}
+	return ""
+}
+
+func (x *VerifyServiceAccountKeyRequest) GetMaxFailures() int32 {
+	if x != nil {
+		return x.MaxFailures
+	}
+	return 0
+}
+
+func (x *VerifyServiceAccountKeyRequest) GetLockoutDuration() *durationpb.Duration {
+	if x != nil {
+		return x.LockoutDuration
+	}
+	return nil
+}
+
+// VerifyServiceAccountKeyResponse is the result of a successful service-
+// account key verification: the account (with its roles) so the caller can
+// establish the authenticated service-account principal.
+type VerifyServiceAccountKeyResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Account *v1.ServiceAccount     `protobuf:"bytes,1,opt,name=account,proto3" json:"account,omitempty"`
+	// slot is the key slot that matched (1 or 2).
+	Slot          int32 `protobuf:"varint,2,opt,name=slot,proto3" json:"slot,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VerifyServiceAccountKeyResponse) Reset() {
+	*x = VerifyServiceAccountKeyResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VerifyServiceAccountKeyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VerifyServiceAccountKeyResponse) ProtoMessage() {}
+
+func (x *VerifyServiceAccountKeyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VerifyServiceAccountKeyResponse.ProtoReflect.Descriptor instead.
+func (*VerifyServiceAccountKeyResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *VerifyServiceAccountKeyResponse) GetAccount() *v1.ServiceAccount {
+	if x != nil {
+		return x.Account
+	}
+	return nil
+}
+
+func (x *VerifyServiceAccountKeyResponse) GetSlot() int32 {
+	if x != nil {
+		return x.Slot
+	}
+	return 0
+}
+
+type ResetServiceAccountLockoutRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the account's identifier.
+	Id            string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetServiceAccountLockoutRequest) Reset() {
+	*x = ResetServiceAccountLockoutRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetServiceAccountLockoutRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetServiceAccountLockoutRequest) ProtoMessage() {}
+
+func (x *ResetServiceAccountLockoutRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetServiceAccountLockoutRequest.ProtoReflect.Descriptor instead.
+func (*ResetServiceAccountLockoutRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *ResetServiceAccountLockoutRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+type ResetServiceAccountLockoutResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetServiceAccountLockoutResponse) Reset() {
+	*x = ResetServiceAccountLockoutResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetServiceAccountLockoutResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetServiceAccountLockoutResponse) ProtoMessage() {}
+
+func (x *ResetServiceAccountLockoutResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetServiceAccountLockoutResponse.ProtoReflect.Descriptor instead.
+func (*ResetServiceAccountLockoutResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *ResetServiceAccountLockoutResponse) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
 var File_cdrom_idp_v1_idp_proto protoreflect.FileDescriptor
 
 const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
@@ -1720,7 +2819,83 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\x19ResetAPIKeyLockoutRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\"4\n" +
 	"\x1aResetAPIKeyLockoutResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status2\xb1\t\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\"\xce\x01\n" +
+	"\x1bCreateServiceAccountRequest\x12\x1d\n" +
+	"\n" +
+	"login_name\x18\x01 \x01(\tR\tloginName\x12!\n" +
+	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x14\n" +
+	"\x05roles\x18\x04 \x03(\tR\x05roles\x12\x16\n" +
+	"\x06pepper\x18\x05 \x01(\tR\x06pepper\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\x06 \x01(\tR\tcreatedBy\"\x93\x01\n" +
+	"\x1cCreateServiceAccountResponse\x125\n" +
+	"\aaccount\x18\x01 \x01(\v2\x1b.cdrom.db.v1.ServiceAccountR\aaccount\x12<\n" +
+	"\x04keys\x18\x02 \x03(\v2(.cdrom.idp.v1.ServiceAccountPlaintextKeyR\x04keys\"B\n" +
+	"\x1aServiceAccountPlaintextKey\x12\x12\n" +
+	"\x04slot\x18\x01 \x01(\x05R\x04slot\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\"r\n" +
+	"\x18GetServiceAccountRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"login_name\x18\x02 \x01(\tR\tloginName\x12'\n" +
+	"\x0finclude_deleted\x18\x03 \x01(\bR\x0eincludeDeleted\"E\n" +
+	"\x1aListServiceAccountsRequest\x12'\n" +
+	"\x0finclude_deleted\x18\x01 \x01(\bR\x0eincludeDeleted\"V\n" +
+	"\x1bListServiceAccountsResponse\x127\n" +
+	"\baccounts\x18\x01 \x03(\v2\x1b.cdrom.db.v1.ServiceAccountR\baccounts\"\x80\x02\n" +
+	"\x1bUpdateServiceAccountRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
+	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12(\n" +
+	"\x10has_display_name\x18\x04 \x01(\bR\x0ehasDisplayName\x12'\n" +
+	"\x0fhas_description\x18\x05 \x01(\bR\x0ehasDescription\x12\x1a\n" +
+	"\brevision\x18\x06 \x01(\x03R\brevision\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\a \x01(\tR\tupdatedBy\"\x97\x01\n" +
+	"\x1eRotateServiceAccountKeyRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04slot\x18\x02 \x01(\x05R\x04slot\x12\x16\n" +
+	"\x06pepper\x18\x03 \x01(\tR\x06pepper\x12\x1a\n" +
+	"\brevision\x18\x04 \x01(\x03R\brevision\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x05 \x01(\tR\tupdatedBy\"\x94\x01\n" +
+	"\x1fRotateServiceAccountKeyResponse\x125\n" +
+	"\aaccount\x18\x01 \x01(\v2\x1b.cdrom.db.v1.ServiceAccountR\aaccount\x12:\n" +
+	"\x03key\x18\x02 \x01(\v2(.cdrom.idp.v1.ServiceAccountPlaintextKeyR\x03key\"g\n" +
+	"\x1aServiceAccountStateRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x03R\brevision\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x03 \x01(\tR\tupdatedBy\"L\n" +
+	"\x1bDeleteServiceAccountRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x02 \x01(\tR\tupdatedBy\"g\n" +
+	" AssignServiceAccountRolesRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05roles\x18\x02 \x03(\tR\x05roles\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x03 \x01(\tR\tupdatedBy\"d\n" +
+	"\x1fRemoveServiceAccountRoleRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04role\x18\x02 \x01(\tR\x04role\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x03 \x01(\tR\tupdatedBy\"\xd9\x01\n" +
+	"\x1eVerifyServiceAccountKeyRequest\x12\x1d\n" +
+	"\n" +
+	"login_name\x18\x01 \x01(\tR\tloginName\x12\x17\n" +
+	"\aapi_key\x18\x02 \x01(\tR\x06apiKey\x12\x16\n" +
+	"\x06pepper\x18\x03 \x01(\tR\x06pepper\x12!\n" +
+	"\fmax_failures\x18\x04 \x01(\x05R\vmaxFailures\x12D\n" +
+	"\x10lockout_duration\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x0flockoutDuration\"l\n" +
+	"\x1fVerifyServiceAccountKeyResponse\x125\n" +
+	"\aaccount\x18\x01 \x01(\v2\x1b.cdrom.db.v1.ServiceAccountR\aaccount\x12\x12\n" +
+	"\x04slot\x18\x02 \x01(\x05R\x04slot\"3\n" +
+	"!ResetServiceAccountLockoutRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"<\n" +
+	"\"ResetServiceAccountLockoutResponse\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status2\xa8\x13\n" +
 	"\x03IdP\x12U\n" +
 	"\fMintJobToken\x12!.cdrom.idp.v1.MintJobTokenRequest\x1a\".cdrom.idp.v1.MintJobTokenResponse\x12@\n" +
 	"\x05Login\x12\x1a.cdrom.idp.v1.LoginRequest\x1a\x1b.cdrom.idp.v1.LoginResponse\x12?\n" +
@@ -1739,7 +2914,19 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\fRotateAPIKey\x12!.cdrom.idp.v1.RotateAPIKeyRequest\x1a\".cdrom.idp.v1.RotateAPIKeyResponse\x12U\n" +
 	"\fDeleteAPIKey\x12!.cdrom.idp.v1.DeleteAPIKeyRequest\x1a\".cdrom.idp.v1.DeleteAPIKeyResponse\x12U\n" +
 	"\fVerifyAPIKey\x12!.cdrom.idp.v1.VerifyAPIKeyRequest\x1a\".cdrom.idp.v1.VerifyAPIKeyResponse\x12g\n" +
-	"\x12ResetAPIKeyLockout\x12'.cdrom.idp.v1.ResetAPIKeyLockoutRequest\x1a(.cdrom.idp.v1.ResetAPIKeyLockoutResponseB'Z%cdrom/internal/gen/cdrom/idp/v1;idpv1b\x06proto3"
+	"\x12ResetAPIKeyLockout\x12'.cdrom.idp.v1.ResetAPIKeyLockoutRequest\x1a(.cdrom.idp.v1.ResetAPIKeyLockoutResponse\x12m\n" +
+	"\x14CreateServiceAccount\x12).cdrom.idp.v1.CreateServiceAccountRequest\x1a*.cdrom.idp.v1.CreateServiceAccountResponse\x12X\n" +
+	"\x11GetServiceAccount\x12&.cdrom.idp.v1.GetServiceAccountRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12j\n" +
+	"\x13ListServiceAccounts\x12(.cdrom.idp.v1.ListServiceAccountsRequest\x1a).cdrom.idp.v1.ListServiceAccountsResponse\x12^\n" +
+	"\x14UpdateServiceAccount\x12).cdrom.idp.v1.UpdateServiceAccountRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12v\n" +
+	"\x17RotateServiceAccountKey\x12,.cdrom.idp.v1.RotateServiceAccountKeyRequest\x1a-.cdrom.idp.v1.RotateServiceAccountKeyResponse\x12^\n" +
+	"\x15DisableServiceAccount\x12(.cdrom.idp.v1.ServiceAccountStateRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12]\n" +
+	"\x14EnableServiceAccount\x12(.cdrom.idp.v1.ServiceAccountStateRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12^\n" +
+	"\x14DeleteServiceAccount\x12).cdrom.idp.v1.DeleteServiceAccountRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12h\n" +
+	"\x19AssignServiceAccountRoles\x12..cdrom.idp.v1.AssignServiceAccountRolesRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12f\n" +
+	"\x18RemoveServiceAccountRole\x12-.cdrom.idp.v1.RemoveServiceAccountRoleRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12v\n" +
+	"\x17VerifyServiceAccountKey\x12,.cdrom.idp.v1.VerifyServiceAccountKeyRequest\x1a-.cdrom.idp.v1.VerifyServiceAccountKeyResponse\x12\x7f\n" +
+	"\x1aResetServiceAccountLockout\x12/.cdrom.idp.v1.ResetServiceAccountLockoutRequest\x1a0.cdrom.idp.v1.ResetServiceAccountLockoutResponseB'Z%cdrom/internal/gen/cdrom/idp/v1;idpv1b\x06proto3"
 
 var (
 	file_cdrom_idp_v1_idp_proto_rawDescOnce sync.Once
@@ -1753,81 +2940,130 @@ func file_cdrom_idp_v1_idp_proto_rawDescGZIP() []byte {
 	return file_cdrom_idp_v1_idp_proto_rawDescData
 }
 
-var file_cdrom_idp_v1_idp_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_cdrom_idp_v1_idp_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_cdrom_idp_v1_idp_proto_goTypes = []any{
-	(*MintJobTokenRequest)(nil),        // 0: cdrom.idp.v1.MintJobTokenRequest
-	(*MintJobTokenResponse)(nil),       // 1: cdrom.idp.v1.MintJobTokenResponse
-	(*LoginRequest)(nil),               // 2: cdrom.idp.v1.LoginRequest
-	(*LoginResponse)(nil),              // 3: cdrom.idp.v1.LoginResponse
-	(*RegisterRequest)(nil),            // 4: cdrom.idp.v1.RegisterRequest
-	(*ListUsersRequest)(nil),           // 5: cdrom.idp.v1.ListUsersRequest
-	(*ListUsersResponse)(nil),          // 6: cdrom.idp.v1.ListUsersResponse
-	(*CreateUserRequest)(nil),          // 7: cdrom.idp.v1.CreateUserRequest
-	(*UpdateUserRequest)(nil),          // 8: cdrom.idp.v1.UpdateUserRequest
-	(*DeleteUserRequest)(nil),          // 9: cdrom.idp.v1.DeleteUserRequest
-	(*DeleteUserResponse)(nil),         // 10: cdrom.idp.v1.DeleteUserResponse
-	(*CreateAPIKeyRequest)(nil),        // 11: cdrom.idp.v1.CreateAPIKeyRequest
-	(*CreateAPIKeyResponse)(nil),       // 12: cdrom.idp.v1.CreateAPIKeyResponse
-	(*GetAPIKeyRequest)(nil),           // 13: cdrom.idp.v1.GetAPIKeyRequest
-	(*ListAPIKeysRequest)(nil),         // 14: cdrom.idp.v1.ListAPIKeysRequest
-	(*ListAPIKeysResponse)(nil),        // 15: cdrom.idp.v1.ListAPIKeysResponse
-	(*UpdateAPIKeyRequest)(nil),        // 16: cdrom.idp.v1.UpdateAPIKeyRequest
-	(*RotateAPIKeyRequest)(nil),        // 17: cdrom.idp.v1.RotateAPIKeyRequest
-	(*RotateAPIKeyResponse)(nil),       // 18: cdrom.idp.v1.RotateAPIKeyResponse
-	(*DeleteAPIKeyRequest)(nil),        // 19: cdrom.idp.v1.DeleteAPIKeyRequest
-	(*DeleteAPIKeyResponse)(nil),       // 20: cdrom.idp.v1.DeleteAPIKeyResponse
-	(*VerifyAPIKeyRequest)(nil),        // 21: cdrom.idp.v1.VerifyAPIKeyRequest
-	(*VerifyAPIKeyResponse)(nil),       // 22: cdrom.idp.v1.VerifyAPIKeyResponse
-	(*ResetAPIKeyLockoutRequest)(nil),  // 23: cdrom.idp.v1.ResetAPIKeyLockoutRequest
-	(*ResetAPIKeyLockoutResponse)(nil), // 24: cdrom.idp.v1.ResetAPIKeyLockoutResponse
-	(*v1.IDPUser)(nil),                 // 25: cdrom.db.v1.IDPUser
-	(*v1.IDPAPIKey)(nil),               // 26: cdrom.db.v1.IDPAPIKey
-	(*durationpb.Duration)(nil),        // 27: google.protobuf.Duration
+	(*MintJobTokenRequest)(nil),                // 0: cdrom.idp.v1.MintJobTokenRequest
+	(*MintJobTokenResponse)(nil),               // 1: cdrom.idp.v1.MintJobTokenResponse
+	(*LoginRequest)(nil),                       // 2: cdrom.idp.v1.LoginRequest
+	(*LoginResponse)(nil),                      // 3: cdrom.idp.v1.LoginResponse
+	(*RegisterRequest)(nil),                    // 4: cdrom.idp.v1.RegisterRequest
+	(*ListUsersRequest)(nil),                   // 5: cdrom.idp.v1.ListUsersRequest
+	(*ListUsersResponse)(nil),                  // 6: cdrom.idp.v1.ListUsersResponse
+	(*CreateUserRequest)(nil),                  // 7: cdrom.idp.v1.CreateUserRequest
+	(*UpdateUserRequest)(nil),                  // 8: cdrom.idp.v1.UpdateUserRequest
+	(*DeleteUserRequest)(nil),                  // 9: cdrom.idp.v1.DeleteUserRequest
+	(*DeleteUserResponse)(nil),                 // 10: cdrom.idp.v1.DeleteUserResponse
+	(*CreateAPIKeyRequest)(nil),                // 11: cdrom.idp.v1.CreateAPIKeyRequest
+	(*CreateAPIKeyResponse)(nil),               // 12: cdrom.idp.v1.CreateAPIKeyResponse
+	(*GetAPIKeyRequest)(nil),                   // 13: cdrom.idp.v1.GetAPIKeyRequest
+	(*ListAPIKeysRequest)(nil),                 // 14: cdrom.idp.v1.ListAPIKeysRequest
+	(*ListAPIKeysResponse)(nil),                // 15: cdrom.idp.v1.ListAPIKeysResponse
+	(*UpdateAPIKeyRequest)(nil),                // 16: cdrom.idp.v1.UpdateAPIKeyRequest
+	(*RotateAPIKeyRequest)(nil),                // 17: cdrom.idp.v1.RotateAPIKeyRequest
+	(*RotateAPIKeyResponse)(nil),               // 18: cdrom.idp.v1.RotateAPIKeyResponse
+	(*DeleteAPIKeyRequest)(nil),                // 19: cdrom.idp.v1.DeleteAPIKeyRequest
+	(*DeleteAPIKeyResponse)(nil),               // 20: cdrom.idp.v1.DeleteAPIKeyResponse
+	(*VerifyAPIKeyRequest)(nil),                // 21: cdrom.idp.v1.VerifyAPIKeyRequest
+	(*VerifyAPIKeyResponse)(nil),               // 22: cdrom.idp.v1.VerifyAPIKeyResponse
+	(*ResetAPIKeyLockoutRequest)(nil),          // 23: cdrom.idp.v1.ResetAPIKeyLockoutRequest
+	(*ResetAPIKeyLockoutResponse)(nil),         // 24: cdrom.idp.v1.ResetAPIKeyLockoutResponse
+	(*CreateServiceAccountRequest)(nil),        // 25: cdrom.idp.v1.CreateServiceAccountRequest
+	(*CreateServiceAccountResponse)(nil),       // 26: cdrom.idp.v1.CreateServiceAccountResponse
+	(*ServiceAccountPlaintextKey)(nil),         // 27: cdrom.idp.v1.ServiceAccountPlaintextKey
+	(*GetServiceAccountRequest)(nil),           // 28: cdrom.idp.v1.GetServiceAccountRequest
+	(*ListServiceAccountsRequest)(nil),         // 29: cdrom.idp.v1.ListServiceAccountsRequest
+	(*ListServiceAccountsResponse)(nil),        // 30: cdrom.idp.v1.ListServiceAccountsResponse
+	(*UpdateServiceAccountRequest)(nil),        // 31: cdrom.idp.v1.UpdateServiceAccountRequest
+	(*RotateServiceAccountKeyRequest)(nil),     // 32: cdrom.idp.v1.RotateServiceAccountKeyRequest
+	(*RotateServiceAccountKeyResponse)(nil),    // 33: cdrom.idp.v1.RotateServiceAccountKeyResponse
+	(*ServiceAccountStateRequest)(nil),         // 34: cdrom.idp.v1.ServiceAccountStateRequest
+	(*DeleteServiceAccountRequest)(nil),        // 35: cdrom.idp.v1.DeleteServiceAccountRequest
+	(*AssignServiceAccountRolesRequest)(nil),   // 36: cdrom.idp.v1.AssignServiceAccountRolesRequest
+	(*RemoveServiceAccountRoleRequest)(nil),    // 37: cdrom.idp.v1.RemoveServiceAccountRoleRequest
+	(*VerifyServiceAccountKeyRequest)(nil),     // 38: cdrom.idp.v1.VerifyServiceAccountKeyRequest
+	(*VerifyServiceAccountKeyResponse)(nil),    // 39: cdrom.idp.v1.VerifyServiceAccountKeyResponse
+	(*ResetServiceAccountLockoutRequest)(nil),  // 40: cdrom.idp.v1.ResetServiceAccountLockoutRequest
+	(*ResetServiceAccountLockoutResponse)(nil), // 41: cdrom.idp.v1.ResetServiceAccountLockoutResponse
+	(*v1.IDPUser)(nil),                         // 42: cdrom.db.v1.IDPUser
+	(*v1.IDPAPIKey)(nil),                       // 43: cdrom.db.v1.IDPAPIKey
+	(*durationpb.Duration)(nil),                // 44: google.protobuf.Duration
+	(*v1.ServiceAccount)(nil),                  // 45: cdrom.db.v1.ServiceAccount
 }
 var file_cdrom_idp_v1_idp_proto_depIdxs = []int32{
-	25, // 0: cdrom.idp.v1.LoginResponse.user:type_name -> cdrom.db.v1.IDPUser
-	25, // 1: cdrom.idp.v1.ListUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
-	26, // 2: cdrom.idp.v1.CreateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	26, // 3: cdrom.idp.v1.ListAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
-	26, // 4: cdrom.idp.v1.RotateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	27, // 5: cdrom.idp.v1.VerifyAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
-	26, // 6: cdrom.idp.v1.VerifyAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	25, // 7: cdrom.idp.v1.VerifyAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
-	0,  // 8: cdrom.idp.v1.IdP.MintJobToken:input_type -> cdrom.idp.v1.MintJobTokenRequest
-	2,  // 9: cdrom.idp.v1.IdP.Login:input_type -> cdrom.idp.v1.LoginRequest
-	4,  // 10: cdrom.idp.v1.IdP.Register:input_type -> cdrom.idp.v1.RegisterRequest
-	5,  // 11: cdrom.idp.v1.IdP.ListUsers:input_type -> cdrom.idp.v1.ListUsersRequest
-	7,  // 12: cdrom.idp.v1.IdP.CreateUser:input_type -> cdrom.idp.v1.CreateUserRequest
-	8,  // 13: cdrom.idp.v1.IdP.UpdateUser:input_type -> cdrom.idp.v1.UpdateUserRequest
-	9,  // 14: cdrom.idp.v1.IdP.DeleteUser:input_type -> cdrom.idp.v1.DeleteUserRequest
-	11, // 15: cdrom.idp.v1.IdP.CreateAPIKey:input_type -> cdrom.idp.v1.CreateAPIKeyRequest
-	13, // 16: cdrom.idp.v1.IdP.GetAPIKey:input_type -> cdrom.idp.v1.GetAPIKeyRequest
-	14, // 17: cdrom.idp.v1.IdP.ListAPIKeys:input_type -> cdrom.idp.v1.ListAPIKeysRequest
-	16, // 18: cdrom.idp.v1.IdP.UpdateAPIKey:input_type -> cdrom.idp.v1.UpdateAPIKeyRequest
-	17, // 19: cdrom.idp.v1.IdP.RotateAPIKey:input_type -> cdrom.idp.v1.RotateAPIKeyRequest
-	19, // 20: cdrom.idp.v1.IdP.DeleteAPIKey:input_type -> cdrom.idp.v1.DeleteAPIKeyRequest
-	21, // 21: cdrom.idp.v1.IdP.VerifyAPIKey:input_type -> cdrom.idp.v1.VerifyAPIKeyRequest
-	23, // 22: cdrom.idp.v1.IdP.ResetAPIKeyLockout:input_type -> cdrom.idp.v1.ResetAPIKeyLockoutRequest
-	1,  // 23: cdrom.idp.v1.IdP.MintJobToken:output_type -> cdrom.idp.v1.MintJobTokenResponse
-	3,  // 24: cdrom.idp.v1.IdP.Login:output_type -> cdrom.idp.v1.LoginResponse
-	25, // 25: cdrom.idp.v1.IdP.Register:output_type -> cdrom.db.v1.IDPUser
-	6,  // 26: cdrom.idp.v1.IdP.ListUsers:output_type -> cdrom.idp.v1.ListUsersResponse
-	25, // 27: cdrom.idp.v1.IdP.CreateUser:output_type -> cdrom.db.v1.IDPUser
-	25, // 28: cdrom.idp.v1.IdP.UpdateUser:output_type -> cdrom.db.v1.IDPUser
-	10, // 29: cdrom.idp.v1.IdP.DeleteUser:output_type -> cdrom.idp.v1.DeleteUserResponse
-	12, // 30: cdrom.idp.v1.IdP.CreateAPIKey:output_type -> cdrom.idp.v1.CreateAPIKeyResponse
-	26, // 31: cdrom.idp.v1.IdP.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	15, // 32: cdrom.idp.v1.IdP.ListAPIKeys:output_type -> cdrom.idp.v1.ListAPIKeysResponse
-	26, // 33: cdrom.idp.v1.IdP.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	18, // 34: cdrom.idp.v1.IdP.RotateAPIKey:output_type -> cdrom.idp.v1.RotateAPIKeyResponse
-	20, // 35: cdrom.idp.v1.IdP.DeleteAPIKey:output_type -> cdrom.idp.v1.DeleteAPIKeyResponse
-	22, // 36: cdrom.idp.v1.IdP.VerifyAPIKey:output_type -> cdrom.idp.v1.VerifyAPIKeyResponse
-	24, // 37: cdrom.idp.v1.IdP.ResetAPIKeyLockout:output_type -> cdrom.idp.v1.ResetAPIKeyLockoutResponse
-	23, // [23:38] is the sub-list for method output_type
-	8,  // [8:23] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	42, // 0: cdrom.idp.v1.LoginResponse.user:type_name -> cdrom.db.v1.IDPUser
+	42, // 1: cdrom.idp.v1.ListUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
+	43, // 2: cdrom.idp.v1.CreateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	43, // 3: cdrom.idp.v1.ListAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
+	43, // 4: cdrom.idp.v1.RotateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	44, // 5: cdrom.idp.v1.VerifyAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	43, // 6: cdrom.idp.v1.VerifyAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	42, // 7: cdrom.idp.v1.VerifyAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
+	45, // 8: cdrom.idp.v1.CreateServiceAccountResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	27, // 9: cdrom.idp.v1.CreateServiceAccountResponse.keys:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
+	45, // 10: cdrom.idp.v1.ListServiceAccountsResponse.accounts:type_name -> cdrom.db.v1.ServiceAccount
+	45, // 11: cdrom.idp.v1.RotateServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	27, // 12: cdrom.idp.v1.RotateServiceAccountKeyResponse.key:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
+	44, // 13: cdrom.idp.v1.VerifyServiceAccountKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	45, // 14: cdrom.idp.v1.VerifyServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	0,  // 15: cdrom.idp.v1.IdP.MintJobToken:input_type -> cdrom.idp.v1.MintJobTokenRequest
+	2,  // 16: cdrom.idp.v1.IdP.Login:input_type -> cdrom.idp.v1.LoginRequest
+	4,  // 17: cdrom.idp.v1.IdP.Register:input_type -> cdrom.idp.v1.RegisterRequest
+	5,  // 18: cdrom.idp.v1.IdP.ListUsers:input_type -> cdrom.idp.v1.ListUsersRequest
+	7,  // 19: cdrom.idp.v1.IdP.CreateUser:input_type -> cdrom.idp.v1.CreateUserRequest
+	8,  // 20: cdrom.idp.v1.IdP.UpdateUser:input_type -> cdrom.idp.v1.UpdateUserRequest
+	9,  // 21: cdrom.idp.v1.IdP.DeleteUser:input_type -> cdrom.idp.v1.DeleteUserRequest
+	11, // 22: cdrom.idp.v1.IdP.CreateAPIKey:input_type -> cdrom.idp.v1.CreateAPIKeyRequest
+	13, // 23: cdrom.idp.v1.IdP.GetAPIKey:input_type -> cdrom.idp.v1.GetAPIKeyRequest
+	14, // 24: cdrom.idp.v1.IdP.ListAPIKeys:input_type -> cdrom.idp.v1.ListAPIKeysRequest
+	16, // 25: cdrom.idp.v1.IdP.UpdateAPIKey:input_type -> cdrom.idp.v1.UpdateAPIKeyRequest
+	17, // 26: cdrom.idp.v1.IdP.RotateAPIKey:input_type -> cdrom.idp.v1.RotateAPIKeyRequest
+	19, // 27: cdrom.idp.v1.IdP.DeleteAPIKey:input_type -> cdrom.idp.v1.DeleteAPIKeyRequest
+	21, // 28: cdrom.idp.v1.IdP.VerifyAPIKey:input_type -> cdrom.idp.v1.VerifyAPIKeyRequest
+	23, // 29: cdrom.idp.v1.IdP.ResetAPIKeyLockout:input_type -> cdrom.idp.v1.ResetAPIKeyLockoutRequest
+	25, // 30: cdrom.idp.v1.IdP.CreateServiceAccount:input_type -> cdrom.idp.v1.CreateServiceAccountRequest
+	28, // 31: cdrom.idp.v1.IdP.GetServiceAccount:input_type -> cdrom.idp.v1.GetServiceAccountRequest
+	29, // 32: cdrom.idp.v1.IdP.ListServiceAccounts:input_type -> cdrom.idp.v1.ListServiceAccountsRequest
+	31, // 33: cdrom.idp.v1.IdP.UpdateServiceAccount:input_type -> cdrom.idp.v1.UpdateServiceAccountRequest
+	32, // 34: cdrom.idp.v1.IdP.RotateServiceAccountKey:input_type -> cdrom.idp.v1.RotateServiceAccountKeyRequest
+	34, // 35: cdrom.idp.v1.IdP.DisableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
+	34, // 36: cdrom.idp.v1.IdP.EnableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
+	35, // 37: cdrom.idp.v1.IdP.DeleteServiceAccount:input_type -> cdrom.idp.v1.DeleteServiceAccountRequest
+	36, // 38: cdrom.idp.v1.IdP.AssignServiceAccountRoles:input_type -> cdrom.idp.v1.AssignServiceAccountRolesRequest
+	37, // 39: cdrom.idp.v1.IdP.RemoveServiceAccountRole:input_type -> cdrom.idp.v1.RemoveServiceAccountRoleRequest
+	38, // 40: cdrom.idp.v1.IdP.VerifyServiceAccountKey:input_type -> cdrom.idp.v1.VerifyServiceAccountKeyRequest
+	40, // 41: cdrom.idp.v1.IdP.ResetServiceAccountLockout:input_type -> cdrom.idp.v1.ResetServiceAccountLockoutRequest
+	1,  // 42: cdrom.idp.v1.IdP.MintJobToken:output_type -> cdrom.idp.v1.MintJobTokenResponse
+	3,  // 43: cdrom.idp.v1.IdP.Login:output_type -> cdrom.idp.v1.LoginResponse
+	42, // 44: cdrom.idp.v1.IdP.Register:output_type -> cdrom.db.v1.IDPUser
+	6,  // 45: cdrom.idp.v1.IdP.ListUsers:output_type -> cdrom.idp.v1.ListUsersResponse
+	42, // 46: cdrom.idp.v1.IdP.CreateUser:output_type -> cdrom.db.v1.IDPUser
+	42, // 47: cdrom.idp.v1.IdP.UpdateUser:output_type -> cdrom.db.v1.IDPUser
+	10, // 48: cdrom.idp.v1.IdP.DeleteUser:output_type -> cdrom.idp.v1.DeleteUserResponse
+	12, // 49: cdrom.idp.v1.IdP.CreateAPIKey:output_type -> cdrom.idp.v1.CreateAPIKeyResponse
+	43, // 50: cdrom.idp.v1.IdP.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	15, // 51: cdrom.idp.v1.IdP.ListAPIKeys:output_type -> cdrom.idp.v1.ListAPIKeysResponse
+	43, // 52: cdrom.idp.v1.IdP.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	18, // 53: cdrom.idp.v1.IdP.RotateAPIKey:output_type -> cdrom.idp.v1.RotateAPIKeyResponse
+	20, // 54: cdrom.idp.v1.IdP.DeleteAPIKey:output_type -> cdrom.idp.v1.DeleteAPIKeyResponse
+	22, // 55: cdrom.idp.v1.IdP.VerifyAPIKey:output_type -> cdrom.idp.v1.VerifyAPIKeyResponse
+	24, // 56: cdrom.idp.v1.IdP.ResetAPIKeyLockout:output_type -> cdrom.idp.v1.ResetAPIKeyLockoutResponse
+	26, // 57: cdrom.idp.v1.IdP.CreateServiceAccount:output_type -> cdrom.idp.v1.CreateServiceAccountResponse
+	45, // 58: cdrom.idp.v1.IdP.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	30, // 59: cdrom.idp.v1.IdP.ListServiceAccounts:output_type -> cdrom.idp.v1.ListServiceAccountsResponse
+	45, // 60: cdrom.idp.v1.IdP.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	33, // 61: cdrom.idp.v1.IdP.RotateServiceAccountKey:output_type -> cdrom.idp.v1.RotateServiceAccountKeyResponse
+	45, // 62: cdrom.idp.v1.IdP.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	45, // 63: cdrom.idp.v1.IdP.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	45, // 64: cdrom.idp.v1.IdP.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	45, // 65: cdrom.idp.v1.IdP.AssignServiceAccountRoles:output_type -> cdrom.db.v1.ServiceAccount
+	45, // 66: cdrom.idp.v1.IdP.RemoveServiceAccountRole:output_type -> cdrom.db.v1.ServiceAccount
+	39, // 67: cdrom.idp.v1.IdP.VerifyServiceAccountKey:output_type -> cdrom.idp.v1.VerifyServiceAccountKeyResponse
+	41, // 68: cdrom.idp.v1.IdP.ResetServiceAccountLockout:output_type -> cdrom.idp.v1.ResetServiceAccountLockoutResponse
+	42, // [42:69] is the sub-list for method output_type
+	15, // [15:42] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_idp_v1_idp_proto_init() }
@@ -1841,7 +3077,7 @@ func file_cdrom_idp_v1_idp_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_idp_v1_idp_proto_rawDesc), len(file_cdrom_idp_v1_idp_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

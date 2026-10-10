@@ -287,27 +287,47 @@ func (e *Engine) PermissionsFor(ctx context.Context, p Principal) (*PermissionSe
 // pipeline-scoped operator from granting platform-wide operator; the admin
 // role is grantable only by a principal that holds it.
 func (e *Engine) CanGrant(ctx context.Context, caller Principal, roleName string, targetPipelineID int64) (bool, error) {
+	return e.CanGrantWithPermission(ctx, caller, roleName, targetPipelineID, PermRolesAssign)
+}
+
+// CanGrantWithPermission is CanGrant with an explicit grant permission: it
+// reports whether the caller may bind the named role to a target principal
+// with the given scope (targetPipelineID of 0 means unscoped), where the
+// caller must hold grantPermission (a platform-wide permission) and the role
+// being granted (with a scope at least as wide as the one being granted). The
+// API uses it for service-account role assignment (F-26), which is gated by
+// service-accounts.can-assign-roles rather than roles.can-assign.
+func (e *Engine) CanGrantWithPermission(ctx context.Context, caller Principal, roleName string, targetPipelineID int64, grantPermission string) (bool, error) {
 	e.mu.Lock()
 	cat, err := e.catalogLocked(ctx)
 	if err != nil {
 		e.mu.Unlock()
 		return false, err
 	}
-	ok := canGrantLocked(cat, caller, roleName, targetPipelineID)
+	ok := canGrantWithPermissionLocked(cat, caller, roleName, targetPipelineID, grantPermission)
 	e.mu.Unlock()
 	return ok, nil
 }
 
 func canGrantLocked(cat *catalog, caller Principal, roleName string, targetPipelineID int64) bool {
-	// The caller must hold roles.can-assign (a platform-wide permission, so
-	// it must be granted unscoped).
-	if !checkLocked(cat, caller, PermRolesAssign, Resource{}) {
+	return canGrantWithPermissionLocked(cat, caller, roleName, targetPipelineID, PermRolesAssign)
+}
+
+// canGrantWithPermissionLocked is canGrantLocked with an explicit grant
+// permission: the caller must hold grantPermission (a platform-wide
+// permission, so it must be granted unscoped) and the role being granted, with
+// a scope at least as wide as the one being granted. Only the caller's
+// directly-held roles (token roles and stored bindings) count — not roles
+// reached by composition — so a principal cannot delegate a role it merely
+// inherits.
+func canGrantWithPermissionLocked(cat *catalog, caller Principal, roleName string, targetPipelineID int64, grantPermission string) bool {
+	// The caller must hold the grant permission (a platform-wide permission,
+	// so it must be granted unscoped).
+	if !checkLocked(cat, caller, grantPermission, Resource{}) {
 		return false
 	}
 	// The caller must hold the role being granted, with a scope at least as
-	// wide as the one being granted. Only the caller's directly-held roles
-	// (token roles and stored bindings) count — not roles reached by
-	// composition — so a principal cannot delegate a role it merely inherits.
+	// wide as the one being granted.
 	g, ok := principalGrants(cat, caller)[roleName]
 	if !ok {
 		return false

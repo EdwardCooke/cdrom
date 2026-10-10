@@ -20,21 +20,33 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	IdP_MintJobToken_FullMethodName       = "/cdrom.idp.v1.IdP/MintJobToken"
-	IdP_Login_FullMethodName              = "/cdrom.idp.v1.IdP/Login"
-	IdP_Register_FullMethodName           = "/cdrom.idp.v1.IdP/Register"
-	IdP_ListUsers_FullMethodName          = "/cdrom.idp.v1.IdP/ListUsers"
-	IdP_CreateUser_FullMethodName         = "/cdrom.idp.v1.IdP/CreateUser"
-	IdP_UpdateUser_FullMethodName         = "/cdrom.idp.v1.IdP/UpdateUser"
-	IdP_DeleteUser_FullMethodName         = "/cdrom.idp.v1.IdP/DeleteUser"
-	IdP_CreateAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/CreateAPIKey"
-	IdP_GetAPIKey_FullMethodName          = "/cdrom.idp.v1.IdP/GetAPIKey"
-	IdP_ListAPIKeys_FullMethodName        = "/cdrom.idp.v1.IdP/ListAPIKeys"
-	IdP_UpdateAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/UpdateAPIKey"
-	IdP_RotateAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/RotateAPIKey"
-	IdP_DeleteAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/DeleteAPIKey"
-	IdP_VerifyAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/VerifyAPIKey"
-	IdP_ResetAPIKeyLockout_FullMethodName = "/cdrom.idp.v1.IdP/ResetAPIKeyLockout"
+	IdP_MintJobToken_FullMethodName               = "/cdrom.idp.v1.IdP/MintJobToken"
+	IdP_Login_FullMethodName                      = "/cdrom.idp.v1.IdP/Login"
+	IdP_Register_FullMethodName                   = "/cdrom.idp.v1.IdP/Register"
+	IdP_ListUsers_FullMethodName                  = "/cdrom.idp.v1.IdP/ListUsers"
+	IdP_CreateUser_FullMethodName                 = "/cdrom.idp.v1.IdP/CreateUser"
+	IdP_UpdateUser_FullMethodName                 = "/cdrom.idp.v1.IdP/UpdateUser"
+	IdP_DeleteUser_FullMethodName                 = "/cdrom.idp.v1.IdP/DeleteUser"
+	IdP_CreateAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/CreateAPIKey"
+	IdP_GetAPIKey_FullMethodName                  = "/cdrom.idp.v1.IdP/GetAPIKey"
+	IdP_ListAPIKeys_FullMethodName                = "/cdrom.idp.v1.IdP/ListAPIKeys"
+	IdP_UpdateAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/UpdateAPIKey"
+	IdP_RotateAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/RotateAPIKey"
+	IdP_DeleteAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/DeleteAPIKey"
+	IdP_VerifyAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/VerifyAPIKey"
+	IdP_ResetAPIKeyLockout_FullMethodName         = "/cdrom.idp.v1.IdP/ResetAPIKeyLockout"
+	IdP_CreateServiceAccount_FullMethodName       = "/cdrom.idp.v1.IdP/CreateServiceAccount"
+	IdP_GetServiceAccount_FullMethodName          = "/cdrom.idp.v1.IdP/GetServiceAccount"
+	IdP_ListServiceAccounts_FullMethodName        = "/cdrom.idp.v1.IdP/ListServiceAccounts"
+	IdP_UpdateServiceAccount_FullMethodName       = "/cdrom.idp.v1.IdP/UpdateServiceAccount"
+	IdP_RotateServiceAccountKey_FullMethodName    = "/cdrom.idp.v1.IdP/RotateServiceAccountKey"
+	IdP_DisableServiceAccount_FullMethodName      = "/cdrom.idp.v1.IdP/DisableServiceAccount"
+	IdP_EnableServiceAccount_FullMethodName       = "/cdrom.idp.v1.IdP/EnableServiceAccount"
+	IdP_DeleteServiceAccount_FullMethodName       = "/cdrom.idp.v1.IdP/DeleteServiceAccount"
+	IdP_AssignServiceAccountRoles_FullMethodName  = "/cdrom.idp.v1.IdP/AssignServiceAccountRoles"
+	IdP_RemoveServiceAccountRole_FullMethodName   = "/cdrom.idp.v1.IdP/RemoveServiceAccountRole"
+	IdP_VerifyServiceAccountKey_FullMethodName    = "/cdrom.idp.v1.IdP/VerifyServiceAccountKey"
+	IdP_ResetServiceAccountLockout_FullMethodName = "/cdrom.idp.v1.IdP/ResetServiceAccountLockout"
 )
 
 // IdPClient is the client API for IdP service.
@@ -110,6 +122,51 @@ type IdPClient interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant). A missing user is NotFound.
 	ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLockoutRequest, opts ...grpc.CallOption) (*ResetAPIKeyLockoutResponse, error)
+	// CreateServiceAccount creates a service account (F-26) and its two freshly
+	// generated key slots, and binds its roles. The IdP generates each key's
+	// plaintext (`cdrom-sa-…`), hashes it (mixing in a per-key salt and the
+	// request's pepper), and persists the salted hashes through the Database
+	// service. The response returns both plaintext keys exactly once. The RPC
+	// is Unimplemented when no service-account store is attached.
+	CreateServiceAccount(ctx context.Context, in *CreateServiceAccountRequest, opts ...grpc.CallOption) (*CreateServiceAccountResponse, error)
+	// GetServiceAccount returns an account's metadata and both slots' non-secret
+	// metadata (never the plaintext or hash) by id or login name. A missing
+	// account is NotFound.
+	GetServiceAccount(ctx context.Context, in *GetServiceAccountRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// ListServiceAccounts returns service accounts. When include_deleted is
+	// false (the default) deleted accounts are excluded.
+	ListServiceAccounts(ctx context.Context, in *ListServiceAccountsRequest, opts ...grpc.CallOption) (*ListServiceAccountsResponse, error)
+	// UpdateServiceAccount edits an account's display name/description (never
+	// its roles, status, or keys). A stale revision is Aborted.
+	UpdateServiceAccount(ctx context.Context, in *UpdateServiceAccountRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// RotateServiceAccountKey generates a brand-new `cdrom-sa-…` secret for the
+	// selected slot (hashing it, mixing in the request's pepper), returns it
+	// exactly once (in the response's plaintext field), and invalidates the
+	// previous one. A stale revision is Aborted.
+	RotateServiceAccountKey(ctx context.Context, in *RotateServiceAccountKeyRequest, opts ...grpc.CallOption) (*RotateServiceAccountKeyResponse, error)
+	// DisableServiceAccount temporarily disables an account (rejecting both
+	// keys). A stale revision is Aborted.
+	DisableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// EnableServiceAccount re-enables a disabled, non-deleted account (restoring
+	// both keys). A stale revision is Aborted.
+	EnableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// DeleteServiceAccount permanently soft-deletes an account (tombstone +
+	// zeroed key slots). Repeated delete is idempotent.
+	DeleteServiceAccount(ctx context.Context, in *DeleteServiceAccountRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// AssignServiceAccountRoles adds role bindings to an account (validated
+	// against the role catalog).
+	AssignServiceAccountRoles(ctx context.Context, in *AssignServiceAccountRolesRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// RemoveServiceAccountRole removes a role binding from an account.
+	RemoveServiceAccountRole(ctx context.Context, in *RemoveServiceAccountRoleRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error)
+	// VerifyServiceAccountKey checks a presented `login-name:cdrom-sa-…`
+	// credential against the account's two key slots (salted hash, disabled,
+	// and deleted state). On a miss it increments the account's failure counter
+	// and locks the account out at the configured maximum. A miss is
+	// Unauthenticated.
+	VerifyServiceAccountKey(ctx context.Context, in *VerifyServiceAccountKeyRequest, opts ...grpc.CallOption) (*VerifyServiceAccountKeyResponse, error)
+	// ResetServiceAccountLockout clears an account's key lockout state (the
+	// failed counter and the lockout instant). A missing account is NotFound.
+	ResetServiceAccountLockout(ctx context.Context, in *ResetServiceAccountLockoutRequest, opts ...grpc.CallOption) (*ResetServiceAccountLockoutResponse, error)
 }
 
 type idPClient struct {
@@ -270,6 +327,126 @@ func (c *idPClient) ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLocko
 	return out, nil
 }
 
+func (c *idPClient) CreateServiceAccount(ctx context.Context, in *CreateServiceAccountRequest, opts ...grpc.CallOption) (*CreateServiceAccountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateServiceAccountResponse)
+	err := c.cc.Invoke(ctx, IdP_CreateServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) GetServiceAccount(ctx context.Context, in *GetServiceAccountRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_GetServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) ListServiceAccounts(ctx context.Context, in *ListServiceAccountsRequest, opts ...grpc.CallOption) (*ListServiceAccountsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListServiceAccountsResponse)
+	err := c.cc.Invoke(ctx, IdP_ListServiceAccounts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) UpdateServiceAccount(ctx context.Context, in *UpdateServiceAccountRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_UpdateServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) RotateServiceAccountKey(ctx context.Context, in *RotateServiceAccountKeyRequest, opts ...grpc.CallOption) (*RotateServiceAccountKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RotateServiceAccountKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_RotateServiceAccountKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) DisableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_DisableServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) EnableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_EnableServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) DeleteServiceAccount(ctx context.Context, in *DeleteServiceAccountRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_DeleteServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) AssignServiceAccountRoles(ctx context.Context, in *AssignServiceAccountRolesRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_AssignServiceAccountRoles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) RemoveServiceAccountRole(ctx context.Context, in *RemoveServiceAccountRoleRequest, opts ...grpc.CallOption) (*v1.ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.ServiceAccount)
+	err := c.cc.Invoke(ctx, IdP_RemoveServiceAccountRole_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) VerifyServiceAccountKey(ctx context.Context, in *VerifyServiceAccountKeyRequest, opts ...grpc.CallOption) (*VerifyServiceAccountKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyServiceAccountKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_VerifyServiceAccountKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) ResetServiceAccountLockout(ctx context.Context, in *ResetServiceAccountLockoutRequest, opts ...grpc.CallOption) (*ResetServiceAccountLockoutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResetServiceAccountLockoutResponse)
+	err := c.cc.Invoke(ctx, IdP_ResetServiceAccountLockout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdPServer is the server API for IdP service.
 // All implementations must embed UnimplementedIdPServer
 // for forward compatibility.
@@ -343,6 +520,51 @@ type IdPServer interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant). A missing user is NotFound.
 	ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error)
+	// CreateServiceAccount creates a service account (F-26) and its two freshly
+	// generated key slots, and binds its roles. The IdP generates each key's
+	// plaintext (`cdrom-sa-…`), hashes it (mixing in a per-key salt and the
+	// request's pepper), and persists the salted hashes through the Database
+	// service. The response returns both plaintext keys exactly once. The RPC
+	// is Unimplemented when no service-account store is attached.
+	CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*CreateServiceAccountResponse, error)
+	// GetServiceAccount returns an account's metadata and both slots' non-secret
+	// metadata (never the plaintext or hash) by id or login name. A missing
+	// account is NotFound.
+	GetServiceAccount(context.Context, *GetServiceAccountRequest) (*v1.ServiceAccount, error)
+	// ListServiceAccounts returns service accounts. When include_deleted is
+	// false (the default) deleted accounts are excluded.
+	ListServiceAccounts(context.Context, *ListServiceAccountsRequest) (*ListServiceAccountsResponse, error)
+	// UpdateServiceAccount edits an account's display name/description (never
+	// its roles, status, or keys). A stale revision is Aborted.
+	UpdateServiceAccount(context.Context, *UpdateServiceAccountRequest) (*v1.ServiceAccount, error)
+	// RotateServiceAccountKey generates a brand-new `cdrom-sa-…` secret for the
+	// selected slot (hashing it, mixing in the request's pepper), returns it
+	// exactly once (in the response's plaintext field), and invalidates the
+	// previous one. A stale revision is Aborted.
+	RotateServiceAccountKey(context.Context, *RotateServiceAccountKeyRequest) (*RotateServiceAccountKeyResponse, error)
+	// DisableServiceAccount temporarily disables an account (rejecting both
+	// keys). A stale revision is Aborted.
+	DisableServiceAccount(context.Context, *ServiceAccountStateRequest) (*v1.ServiceAccount, error)
+	// EnableServiceAccount re-enables a disabled, non-deleted account (restoring
+	// both keys). A stale revision is Aborted.
+	EnableServiceAccount(context.Context, *ServiceAccountStateRequest) (*v1.ServiceAccount, error)
+	// DeleteServiceAccount permanently soft-deletes an account (tombstone +
+	// zeroed key slots). Repeated delete is idempotent.
+	DeleteServiceAccount(context.Context, *DeleteServiceAccountRequest) (*v1.ServiceAccount, error)
+	// AssignServiceAccountRoles adds role bindings to an account (validated
+	// against the role catalog).
+	AssignServiceAccountRoles(context.Context, *AssignServiceAccountRolesRequest) (*v1.ServiceAccount, error)
+	// RemoveServiceAccountRole removes a role binding from an account.
+	RemoveServiceAccountRole(context.Context, *RemoveServiceAccountRoleRequest) (*v1.ServiceAccount, error)
+	// VerifyServiceAccountKey checks a presented `login-name:cdrom-sa-…`
+	// credential against the account's two key slots (salted hash, disabled,
+	// and deleted state). On a miss it increments the account's failure counter
+	// and locks the account out at the configured maximum. A miss is
+	// Unauthenticated.
+	VerifyServiceAccountKey(context.Context, *VerifyServiceAccountKeyRequest) (*VerifyServiceAccountKeyResponse, error)
+	// ResetServiceAccountLockout clears an account's key lockout state (the
+	// failed counter and the lockout instant). A missing account is NotFound.
+	ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*ResetServiceAccountLockoutResponse, error)
 	mustEmbedUnimplementedIdPServer()
 }
 
@@ -397,6 +619,42 @@ func (UnimplementedIdPServer) VerifyAPIKey(context.Context, *VerifyAPIKeyRequest
 }
 func (UnimplementedIdPServer) ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
+}
+func (UnimplementedIdPServer) CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*CreateServiceAccountResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateServiceAccount not implemented")
+}
+func (UnimplementedIdPServer) GetServiceAccount(context.Context, *GetServiceAccountRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetServiceAccount not implemented")
+}
+func (UnimplementedIdPServer) ListServiceAccounts(context.Context, *ListServiceAccountsRequest) (*ListServiceAccountsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListServiceAccounts not implemented")
+}
+func (UnimplementedIdPServer) UpdateServiceAccount(context.Context, *UpdateServiceAccountRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateServiceAccount not implemented")
+}
+func (UnimplementedIdPServer) RotateServiceAccountKey(context.Context, *RotateServiceAccountKeyRequest) (*RotateServiceAccountKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateServiceAccountKey not implemented")
+}
+func (UnimplementedIdPServer) DisableServiceAccount(context.Context, *ServiceAccountStateRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method DisableServiceAccount not implemented")
+}
+func (UnimplementedIdPServer) EnableServiceAccount(context.Context, *ServiceAccountStateRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method EnableServiceAccount not implemented")
+}
+func (UnimplementedIdPServer) DeleteServiceAccount(context.Context, *DeleteServiceAccountRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteServiceAccount not implemented")
+}
+func (UnimplementedIdPServer) AssignServiceAccountRoles(context.Context, *AssignServiceAccountRolesRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method AssignServiceAccountRoles not implemented")
+}
+func (UnimplementedIdPServer) RemoveServiceAccountRole(context.Context, *RemoveServiceAccountRoleRequest) (*v1.ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveServiceAccountRole not implemented")
+}
+func (UnimplementedIdPServer) VerifyServiceAccountKey(context.Context, *VerifyServiceAccountKeyRequest) (*VerifyServiceAccountKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyServiceAccountKey not implemented")
+}
+func (UnimplementedIdPServer) ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*ResetServiceAccountLockoutResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetServiceAccountLockout not implemented")
 }
 func (UnimplementedIdPServer) mustEmbedUnimplementedIdPServer() {}
 func (UnimplementedIdPServer) testEmbeddedByValue()             {}
@@ -689,6 +947,222 @@ func _IdP_ResetAPIKeyLockout_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IdP_CreateServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).CreateServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_CreateServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).CreateServiceAccount(ctx, req.(*CreateServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_GetServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).GetServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_GetServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).GetServiceAccount(ctx, req.(*GetServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_ListServiceAccounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListServiceAccountsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).ListServiceAccounts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_ListServiceAccounts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).ListServiceAccounts(ctx, req.(*ListServiceAccountsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_UpdateServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).UpdateServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_UpdateServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).UpdateServiceAccount(ctx, req.(*UpdateServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_RotateServiceAccountKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateServiceAccountKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).RotateServiceAccountKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_RotateServiceAccountKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).RotateServiceAccountKey(ctx, req.(*RotateServiceAccountKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_DisableServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ServiceAccountStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).DisableServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_DisableServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).DisableServiceAccount(ctx, req.(*ServiceAccountStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_EnableServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ServiceAccountStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).EnableServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_EnableServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).EnableServiceAccount(ctx, req.(*ServiceAccountStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_DeleteServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).DeleteServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_DeleteServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).DeleteServiceAccount(ctx, req.(*DeleteServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_AssignServiceAccountRoles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AssignServiceAccountRolesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).AssignServiceAccountRoles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_AssignServiceAccountRoles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).AssignServiceAccountRoles(ctx, req.(*AssignServiceAccountRolesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_RemoveServiceAccountRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveServiceAccountRoleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).RemoveServiceAccountRole(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_RemoveServiceAccountRole_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).RemoveServiceAccountRole(ctx, req.(*RemoveServiceAccountRoleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_VerifyServiceAccountKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyServiceAccountKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).VerifyServiceAccountKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_VerifyServiceAccountKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).VerifyServiceAccountKey(ctx, req.(*VerifyServiceAccountKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_ResetServiceAccountLockout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetServiceAccountLockoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).ResetServiceAccountLockout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_ResetServiceAccountLockout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).ResetServiceAccountLockout(ctx, req.(*ResetServiceAccountLockoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IdP_ServiceDesc is the grpc.ServiceDesc for IdP service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -755,6 +1229,54 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetAPIKeyLockout",
 			Handler:    _IdP_ResetAPIKeyLockout_Handler,
+		},
+		{
+			MethodName: "CreateServiceAccount",
+			Handler:    _IdP_CreateServiceAccount_Handler,
+		},
+		{
+			MethodName: "GetServiceAccount",
+			Handler:    _IdP_GetServiceAccount_Handler,
+		},
+		{
+			MethodName: "ListServiceAccounts",
+			Handler:    _IdP_ListServiceAccounts_Handler,
+		},
+		{
+			MethodName: "UpdateServiceAccount",
+			Handler:    _IdP_UpdateServiceAccount_Handler,
+		},
+		{
+			MethodName: "RotateServiceAccountKey",
+			Handler:    _IdP_RotateServiceAccountKey_Handler,
+		},
+		{
+			MethodName: "DisableServiceAccount",
+			Handler:    _IdP_DisableServiceAccount_Handler,
+		},
+		{
+			MethodName: "EnableServiceAccount",
+			Handler:    _IdP_EnableServiceAccount_Handler,
+		},
+		{
+			MethodName: "DeleteServiceAccount",
+			Handler:    _IdP_DeleteServiceAccount_Handler,
+		},
+		{
+			MethodName: "AssignServiceAccountRoles",
+			Handler:    _IdP_AssignServiceAccountRoles_Handler,
+		},
+		{
+			MethodName: "RemoveServiceAccountRole",
+			Handler:    _IdP_RemoveServiceAccountRole_Handler,
+		},
+		{
+			MethodName: "VerifyServiceAccountKey",
+			Handler:    _IdP_VerifyServiceAccountKey_Handler,
+		},
+		{
+			MethodName: "ResetServiceAccountLockout",
+			Handler:    _IdP_ResetServiceAccountLockout_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

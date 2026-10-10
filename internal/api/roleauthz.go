@@ -63,14 +63,21 @@ func (s *dbRoleSource) ListBindings(ctx context.Context) ([]authz.Binding, error
 }
 
 // principalFromContext returns the principal to authorize: the authenticated
-// user (its kind is "user" and its id is the token's subject) when
-// authentication is enabled, or a synthetic admin principal when it is not
-// (a local run with authentication disabled acts as an admin, so the API
-// stays open).
+// user (its kind is "user", or "service-account" when the principal
+// authenticated with a service-account key (F-26), and its id is the token's
+// subject) when authentication is enabled, or a synthetic admin principal
+// when it is not (a local run with authentication disabled acts as an admin,
+// so the API stays open). The principal's kind and id are how the engine looks
+// up the principal's stored role bindings, so a service-account principal is
+// authorized by its own role bindings, not a human user's.
 func (s *Server) principalFromContext(ctx context.Context) authz.Principal {
 	if s.rbacEnabled {
 		user := auth.UserFromContext(ctx)
-		return authz.Principal{Kind: "user", ID: user.Subject, TokenRoles: user.Roles}
+		kind := user.Kind
+		if kind == "" {
+			kind = "user"
+		}
+		return authz.Principal{Kind: kind, ID: user.Subject, TokenRoles: user.Roles}
 	}
 	// Authentication disabled: act as a synthetic admin so the API stays open.
 	return authz.Principal{Kind: "user", ID: "anonymous", TokenRoles: []string{authz.RoleAdmin}}

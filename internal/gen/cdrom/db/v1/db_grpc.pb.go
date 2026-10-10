@@ -20,84 +20,94 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Database_CreatePipeline_FullMethodName          = "/cdrom.db.v1.Database/CreatePipeline"
-	Database_GetPipeline_FullMethodName             = "/cdrom.db.v1.Database/GetPipeline"
-	Database_ListPipelines_FullMethodName           = "/cdrom.db.v1.Database/ListPipelines"
-	Database_UpdatePipeline_FullMethodName          = "/cdrom.db.v1.Database/UpdatePipeline"
-	Database_DeletePipeline_FullMethodName          = "/cdrom.db.v1.Database/DeletePipeline"
-	Database_TriggerRun_FullMethodName              = "/cdrom.db.v1.Database/TriggerRun"
-	Database_CreateRun_FullMethodName               = "/cdrom.db.v1.Database/CreateRun"
-	Database_GetRun_FullMethodName                  = "/cdrom.db.v1.Database/GetRun"
-	Database_ListRuns_FullMethodName                = "/cdrom.db.v1.Database/ListRuns"
-	Database_UpdateRun_FullMethodName               = "/cdrom.db.v1.Database/UpdateRun"
-	Database_ListPipelineVersions_FullMethodName    = "/cdrom.db.v1.Database/ListPipelineVersions"
-	Database_GetPipelineVersion_FullMethodName      = "/cdrom.db.v1.Database/GetPipelineVersion"
-	Database_CreateJob_FullMethodName               = "/cdrom.db.v1.Database/CreateJob"
-	Database_GetJob_FullMethodName                  = "/cdrom.db.v1.Database/GetJob"
-	Database_ListJobs_FullMethodName                = "/cdrom.db.v1.Database/ListJobs"
-	Database_ListRetriableJobs_FullMethodName       = "/cdrom.db.v1.Database/ListRetriableJobs"
-	Database_UpdateJob_FullMethodName               = "/cdrom.db.v1.Database/UpdateJob"
-	Database_DeleteJob_FullMethodName               = "/cdrom.db.v1.Database/DeleteJob"
-	Database_ClaimJobRetry_FullMethodName           = "/cdrom.db.v1.Database/ClaimJobRetry"
-	Database_RerunJob_FullMethodName                = "/cdrom.db.v1.Database/RerunJob"
-	Database_ReapJob_FullMethodName                 = "/cdrom.db.v1.Database/ReapJob"
-	Database_CancelJob_FullMethodName               = "/cdrom.db.v1.Database/CancelJob"
-	Database_SkipJob_FullMethodName                 = "/cdrom.db.v1.Database/SkipJob"
-	Database_ClaimJob_FullMethodName                = "/cdrom.db.v1.Database/ClaimJob"
-	Database_ListPendingByGroup_FullMethodName      = "/cdrom.db.v1.Database/ListPendingByGroup"
-	Database_StartJobExecution_FullMethodName       = "/cdrom.db.v1.Database/StartJobExecution"
-	Database_ListJobExecutions_FullMethodName       = "/cdrom.db.v1.Database/ListJobExecutions"
-	Database_UpdateJobExecution_FullMethodName      = "/cdrom.db.v1.Database/UpdateJobExecution"
-	Database_AbandonWorkerExecutions_FullMethodName = "/cdrom.db.v1.Database/AbandonWorkerExecutions"
-	Database_ReportStepCompletion_FullMethodName    = "/cdrom.db.v1.Database/ReportStepCompletion"
-	Database_CheckStepBarrier_FullMethodName        = "/cdrom.db.v1.Database/CheckStepBarrier"
-	Database_ResolveApproval_FullMethodName         = "/cdrom.db.v1.Database/ResolveApproval"
-	Database_PublishAssignment_FullMethodName       = "/cdrom.db.v1.Database/PublishAssignment"
-	Database_PublishCancel_FullMethodName           = "/cdrom.db.v1.Database/PublishCancel"
-	Database_PublishJobStatus_FullMethodName        = "/cdrom.db.v1.Database/PublishJobStatus"
-	Database_PublishRunStatus_FullMethodName        = "/cdrom.db.v1.Database/PublishRunStatus"
-	Database_PublishWorkerEvent_FullMethodName      = "/cdrom.db.v1.Database/PublishWorkerEvent"
-	Database_PublishLogUpdated_FullMethodName       = "/cdrom.db.v1.Database/PublishLogUpdated"
-	Database_TailEvents_FullMethodName              = "/cdrom.db.v1.Database/TailEvents"
-	Database_AcquireLease_FullMethodName            = "/cdrom.db.v1.Database/AcquireLease"
-	Database_ReleaseLease_FullMethodName            = "/cdrom.db.v1.Database/ReleaseLease"
-	Database_GetLease_FullMethodName                = "/cdrom.db.v1.Database/GetLease"
-	Database_RegisterWorker_FullMethodName          = "/cdrom.db.v1.Database/RegisterWorker"
-	Database_GetWorker_FullMethodName               = "/cdrom.db.v1.Database/GetWorker"
-	Database_ListWorkers_FullMethodName             = "/cdrom.db.v1.Database/ListWorkers"
-	Database_HeartbeatWorker_FullMethodName         = "/cdrom.db.v1.Database/HeartbeatWorker"
-	Database_DeleteWorker_FullMethodName            = "/cdrom.db.v1.Database/DeleteWorker"
-	Database_ListIDPSigningKeys_FullMethodName      = "/cdrom.db.v1.Database/ListIDPSigningKeys"
-	Database_SetIDPSigningKeys_FullMethodName       = "/cdrom.db.v1.Database/SetIDPSigningKeys"
-	Database_StoreIDPAuthCode_FullMethodName        = "/cdrom.db.v1.Database/StoreIDPAuthCode"
-	Database_ConsumeIDPAuthCode_FullMethodName      = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
-	Database_PruneIDPAuthCodes_FullMethodName       = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
-	Database_CreateUser_FullMethodName              = "/cdrom.db.v1.Database/CreateUser"
-	Database_GetIDPUser_FullMethodName              = "/cdrom.db.v1.Database/GetIDPUser"
-	Database_ListIDPUsers_FullMethodName            = "/cdrom.db.v1.Database/ListIDPUsers"
-	Database_UpdateIDPUser_FullMethodName           = "/cdrom.db.v1.Database/UpdateIDPUser"
-	Database_DeleteIDPUser_FullMethodName           = "/cdrom.db.v1.Database/DeleteIDPUser"
-	Database_CreateAPIKey_FullMethodName            = "/cdrom.db.v1.Database/CreateAPIKey"
-	Database_GetAPIKey_FullMethodName               = "/cdrom.db.v1.Database/GetAPIKey"
-	Database_ListAPIKeys_FullMethodName             = "/cdrom.db.v1.Database/ListAPIKeys"
-	Database_UpdateAPIKey_FullMethodName            = "/cdrom.db.v1.Database/UpdateAPIKey"
-	Database_RotateAPIKey_FullMethodName            = "/cdrom.db.v1.Database/RotateAPIKey"
-	Database_DeleteAPIKey_FullMethodName            = "/cdrom.db.v1.Database/DeleteAPIKey"
-	Database_VerifyAPIKey_FullMethodName            = "/cdrom.db.v1.Database/VerifyAPIKey"
-	Database_ResetAPIKeyLockout_FullMethodName      = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
-	Database_NextSecretNonce_FullMethodName         = "/cdrom.db.v1.Database/NextSecretNonce"
-	Database_CreateRole_FullMethodName              = "/cdrom.db.v1.Database/CreateRole"
-	Database_GetRole_FullMethodName                 = "/cdrom.db.v1.Database/GetRole"
-	Database_ListRoles_FullMethodName               = "/cdrom.db.v1.Database/ListRoles"
-	Database_UpdateRole_FullMethodName              = "/cdrom.db.v1.Database/UpdateRole"
-	Database_DeleteRole_FullMethodName              = "/cdrom.db.v1.Database/DeleteRole"
-	Database_AddRoleBinding_FullMethodName          = "/cdrom.db.v1.Database/AddRoleBinding"
-	Database_ListRoleBindings_FullMethodName        = "/cdrom.db.v1.Database/ListRoleBindings"
-	Database_DeleteRoleBinding_FullMethodName       = "/cdrom.db.v1.Database/DeleteRoleBinding"
-	Database_PublishRoleChange_FullMethodName       = "/cdrom.db.v1.Database/PublishRoleChange"
-	Database_AppendAuditEvent_FullMethodName        = "/cdrom.db.v1.Database/AppendAuditEvent"
-	Database_ListAuditEvents_FullMethodName         = "/cdrom.db.v1.Database/ListAuditEvents"
-	Database_PruneAuditEvents_FullMethodName        = "/cdrom.db.v1.Database/PruneAuditEvents"
+	Database_CreatePipeline_FullMethodName                 = "/cdrom.db.v1.Database/CreatePipeline"
+	Database_GetPipeline_FullMethodName                    = "/cdrom.db.v1.Database/GetPipeline"
+	Database_ListPipelines_FullMethodName                  = "/cdrom.db.v1.Database/ListPipelines"
+	Database_UpdatePipeline_FullMethodName                 = "/cdrom.db.v1.Database/UpdatePipeline"
+	Database_DeletePipeline_FullMethodName                 = "/cdrom.db.v1.Database/DeletePipeline"
+	Database_TriggerRun_FullMethodName                     = "/cdrom.db.v1.Database/TriggerRun"
+	Database_CreateRun_FullMethodName                      = "/cdrom.db.v1.Database/CreateRun"
+	Database_GetRun_FullMethodName                         = "/cdrom.db.v1.Database/GetRun"
+	Database_ListRuns_FullMethodName                       = "/cdrom.db.v1.Database/ListRuns"
+	Database_UpdateRun_FullMethodName                      = "/cdrom.db.v1.Database/UpdateRun"
+	Database_ListPipelineVersions_FullMethodName           = "/cdrom.db.v1.Database/ListPipelineVersions"
+	Database_GetPipelineVersion_FullMethodName             = "/cdrom.db.v1.Database/GetPipelineVersion"
+	Database_CreateJob_FullMethodName                      = "/cdrom.db.v1.Database/CreateJob"
+	Database_GetJob_FullMethodName                         = "/cdrom.db.v1.Database/GetJob"
+	Database_ListJobs_FullMethodName                       = "/cdrom.db.v1.Database/ListJobs"
+	Database_ListRetriableJobs_FullMethodName              = "/cdrom.db.v1.Database/ListRetriableJobs"
+	Database_UpdateJob_FullMethodName                      = "/cdrom.db.v1.Database/UpdateJob"
+	Database_DeleteJob_FullMethodName                      = "/cdrom.db.v1.Database/DeleteJob"
+	Database_ClaimJobRetry_FullMethodName                  = "/cdrom.db.v1.Database/ClaimJobRetry"
+	Database_RerunJob_FullMethodName                       = "/cdrom.db.v1.Database/RerunJob"
+	Database_ReapJob_FullMethodName                        = "/cdrom.db.v1.Database/ReapJob"
+	Database_CancelJob_FullMethodName                      = "/cdrom.db.v1.Database/CancelJob"
+	Database_SkipJob_FullMethodName                        = "/cdrom.db.v1.Database/SkipJob"
+	Database_ClaimJob_FullMethodName                       = "/cdrom.db.v1.Database/ClaimJob"
+	Database_ListPendingByGroup_FullMethodName             = "/cdrom.db.v1.Database/ListPendingByGroup"
+	Database_StartJobExecution_FullMethodName              = "/cdrom.db.v1.Database/StartJobExecution"
+	Database_ListJobExecutions_FullMethodName              = "/cdrom.db.v1.Database/ListJobExecutions"
+	Database_UpdateJobExecution_FullMethodName             = "/cdrom.db.v1.Database/UpdateJobExecution"
+	Database_AbandonWorkerExecutions_FullMethodName        = "/cdrom.db.v1.Database/AbandonWorkerExecutions"
+	Database_ReportStepCompletion_FullMethodName           = "/cdrom.db.v1.Database/ReportStepCompletion"
+	Database_CheckStepBarrier_FullMethodName               = "/cdrom.db.v1.Database/CheckStepBarrier"
+	Database_ResolveApproval_FullMethodName                = "/cdrom.db.v1.Database/ResolveApproval"
+	Database_PublishAssignment_FullMethodName              = "/cdrom.db.v1.Database/PublishAssignment"
+	Database_PublishCancel_FullMethodName                  = "/cdrom.db.v1.Database/PublishCancel"
+	Database_PublishJobStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishJobStatus"
+	Database_PublishRunStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishRunStatus"
+	Database_PublishWorkerEvent_FullMethodName             = "/cdrom.db.v1.Database/PublishWorkerEvent"
+	Database_PublishLogUpdated_FullMethodName              = "/cdrom.db.v1.Database/PublishLogUpdated"
+	Database_TailEvents_FullMethodName                     = "/cdrom.db.v1.Database/TailEvents"
+	Database_AcquireLease_FullMethodName                   = "/cdrom.db.v1.Database/AcquireLease"
+	Database_ReleaseLease_FullMethodName                   = "/cdrom.db.v1.Database/ReleaseLease"
+	Database_GetLease_FullMethodName                       = "/cdrom.db.v1.Database/GetLease"
+	Database_RegisterWorker_FullMethodName                 = "/cdrom.db.v1.Database/RegisterWorker"
+	Database_GetWorker_FullMethodName                      = "/cdrom.db.v1.Database/GetWorker"
+	Database_ListWorkers_FullMethodName                    = "/cdrom.db.v1.Database/ListWorkers"
+	Database_HeartbeatWorker_FullMethodName                = "/cdrom.db.v1.Database/HeartbeatWorker"
+	Database_DeleteWorker_FullMethodName                   = "/cdrom.db.v1.Database/DeleteWorker"
+	Database_ListIDPSigningKeys_FullMethodName             = "/cdrom.db.v1.Database/ListIDPSigningKeys"
+	Database_SetIDPSigningKeys_FullMethodName              = "/cdrom.db.v1.Database/SetIDPSigningKeys"
+	Database_StoreIDPAuthCode_FullMethodName               = "/cdrom.db.v1.Database/StoreIDPAuthCode"
+	Database_ConsumeIDPAuthCode_FullMethodName             = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
+	Database_PruneIDPAuthCodes_FullMethodName              = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
+	Database_CreateUser_FullMethodName                     = "/cdrom.db.v1.Database/CreateUser"
+	Database_GetIDPUser_FullMethodName                     = "/cdrom.db.v1.Database/GetIDPUser"
+	Database_ListIDPUsers_FullMethodName                   = "/cdrom.db.v1.Database/ListIDPUsers"
+	Database_UpdateIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/UpdateIDPUser"
+	Database_DeleteIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/DeleteIDPUser"
+	Database_CreateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/CreateAPIKey"
+	Database_GetAPIKey_FullMethodName                      = "/cdrom.db.v1.Database/GetAPIKey"
+	Database_ListAPIKeys_FullMethodName                    = "/cdrom.db.v1.Database/ListAPIKeys"
+	Database_UpdateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/UpdateAPIKey"
+	Database_RotateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/RotateAPIKey"
+	Database_DeleteAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/DeleteAPIKey"
+	Database_VerifyAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/VerifyAPIKey"
+	Database_ResetAPIKeyLockout_FullMethodName             = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
+	Database_CreateServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/CreateServiceAccount"
+	Database_GetServiceAccount_FullMethodName              = "/cdrom.db.v1.Database/GetServiceAccount"
+	Database_ListServiceAccounts_FullMethodName            = "/cdrom.db.v1.Database/ListServiceAccounts"
+	Database_UpdateServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/UpdateServiceAccount"
+	Database_RotateServiceAccountKey_FullMethodName        = "/cdrom.db.v1.Database/RotateServiceAccountKey"
+	Database_DisableServiceAccount_FullMethodName          = "/cdrom.db.v1.Database/DisableServiceAccount"
+	Database_EnableServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/EnableServiceAccount"
+	Database_DeleteServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/DeleteServiceAccount"
+	Database_RecordServiceAccountKeyAttempt_FullMethodName = "/cdrom.db.v1.Database/RecordServiceAccountKeyAttempt"
+	Database_ResetServiceAccountLockout_FullMethodName     = "/cdrom.db.v1.Database/ResetServiceAccountLockout"
+	Database_NextSecretNonce_FullMethodName                = "/cdrom.db.v1.Database/NextSecretNonce"
+	Database_CreateRole_FullMethodName                     = "/cdrom.db.v1.Database/CreateRole"
+	Database_GetRole_FullMethodName                        = "/cdrom.db.v1.Database/GetRole"
+	Database_ListRoles_FullMethodName                      = "/cdrom.db.v1.Database/ListRoles"
+	Database_UpdateRole_FullMethodName                     = "/cdrom.db.v1.Database/UpdateRole"
+	Database_DeleteRole_FullMethodName                     = "/cdrom.db.v1.Database/DeleteRole"
+	Database_AddRoleBinding_FullMethodName                 = "/cdrom.db.v1.Database/AddRoleBinding"
+	Database_ListRoleBindings_FullMethodName               = "/cdrom.db.v1.Database/ListRoleBindings"
+	Database_DeleteRoleBinding_FullMethodName              = "/cdrom.db.v1.Database/DeleteRoleBinding"
+	Database_PublishRoleChange_FullMethodName              = "/cdrom.db.v1.Database/PublishRoleChange"
+	Database_AppendAuditEvent_FullMethodName               = "/cdrom.db.v1.Database/AppendAuditEvent"
+	Database_ListAuditEvents_FullMethodName                = "/cdrom.db.v1.Database/ListAuditEvents"
+	Database_PruneAuditEvents_FullMethodName               = "/cdrom.db.v1.Database/PruneAuditEvents"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -361,6 +371,46 @@ type DatabaseClient interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant); an admin uses it to un-lock a user.
 	ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPIKeyLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Service accounts (F-26). A service account is a non-human identity with
+	// two API-key slots. The IdP generates and hashes the keys (mixing in a
+	// per-key salt and an optional pepper) and persists them here; the Database
+	// service stores the salted hashes opaquely and never sees the plaintext.
+	// CreateServiceAccount atomically creates the account and both freshly
+	// generated key slots (the caller supplies both slots' salted hashes and
+	// prefixes) in one transaction. The other RPCs key on the account id.
+	CreateServiceAccount(ctx context.Context, in *CreateServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	GetServiceAccount(ctx context.Context, in *GetServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	ListServiceAccounts(ctx context.Context, in *ListServiceAccountsRequest, opts ...grpc.CallOption) (*ListServiceAccountsResponse, error)
+	// UpdateServiceAccount edits an account's display name/description (and
+	// bumps its revision); a stale revision is Aborted.
+	UpdateServiceAccount(ctx context.Context, in *UpdateServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	// RotateServiceAccountKey replaces one slot's salted hash and prefix (the
+	// caller generated and hashed the new plaintext), bumping the slot's
+	// generation and the account's revision; a stale revision is Aborted.
+	RotateServiceAccountKey(ctx context.Context, in *RotateServiceAccountKeyRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	// DisableServiceAccount sets the account's disabled flag (rejecting both
+	// keys); a stale revision is Aborted.
+	DisableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	// EnableServiceAccount clears the account's disabled flag (restoring both
+	// keys); a stale revision is Aborted.
+	EnableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	// DeleteServiceAccount permanently soft-deletes the account: it sets the
+	// tombstone, marks it disabled, and zeros out both key slots (clearing
+	// hashes, salts, and prefixes) in one transaction. Repeated delete is
+	// idempotent.
+	DeleteServiceAccount(ctx context.Context, in *DeleteServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	// RecordServiceAccountKeyAttempt atomically updates an account's key
+	// lockout state after the IdP has verified (or failed to verify) a
+	// presented key: on a success it resets the failure counter; on a miss it
+	// increments the counter and, at the configured maximum, locks the account
+	// out (for the configured duration, or permanently when it is zero) and
+	// resets the counter. The IdP does the salted-hash comparison itself (like
+	// password verification) and calls this to persist the lockout outcome.
+	RecordServiceAccountKeyAttempt(ctx context.Context, in *RecordServiceAccountKeyAttemptRequest, opts ...grpc.CallOption) (*ServiceAccount, error)
+	// ResetServiceAccountLockout clears an account's key lockout state (the
+	// failed counter and the lockout instant); an admin uses it to un-lock an
+	// account.
+	ResetServiceAccountLockout(ctx context.Context, in *ResetServiceAccountLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1084,6 +1134,106 @@ func (c *databaseClient) ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPI
 	return out, nil
 }
 
+func (c *databaseClient) CreateServiceAccount(ctx context.Context, in *CreateServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_CreateServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetServiceAccount(ctx context.Context, in *GetServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_GetServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListServiceAccounts(ctx context.Context, in *ListServiceAccountsRequest, opts ...grpc.CallOption) (*ListServiceAccountsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListServiceAccountsResponse)
+	err := c.cc.Invoke(ctx, Database_ListServiceAccounts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateServiceAccount(ctx context.Context, in *UpdateServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_UpdateServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RotateServiceAccountKey(ctx context.Context, in *RotateServiceAccountKeyRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_RotateServiceAccountKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DisableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_DisableServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) EnableServiceAccount(ctx context.Context, in *ServiceAccountStateRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_EnableServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteServiceAccount(ctx context.Context, in *DeleteServiceAccountRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_DeleteServiceAccount_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RecordServiceAccountKeyAttempt(ctx context.Context, in *RecordServiceAccountKeyAttemptRequest, opts ...grpc.CallOption) (*ServiceAccount, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServiceAccount)
+	err := c.cc.Invoke(ctx, Database_RecordServiceAccountKeyAttempt_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ResetServiceAccountLockout(ctx context.Context, in *ResetServiceAccountLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_ResetServiceAccountLockout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NextSecretNonceResponse)
@@ -1475,6 +1625,46 @@ type DatabaseServer interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant); an admin uses it to un-lock a user.
 	ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error)
+	// Service accounts (F-26). A service account is a non-human identity with
+	// two API-key slots. The IdP generates and hashes the keys (mixing in a
+	// per-key salt and an optional pepper) and persists them here; the Database
+	// service stores the salted hashes opaquely and never sees the plaintext.
+	// CreateServiceAccount atomically creates the account and both freshly
+	// generated key slots (the caller supplies both slots' salted hashes and
+	// prefixes) in one transaction. The other RPCs key on the account id.
+	CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*ServiceAccount, error)
+	GetServiceAccount(context.Context, *GetServiceAccountRequest) (*ServiceAccount, error)
+	ListServiceAccounts(context.Context, *ListServiceAccountsRequest) (*ListServiceAccountsResponse, error)
+	// UpdateServiceAccount edits an account's display name/description (and
+	// bumps its revision); a stale revision is Aborted.
+	UpdateServiceAccount(context.Context, *UpdateServiceAccountRequest) (*ServiceAccount, error)
+	// RotateServiceAccountKey replaces one slot's salted hash and prefix (the
+	// caller generated and hashed the new plaintext), bumping the slot's
+	// generation and the account's revision; a stale revision is Aborted.
+	RotateServiceAccountKey(context.Context, *RotateServiceAccountKeyRequest) (*ServiceAccount, error)
+	// DisableServiceAccount sets the account's disabled flag (rejecting both
+	// keys); a stale revision is Aborted.
+	DisableServiceAccount(context.Context, *ServiceAccountStateRequest) (*ServiceAccount, error)
+	// EnableServiceAccount clears the account's disabled flag (restoring both
+	// keys); a stale revision is Aborted.
+	EnableServiceAccount(context.Context, *ServiceAccountStateRequest) (*ServiceAccount, error)
+	// DeleteServiceAccount permanently soft-deletes the account: it sets the
+	// tombstone, marks it disabled, and zeros out both key slots (clearing
+	// hashes, salts, and prefixes) in one transaction. Repeated delete is
+	// idempotent.
+	DeleteServiceAccount(context.Context, *DeleteServiceAccountRequest) (*ServiceAccount, error)
+	// RecordServiceAccountKeyAttempt atomically updates an account's key
+	// lockout state after the IdP has verified (or failed to verify) a
+	// presented key: on a success it resets the failure counter; on a miss it
+	// increments the counter and, at the configured maximum, locks the account
+	// out (for the configured duration, or permanently when it is zero) and
+	// resets the counter. The IdP does the salted-hash comparison itself (like
+	// password verification) and calls this to persist the lockout outcome.
+	RecordServiceAccountKeyAttempt(context.Context, *RecordServiceAccountKeyAttemptRequest) (*ServiceAccount, error)
+	// ResetServiceAccountLockout clears an account's key lockout state (the
+	// failed counter and the lockout instant); an admin uses it to un-lock an
+	// account.
+	ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*emptypb.Empty, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1742,6 +1932,36 @@ func (UnimplementedDatabaseServer) VerifyAPIKey(context.Context, *VerifyIDPAPIKe
 }
 func (UnimplementedDatabaseServer) ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
+}
+func (UnimplementedDatabaseServer) CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateServiceAccount not implemented")
+}
+func (UnimplementedDatabaseServer) GetServiceAccount(context.Context, *GetServiceAccountRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetServiceAccount not implemented")
+}
+func (UnimplementedDatabaseServer) ListServiceAccounts(context.Context, *ListServiceAccountsRequest) (*ListServiceAccountsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListServiceAccounts not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateServiceAccount(context.Context, *UpdateServiceAccountRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateServiceAccount not implemented")
+}
+func (UnimplementedDatabaseServer) RotateServiceAccountKey(context.Context, *RotateServiceAccountKeyRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateServiceAccountKey not implemented")
+}
+func (UnimplementedDatabaseServer) DisableServiceAccount(context.Context, *ServiceAccountStateRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method DisableServiceAccount not implemented")
+}
+func (UnimplementedDatabaseServer) EnableServiceAccount(context.Context, *ServiceAccountStateRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method EnableServiceAccount not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteServiceAccount(context.Context, *DeleteServiceAccountRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteServiceAccount not implemented")
+}
+func (UnimplementedDatabaseServer) RecordServiceAccountKeyAttempt(context.Context, *RecordServiceAccountKeyAttemptRequest) (*ServiceAccount, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordServiceAccountKeyAttempt not implemented")
+}
+func (UnimplementedDatabaseServer) ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetServiceAccountLockout not implemented")
 }
 func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
@@ -2973,6 +3193,186 @@ func _Database_ResetAPIKeyLockout_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateServiceAccount(ctx, req.(*CreateServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetServiceAccount(ctx, req.(*GetServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListServiceAccounts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListServiceAccountsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListServiceAccounts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListServiceAccounts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListServiceAccounts(ctx, req.(*ListServiceAccountsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateServiceAccount(ctx, req.(*UpdateServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RotateServiceAccountKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateServiceAccountKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RotateServiceAccountKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RotateServiceAccountKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RotateServiceAccountKey(ctx, req.(*RotateServiceAccountKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DisableServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ServiceAccountStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DisableServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DisableServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DisableServiceAccount(ctx, req.(*ServiceAccountStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_EnableServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ServiceAccountStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).EnableServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_EnableServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).EnableServiceAccount(ctx, req.(*ServiceAccountStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteServiceAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteServiceAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteServiceAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteServiceAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteServiceAccount(ctx, req.(*DeleteServiceAccountRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RecordServiceAccountKeyAttempt_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordServiceAccountKeyAttemptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RecordServiceAccountKeyAttempt(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RecordServiceAccountKeyAttempt_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RecordServiceAccountKeyAttempt(ctx, req.(*RecordServiceAccountKeyAttemptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ResetServiceAccountLockout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetServiceAccountLockoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ResetServiceAccountLockout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ResetServiceAccountLockout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ResetServiceAccountLockout(ctx, req.(*ResetServiceAccountLockoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NextSecretNonceRequest)
 	if err := dec(in); err != nil {
@@ -3473,6 +3873,46 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetAPIKeyLockout",
 			Handler:    _Database_ResetAPIKeyLockout_Handler,
+		},
+		{
+			MethodName: "CreateServiceAccount",
+			Handler:    _Database_CreateServiceAccount_Handler,
+		},
+		{
+			MethodName: "GetServiceAccount",
+			Handler:    _Database_GetServiceAccount_Handler,
+		},
+		{
+			MethodName: "ListServiceAccounts",
+			Handler:    _Database_ListServiceAccounts_Handler,
+		},
+		{
+			MethodName: "UpdateServiceAccount",
+			Handler:    _Database_UpdateServiceAccount_Handler,
+		},
+		{
+			MethodName: "RotateServiceAccountKey",
+			Handler:    _Database_RotateServiceAccountKey_Handler,
+		},
+		{
+			MethodName: "DisableServiceAccount",
+			Handler:    _Database_DisableServiceAccount_Handler,
+		},
+		{
+			MethodName: "EnableServiceAccount",
+			Handler:    _Database_EnableServiceAccount_Handler,
+		},
+		{
+			MethodName: "DeleteServiceAccount",
+			Handler:    _Database_DeleteServiceAccount_Handler,
+		},
+		{
+			MethodName: "RecordServiceAccountKeyAttempt",
+			Handler:    _Database_RecordServiceAccountKeyAttempt_Handler,
+		},
+		{
+			MethodName: "ResetServiceAccountLockout",
+			Handler:    _Database_ResetServiceAccountLockout_Handler,
 		},
 		{
 			MethodName: "NextSecretNonce",
