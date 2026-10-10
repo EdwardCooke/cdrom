@@ -56,12 +56,20 @@ plugs into the same authorization the user already has.
   `lockout_duration` (how long a lockout lasts; `0` = until reset), and an
   optional `pepper` (mixed into the key hash).
 - `internal/api` — an `APIKeyClient` (a gRPC proxy to the IdP, like
-  `UserPassClient`) and the `/api/api-keys` handlers: `POST /api/api-keys`
-  (create for self, or for another user when the caller has the appropriate
-  role), `GET /api/api-keys` (list the caller's keys, or all when admin),
-  `GET /api/api-keys/{id}`, `PUT /api/api-keys/{id}` (edit/renew),
-  `POST /api/api-keys/{id}/rotate`, `DELETE /api/api-keys/{id}`. The create
-  and rotate responses return the plaintext key once.
+  `UserPassClient`) and the `/api/api-keys` handlers. Managing **one's own**
+  keys requires `api-keys.can-manage` (granted to the built-in user role for
+  self-service); acting on **another user's** keys (creating a key for them,
+  or getting/editing/rotating/deleting their key) requires the explicit
+  `api-keys.can-manage-all` permission, which the admin role grants by
+  default. The handlers: `POST /api/api-keys` (create for self, or for
+  another user when the caller holds `api-keys.can-manage-all`),
+  `GET /api/api-keys` (list the **caller's own** keys),
+  `GET /api/api-keys/all` (list **every key in the system** — requires
+  `api-keys.can-list-all`, which the admin role grants), `GET /api/api-keys/{id}`,
+  `PUT /api/api-keys/{id}` (edit/renew), `POST /api/api-keys/{id}/rotate`,
+  `DELETE /api/api-keys/{id}`, and `POST /api/api-keys/lockout/reset` (an
+  admin clears a user's API-key lockout). The create and rotate responses
+  return the plaintext key once.
 - `internal/auth` — the middleware accepts `Authorization: Bearer
   <username>:<apikey>` as an alternative to a JWT: when the bearer value is of
   the form `<username>:cdrom-…` it calls the IdP's `VerifyAPIKey` and, on
@@ -71,36 +79,45 @@ plugs into the same authorization the user already has.
   authorization can limit the caller to the key's pipelines.
 
 **Acceptance criteria.**
-- [ ] A user (whether they signed in via OIDC or username/password) can create
+- [x] A user (whether they signed in via OIDC or username/password) can create
       an API key; the response returns the plaintext `cdrom-…` key once, and
       the stored record holds only its hash.
-- [ ] API keys are available to any user with the permission to create one, on
+- [x] API keys are available to any user with the permission to create one, on
       both the OIDC and the username/password (internal) sign-in paths.
-- [ ] A user with the appropriate role (e.g. `admin`) can create an API key for
-      another user; the key belongs to that user and its effective permissions
-      are that user's, limited to the key's pipeline scope.
-- [ ] A user can have any number of API keys.
-- [ ] A key's expiration date is validated to be at most one year in the
+- [x] A user with the `api-keys.can-manage-all` permission (e.g. `admin`) can
+      create an API key for another user; the key belongs to that user and its
+      effective permissions are that user's, limited to the key's pipeline
+      scope. A user without the permission can only create keys for themselves.
+- [x] A user can have any number of API keys.
+- [x] A key's expiration date is validated to be at most one year in the
       future; an expired key is rejected.
-- [ ] `Authorization: Bearer <username>:<apikey>` authenticates the caller as
+- [x] `Authorization: Bearer <username>:<apikey>` authenticates the caller as
       the key's owner on any `/api/*` route that accepts a JWT; a JWT and an
       API key are both accepted (both sign-in methods coexist).
-- [ ] The key's effective permissions are the owner's permissions limited to
+- [x] The key's effective permissions are the owner's permissions limited to
       the key's pipeline scope (a key scoped to pipeline X cannot act on
       pipeline Y, even if the owner could).
-- [ ] A key can be edited/renewed (description, expiration, pipeline scope)
+- [x] A key can be edited/renewed (description, expiration, pipeline scope)
       without changing its secret — the same `cdrom-…` value keeps working.
-- [ ] A key can be rotated: a new `cdrom-…` secret is generated and returned
+- [x] A key can be rotated: a new `cdrom-…` secret is generated and returned
       once, and the previous secret stops working.
-- [ ] The plaintext key is never returned by list/get (only the prefix and
+- [x] The plaintext key is never returned by list/get (only the prefix and
       metadata); it is returned only by create and rotate.
-- [ ] After the configured number of failed API-key attempts for a user, that
+- [x] After the configured number of failed API-key attempts for a user, that
       user is locked out of API-key access (for the configured duration, or
       until reset); password sign-in is unaffected.
-- [ ] API-key lockout is a separate mechanism from password-attempt lockout
+- [x] API-key lockout is a separate mechanism from password-attempt lockout
       (distinct counters/state).
-- [ ] `auth.api_key.enabled: false` disables API-key authentication and the
+- [x] `auth.api_key.enabled: false` disables API-key authentication and the
       `/api/api-keys` endpoints (they respond 501).
+- [x] `GET /api/api-keys` returns only the caller's own keys. A user with the
+      `api-keys.can-list-all` permission (e.g. `admin`) can call
+      `GET /api/api-keys/all` to get a list of **all** API keys in the system;
+      any other caller is denied (403). An admin can also reset a user's
+      API-key lockout (`POST /api/api-keys/lockout/reset`).
+- [x] A user can manage (get/edit/rotate/delete) only their own keys. Acting
+      on another user's key requires the `api-keys.can-manage-all` permission
+      (granted to `admin` by default); a user without it is denied (403).
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
 - **The key is `cdrom-` + 64 random alphanumeric characters; only its hash is

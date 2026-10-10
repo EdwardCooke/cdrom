@@ -1071,6 +1071,211 @@ func TestIDPUsers(t *testing.T) {
 	}
 }
 
+// TestAPIKeys verifies the IdP API-key CRUD + verify RPCs (F-25): create, get,
+// list (per-owner and all), update (renew), rotate, delete, verify (success,
+// miss, lockout, and reset), plus the not-found and invalid-owner cases.
+func TestAPIKeys(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	// A key's owner must exist.
+	owner, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
+		User: &dbpb.IDPUser{Email: "ada@example.com", PasswordHash: "h", Roles: []string{"admin"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	ownerID := owner.GetId()
+
+	// Create a key for the owner.
+	created, err := client.CreateAPIKey(ctx, &dbpb.CreateIDPAPIKeyRequest{
+		Key: &dbpb.IDPAPIKey{
+			OwnerId:       ownerID,
+			Description:   "ci key",
+			KeyHash:       "hash-1",
+			KeyPrefix:     "cdrom-abcd",
+			PipelineScope: []int64{1, 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	if created.GetId() == "" {
+		t.Fatal("created key has no ID")
+	}
+	if created.GetOwnerId() != ownerID {
+		t.Errorf("owner = %q, want %q", created.GetOwnerId(), ownerID)
+	}
+	if created.GetKeyHash() != "hash-1" {
+		t.Errorf("hash = %q, want hash-1", created.GetKeyHash())
+	}
+	if len(created.GetPipelineScope()) != 2 {
+		t.Errorf("scope = %v, want [1 2]", created.GetPipelineScope())
+	}
+	keyID := created.GetId()
+
+	// Creating a key for a missing owner is InvalidArgument.
+	if _, err := client.CreateAPIKey(ctx, &dbpb.CreateIDPAPIKeyRequest{
+		Key: &dbpb.IDPAPIKey{OwnerId: "999999", KeyHash: "h"},
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("create for missing owner = %v, want InvalidArgument", err)
+	}
+
+	// Get the key.
+	got, err := client.GetAPIKey(ctx, &dbpb.GetIDPAPIKeyRequest{Id: keyID})
+	if err != nil {
+		t.Fatalf("GetAPIKey: %v", err)
+	}
+	if got.GetKeyHash() != "hash-1" {
+		t.Errorf("get hash = %q, want hash-1", got.GetKeyHash())
+	}
+
+	// A missing key is NotFound.
+	if _, err := client.GetAPIKey(ctx, &dbpb.GetIDPAPIKeyRequest{Id: "424242"}); status.Code(err) != codes.NotFound {
+		t.Errorf("get missing = %v, want NotFound", err)
+	}
+
+	// Create a second key for the owner (a user can have any number of keys).
+	if _, err := client.CreateAPIKey(ctx, &dbpb.CreateIDPAPIKeyRequest{
+		Key: &dbpb.IDPAPIKey{OwnerId: ownerID, Description: "second", KeyHash: "hash-2", KeyPrefix: "cdrom-efgh"},
+	}); err != nil {
+		t.Fatalf("CreateAPIKey second: %v", err)
+	}
+
+	// List the owner's keys (two).
+	ownerKeys, err := client.ListAPIKeys(ctx, &dbpb.ListIDPAPIKeysRequest{OwnerId: ownerID})
+	if err != nil {
+		t.Fatalf("ListAPIKeys owner: %v", err)
+	}
+	if len(ownerKeys.GetKeys()) != 2 {
+		t.Errorf("owner keys = %d, want 2", len(ownerKeys.GetKeys()))
+	}
+
+	// List all keys (two, since there is only one owner).
+	allKeys, err := client.ListAPIKeys(ctx, &dbpb.ListIDPAPIKeysRequest{})
+	if err != nil {
+		t.Fatalf("ListAPIKeys all: %v", err)
+	}
+	if len(allKeys.GetKeys()) != 2 {
+		t.Errorf("all keys = %d, want 2", len(allKeys.GetKeys()))
+	}
+
+	// Update (renew) the key's description and pipeline scope, leaving the
+	// secret (hash) unchanged.
+	updated, err := client.UpdateAPIKey(ctx, &dbpb.UpdateIDPAPIKeyRequest{
+		Key:              &dbpb.IDPAPIKey{Id: keyID, Description: "renamed", PipelineScope: []int64{3}},
+		HasDescription:   true,
+		HasPipelineScope: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAPIKey: %v", err)
+	}
+	if updated.GetDescription() != "renamed" {
+		t.Errorf("description = %q, want renamed", updated.GetDescription())
+	}
+	if len(updated.GetPipelineScope()) != 1 || updated.GetPipelineScope()[0] != 3 {
+		t.Errorf("scope = %v, want [3]", updated.GetPipelineScope())
+	}
+	if updated.GetKeyHash() != "hash-1" {
+		t.Errorf("hash after renew = %q, want hash-1 (unchanged)", updated.GetKeyHash())
+	}
+
+	// Rotate the key: a new hash, the old one stops working.
+	rotated, err := client.RotateAPIKey(ctx, &dbpb.RotateIDPAPIKeyRequest{Id: keyID, KeyHash: "hash-rotated", KeyPrefix: "cdrom-rot"})
+	if err != nil {
+		t.Fatalf("RotateAPIKey: %v", err)
+	}
+	if rotated.GetKeyHash() != "hash-rotated" {
+		t.Errorf("rotated hash = %q, want hash-rotated", rotated.GetKeyHash())
+	}
+	if rotated.GetDescription() != "renamed" {
+		t.Errorf("rotated description = %q, want renamed (unchanged)", rotated.GetDescription())
+	}
+
+	// Verify: a matching hash (and not locked) succeeds and returns the key
+	// and owner.
+	verified, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
+		Username:    "ada@example.com",
+		KeyHash:     "hash-rotated",
+		MaxFailures: 3,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAPIKey: %v", err)
+	}
+	if verified.GetKey().GetId() != keyID {
+		t.Errorf("verified key = %q, want %q", verified.GetKey().GetId(), keyID)
+	}
+	if verified.GetOwner().GetEmail() != "ada@example.com" {
+		t.Errorf("verified owner = %q, want ada@example.com", verified.GetOwner().GetEmail())
+	}
+
+	// Verify: a miss (wrong hash) is Unauthenticated and increments the
+	// failure counter.
+	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
+		Username:    "ada@example.com",
+		KeyHash:     "wrong",
+		MaxFailures: 3,
+	}); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("verify miss = %v, want Unauthenticated", err)
+	}
+
+	// Verify: an unknown user is Unauthenticated.
+	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
+		Username:    "nobody@example.com",
+		KeyHash:     "hash-rotated",
+		MaxFailures: 3,
+	}); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("verify unknown user = %v, want Unauthenticated", err)
+	}
+
+	// Lockout: with max_failures=1, a single miss locks the owner out
+	// (permanently, since lockout_duration is 0); a subsequent correct
+	// verification is rejected while locked.
+	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
+		Username:    "ada@example.com",
+		KeyHash:     "wrong",
+		MaxFailures: 1,
+	}); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("verify (lockout trigger) = %v, want Unauthenticated", err)
+	}
+	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
+		Username:    "ada@example.com",
+		KeyHash:     "hash-rotated",
+		MaxFailures: 1,
+	}); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("verify while locked = %v, want Unauthenticated", err)
+	}
+
+	// Reset the lockout: a correct verification succeeds again.
+	if _, err := client.ResetAPIKeyLockout(ctx, &dbpb.ResetIDPAPIKeyLockoutRequest{UserId: ownerID}); err != nil {
+		t.Fatalf("ResetAPIKeyLockout: %v", err)
+	}
+	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
+		Username:    "ada@example.com",
+		KeyHash:     "hash-rotated",
+		MaxFailures: 1,
+	}); err != nil {
+		t.Errorf("verify after reset = %v, want success", err)
+	}
+
+	// Resetting a missing user is NotFound.
+	if _, err := client.ResetAPIKeyLockout(ctx, &dbpb.ResetIDPAPIKeyLockoutRequest{UserId: "424242"}); status.Code(err) != codes.NotFound {
+		t.Errorf("reset missing user = %v, want NotFound", err)
+	}
+
+	// Delete the key.
+	if _, err := client.DeleteAPIKey(ctx, &dbpb.DeleteIDPAPIKeyRequest{Id: keyID}); err != nil {
+		t.Fatalf("DeleteAPIKey: %v", err)
+	}
+	if _, err := client.GetAPIKey(ctx, &dbpb.GetIDPAPIKeyRequest{Id: keyID}); status.Code(err) != codes.NotFound {
+		t.Errorf("get after delete = %v, want NotFound", err)
+	}
+	// Deleting again is a NotFound.
+	if _, err := client.DeleteAPIKey(ctx, &dbpb.DeleteIDPAPIKeyRequest{Id: keyID}); status.Code(err) != codes.NotFound {
+		t.Errorf("re-delete = %v, want NotFound", err)
+	}
+}
+
 // TestSkipJob verifies SkipJob's conditional semantics (F-06): a pending job
 // transitions to skipped, but a job that already started (or finished) is
 // left untouched.

@@ -85,10 +85,15 @@ func main() {
 	// authorization endpoint, and the authorization_code token grant) to
 	// browsers and the API's discovery/code-exchange.
 	srv := idp.NewServer(cfg.IdP, km, idp.NewDBAuthCodeStore(dbClient), logger)
-	// The gRPC server serves the IdP's API-only surface (job-token minting and
-	// user management) to the API, which authenticates with its mTLS client
-	// certificate (when TLS is configured), so only the API can reach it.
+	// The gRPC server serves the IdP's API-only surface (job-token minting,
+	// user management, and API-key management) to the API, which authenticates
+	// with its mTLS client certificate (when TLS is configured), so only the
+	// API can reach it.
 	userStore := idp.NewDBUserStore(dbClient)
+	// The API-key store (F-25) persists the key directory (hashes, metadata,
+	// and the owner's lockout state) through the Database service, so multiple
+	// IdP replicas share it.
+	apiKeyStore := idp.NewDBAPIKeyStore(dbClient)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -128,7 +133,9 @@ func main() {
 		os.Exit(1)
 	}
 	grpcSrv := grpc.NewServer(grpc.Creds(creds))
-	idppb.RegisterIdPServer(grpcSrv, idp.NewGRPCServer(cfg.IdP, km, userStore, logger))
+	idpGRPC := idp.NewGRPCServer(cfg.IdP, km, userStore, logger)
+	idpGRPC.SetAPIKeyStore(apiKeyStore)
+	idppb.RegisterIdPServer(grpcSrv, idpGRPC)
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		logger.Error("idp: listen grpc", "addr", grpcAddr, "err", err)

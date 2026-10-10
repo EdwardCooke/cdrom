@@ -261,6 +261,22 @@ service Database {
   rpc UpdateIDPUser(UpdateIDPUserRequest) returns (IDPUser);
   rpc DeleteIDPUser(DeleteIDPUserRequest) returns (google.protobuf.Empty);
 
+  // IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
+  // metadata, and the owner's lockout state) here so multiple IdP replicas
+  // share it. The Database service stores the key hash opaquely and never
+  // sees the plaintext; the IdP generates and hashes the secret. CreateAPIKey
+  // is idempotent on (owner, key hash); the other RPCs key on the key id.
+  rpc CreateAPIKey(CreateIDPAPIKeyRequest) returns (IDPAPIKey);
+  rpc GetAPIKey(GetIDPAPIKeyRequest) returns (IDPAPIKey);
+  rpc ListAPIKeys(ListIDPAPIKeysRequest) returns (ListIDPAPIKeysResponse);
+  rpc UpdateAPIKey(UpdateIDPAPIKeyRequest) returns (IDPAPIKey);
+  rpc RotateAPIKey(RotateIDPAPIKeyRequest) returns (IDPAPIKey);
+  rpc DeleteAPIKey(DeleteIDPAPIKeyRequest) returns (google.protobuf.Empty);
+  rpc VerifyAPIKey(VerifyIDPAPIKeyRequest) returns (VerifyIDPAPIKeyResponse);
+  // ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+  // counter and the lockout instant); an admin uses it to un-lock a user.
+  rpc ResetAPIKeyLockout(ResetIDPAPIKeyLockoutRequest) returns (google.protobuf.Empty);
+
   // Secrets (F-12). NextSecretNonce returns the next value of the named
   // secret-nonce counter and atomically increments it. The counter is what
   // keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1777,6 +1793,134 @@ message UpdateIDPUserRequest {
 
 message DeleteIDPUserRequest {
   string id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// IdP API keys (F-25)
+// ---------------------------------------------------------------------------
+
+// IDPAPIKey is an API key owned by a user (F-25). Only the key's hash and a
+// short non-secret prefix are stored; the plaintext is shown to the user
+// exactly once (at creation and at each rotation) and is never persisted.
+message IDPAPIKey {
+  // id is the key's stable identifier (the database's auto-increment primary
+  // key, rendered as a string on the wire).
+  string id = 1;
+  // owner_id is the user (IDPUser.id) the key belongs to.
+  string owner_id = 2;
+  // description is a human-readable label for the key.
+  string description = 3;
+  // key_hash is the SHA-512 hash of the key's plaintext (optionally mixed
+  // with a configured pepper). It is never returned by the API to the UI.
+  string key_hash = 4;
+  // key_prefix is a short, non-secret prefix of the key shown in listings so
+  // a user can tell keys apart without the plaintext.
+  string key_prefix = 5;
+  // expires_at is when the key stops working; unset means the key never
+  // expires.
+  google.protobuf.Timestamp expires_at = 6;
+  // pipeline_scope is the set of pipeline IDs the key is limited to; an empty
+  // set means the key is not limited (it can act on any pipeline the owner
+  // can).
+  repeated int64 pipeline_scope = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// CreateIDPAPIKeyRequest stores a new API key. The caller (the IdP) supplies
+// the key's hash and prefix (it generated and hashed the plaintext); the
+// database assigns the key's id.
+message CreateIDPAPIKeyRequest {
+  IDPAPIKey key = 1;
+}
+
+message GetIDPAPIKeyRequest {
+  // id is the key's identifier.
+  string id = 1;
+}
+
+// ListIDPAPIKeysRequest lists API keys. When owner_id is set only that
+// user's keys are returned; when empty, all keys are returned (used by an
+// admin to list every key in the system).
+message ListIDPAPIKeysRequest {
+  string owner_id = 1;
+}
+
+message ListIDPAPIKeysResponse {
+  repeated IDPAPIKey keys = 1;
+}
+
+// UpdateIDPAPIKeyRequest edits a key's description, expiration, and/or
+// pipeline scope without changing its secret (a "renew"). The key message
+// carries the key's id and the fields to change; the has_* flags indicate
+// which fields are applied (a field whose has_* flag is false is left
+// unchanged). A zero expires_at means the key never expires; an empty
+// pipeline_scope means the key is not limited (all pipelines).
+message UpdateIDPAPIKeyRequest {
+  // key carries the key's id and the fields to change (description,
+  // expires_at, and pipeline_scope).
+  IDPAPIKey key = 1;
+  // has_description indicates whether key.description should be applied
+  // (true) or left unchanged (false).
+  bool has_description = 2;
+  // has_expires_at indicates whether key.expires_at should be applied (true)
+  // or left unchanged (false). A zero timestamp means the key never expires.
+  bool has_expires_at = 3;
+  // has_pipeline_scope indicates whether key.pipeline_scope should be applied
+  // (true) or left unchanged (false).
+  bool has_pipeline_scope = 4;
+}
+
+// RotateIDPAPIKeyRequest replaces a key's secret: the caller (the IdP)
+// supplies the new key's hash and prefix (it generated and hashed the new
+// plaintext); the previous secret stops working. The key's id, description,
+// expiration, and pipeline scope are unchanged.
+message RotateIDPAPIKeyRequest {
+  string id = 1;
+  string key_hash = 2;
+  string key_prefix = 3;
+}
+
+message DeleteIDPAPIKeyRequest {
+  string id = 1;
+}
+
+// VerifyIDPAPIKeyRequest checks a presented `username:apikey` credential
+// against the stored key directory: it looks up the owner by email, checks
+// the owner's API-key lockout, and verifies the presented key's hash against
+// the owner's keys (and the key's expiration). On a miss it increments the
+// owner's failure counter and locks the owner out at the configured maximum.
+// The caller (the IdP) computes key_hash from the presented plaintext (mixing
+// in the configured pepper), so the Database service never sees the plaintext.
+message VerifyIDPAPIKeyRequest {
+  // username is the owner's email (the user's unique login identifier).
+  string username = 1;
+  // key_hash is the SHA-512 hash of the presented key's plaintext (computed
+  // by the caller, mixing in the configured pepper).
+  string key_hash = 2;
+  // max_failures is the failure count that triggers a lockout (the caller's
+  // configured value); 0 disables the lockout (failed attempts are counted
+  // but never lock a user out).
+  int32 max_failures = 3;
+  // lockout_duration is how long a lockout lasts; 0 means the lockout is
+  // permanent (until an admin resets it).
+  google.protobuf.Duration lockout_duration = 4;
+}
+
+// VerifyIDPAPIKeyResponse is the result of a successful API-key verification:
+// the key that matched (metadata + prefix, never the plaintext or hash) and
+// the owner's profile (so the caller can establish the authenticated user
+// with the owner's roles).
+message VerifyIDPAPIKeyResponse {
+  IDPAPIKey key = 1;
+  IDPUser owner = 2;
+}
+
+// ResetIDPAPIKeyLockoutRequest clears a user's API-key lockout state (the
+// failed counter and the lockout instant).
+message ResetIDPAPIKeyLockoutRequest {
+  // user_id is the user's identifier.
+  string user_id = 1;
 }
 
 // ---------------------------------------------------------------------------

@@ -20,22 +20,24 @@ package authz
 // registers its permissions here (F-26 adds service-accounts.*, F-19 adds
 // artifacts.can-promote, …).
 const (
-	PermPipelinesView   = "pipelines.can-view"
-	PermPipelinesCreate = "pipelines.can-create"
-	PermPipelinesEdit   = "pipelines.can-edit"
-	PermPipelinesDelete = "pipelines.can-delete"
-	PermRunsTrigger     = "runs.can-trigger"
-	PermRunsCancel      = "runs.can-cancel"
-	PermJobsApprove     = "jobs.can-approve"
-	PermJobsReject      = "jobs.can-reject"
-	PermSecretsView     = "secrets.can-view"
-	PermSecretsManage   = "secrets.can-manage"
-	PermRolesManage     = "roles.can-manage"
-	PermRolesAssign     = "roles.can-assign"
-	PermUsersManage     = "users.can-manage"
-	PermAPIKeysManage   = "api-keys.can-manage"
-	PermAuditView       = "audit.can-view"
-	PermWorkersView     = "workers.can-view"
+	PermPipelinesView    = "pipelines.can-view"
+	PermPipelinesCreate  = "pipelines.can-create"
+	PermPipelinesEdit    = "pipelines.can-edit"
+	PermPipelinesDelete  = "pipelines.can-delete"
+	PermRunsTrigger      = "runs.can-trigger"
+	PermRunsCancel       = "runs.can-cancel"
+	PermJobsApprove      = "jobs.can-approve"
+	PermJobsReject       = "jobs.can-reject"
+	PermSecretsView      = "secrets.can-view"
+	PermSecretsManage    = "secrets.can-manage"
+	PermRolesManage      = "roles.can-manage"
+	PermRolesAssign      = "roles.can-assign"
+	PermUsersManage      = "users.can-manage"
+	PermAPIKeysManage    = "api-keys.can-manage"
+	PermAPIKeysListAll   = "api-keys.can-list-all"
+	PermAPIKeysManageAll = "api-keys.can-manage-all"
+	PermAuditView        = "audit.can-view"
+	PermWorkersView      = "workers.can-view"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -55,6 +57,8 @@ var AllPermissions = []string{
 	PermRolesAssign,
 	PermUsersManage,
 	PermAPIKeysManage,
+	PermAPIKeysListAll,
+	PermAPIKeysManageAll,
 	PermAuditView,
 	PermWorkersView,
 }

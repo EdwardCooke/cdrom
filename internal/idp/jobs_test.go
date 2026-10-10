@@ -33,6 +33,7 @@ type testIDP struct {
 	httpURL string
 	client  idppb.IdPClient
 	users   UserStore
+	keys    APIKeyStore
 }
 
 // startTestIDP starts an in-process IdP with the given config and user store
@@ -66,6 +67,36 @@ func startTestIDP(t *testing.T, cfg config.IdPConfig, users UserStore) *testIDP 
 	}
 	t.Cleanup(func() { conn.Close() })
 	return &testIDP{httpURL: ts.URL, client: idppb.NewIdPClient(conn), users: users}
+}
+
+// startTestIDPWithKeys is startTestIDP with an API-key store attached (F-25),
+// so the IdP's API-key RPCs are implemented (not Unimplemented).
+func startTestIDPWithKeys(t *testing.T, cfg config.IdPConfig, users UserStore, keys APIKeyStore) *testIDP {
+	t.Helper()
+	km, err := NewKeyManager(cfg, NewMemoryKeyStore(), testLogger())
+	if err != nil {
+		t.Fatalf("NewKeyManager: %v", err)
+	}
+	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	cfg.Issuer = ts.URL
+	grpcSrv := grpc.NewServer()
+	idpGRPC := NewGRPCServer(cfg, km, users, testLogger())
+	idpGRPC.SetAPIKeyStore(keys)
+	idppb.RegisterIdPServer(grpcSrv, idpGRPC)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go grpcSrv.Serve(lis)
+	t.Cleanup(grpcSrv.Stop)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return &testIDP{httpURL: ts.URL, client: idppb.NewIdPClient(conn), users: users, keys: keys}
 }
 
 // mintJobToken mints a job token for jobID from the IdP over gRPC. audience

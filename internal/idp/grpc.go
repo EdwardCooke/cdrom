@@ -27,6 +27,7 @@ type GRPCServer struct {
 	cfg    config.IdPConfig
 	km     *KeyManager
 	users  UserStore
+	keys   APIKeyStore
 	logger *slog.Logger
 }
 
@@ -38,6 +39,12 @@ func NewGRPCServer(cfg config.IdPConfig, km *KeyManager, users UserStore, logger
 		logger = slog.Default()
 	}
 	return &GRPCServer{cfg: cfg, km: km, users: users, logger: logger}
+}
+
+// SetAPIKeyStore attaches the API-key store (F-25). When left nil the
+// API-key RPCs respond with Unimplemented.
+func (s *GRPCServer) SetAPIKeyStore(keys APIKeyStore) {
+	s.keys = keys
 }
 
 // MintJobToken mints a job token for a dispatched job. The token is scoped to
@@ -331,6 +338,189 @@ func (s *GRPCServer) DeleteUser(ctx context.Context, req *idppb.DeleteUserReques
 		return nil, status.Errorf(codes.Internal, "idp: delete user: %v", err)
 	}
 	return &idppb.DeleteUserResponse{Status: "deleted"}, nil
+}
+
+// ---------------------------------------------------------------------------
+// API keys (F-25)
+// ---------------------------------------------------------------------------
+
+// CreateAPIKey generates a new `cdrom-…` API key for a user, hashes it (mixing
+// in the request's pepper), stores it, and returns the plaintext exactly once
+// (in the response's plaintext field). The key's expiration is validated to be
+// at most one year in the future. The RPC is Unimplemented when no API-key
+// store is attached.
+func (s *GRPCServer) CreateAPIKey(ctx context.Context, req *idppb.CreateAPIKeyRequest) (*idppb.CreateAPIKeyResponse, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetOwnerEmail() == "" {
+		return nil, status.Error(codes.InvalidArgument, "owner_email is required")
+	}
+	var expiresAt time.Time
+	if v := req.GetExpiresIn(); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid expires_in: %v", err)
+		}
+		if d < 0 {
+			return nil, status.Error(codes.InvalidArgument, "expires_in must not be negative")
+		}
+		expiresAt = time.Now().Add(d)
+	}
+	key, plaintext, err := s.keys.Create(ctx, req.GetOwnerEmail(), req.GetDescription(), expiresAt, uintsFromInt64(req.GetPipelineScope()), req.GetPepper())
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("idp: created api key", "key", key.ID, "owner", req.GetOwnerEmail(), "description", req.GetDescription())
+	return &idppb.CreateAPIKeyResponse{Key: apiKeyToProto(key), Plaintext: plaintext}, nil
+}
+
+// GetAPIKey returns a key's metadata and prefix (never the plaintext or hash)
+// by key id. A missing key is NotFound.
+func (s *GRPCServer) GetAPIKey(ctx context.Context, req *idppb.GetAPIKeyRequest) (*dbpb.IDPAPIKey, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	key, err := s.keys.Get(ctx, req.GetId())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: get api key: %v", err)
+	}
+	return apiKeyToProto(key), nil
+}
+
+// ListAPIKeys returns API keys. When owner_id is set only that user's keys are
+// returned; when empty, all keys in the system are returned (an admin listing
+// every key). The plaintext is never returned.
+func (s *GRPCServer) ListAPIKeys(ctx context.Context, req *idppb.ListAPIKeysRequest) (*idppb.ListAPIKeysResponse, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	keys, err := s.keys.List(ctx, req.GetOwnerId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "idp: list api keys: %v", err)
+	}
+	out := &idppb.ListAPIKeysResponse{Keys: make([]*dbpb.IDPAPIKey, 0, len(keys))}
+	for _, k := range keys {
+		out.Keys = append(out.Keys, apiKeyToProto(k))
+	}
+	return out, nil
+}
+
+// UpdateAPIKey edits a key's description, expiration, and/or pipeline scope
+// without changing its secret (a "renew"); the same `cdrom-…` value keeps
+// working. A missing key is NotFound.
+func (s *GRPCServer) UpdateAPIKey(ctx context.Context, req *idppb.UpdateAPIKeyRequest) (*dbpb.IDPAPIKey, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	var expiresAt time.Time
+	if req.GetHasExpiresAt() {
+		if v := req.GetExpiresIn(); v != "" {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "invalid expires_in: %v", err)
+			}
+			if d < 0 {
+				return nil, status.Error(codes.InvalidArgument, "expires_in must not be negative")
+			}
+			expiresAt = time.Now().Add(d)
+		}
+	}
+	key, err := s.keys.Update(ctx, req.GetId(), req.GetDescription(), req.GetHasDescription(), expiresAt, req.GetHasExpiresAt(), req.GetHasPipelineScope(), uintsFromInt64(req.GetPipelineScope()))
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: update api key: %v", err)
+	}
+	return apiKeyToProto(key), nil
+}
+
+// RotateAPIKey generates a brand-new `cdrom-…` secret for a key (hashing it,
+// mixing in the request's pepper), returns it exactly once (in the response's
+// plaintext field), and invalidates the previous one. A missing key is
+// NotFound.
+func (s *GRPCServer) RotateAPIKey(ctx context.Context, req *idppb.RotateAPIKeyRequest) (*idppb.RotateAPIKeyResponse, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	key, plaintext, err := s.keys.Rotate(ctx, req.GetId(), req.GetPepper())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: rotate api key: %v", err)
+	}
+	s.logger.Info("idp: rotated api key", "key", key.ID)
+	return &idppb.RotateAPIKeyResponse{Key: apiKeyToProto(key), Plaintext: plaintext}, nil
+}
+
+// DeleteAPIKey removes a key by id. A missing key is NotFound.
+func (s *GRPCServer) DeleteAPIKey(ctx context.Context, req *idppb.DeleteAPIKeyRequest) (*idppb.DeleteAPIKeyResponse, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	if err := s.keys.Delete(ctx, req.GetId()); err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: delete api key: %v", err)
+	}
+	return &idppb.DeleteAPIKeyResponse{Status: "deleted"}, nil
+}
+
+// VerifyAPIKey checks a presented `username:apikey` credential against the
+// stored key directory (hash, expiration, and the owner's lockout). On a miss
+// it increments the owner's failure counter and locks the owner out at the
+// configured maximum. A miss is Unauthenticated.
+func (s *GRPCServer) VerifyAPIKey(ctx context.Context, req *idppb.VerifyAPIKeyRequest) (*idppb.VerifyAPIKeyResponse, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetUsername() == "" || req.GetApiKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username and api_key are required")
+	}
+	key, owner, err := s.keys.Verify(ctx, req.GetUsername(), req.GetApiKey(), req.GetPepper(), int(req.GetMaxFailures()), req.GetLockoutDuration().AsDuration())
+	if err != nil {
+		if status.Code(err) == codes.Unauthenticated {
+			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: verify api key: %v", err)
+	}
+	return &idppb.VerifyAPIKeyResponse{Key: apiKeyToProto(key), Owner: userToProto(owner)}, nil
+}
+
+// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+// counter and the lockout instant). A missing user is NotFound.
+func (s *GRPCServer) ResetAPIKeyLockout(ctx context.Context, req *idppb.ResetAPIKeyLockoutRequest) (*idppb.ResetAPIKeyLockoutResponse, error) {
+	if s.keys == nil {
+		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
+	}
+	if req.GetUserId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+	if err := s.keys.ResetLockout(ctx, req.GetUserId()); err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: reset api key lockout: %v", err)
+	}
+	return &idppb.ResetAPIKeyLockoutResponse{Status: "reset"}, nil
 }
 
 // userToProto renders a user as its protobuf form.

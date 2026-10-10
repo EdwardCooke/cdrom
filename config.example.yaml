@@ -75,6 +75,20 @@ db:
 #auth:
 #  enabled: true
 #  userpass_enabled: true   # default; set false to disable /api/login & /api/register
+#
+#  # API-key authentication (F-25). API keys are per-user, per-pipeline-scoped,
+#  # expiring, revocable credentials that authenticate a user to the API in
+#  # place of a JWT, presented as `Authorization: Bearer <username>:<apikey>`.
+#  # Enabled by default so a local run can mint and use API keys without a full
+#  # OIDC client; set enabled: false to disable API-key authentication and the
+#  # /api/api-keys endpoints (they respond 501). The real logic (key
+#  # generation, hashing, verification, lockout) lives in the IdP; the API is
+#  # a thin proxy.
+#  #api_key:
+#  #  enabled: true          # default; set false to disable API-key auth
+#  #  max_failures: 5        # failed attempts that lock a user out (0 = never)
+#  #  lockout_duration: 1h   # how long a lockout lasts (0 = until an admin resets it)
+#  #  pepper: ""             # optional secret mixed into the key's hash
 #  issuer: https://accounts.example.com/realms/cdrom
 #  client_id: cdrom-ui
 #  redirect_url: http://localhost:8080/api/auth/callback

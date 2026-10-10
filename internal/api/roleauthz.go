@@ -81,9 +81,25 @@ func (s *Server) principalFromContext(ctx context.Context) authz.Principal {
 // the resource, and writes a 403 (or 500 on an engine error) and returns
 // false when the caller is not allowed. When RBAC is not enabled (authentication
 // disabled) it always allows (the caller acts as a synthetic admin).
+//
+// When the caller authenticated with an API key (F-25) that carries a
+// pipeline scope, the caller's resource-scoped permissions are additionally
+// limited to that scope: a request for a pipeline outside the key's scope is
+// denied even if the owner's roles would otherwise allow it. A key with an
+// empty scope is not limited.
 func (s *Server) requirePermission(w http.ResponseWriter, r *http.Request, permission string, res authz.Resource) bool {
 	if !s.rbacEnabled || s.authz == nil {
 		return true
+	}
+	// API-key pipeline scope (F-25): a key scoped to a set of pipelines limits
+	// the caller's resource-scoped permissions to those pipelines. A
+	// platform-wide permission (or a request for a non-pipeline resource) is
+	// unaffected by the scope.
+	if user := auth.UserFromContext(r.Context()); len(user.PipelineScope) > 0 && res.PipelineID != 0 {
+		if !pipelineInScope(user.PipelineScope, uint(res.PipelineID)) {
+			httpError(w, http.StatusForbidden, "permission denied: %s (outside the api key's pipeline scope)", permission)
+			return false
+		}
 	}
 	principal := s.principalFromContext(r.Context())
 	ok, err := s.authz.Check(r.Context(), principal, permission, res)
@@ -96,6 +112,16 @@ func (s *Server) requirePermission(w http.ResponseWriter, r *http.Request, permi
 		return false
 	}
 	return true
+}
+
+// pipelineInScope reports whether pipeline is in the key's pipeline scope.
+func pipelineInScope(scope []uint, pipeline uint) bool {
+	for _, p := range scope {
+		if p == pipeline {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

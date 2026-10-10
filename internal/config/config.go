@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -264,6 +265,39 @@ type AuthConfig struct {
 	// knowing the user at all. When RoleClaim is empty, claim mapping is
 	// disabled.
 	Roles RolesConfig
+	// APIKey configures API-key authentication (F-25): long-lived credentials
+	// that authenticate a user to the API in place of a JWT, presented as
+	// `Authorization: Bearer <username>:<apikey>`. Enabled by default so a
+	// local run can mint and use API keys without a full OIDC client; set it
+	// to false to disable API-key authentication and the /api/api-keys
+	// endpoints (they respond 501).
+	APIKey APIKeyConfig
+}
+
+// APIKeyConfig configures API-key authentication (F-25). API keys are
+// per-user, per-pipeline-scoped, expiring, revocable credentials that
+// authenticate a user to the API in place of a JWT. The real logic (key
+// generation, hashing, verification, and lockout) lives in the IdP; the API
+// is a thin proxy. The pepper is mixed into the key's hash so a database leak
+// does not reveal usable keys; it is passed from the API to the IdP on each
+// key operation (over the mTLS-protected gRPC channel).
+type APIKeyConfig struct {
+	// Enabled turns API-key authentication on. When false the API does not
+	// accept `Bearer <username>:<apikey>` credentials and the /api/api-keys
+	// endpoints respond 501.
+	Enabled bool
+	// MaxFailures is the number of consecutive failed API-key attempts for a
+	// user that triggers a lockout of that user's API-key access. A value of
+	// 0 disables the lockout (failed attempts are counted but never lock a
+	// user out). It is separate from any password-attempt lockout.
+	MaxFailures int
+	// LockoutDuration is how long an API-key lockout lasts. A value of 0
+	// means the lockout is permanent (until an admin resets it).
+	LockoutDuration time.Duration
+	// Pepper is an optional secret mixed into the key's hash (SHA-512 of
+	// pepper + key). When empty the key is hashed on its own. It is passed
+	// from the API to the IdP on each key operation.
+	Pepper string
 }
 
 // RolesConfig configures JWT claim mapping for role-based access control
@@ -541,8 +575,12 @@ func LoadWithFile(file string) (*Config, error) {
 		// UserPassEnabled defaults to true so a local run can sign in with a
 		// password (the API's /api/login and /api/register) without a full
 		// OIDC client; deployments using an external identity provider can
-		// disable it.
-		Auth: AuthConfig{UserPassEnabled: true},
+		// disable it. APIKey.Enabled defaults to true so a local run can mint
+		// and use API keys (F-25) without a full OIDC client.
+		Auth: AuthConfig{
+			UserPassEnabled: true,
+			APIKey:          APIKeyConfig{Enabled: true},
+		},
 		IdP: IdPConfig{
 			Issuer:        defaultIdPIssuer,
 			KeyLifetime:   90 * 24 * time.Hour,
@@ -627,6 +665,12 @@ type fileConfig struct {
 			RoleMappings     map[string]string `yaml:"role_mappings"`
 			RoleClaimAsNames *bool             `yaml:"role_claim_as_names"`
 		} `yaml:"roles"`
+		APIKey *struct {
+			Enabled         *bool   `yaml:"enabled"`
+			MaxFailures     *int    `yaml:"max_failures"`
+			LockoutDuration *string `yaml:"lockout_duration"`
+			Pepper          *string `yaml:"pepper"`
+		} `yaml:"api_key"`
 	} `yaml:"auth"`
 	IdP *struct {
 		Issuer        *string   `yaml:"issuer"`
@@ -758,6 +802,24 @@ func applyFile(cfg *Config, path string) error {
 				cfg.Auth.Roles.RoleClaimAsNames = *f.Auth.Roles.RoleClaimAsNames
 			}
 		}
+		if f.Auth.APIKey != nil {
+			if f.Auth.APIKey.Enabled != nil {
+				cfg.Auth.APIKey.Enabled = *f.Auth.APIKey.Enabled
+			}
+			if f.Auth.APIKey.MaxFailures != nil {
+				cfg.Auth.APIKey.MaxFailures = *f.Auth.APIKey.MaxFailures
+			}
+			if f.Auth.APIKey.LockoutDuration != nil {
+				if d, err := time.ParseDuration(*f.Auth.APIKey.LockoutDuration); err == nil {
+					cfg.Auth.APIKey.LockoutDuration = d
+				} else {
+					return fmt.Errorf("config: parse auth.api_key.lockout_duration %q: %w", *f.Auth.APIKey.LockoutDuration, err)
+				}
+			}
+			if f.Auth.APIKey.Pepper != nil {
+				cfg.Auth.APIKey.Pepper = *f.Auth.APIKey.Pepper
+			}
+		}
 	}
 	if f.IdP != nil {
 		if f.IdP.Issuer != nil {
@@ -881,6 +943,21 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("CDROM_AUTH_USERPASS_ENABLED"); v != "" {
 		cfg.Auth.UserPassEnabled = v == "true" || v == "1"
 	}
+	// API-key authentication (F-25).
+	if v := os.Getenv("CDROM_AUTH_APIKEY_ENABLED"); v != "" {
+		cfg.Auth.APIKey.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("CDROM_AUTH_APIKEY_MAX_FAILURES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.APIKey.MaxFailures = n
+		}
+	}
+	if v := os.Getenv("CDROM_AUTH_APIKEY_LOCKOUT_DURATION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Auth.APIKey.LockoutDuration = d
+		}
+	}
+	cfg.Auth.APIKey.Pepper = envOr("CDROM_AUTH_APIKEY_PEPPER", cfg.Auth.APIKey.Pepper)
 	cfg.Auth.Issuer = envOr("CDROM_AUTH_ISSUER", cfg.Auth.Issuer)
 	cfg.Auth.ClientID = envOr("CDROM_AUTH_CLIENT_ID", cfg.Auth.ClientID)
 	cfg.Auth.RedirectURL = envOr("CDROM_AUTH_REDIRECT_URL", cfg.Auth.RedirectURL)

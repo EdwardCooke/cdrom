@@ -79,6 +79,69 @@ func TestUserPassEnabledConfig(t *testing.T) {
 	}
 }
 
+func TestAPIKeyConfig(t *testing.T) {
+	// API-key auth is enabled by default for local development.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Auth.APIKey.Enabled {
+		t.Errorf("Auth.APIKey.Enabled = false, want true (default)")
+	}
+
+	// Set via the config file.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+auth:
+  api_key:
+    enabled: false
+    max_failures: 5
+    lockout_duration: 15m
+    pepper: s3cret-pepper
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.Auth.APIKey.Enabled {
+		t.Errorf("APIKey.Enabled = true, want false (from file)")
+	}
+	if cfg.Auth.APIKey.MaxFailures != 5 {
+		t.Errorf("APIKey.MaxFailures = %d, want 5 (from file)", cfg.Auth.APIKey.MaxFailures)
+	}
+	if cfg.Auth.APIKey.LockoutDuration != 15*time.Minute {
+		t.Errorf("APIKey.LockoutDuration = %v, want 15m (from file)", cfg.Auth.APIKey.LockoutDuration)
+	}
+	if cfg.Auth.APIKey.Pepper != "s3cret-pepper" {
+		t.Errorf("APIKey.Pepper = %q, want s3cret-pepper (from file)", cfg.Auth.APIKey.Pepper)
+	}
+
+	// Overridden by the environment.
+	t.Setenv("CDROM_AUTH_APIKEY_ENABLED", "true")
+	t.Setenv("CDROM_AUTH_APIKEY_MAX_FAILURES", "3")
+	t.Setenv("CDROM_AUTH_APIKEY_LOCKOUT_DURATION", "1h")
+	t.Setenv("CDROM_AUTH_APIKEY_PEPPER", "env-pepper")
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if !cfg.Auth.APIKey.Enabled {
+		t.Errorf("APIKey.Enabled = false, want true (env must override file)")
+	}
+	if cfg.Auth.APIKey.MaxFailures != 3 {
+		t.Errorf("APIKey.MaxFailures = %d, want 3 (env must override file)", cfg.Auth.APIKey.MaxFailures)
+	}
+	if cfg.Auth.APIKey.LockoutDuration != time.Hour {
+		t.Errorf("APIKey.LockoutDuration = %v, want 1h (env must override file)", cfg.Auth.APIKey.LockoutDuration)
+	}
+	if cfg.Auth.APIKey.Pepper != "env-pepper" {
+		t.Errorf("APIKey.Pepper = %q, want env-pepper (env must override file)", cfg.Auth.APIKey.Pepper)
+	}
+}
+
 func TestLoadWithFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := `

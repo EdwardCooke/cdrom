@@ -184,6 +184,19 @@ func main() {
 		apiServer.SetUserPassClient(api.NewUserPassClient(idpClient, audience, idpBase))
 	}
 
+	// API-key authentication (F-25). When enabled the API attaches a proxy
+	// client to the IdP so the UI can manage API keys (the real logic — key
+	// generation, hashing, verification, and lockout — lives in the IdP), and
+	// the auth middleware accepts `Authorization: Bearer <username>:<apikey>`
+	// credentials in place of a JWT. The pepper, failure threshold, and
+	// lockout duration come from the API's auth.api_key config and are supplied
+	// to the IdP on each operation.
+	if cfg.Auth.APIKey.Enabled {
+		apiKeyClient := api.NewAPIKeyClient(idpClient, cfg.Auth.APIKey.Pepper, cfg.Auth.APIKey.MaxFailures, cfg.Auth.APIKey.LockoutDuration)
+		apiServer.SetAPIKeyClient(apiKeyClient)
+		authBundle.SetAPIKeyVerifier(api.NewAPIKeyVerifier(apiKeyClient), true)
+	}
+
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
 	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
 	// endpoint is registered on a parent mux so it is reachable without a

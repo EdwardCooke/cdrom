@@ -154,8 +154,7 @@ is the summary index). Summary:
 | F-16…F-22 | Roadmap: queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 | F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
-| F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
-
+| F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; `api-keys.can-manage` lets a user manage their own keys, while acting on **another user's** keys (create-for-them, get/edit/rotate/delete) requires the explicit `api-keys.can-manage-all` permission (admins have it by default); `GET /api/api-keys` lists only the caller's own keys, while `GET /api/api-keys/all` lists **all** keys in the system and requires `api-keys.can-list-all`; an admin can reset a user's lockout; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
 | F-26 | Roadmap: service accounts (role-assignable non-human identities; exactly two individually rotatable API keys generated and hashed by the Database service, returned once on create/rotate for UI display; disable/enable; permanent soft deletion with both key slots cleared; granular create/edit/rotate/disable/enable/delete/assign-role/remove-role management permissions; not yet implemented) |
 | F-27 | Roadmap: approval groups (named sets of users an `approval` step (F-13) references via an `approvers` param instead of individual users; a decision is accepted only from a member of a referenced group / named individual who also holds the F-14 approve/reject permission; membership resolved at decision time; optional role references and N-of-M quorum; not yet implemented) |
 | F-28 | Roadmap: SCIM 2.0 user provisioning (a service-provider endpoint on the built-in IdP so an external IdP like Azure AD/Entra ID provisions, updates, and deprovisions users and groups into the IdP's user directory; SCIM Groups map to F-14 roles / F-27 approval groups; **users are soft-deleted, never hard-deleted**, so audit (F-15) / approval (F-13) / trigger (F-07/F-09) actor references stay resolvable after deprovisioning; provisioning is mutually exclusive — with SCIM **enabled** the corporate IdP is the sole source of users (no auto-provisioning on login), with SCIM **disabled** the IdP auto-provisions users just-in-time on first OIDC login; not yet implemented) |
@@ -317,9 +316,12 @@ Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_P
 `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
 the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
 auth vars `CDROM_AUTH_*` (incl. `CDROM_AUTH_USERPASS_ENABLED`, username/password
-auth, default on; and the RBAC claim-mapping vars `CDROM_AUTH_ROLE_CLAIM`,
-`CDROM_AUTH_ROLE_MAPPINGS` (comma-separated `claimValue=roleName`), and
-`CDROM_AUTH_ROLE_CLAIM_AS_NAMES`, F-14), the IdP vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
+auth, default on; the API-key vars `CDROM_AUTH_APIKEY_ENABLED` (default on),
+`CDROM_AUTH_APIKEY_MAX_FAILURES`, `CDROM_AUTH_APIKEY_LOCKOUT_DURATION`, and
+`CDROM_AUTH_APIKEY_PEPPER` (F-25); and the RBAC claim-mapping vars
+`CDROM_AUTH_ROLE_CLAIM`, `CDROM_AUTH_ROLE_MAPPINGS` (comma-separated
+`claimValue=roleName`), and `CDROM_AUTH_ROLE_CLAIM_AS_NAMES`, F-14), the IdP
+vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
 IdP's gRPC listen address; the API dials it via `CDROM_IDP_GRPC_ADDR`), the
 job-token auth vars `CDROM_GRPC_AUTH_*`, the secrets vars
 `CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY` (base64 32-byte AES-256-GCM key;

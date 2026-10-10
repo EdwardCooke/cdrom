@@ -825,6 +825,52 @@ type IDPUser struct {
 	Roles     []string  `gorm:"type:text;serializer:json" json:"roles"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// APIKeyFailedCount is the number of consecutive failed API-key
+	// verification attempts for this user (F-25). It is reset to zero on a
+	// successful verification and is separate from any password-attempt
+	// lockout, so brute-forcing API keys does not lock a user out of password
+	// sign-in (and vice versa).
+	APIKeyFailedCount int `gorm:"column:api_key_failed_count;not null;default:0" json:"-"`
+	// APIKeyLockedUntil is when the user's API-key lockout expires (F-25);
+	// zero means the user is not locked out. When the configured lockout
+	// duration is zero the lockout is permanent (until an admin resets it).
+	APIKeyLockedUntil time.Time `gorm:"column:api_key_locked_until" json:"-"`
+}
+
+// IDPAPIKey is an API key owned by a user (F-25): a long-lived credential that
+// authenticates the user to the API in place of a JWT. A key is a string
+// `cdrom-` followed by 64 random alphanumeric characters; only its hash is
+// stored (the plaintext is shown to the user exactly once, at creation and at
+// each rotation). A key carries a description, an expiration date (at most
+// one year in the future), and a pipeline scope (a set of pipeline IDs; an
+// empty set means all pipelines). The key's effective permissions are the
+// owner's own permissions limited to the key's pipeline scope.
+//
+// The key directory (hashes, metadata, and the owner's lockout state) is
+// stored in the database (like the IdP's user directory) so multiple IdP
+// replicas share it. The Database service stores the key hash opaquely and
+// never sees the plaintext; the IdP generates and hashes the secret.
+type IDPAPIKey struct {
+	gorm.Model
+	// OwnerID is the user (IDPUser.ID) the key belongs to.
+	OwnerID uint `gorm:"index;not null" json:"owner_id"`
+	// Description is a human-readable label for the key.
+	Description string `json:"description"`
+	// KeyHash is the SHA-512 hash of the key's plaintext (optionally mixed
+	// with a configured pepper). The plaintext is never persisted.
+	KeyHash string `gorm:"column:key_hash;type:text;not null" json:"-"`
+	// KeyPrefix is a short, non-secret prefix of the key (e.g. the first
+	// dozen characters) shown in listings so a user can tell keys apart
+	// without the plaintext.
+	KeyPrefix string `gorm:"column:key_prefix" json:"key_prefix"`
+	// ExpiresAt is when the key stops working; zero means the key never
+	// expires. It is validated to be at most one year in the future.
+	ExpiresAt time.Time `json:"expires_at"`
+	// PipelineScope is the set of pipeline IDs the key is limited to; an empty
+	// set means the key is not limited (it can act on any pipeline the owner
+	// can). It is stored as a JSON document in a text column (portable across
+	// SQLite and PostgreSQL).
+	PipelineScope []uint `gorm:"type:text;serializer:json" json:"pipeline_scope,omitempty"`
 }
 
 // Event is a row in the shared, append-only event log (F-23, high
@@ -1036,6 +1082,7 @@ func All() []any {
 		&IDPSigningKey{},
 		&IDPAuthCode{},
 		&IDPUser{},
+		&IDPAPIKey{},
 		&Event{},
 		&Lease{},
 		&SecretNonce{},

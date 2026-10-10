@@ -77,6 +77,14 @@ const (
 	Database_ListIDPUsers_FullMethodName            = "/cdrom.db.v1.Database/ListIDPUsers"
 	Database_UpdateIDPUser_FullMethodName           = "/cdrom.db.v1.Database/UpdateIDPUser"
 	Database_DeleteIDPUser_FullMethodName           = "/cdrom.db.v1.Database/DeleteIDPUser"
+	Database_CreateAPIKey_FullMethodName            = "/cdrom.db.v1.Database/CreateAPIKey"
+	Database_GetAPIKey_FullMethodName               = "/cdrom.db.v1.Database/GetAPIKey"
+	Database_ListAPIKeys_FullMethodName             = "/cdrom.db.v1.Database/ListAPIKeys"
+	Database_UpdateAPIKey_FullMethodName            = "/cdrom.db.v1.Database/UpdateAPIKey"
+	Database_RotateAPIKey_FullMethodName            = "/cdrom.db.v1.Database/RotateAPIKey"
+	Database_DeleteAPIKey_FullMethodName            = "/cdrom.db.v1.Database/DeleteAPIKey"
+	Database_VerifyAPIKey_FullMethodName            = "/cdrom.db.v1.Database/VerifyAPIKey"
+	Database_ResetAPIKeyLockout_FullMethodName      = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
 	Database_NextSecretNonce_FullMethodName         = "/cdrom.db.v1.Database/NextSecretNonce"
 	Database_CreateRole_FullMethodName              = "/cdrom.db.v1.Database/CreateRole"
 	Database_GetRole_FullMethodName                 = "/cdrom.db.v1.Database/GetRole"
@@ -338,6 +346,21 @@ type DatabaseClient interface {
 	ListIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error)
 	UpdateIDPUser(ctx context.Context, in *UpdateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
+	// metadata, and the owner's lockout state) here so multiple IdP replicas
+	// share it. The Database service stores the key hash opaquely and never
+	// sees the plaintext; the IdP generates and hashes the secret. CreateAPIKey
+	// is idempotent on (owner, key hash); the other RPCs key on the key id.
+	CreateAPIKey(ctx context.Context, in *CreateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
+	GetAPIKey(ctx context.Context, in *GetIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
+	ListAPIKeys(ctx context.Context, in *ListIDPAPIKeysRequest, opts ...grpc.CallOption) (*ListIDPAPIKeysResponse, error)
+	UpdateAPIKey(ctx context.Context, in *UpdateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
+	RotateAPIKey(ctx context.Context, in *RotateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
+	DeleteAPIKey(ctx context.Context, in *DeleteIDPAPIKeyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	VerifyAPIKey(ctx context.Context, in *VerifyIDPAPIKeyRequest, opts ...grpc.CallOption) (*VerifyIDPAPIKeyResponse, error)
+	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+	// counter and the lockout instant); an admin uses it to un-lock a user.
+	ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPIKeyLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -981,6 +1004,86 @@ func (c *databaseClient) DeleteIDPUser(ctx context.Context, in *DeleteIDPUserReq
 	return out, nil
 }
 
+func (c *databaseClient) CreateAPIKey(ctx context.Context, in *CreateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPAPIKey)
+	err := c.cc.Invoke(ctx, Database_CreateAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetAPIKey(ctx context.Context, in *GetIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPAPIKey)
+	err := c.cc.Invoke(ctx, Database_GetAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListAPIKeys(ctx context.Context, in *ListIDPAPIKeysRequest, opts ...grpc.CallOption) (*ListIDPAPIKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListIDPAPIKeysResponse)
+	err := c.cc.Invoke(ctx, Database_ListAPIKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateAPIKey(ctx context.Context, in *UpdateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPAPIKey)
+	err := c.cc.Invoke(ctx, Database_UpdateAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RotateAPIKey(ctx context.Context, in *RotateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPAPIKey)
+	err := c.cc.Invoke(ctx, Database_RotateAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteAPIKey(ctx context.Context, in *DeleteIDPAPIKeyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) VerifyAPIKey(ctx context.Context, in *VerifyIDPAPIKeyRequest, opts ...grpc.CallOption) (*VerifyIDPAPIKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyIDPAPIKeyResponse)
+	err := c.cc.Invoke(ctx, Database_VerifyAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPIKeyLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_ResetAPIKeyLockout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NextSecretNonceResponse)
@@ -1357,6 +1460,21 @@ type DatabaseServer interface {
 	ListIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error)
 	UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error)
 	DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*emptypb.Empty, error)
+	// IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
+	// metadata, and the owner's lockout state) here so multiple IdP replicas
+	// share it. The Database service stores the key hash opaquely and never
+	// sees the plaintext; the IdP generates and hashes the secret. CreateAPIKey
+	// is idempotent on (owner, key hash); the other RPCs key on the key id.
+	CreateAPIKey(context.Context, *CreateIDPAPIKeyRequest) (*IDPAPIKey, error)
+	GetAPIKey(context.Context, *GetIDPAPIKeyRequest) (*IDPAPIKey, error)
+	ListAPIKeys(context.Context, *ListIDPAPIKeysRequest) (*ListIDPAPIKeysResponse, error)
+	UpdateAPIKey(context.Context, *UpdateIDPAPIKeyRequest) (*IDPAPIKey, error)
+	RotateAPIKey(context.Context, *RotateIDPAPIKeyRequest) (*IDPAPIKey, error)
+	DeleteAPIKey(context.Context, *DeleteIDPAPIKeyRequest) (*emptypb.Empty, error)
+	VerifyAPIKey(context.Context, *VerifyIDPAPIKeyRequest) (*VerifyIDPAPIKeyResponse, error)
+	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+	// counter and the lockout instant); an admin uses it to un-lock a user.
+	ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1600,6 +1718,30 @@ func (UnimplementedDatabaseServer) UpdateIDPUser(context.Context, *UpdateIDPUser
 }
 func (UnimplementedDatabaseServer) DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) CreateAPIKey(context.Context, *CreateIDPAPIKeyRequest) (*IDPAPIKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) GetAPIKey(context.Context, *GetIDPAPIKeyRequest) (*IDPAPIKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) ListAPIKeys(context.Context, *ListIDPAPIKeysRequest) (*ListIDPAPIKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAPIKeys not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateAPIKey(context.Context, *UpdateIDPAPIKeyRequest) (*IDPAPIKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) RotateAPIKey(context.Context, *RotateIDPAPIKeyRequest) (*IDPAPIKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteAPIKey(context.Context, *DeleteIDPAPIKeyRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) VerifyAPIKey(context.Context, *VerifyIDPAPIKeyRequest) (*VerifyIDPAPIKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
 }
 func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
@@ -2687,6 +2829,150 @@ func _Database_DeleteIDPUser_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateIDPAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateAPIKey(ctx, req.(*CreateIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetIDPAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetAPIKey(ctx, req.(*GetIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListAPIKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListIDPAPIKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListAPIKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListAPIKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListAPIKeys(ctx, req.(*ListIDPAPIKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateIDPAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateAPIKey(ctx, req.(*UpdateIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RotateAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateIDPAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RotateAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RotateAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RotateAPIKey(ctx, req.(*RotateIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteIDPAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteAPIKey(ctx, req.(*DeleteIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_VerifyAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyIDPAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).VerifyAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_VerifyAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).VerifyAPIKey(ctx, req.(*VerifyIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ResetAPIKeyLockout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetIDPAPIKeyLockoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ResetAPIKeyLockout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ResetAPIKeyLockout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ResetAPIKeyLockout(ctx, req.(*ResetIDPAPIKeyLockoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NextSecretNonceRequest)
 	if err := dec(in); err != nil {
@@ -3155,6 +3441,38 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteIDPUser",
 			Handler:    _Database_DeleteIDPUser_Handler,
+		},
+		{
+			MethodName: "CreateAPIKey",
+			Handler:    _Database_CreateAPIKey_Handler,
+		},
+		{
+			MethodName: "GetAPIKey",
+			Handler:    _Database_GetAPIKey_Handler,
+		},
+		{
+			MethodName: "ListAPIKeys",
+			Handler:    _Database_ListAPIKeys_Handler,
+		},
+		{
+			MethodName: "UpdateAPIKey",
+			Handler:    _Database_UpdateAPIKey_Handler,
+		},
+		{
+			MethodName: "RotateAPIKey",
+			Handler:    _Database_RotateAPIKey_Handler,
+		},
+		{
+			MethodName: "DeleteAPIKey",
+			Handler:    _Database_DeleteAPIKey_Handler,
+		},
+		{
+			MethodName: "VerifyAPIKey",
+			Handler:    _Database_VerifyAPIKey_Handler,
+		},
+		{
+			MethodName: "ResetAPIKeyLockout",
+			Handler:    _Database_ResetAPIKeyLockout_Handler,
 		},
 		{
 			MethodName: "NextSecretNonce",

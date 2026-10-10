@@ -132,27 +132,33 @@ type Event struct {
 // Action names (F-15). Every audited action has a stable, namespaced name
 // (<area>.<action>) so the log can be filtered by action.
 const (
-	ActionPipelineCreate   = "pipeline.create"
-	ActionPipelineUpdate   = "pipeline.update"
-	ActionPipelineDelete   = "pipeline.delete"
-	ActionRunTrigger       = "run.trigger"
-	ActionJobCancel        = "job.cancel"
-	ActionJobApprove       = "job.approve"
-	ActionJobReject        = "job.reject"
-	ActionJobRerun         = "job.rerun"
-	ActionSecretEncrypt    = "secret.encrypt"
-	ActionRoleCreate       = "role.create"
-	ActionRoleUpdate       = "role.update"
-	ActionRoleDelete       = "role.delete"
-	ActionBindingAdd       = "binding.add"
-	ActionBindingDelete    = "binding.delete"
-	ActionUserCreate       = "user.create"
-	ActionUserUpdate       = "user.update"
-	ActionUserDelete       = "user.delete"
-	ActionLogin            = "auth.login"
-	ActionRegister         = "auth.register"
-	ActionWorkerRegister   = "worker.register"
-	ActionWorkerDeregister = "worker.deregister"
+	ActionPipelineCreate = "pipeline.create"
+	ActionPipelineUpdate = "pipeline.update"
+	ActionPipelineDelete = "pipeline.delete"
+	ActionRunTrigger     = "run.trigger"
+	ActionJobCancel      = "job.cancel"
+	ActionJobApprove     = "job.approve"
+	ActionJobReject      = "job.reject"
+	ActionJobRerun       = "job.rerun"
+	ActionSecretEncrypt  = "secret.encrypt"
+	ActionRoleCreate     = "role.create"
+	ActionRoleUpdate     = "role.update"
+	ActionRoleDelete     = "role.delete"
+	ActionBindingAdd     = "binding.add"
+	ActionBindingDelete  = "binding.delete"
+	ActionUserCreate     = "user.create"
+	ActionUserUpdate     = "user.update"
+	ActionUserDelete     = "user.delete"
+	// ActionAPIKey* are the API-key management actions (F-25).
+	ActionAPIKeyCreate       = "api-key.create"
+	ActionAPIKeyUpdate       = "api-key.update"
+	ActionAPIKeyRotate       = "api-key.rotate"
+	ActionAPIKeyDelete       = "api-key.delete"
+	ActionAPIKeyResetLockout = "api-key.reset-lockout"
+	ActionLogin              = "auth.login"
+	ActionRegister           = "auth.register"
+	ActionWorkerRegister     = "worker.register"
+	ActionWorkerDeregister   = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
@@ -174,6 +180,7 @@ const (
 	TargetSecret      = "secret"
 	TargetWorker      = "worker"
 	TargetLogin       = "login"
+	TargetAPIKey      = "api-key"
 )
 
 // Outcomes (F-15).

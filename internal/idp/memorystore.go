@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -229,6 +230,225 @@ func copyUser(u *User) *User {
 	out := *u
 	if u.Roles != nil {
 		out.Roles = append([]string(nil), u.Roles...)
+	}
+	return &out
+}
+
+// MemoryAPIKeyStore is an in-memory APIKeyStore. It is used by tests and is
+// suitable for running a single IdP without a Database service; it does not
+// share state across processes, so it does not support multiple IdP replicas.
+// It holds a UserStore (users) so it can resolve a key's owner by email.
+type MemoryAPIKeyStore struct {
+	mu    sync.Mutex
+	keys  map[string]*APIKey
+	byKey map[string]*APIKey // keyed by key hash
+	// lockout tracks a user's API-key lockout state, keyed by user ID.
+	lockout map[string]*apiKeyLockout
+	users   UserStore
+}
+
+// apiKeyLockout is a user's API-key lockout state.
+type apiKeyLockout struct {
+	failedCount int
+	lockedUntil time.Time
+}
+
+// NewMemoryAPIKeyStore returns an empty in-memory APIKeyStore that resolves
+// key owners through users.
+func NewMemoryAPIKeyStore(users UserStore) *MemoryAPIKeyStore {
+	return &MemoryAPIKeyStore{
+		keys:    make(map[string]*APIKey),
+		byKey:   make(map[string]*APIKey),
+		lockout: make(map[string]*apiKeyLockout),
+		users:   users,
+	}
+}
+
+// nextKeyID returns the next key id (a 1-based counter over the store's keys).
+func (s *MemoryAPIKeyStore) nextKeyID() string {
+	max := 0
+	for id := range s.keys {
+		if n, err := strconv.Atoi(id); err == nil && n > max {
+			max = n
+		}
+	}
+	return strconv.Itoa(max + 1)
+}
+
+// storeKey indexes a key by its id and its hash. The caller must hold s.mu.
+func (s *MemoryAPIKeyStore) storeKey(k *APIKey) {
+	s.keys[k.ID] = k
+	s.byKey[k.KeyHash] = k
+}
+
+// removeKey unindexes a key by its id and hash. The caller must hold s.mu.
+func (s *MemoryAPIKeyStore) removeKey(k *APIKey) {
+	delete(s.keys, k.ID)
+	delete(s.byKey, k.KeyHash)
+}
+
+func (s *MemoryAPIKeyStore) Create(ctx context.Context, ownerEmail, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error) {
+	if !expiresAt.IsZero() && expiresAt.After(time.Now().Add(maxAPIKeyLifetime)) {
+		return nil, "", status.Error(codes.InvalidArgument, "expiration is more than one year in the future")
+	}
+	owner, err := s.users.GetByEmail(ctx, ownerEmail)
+	if err != nil {
+		return nil, "", err
+	}
+	plaintext, err := NewAPIKey()
+	if err != nil {
+		return nil, "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := &APIKey{
+		ID:            s.nextKeyID(),
+		OwnerID:       owner.ID,
+		Description:   description,
+		KeyHash:       HashAPIKey(pepper, plaintext),
+		KeyPrefix:     apiDisplayPrefix(plaintext),
+		ExpiresAt:     expiresAt,
+		PipelineScope: pipelineScope,
+		CreatedAt:     time.Now(),
+	}
+	s.storeKey(key)
+	return copyAPIKey(key), plaintext, nil
+}
+
+func (s *MemoryAPIKeyStore) Get(_ context.Context, id string) (*APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "api key not found")
+	}
+	return copyAPIKey(k), nil
+}
+
+func (s *MemoryAPIKeyStore) List(_ context.Context, ownerID string) ([]*APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*APIKey, 0, len(s.keys))
+	for _, k := range s.keys {
+		if ownerID != "" && k.OwnerID != ownerID {
+			continue
+		}
+		out = append(out, copyAPIKey(k))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (s *MemoryAPIKeyStore) Update(_ context.Context, id, description string, hasDescription bool, expiresAt time.Time, hasExpiresAt bool, hasScope bool, pipelineScope []uint) (*APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "api key not found")
+	}
+	if hasDescription {
+		k.Description = description
+	}
+	if hasExpiresAt {
+		k.ExpiresAt = expiresAt
+	}
+	if hasScope {
+		k.PipelineScope = pipelineScope
+	}
+	return copyAPIKey(k), nil
+}
+
+func (s *MemoryAPIKeyStore) Rotate(_ context.Context, id, pepper string) (*APIKey, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, "", status.Error(codes.NotFound, "api key not found")
+	}
+	plaintext, err := NewAPIKey()
+	if err != nil {
+		return nil, "", err
+	}
+	delete(s.byKey, k.KeyHash)
+	k.KeyHash = HashAPIKey(pepper, plaintext)
+	k.KeyPrefix = apiDisplayPrefix(plaintext)
+	s.byKey[k.KeyHash] = k
+	return copyAPIKey(k), plaintext, nil
+}
+
+func (s *MemoryAPIKeyStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return status.Error(codes.NotFound, "api key not found")
+	}
+	s.removeKey(k)
+	return nil
+}
+
+func (s *MemoryAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper string, maxFailures int, lockoutDuration time.Duration) (*APIKey, *User, error) {
+	owner, err := s.users.GetByEmail(ctx, username)
+	if err != nil {
+		return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lo := s.lockout[owner.ID]
+	if lo != nil && !lo.lockedUntil.IsZero() && lo.lockedUntil.After(time.Now()) {
+		return nil, nil, status.Error(codes.Unauthenticated, "api key access is locked")
+	}
+	hash := HashAPIKey(pepper, apiKey)
+	now := time.Now()
+	for _, k := range s.byKey {
+		if k.OwnerID != owner.ID || k.KeyHash != hash {
+			continue
+		}
+		if !k.ExpiresAt.IsZero() && k.ExpiresAt.Before(now) {
+			continue
+		}
+		if lo != nil {
+			lo.failedCount = 0
+		}
+		return copyAPIKey(k), copyUser(owner), nil
+	}
+	// A miss: increment the owner's failure counter and, at the configured
+	// maximum, lock the owner out (for the configured duration, or
+	// permanently when it is zero) and reset the counter.
+	if maxFailures > 0 {
+		if lo == nil {
+			lo = &apiKeyLockout{}
+			s.lockout[owner.ID] = lo
+		}
+		lo.failedCount++
+		if lo.failedCount >= maxFailures {
+			if lockoutDuration > 0 {
+				lo.lockedUntil = now.Add(lockoutDuration)
+			} else {
+				lo.lockedUntil = apiKeyLockoutForever
+			}
+			lo.failedCount = 0
+		}
+	}
+	return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
+}
+
+func (s *MemoryAPIKeyStore) ResetLockout(ctx context.Context, userID string) error {
+	if _, err := s.users.GetByID(ctx, userID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.lockout, userID)
+	return nil
+}
+
+// copyAPIKey returns a copy of key (with a copied PipelineScope slice) so
+// callers cannot mutate the store's state.
+func copyAPIKey(k *APIKey) *APIKey {
+	out := *k
+	if k.PipelineScope != nil {
+		out.PipelineScope = append([]uint(nil), k.PipelineScope...)
 	}
 	return &out
 }

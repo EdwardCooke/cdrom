@@ -2163,6 +2163,318 @@ func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserReque
 	return &emptypb.Empty{}, nil
 }
 
+// ---------------------------------------------------------------------------
+// IdP API keys (F-25)
+// ---------------------------------------------------------------------------
+
+// apiKeyLockoutForever is the instant used to record a permanent API-key
+// lockout (one whose configured duration is zero): a far-future time that
+// keeps the user locked out until an admin resets the lockout.
+var apiKeyLockoutForever = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+
+// CreateAPIKey stores a new API key. The caller (the IdP) supplies the key's
+// hash and prefix (it generated and hashed the plaintext); the database
+// assigns the key's id. A key whose owner does not exist is InvalidArgument.
+func (s *Server) CreateAPIKey(ctx context.Context, req *dbpb.CreateIDPAPIKeyRequest) (*dbpb.IDPAPIKey, error) {
+	k := req.GetKey()
+	if k == nil || k.GetOwnerId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "owner_id is required")
+	}
+	if k.GetKeyHash() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key_hash is required")
+	}
+	ownerID, err := parseUserID(k.GetOwnerId())
+	if err != nil {
+		return nil, err
+	}
+	var owner models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", ownerID).First(&owner).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.InvalidArgument, "owner user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	key := &models.IDPAPIKey{
+		OwnerID:       ownerID,
+		Description:   k.GetDescription(),
+		KeyHash:       k.GetKeyHash(),
+		KeyPrefix:     k.GetKeyPrefix(),
+		PipelineScope: uintsFromInt64(k.GetPipelineScope()),
+	}
+	if ts := k.GetExpiresAt(); ts != nil {
+		key.ExpiresAt = ts.AsTime()
+	}
+	if err := s.db.WithContext(ctx).Create(key).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPAPIKey(key), nil
+}
+
+// GetAPIKey returns a key by id. A missing key returns NotFound.
+func (s *Server) GetAPIKey(ctx context.Context, req *dbpb.GetIDPAPIKeyRequest) (*dbpb.IDPAPIKey, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseAPIKeyID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var key models.IDPAPIKey
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&key).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPAPIKey(&key), nil
+}
+
+// ListAPIKeys returns API keys, ordered by id. When owner_id is set only that
+// user's keys are returned; when empty, all keys in the system are returned.
+func (s *Server) ListAPIKeys(ctx context.Context, req *dbpb.ListIDPAPIKeysRequest) (*dbpb.ListIDPAPIKeysResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.IDPAPIKey{})
+	if req.GetOwnerId() != "" {
+		ownerID, err := parseUserID(req.GetOwnerId())
+		if err != nil {
+			return nil, err
+		}
+		query = query.Where("owner_id = ?", ownerID)
+	}
+	var keys []models.IDPAPIKey
+	if err := query.Order("id").Find(&keys).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListIDPAPIKeysResponse{}
+	for i := range keys {
+		response.Keys = append(response.Keys, toProtoIDPAPIKey(&keys[i]))
+	}
+	return response, nil
+}
+
+// UpdateAPIKey edits a key's description, expiration, and/or pipeline scope
+// without changing its secret (a "renew"). Only the fields whose has_* flag is
+// set are changed: has_description applies key.description, has_expires_at
+// applies key.expires_at (a zero timestamp means the key never expires), and
+// has_pipeline_scope applies key.pipeline_scope (an empty value means the key
+// is not limited). A missing key returns NotFound.
+func (s *Server) UpdateAPIKey(ctx context.Context, req *dbpb.UpdateIDPAPIKeyRequest) (*dbpb.IDPAPIKey, error) {
+	k := req.GetKey()
+	if k == nil || k.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseAPIKeyID(k.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var key models.IDPAPIKey
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&key).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if req.GetHasDescription() {
+		key.Description = k.GetDescription()
+	}
+	if req.GetHasExpiresAt() {
+		if ts := k.GetExpiresAt(); ts != nil {
+			key.ExpiresAt = ts.AsTime()
+		} else {
+			key.ExpiresAt = time.Time{}
+		}
+	}
+	if req.GetHasPipelineScope() {
+		key.PipelineScope = uintsFromInt64(k.GetPipelineScope())
+	}
+	key.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&key).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPAPIKey(&key), nil
+}
+
+// RotateAPIKey replaces a key's secret: it stores the new key's hash and
+// prefix (the caller generated and hashed the new plaintext), invalidating
+// the previous one. The key's id, description, expiration, and pipeline scope
+// are unchanged. A missing key returns NotFound.
+func (s *Server) RotateAPIKey(ctx context.Context, req *dbpb.RotateIDPAPIKeyRequest) (*dbpb.IDPAPIKey, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	if req.GetKeyHash() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key_hash is required")
+	}
+	id, err := parseAPIKeyID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var key models.IDPAPIKey
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&key).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, grpcErr(err)
+	}
+	key.KeyHash = req.GetKeyHash()
+	key.KeyPrefix = req.GetKeyPrefix()
+	key.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&key).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPAPIKey(&key), nil
+}
+
+// DeleteAPIKey removes a key by id. A missing key returns NotFound.
+func (s *Server) DeleteAPIKey(ctx context.Context, req *dbpb.DeleteIDPAPIKeyRequest) (*emptypb.Empty, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseAPIKeyID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var key models.IDPAPIKey
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&key).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "api key not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if err := s.db.WithContext(ctx).Delete(&key).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// VerifyAPIKey checks a presented `username:apikey` credential against the
+// stored key directory: it looks up the owner by email, checks the owner's
+// API-key lockout, and verifies the presented key's hash against the owner's
+// keys (and the key's expiration). On a miss it increments the owner's
+// failure counter and, at the configured maximum, locks the owner out (for
+// the configured duration, or permanently when it is zero) and resets the
+// counter. A successful verification clears the owner's failure counter. The
+// caller (the IdP) computes key_hash from the presented plaintext, so this
+// service never sees the plaintext. A miss is Unauthenticated.
+func (s *Server) VerifyAPIKey(ctx context.Context, req *dbpb.VerifyIDPAPIKeyRequest) (*dbpb.VerifyIDPAPIKeyResponse, error) {
+	if req.GetUsername() == "" || req.GetKeyHash() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username and key_hash are required")
+	}
+	var owner models.IDPUser
+	if err := s.db.WithContext(ctx).Where("email = ?", req.GetUsername()).First(&owner).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		return nil, grpcErr(err)
+	}
+	// While locked, every API-key verification for the owner fails (the
+	// counter is not incremented again).
+	if !owner.APIKeyLockedUntil.IsZero() && owner.APIKeyLockedUntil.After(time.Now()) {
+		return nil, status.Error(codes.Unauthenticated, "api key access is locked")
+	}
+	keys, err := s.listAPIKeysByOwner(ctx, owner.ID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	for i := range keys {
+		key := &keys[i]
+		if key.KeyHash != req.GetKeyHash() {
+			continue
+		}
+		if !key.ExpiresAt.IsZero() && key.ExpiresAt.Before(now) {
+			continue
+		}
+		// A match: clear the owner's failure counter and return the key and
+		// owner (so the caller can establish the authenticated user).
+		if owner.APIKeyFailedCount != 0 {
+			owner.APIKeyFailedCount = 0
+			owner.UpdatedAt = now
+			if err := s.db.WithContext(ctx).Save(&owner).Error; err != nil {
+				return nil, grpcErr(err)
+			}
+		}
+		return &dbpb.VerifyIDPAPIKeyResponse{
+			Key:   toProtoIDPAPIKey(key),
+			Owner: toProtoIDPUser(&owner),
+		}, nil
+	}
+	// A miss: increment the owner's failure counter and, at the configured
+	// maximum, lock the owner out (for the configured duration, or
+	// permanently when it is zero) and reset the counter.
+	maxFailures := int(req.GetMaxFailures())
+	if maxFailures > 0 {
+		owner.APIKeyFailedCount++
+		if owner.APIKeyFailedCount >= maxFailures {
+			if d := req.GetLockoutDuration().AsDuration(); d > 0 {
+				owner.APIKeyLockedUntil = now.Add(d)
+			} else {
+				owner.APIKeyLockedUntil = apiKeyLockoutForever
+			}
+			owner.APIKeyFailedCount = 0
+		}
+		owner.UpdatedAt = now
+		if err := s.db.WithContext(ctx).Save(&owner).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+}
+
+// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+// counter and the lockout instant). A missing user returns NotFound.
+func (s *Server) ResetAPIKeyLockout(ctx context.Context, req *dbpb.ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error) {
+	if req.GetUserId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
+	}
+	id, err := parseUserID(req.GetUserId())
+	if err != nil {
+		return nil, err
+	}
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	user.APIKeyFailedCount = 0
+	user.APIKeyLockedUntil = time.Time{}
+	user.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// listAPIKeysByOwner returns a user's API keys, ordered by id.
+func (s *Server) listAPIKeysByOwner(ctx context.Context, ownerID uint) ([]models.IDPAPIKey, error) {
+	var keys []models.IDPAPIKey
+	if err := s.db.WithContext(ctx).Where("owner_id = ?", ownerID).Order("id").Find(&keys).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return keys, nil
+}
+
+// parseAPIKeyID parses a key ID (the string form used on the wire) into the
+// database's numeric primary key. A malformed ID is an InvalidArgument error.
+func parseAPIKeyID(id string) (uint, error) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, status.Error(codes.InvalidArgument, "invalid api key id: "+id)
+	}
+	return uint(n), nil
+}
+
+// uintsFromInt64 converts a proto int64 list to a uint list (the model's
+// pipeline-scope type).
+func uintsFromInt64(in []int64) []uint {
+	out := make([]uint, len(in))
+	for i, v := range in {
+		out[i] = uint(v)
+	}
+	return out
+}
+
 // parseUserID parses a user ID (the string form used on the wire) into the
 // database's numeric primary key. A malformed ID is an InvalidArgument error.
 func parseUserID(id string) (uint, error) {
@@ -3524,6 +3836,36 @@ func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
 	}
 }
 
+// toProtoIDPAPIKey renders an API key as its Database-service form. The key
+// hash is included (the IdP needs it to verify presented keys); the plaintext
+// is never stored and so is never rendered.
+func toProtoIDPAPIKey(key *models.IDPAPIKey) *dbpb.IDPAPIKey {
+	out := &dbpb.IDPAPIKey{
+		Id:            strconv.FormatUint(uint64(key.ID), 10),
+		OwnerId:       strconv.FormatUint(uint64(key.OwnerID), 10),
+		Description:   key.Description,
+		KeyHash:       key.KeyHash,
+		KeyPrefix:     key.KeyPrefix,
+		PipelineScope: int64sFromUint(key.PipelineScope),
+		CreatedAt:     timestamppb.New(key.CreatedAt),
+		UpdatedAt:     timestamppb.New(key.UpdatedAt),
+	}
+	if !key.ExpiresAt.IsZero() {
+		out.ExpiresAt = timestamppb.New(key.ExpiresAt)
+	}
+	return out
+}
+
+// int64sFromUint converts a model uint list to a proto int64 list (the
+// wire's pipeline-scope type).
+func int64sFromUint(in []uint) []int64 {
+	out := make([]int64, len(in))
+	for i, v := range in {
+		out[i] = int64(v)
+	}
+	return out
+}
+
 func runStatusToProto(status models.RunStatus) dbpb.RunStatus {
 	switch status {
 	case models.RunStatusPending:
@@ -3702,8 +4044,8 @@ var builtinRolePermissions = map[string][]string{
 		"pipelines.can-delete", "runs.can-trigger", "runs.can-cancel",
 		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
-		"users.can-manage", "api-keys.can-manage", "audit.can-view",
-		"workers.can-view",
+		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
+		"api-keys.can-manage-all", "audit.can-view", "workers.can-view",
 	},
 	"operator": {
 		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",

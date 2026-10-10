@@ -53,6 +53,11 @@ type Server struct {
 	// when username/password authentication is disabled, in which case the
 	// /api/login, /api/register, and /api/users endpoints respond 501.
 	userpass UserPassClient
+	// apikey proxies the UI's API-key management requests (F-25) to the IdP,
+	// where the real logic (key generation, hashing, verification, and
+	// lockout) lives. It is nil when API-key authentication is disabled, in
+	// which case the /api/api-keys endpoints respond 501.
+	apikey APIKeyClient
 	// authz is the authorization engine (F-14, RBAC). It enforces role-based
 	// access on the UI-facing HTTP surface: a request is allowed only if the
 	// authenticated principal's roles grant the required permission (with a
@@ -78,6 +83,13 @@ type Server struct {
 // endpoints are disabled (they respond 501).
 func (s *Server) SetUserPassClient(c UserPassClient) {
 	s.userpass = c
+}
+
+// SetAPIKeyClient attaches the IdP API-key proxy client (F-25), enabling the
+// /api/api-keys endpoints. When left nil the endpoints are disabled (they
+// respond 501).
+func (s *Server) SetAPIKeyClient(c APIKeyClient) {
+	s.apikey = c
 }
 
 // SetAuthz attaches the authorization engine (F-14, RBAC) and enables
@@ -190,6 +202,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/users", s.createUser)
 	mux.HandleFunc("PUT /api/users/{id}", s.updateUser)
 	mux.HandleFunc("DELETE /api/users/{id}", s.deleteUser)
+
+	// API keys (F-25, proxied to the IdP). A user with the api-keys.can-manage
+	// permission can create a key for themselves or (an admin) for another
+	// user, and list their own keys. Listing every key in the system is a
+	// separate, more privileged operation (GET /api/api-keys/all) that requires
+	// the api-keys.can-list-all permission (granted to admins). The create and
+	// rotate responses return the plaintext key exactly once. They are disabled
+	// (501) when API-key auth is not enabled.
+	mux.HandleFunc("POST /api/api-keys", s.createAPIKey)
+	mux.HandleFunc("GET /api/api-keys", s.listAPIKeys)
+	mux.HandleFunc("GET /api/api-keys/all", s.listAllAPIKeys)
+	mux.HandleFunc("GET /api/api-keys/{id}", s.getAPIKey)
+	mux.HandleFunc("PUT /api/api-keys/{id}", s.updateAPIKey)
+	mux.HandleFunc("POST /api/api-keys/{id}/rotate", s.rotateAPIKey)
+	mux.HandleFunc("DELETE /api/api-keys/{id}", s.deleteAPIKey)
+	mux.HandleFunc("POST /api/api-keys/lockout/reset", s.resetAPIKeyLockout)
 
 	// Live event stream (WebSocket).
 	if s.hub != nil {
@@ -1784,6 +1812,447 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		OldValue:   oldValue,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ---------------------------------------------------------------------------
+// API keys (F-25)
+// ---------------------------------------------------------------------------
+
+// requireAPIKey reports whether API-key authentication is enabled (an API-key
+// client is attached). When it is not, the endpoints respond 501.
+func (s *Server) requireAPIKey(w http.ResponseWriter) bool {
+	if s.apikey == nil {
+		httpError(w, http.StatusNotImplemented, "api key authentication is not enabled")
+		return false
+	}
+	return true
+}
+
+// apiKeyStatus maps an error from the IdP's API-key surface to an HTTP status:
+// an apiKeyError is mapped from its gRPC status code, and any other error (a
+// transport failure reaching the IdP) is a 502.
+func apiKeyStatus(err error) int {
+	if e, ok := err.(*apiKeyError); ok {
+		switch e.code {
+		case codes.Unauthenticated:
+			return http.StatusUnauthorized
+		case codes.NotFound:
+			return http.StatusNotFound
+		case codes.InvalidArgument:
+			return http.StatusBadRequest
+		case codes.Unimplemented:
+			return http.StatusNotImplemented
+		}
+		return http.StatusBadGateway
+	}
+	return http.StatusBadGateway
+}
+
+// apiKeyOwnerEmail resolves a key's owner id to the owner's email (so the UI
+// can show who a key belongs to). It returns "" when the owner cannot be
+// resolved (e.g. the user was deleted); a failure to resolve does not block
+// the response.
+func (s *Server) apiKeyOwnerEmail(ctx context.Context, ownerID string) string {
+	if s.userpass == nil || ownerID == "" {
+		return ""
+	}
+	users, err := s.userpass.ListUsers(ctx)
+	if err != nil {
+		return ""
+	}
+	for i := range users {
+		if users[i].ID == ownerID {
+			return users[i].Email
+		}
+	}
+	return ""
+}
+
+// fillAPIKeyOwnerEmails resolves each key's owner email (best-effort) so the
+// UI can show who a key belongs to.
+func (s *Server) fillAPIKeyOwnerEmails(ctx context.Context, keys []APIKeyResult) {
+	if s.userpass == nil {
+		return
+	}
+	users, err := s.userpass.ListUsers(ctx)
+	if err != nil {
+		return
+	}
+	byID := make(map[string]string, len(users))
+	for i := range users {
+		byID[users[i].ID] = users[i].Email
+	}
+	for i := range keys {
+		keys[i].OwnerEmail = byID[keys[i].OwnerID]
+	}
+}
+
+// createAPIKeyRequest is the body of POST /api/api-keys: the key's metadata.
+// owner_email is the user the key belongs to; when empty the caller's own
+// account is used. An authenticated caller with the api-keys.can-manage
+// permission (e.g. an admin) may create a key for another user.
+type createAPIKeyRequest struct {
+	OwnerEmail    string `json:"owner_email"`
+	Description   string `json:"description"`
+	ExpiresIn     string `json:"expires_in,omitempty"`
+	PipelineScope []uint `json:"pipeline_scope,omitempty"`
+}
+
+// createAPIKey creates an API key for the caller (or, when the caller has the
+// api-keys.can-manage permission, for another user). The response returns the
+// plaintext `cdrom-…` key exactly once; the stored record holds only its hash.
+func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	var req createAPIKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	ownerEmail := req.OwnerEmail
+	if ownerEmail == "" {
+		ownerEmail = user.Email
+	}
+	if ownerEmail == "" {
+		httpError(w, http.StatusBadRequest, "owner_email is required")
+		return
+	}
+	// Creating a key requires the api-keys.can-manage permission (self-service,
+	// granted to the built-in user role). Creating a key for another user
+	// additionally requires the api-keys.can-manage-all permission — an
+	// explicit grant the admin role carries by default — so a regular user can
+	// only ever create keys for themselves.
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	if ownerEmail != user.Email {
+		if !s.requirePermission(w, r, authz.PermAPIKeysManageAll, authz.Resource{}) {
+			return
+		}
+	}
+	result, plaintext, err := s.apikey.CreateAPIKey(r.Context(), ownerEmail, req.Description, req.ExpiresIn, req.PipelineScope)
+	if err != nil {
+		httpError(w, apiKeyStatus(err), "create api key: %v", err)
+		return
+	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionAPIKeyCreate,
+		TargetKind: audit.TargetAPIKey,
+		TargetID:   result.ID,
+		TargetName: result.KeyPrefix,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  audit.ActorKindUser,
+		NewValue:   auditJSON(map[string]any{"owner": ownerEmail, "description": req.Description, "prefix": result.KeyPrefix, "pipeline_scope": result.PipelineScope}),
+	})
+	// The plaintext key is returned exactly once (at creation and at each
+	// rotation); it is never returned by list/get.
+	writeJSON(w, http.StatusCreated, map[string]any{"key": result, "plaintext": plaintext})
+}
+
+// listAPIKeys returns the caller's own API keys. It requires the
+// api-keys.can-manage permission (which the built-in user role grants for
+// self-service). A caller can only ever see their own keys here; listing every
+// key in the system is a separate, more privileged operation (listAllAPIKeys).
+func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	keys, err := s.apikey.ListAPIKeys(r.Context(), user.Subject)
+	if err != nil {
+		httpError(w, apiKeyStatus(err), "list api keys: %v", err)
+		return
+	}
+	s.fillAPIKeyOwnerEmails(r.Context(), keys)
+	writeJSON(w, http.StatusOK, nonNil(keys))
+}
+
+// listAllAPIKeys returns every API key in the system. It requires the
+// api-keys.can-list-all permission — a more privileged, platform-wide grant
+// that the admin role carries — so a regular user (who can only ever see their
+// own keys via listAPIKeys) cannot enumerate other users' keys.
+func (s *Server) listAllAPIKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysListAll, authz.Resource{}) {
+		return
+	}
+	keys, err := s.apikey.ListAPIKeys(r.Context(), "")
+	if err != nil {
+		httpError(w, apiKeyStatus(err), "list all api keys: %v", err)
+		return
+	}
+	s.fillAPIKeyOwnerEmails(r.Context(), keys)
+	writeJSON(w, http.StatusOK, nonNil(keys))
+}
+
+// callerCanManageAllAPIKeys reports whether the caller may manage every key in
+// the system, as opposed to only their own. It requires the
+// api-keys.can-manage-all permission — an explicit grant the admin role
+// carries by default — so a regular user (who can only manage their own keys
+// via api-keys.can-manage) cannot act on another user's keys. When
+// authentication is disabled the caller acts as a synthetic admin and may
+// manage every key.
+func (s *Server) callerCanManageAllAPIKeys(r *http.Request) bool {
+	if !s.rbacEnabled || s.authz == nil {
+		// Authentication disabled: the caller acts as a synthetic admin.
+		return true
+	}
+	principal := s.principalFromContext(r.Context())
+	ok, err := s.authz.Check(r.Context(), principal, authz.PermAPIKeysManageAll, authz.Resource{})
+	if err != nil {
+		return false
+	}
+	return ok
+}
+
+// getAPIKey returns a single API key's metadata (never the plaintext or hash).
+// A caller may fetch a key only if it is their own or they hold the
+// api-keys.can-manage-all permission (which the admin role grants).
+func (s *Server) getAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "api key id is required")
+		return
+	}
+	result, err := s.apikey.GetAPIKey(r.Context(), id)
+	if err != nil {
+		httpError(w, apiKeyStatus(err), "get api key: %v", err)
+		return
+	}
+	if !s.callerCanManageAllAPIKeys(r) && result.OwnerID != auth.UserFromContext(r.Context()).Subject {
+		httpError(w, http.StatusForbidden, "permission denied: not your api key")
+		return
+	}
+	keys := []APIKeyResult{*result}
+	s.fillAPIKeyOwnerEmails(r.Context(), keys)
+	writeJSON(w, http.StatusOK, keys[0])
+}
+
+// updateAPIKeyRequest is the body of PUT /api/api-keys/{id}: the key's new
+// metadata. Only the fields present are changed (a "renew"); the key's secret
+// is never changed. A field is applied only when it is present in the body:
+// the pointer fields are nil when absent, so the decoder can tell "not
+// provided" (leave unchanged) from "provided" (apply, even if empty).
+type updateAPIKeyRequest struct {
+	Description   *string `json:"description"`
+	ExpiresIn     *string `json:"expires_in"`
+	PipelineScope *[]uint `json:"pipeline_scope"`
+}
+
+// updateAPIKey edits a key's description, expiration, and/or pipeline scope
+// without changing its secret (a "renew"); the same `cdrom-…` value keeps
+// working. A caller may edit a key only if it is their own or they hold the
+// api-keys.can-manage-all permission (which the admin role grants).
+func (s *Server) updateAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "api key id is required")
+		return
+	}
+	// A caller may edit only their own key unless they may manage every key
+	// in the system (an admin).
+	if !s.callerCanManageAllAPIKeys(r) {
+		current, err := s.apikey.GetAPIKey(r.Context(), id)
+		if err != nil {
+			httpError(w, apiKeyStatus(err), "get api key: %v", err)
+			return
+		}
+		if current.OwnerID != auth.UserFromContext(r.Context()).Subject {
+			httpError(w, http.StatusForbidden, "permission denied: not your api key")
+			return
+		}
+	}
+	var req updateAPIKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	// A field is applied only when it is present in the body (its pointer is
+	// non-nil); a field whose pointer is nil is left unchanged.
+	result, err := s.apikey.UpdateAPIKey(r.Context(), id, UpdateAPIKeyRequest{
+		Description:    derefString(req.Description),
+		HasDescription: req.Description != nil,
+		ExpiresIn:      derefString(req.ExpiresIn),
+		HasExpiresAt:   req.ExpiresIn != nil,
+		PipelineScope:  derefUintSlice(req.PipelineScope),
+		HasScope:       req.PipelineScope != nil,
+	})
+	if err != nil {
+		httpError(w, apiKeyStatus(err), "update api key: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionAPIKeyUpdate,
+		TargetKind: audit.TargetAPIKey,
+		TargetID:   id,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  audit.ActorKindUser,
+		NewValue:   auditJSON(map[string]any{"description": result.Description, "expires_at": result.ExpiresAt, "pipeline_scope": result.PipelineScope}),
+	})
+	writeJSON(w, http.StatusOK, result)
+}
+
+// derefString returns the value pointed to by p, or "" when p is nil.
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// derefUintSlice returns the slice pointed to by p, or nil when p is nil.
+func derefUintSlice(p *[]uint) []uint {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// rotateAPIKey generates a brand-new `cdrom-…` secret for a key and returns it
+// exactly once; the previous key stops working. A caller may rotate a key only
+// if it is their own or they hold the api-keys.can-manage-all permission
+// (which the admin role grants).
+func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "api key id is required")
+		return
+	}
+	if !s.callerCanManageAllAPIKeys(r) {
+		current, err := s.apikey.GetAPIKey(r.Context(), id)
+		if err != nil {
+			httpError(w, apiKeyStatus(err), "get api key: %v", err)
+			return
+		}
+		if current.OwnerID != auth.UserFromContext(r.Context()).Subject {
+			httpError(w, http.StatusForbidden, "permission denied: not your api key")
+			return
+		}
+	}
+	result, plaintext, err := s.apikey.RotateAPIKey(r.Context(), id)
+	if err != nil {
+		httpError(w, apiKeyStatus(err), "rotate api key: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionAPIKeyRotate,
+		TargetKind: audit.TargetAPIKey,
+		TargetID:   id,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  audit.ActorKindUser,
+		NewValue:   auditJSON(map[string]any{"prefix": result.KeyPrefix}),
+	})
+	// The new plaintext key is returned exactly once; the previous key stops
+	// working.
+	writeJSON(w, http.StatusOK, map[string]any{"key": result, "plaintext": plaintext})
+}
+
+// deleteAPIKey removes a key by id. A caller may delete a key only if it is
+// their own or they hold the api-keys.can-manage-all permission (which the
+// admin role grants).
+func (s *Server) deleteAPIKey(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, "api key id is required")
+		return
+	}
+	if !s.callerCanManageAllAPIKeys(r) {
+		current, err := s.apikey.GetAPIKey(r.Context(), id)
+		if err != nil {
+			httpError(w, apiKeyStatus(err), "get api key: %v", err)
+			return
+		}
+		if current.OwnerID != auth.UserFromContext(r.Context()).Subject {
+			httpError(w, http.StatusForbidden, "permission denied: not your api key")
+			return
+		}
+	}
+	if err := s.apikey.DeleteAPIKey(r.Context(), id); err != nil {
+		httpError(w, apiKeyStatus(err), "delete api key: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionAPIKeyDelete,
+		TargetKind: audit.TargetAPIKey,
+		TargetID:   id,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  audit.ActorKindUser,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// resetAPIKeyLockout clears a user's API-key lockout state. It requires the
+// api-keys.can-manage permission (e.g. the admin role).
+func (s *Server) resetAPIKeyLockout(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAPIKey(w) {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
+		return
+	}
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if req.UserID == "" {
+		httpError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if err := s.apikey.ResetAPIKeyLockout(r.Context(), req.UserID); err != nil {
+		httpError(w, apiKeyStatus(err), "reset api key lockout: %v", err)
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionAPIKeyResetLockout,
+		TargetKind: audit.TargetAPIKey,
+		TargetID:   req.UserID,
+		Outcome:    audit.OutcomeSuccess,
+		Actor:      user.Subject,
+		ActorKind:  audit.ActorKindUser,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
 }
 
 // ---------------------------------------------------------------------------

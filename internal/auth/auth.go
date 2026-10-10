@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 
@@ -29,9 +30,44 @@ import (
 
 // Auth bundles the OIDC provider (token verifier) for the API's HTTP surface.
 // It is always non-nil; when authentication is disabled the Provider is nil
-// and Enabled reports false.
+// and Enabled reports false. It may also carry an API-key verifier (F-25),
+// which authenticates `Authorization: Bearer <username>:<apikey>` credentials
+// in place of a JWT.
 type Auth struct {
 	Provider *Provider
+	// apiKeys verifies API-key credentials (F-25). It is nil when API-key
+	// authentication is disabled.
+	apiKeys APIKeyVerifier
+	// apiKeyEnabled reports whether API-key authentication is active.
+	apiKeyEnabled bool
+}
+
+// APIKeyVerifier authenticates an API-key credential (F-25): it checks a
+// presented `username:apikey` credential against the key directory and, on
+// success, returns the owner's authenticated user (with the owner's roles)
+// carrying the key's pipeline scope. The API implements it as a gRPC proxy to
+// the IdP (the real logic lives there).
+type APIKeyVerifier interface {
+	// Verify checks the presented `username:apikey` credential and returns the
+	// owner's authenticated user (with the owner's roles and the key's
+	// pipeline scope). A miss (wrong key, unknown user, or a locked-out user)
+	// returns an error.
+	Verify(ctx context.Context, username, apiKey string) (User, error)
+}
+
+// SetAPIKeyVerifier attaches the API-key verifier (F-25) and enables API-key
+// authentication on the HTTP surface. When enabled, a bearer credential of the
+// form `<username>:cdrom-…` is verified against the key directory instead of
+// being treated as a JWT. When left unset (or disabled) API-key credentials
+// are not accepted.
+func (a *Auth) SetAPIKeyVerifier(v APIKeyVerifier, enabled bool) {
+	a.apiKeys = v
+	a.apiKeyEnabled = enabled
+}
+
+// APIKeyEnabled reports whether API-key authentication is active.
+func (a *Auth) APIKeyEnabled() bool {
+	return a != nil && a.apiKeyEnabled && a.apiKeys != nil
 }
 
 // New builds the auth components from config. When auth is disabled it
@@ -61,7 +97,8 @@ func (a *Auth) Enabled() bool {
 	return a != nil && a.Provider != nil && a.Provider.Enabled()
 }
 
-// User is the authenticated principal extracted from a verified token.
+// User is the authenticated principal extracted from a verified token (or an
+// API key).
 type User struct {
 	Subject string `json:"sub"`
 	Name    string `json:"name,omitempty"`
@@ -70,6 +107,12 @@ type User struct {
 	// (from the user's registered roles). They are empty when the token was
 	// not minted for a registered user (e.g. the local OIDC dev flow).
 	Roles []string `json:"roles,omitempty"`
+	// PipelineScope is the set of pipeline IDs the authenticated principal is
+	// limited to (F-25): it is set when the principal authenticated with an
+	// API key (the key's pipeline scope) and is empty otherwise (a JWT
+	// principal is not pipeline-scoped). Authorization limits the caller's
+	// resource-scoped permissions to these pipelines.
+	PipelineScope []uint `json:"pipeline_scope,omitempty"`
 }
 
 // HasRole reports whether the user carries the named role.
@@ -102,8 +145,9 @@ func UserFromContext(ctx context.Context) User {
 
 // Middleware wraps next so that, when authentication is enabled, every
 // request must carry a valid `Authorization: Bearer <token>` header that
-// verifies against the identity provider. When authentication is disabled it
-// passes requests through unchanged.
+// verifies against the identity provider (or an API-key credential, F-25).
+// When neither OIDC nor API-key authentication is active it passes requests
+// through unchanged.
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return a.MiddlewareExempt(next)
 }
@@ -112,10 +156,17 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 // whose path is in exempt bypass the token check (they are reachable without a
 // Bearer token even when authentication is enabled). This is how the API keeps
 // its sign-in entry points (e.g. /api/login and /api/register) reachable while
-// still requiring a token on every other request. When authentication is
-// disabled it passes all requests through unchanged.
+// still requiring a token on every other request. When neither OIDC nor
+// API-key authentication is active it passes all requests through unchanged
+// (they act as a synthetic admin).
+//
+// API-key authentication (F-25) is independent of OIDC: a bearer credential of
+// the form `<username>:cdrom-…` is verified against the key directory even
+// when OIDC is disabled, so API keys work in a local run that has no identity
+// provider. When OIDC is disabled, a request that is not an API-key credential
+// passes through unchanged (synthetic admin).
 func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handler {
-	if !a.Enabled() {
+	if !a.Enabled() && !a.APIKeyEnabled() {
 		return next
 	}
 	exemptSet := make(map[string]bool, len(exempt))
@@ -124,6 +175,29 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if exemptSet[r.URL.Path] {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// API-key credential (F-25): a bearer value of the form
+		// `<username>:cdrom-…` is verified against the key directory instead
+		// of being treated as a JWT. It is accepted anywhere a JWT would be,
+		// so the two credential types coexist.
+		if a.APIKeyEnabled() {
+			if username, apiKey, ok := parseAPIKeyBearer(r); ok {
+				user, err := a.apiKeys.Verify(r.Context(), username, apiKey)
+				if err != nil {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
+				return
+			}
+		}
+		// OIDC is disabled: a request that is not an API-key credential passes
+		// through unchanged (it acts as a synthetic admin).
+		if !a.Enabled() {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -136,6 +210,34 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 		}
 		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
 	})
+}
+
+// apiKeyPrefix is the shape marker of an API key: a bearer value of the form
+// `<username>:cdrom-…` is an API-key credential (F-25); anything else is a
+// JWT.
+const apiKeyPrefix = "cdrom-"
+
+// parseAPIKeyBearer reports whether the request's Authorization header carries
+// an API-key credential (a bearer value of the form `<username>:cdrom-…`), and
+// if so returns the username (the owner's email) and the key's plaintext. It
+// reports false when the header is absent, is not a Bearer token, or the bearer
+// value is not of the API-key shape (no colon, or the part after the colon does
+// not start with the key prefix).
+func parseAPIKeyBearer(r *http.Request) (username, apiKey string, ok bool) {
+	token, ok := bearerToken(r)
+	if !ok {
+		return "", "", false
+	}
+	idx := strings.IndexByte(token, ':')
+	if idx <= 0 {
+		return "", "", false
+	}
+	username = token[:idx]
+	apiKey = token[idx+1:]
+	if !strings.HasPrefix(apiKey, apiKeyPrefix) {
+		return "", "", false
+	}
+	return username, apiKey, true
 }
 
 // userFromIDToken extracts the principal from validated OIDC claims, applying

@@ -33,21 +33,6 @@ services:
       - data:/app/data
     depends_on:
       - mailcrab
-#	DefaultDBAddress        = "127.0.0.1:7101"
-#	DefaultSchedulerAddress = "127.0.0.1:7102"
-#	DefaultArtifactsAddress = "127.0.0.1:7103"
-#	// DefaultAPIAddress is the gRPC address of the API service (the control
-#	// plane that workers, agents, and the scheduler dial).
-#	DefaultAPIAddress = "127.0.0.1:7105"
-#	// DefaultAPIHTTPAddress is the HTTP address the API binds for the UI.
-#	DefaultAPIHTTPAddress = "127.0.0.1:8080"
-#	// DefaultIdPAddress is the HTTP address the local OIDC identity provider
-#	// (cmd/idp) binds to (its OIDC surface: discovery, JWKS, /auth, /token).
-#	DefaultIdPAddress = "127.0.0.1:7104"
-#	// DefaultIdPGRPCAddress is the gRPC address the local OIDC identity
-#	// provider (cmd/idp) binds to for its API-only surface (job-token minting
-#	// and user management), which the API dials over mTLS.
-#	DefaultIdPGRPCAddress = "127.0.0.1:7106"
 
   database:
     build:

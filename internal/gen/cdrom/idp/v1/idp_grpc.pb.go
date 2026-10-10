@@ -20,13 +20,21 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	IdP_MintJobToken_FullMethodName = "/cdrom.idp.v1.IdP/MintJobToken"
-	IdP_Login_FullMethodName        = "/cdrom.idp.v1.IdP/Login"
-	IdP_Register_FullMethodName     = "/cdrom.idp.v1.IdP/Register"
-	IdP_ListUsers_FullMethodName    = "/cdrom.idp.v1.IdP/ListUsers"
-	IdP_CreateUser_FullMethodName   = "/cdrom.idp.v1.IdP/CreateUser"
-	IdP_UpdateUser_FullMethodName   = "/cdrom.idp.v1.IdP/UpdateUser"
-	IdP_DeleteUser_FullMethodName   = "/cdrom.idp.v1.IdP/DeleteUser"
+	IdP_MintJobToken_FullMethodName       = "/cdrom.idp.v1.IdP/MintJobToken"
+	IdP_Login_FullMethodName              = "/cdrom.idp.v1.IdP/Login"
+	IdP_Register_FullMethodName           = "/cdrom.idp.v1.IdP/Register"
+	IdP_ListUsers_FullMethodName          = "/cdrom.idp.v1.IdP/ListUsers"
+	IdP_CreateUser_FullMethodName         = "/cdrom.idp.v1.IdP/CreateUser"
+	IdP_UpdateUser_FullMethodName         = "/cdrom.idp.v1.IdP/UpdateUser"
+	IdP_DeleteUser_FullMethodName         = "/cdrom.idp.v1.IdP/DeleteUser"
+	IdP_CreateAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/CreateAPIKey"
+	IdP_GetAPIKey_FullMethodName          = "/cdrom.idp.v1.IdP/GetAPIKey"
+	IdP_ListAPIKeys_FullMethodName        = "/cdrom.idp.v1.IdP/ListAPIKeys"
+	IdP_UpdateAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/UpdateAPIKey"
+	IdP_RotateAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/RotateAPIKey"
+	IdP_DeleteAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/DeleteAPIKey"
+	IdP_VerifyAPIKey_FullMethodName       = "/cdrom.idp.v1.IdP/VerifyAPIKey"
+	IdP_ResetAPIKeyLockout_FullMethodName = "/cdrom.idp.v1.IdP/ResetAPIKeyLockout"
 )
 
 // IdPClient is the client API for IdP service.
@@ -70,6 +78,38 @@ type IdPClient interface {
 	UpdateUser(ctx context.Context, in *UpdateUserRequest, opts ...grpc.CallOption) (*v1.IDPUser, error)
 	// DeleteUser removes a user by ID. A missing user is NotFound.
 	DeleteUser(ctx context.Context, in *DeleteUserRequest, opts ...grpc.CallOption) (*DeleteUserResponse, error)
+	// CreateAPIKey generates a new `cdrom-…` API key for a user, hashes it,
+	// stores it, and returns the plaintext exactly once (in the response's
+	// key field). The key's metadata (description, expiration, pipeline scope)
+	// is set from the request. A key's expiration is validated to be at most
+	// one year in the future. The RPC is Unimplemented when no user store is
+	// attached.
+	CreateAPIKey(ctx context.Context, in *CreateAPIKeyRequest, opts ...grpc.CallOption) (*CreateAPIKeyResponse, error)
+	// GetAPIKey returns a key's metadata and prefix (never the plaintext or
+	// hash) by key id. A missing key is NotFound.
+	GetAPIKey(ctx context.Context, in *GetAPIKeyRequest, opts ...grpc.CallOption) (*v1.IDPAPIKey, error)
+	// ListAPIKeys returns API keys. When owner_id is set only that user's keys
+	// are returned; when empty, all keys in the system are returned (an admin
+	// listing every key). The plaintext is never returned.
+	ListAPIKeys(ctx context.Context, in *ListAPIKeysRequest, opts ...grpc.CallOption) (*ListAPIKeysResponse, error)
+	// UpdateAPIKey edits a key's description, expiration, and/or pipeline scope
+	// without changing its secret (a "renew"); the same `cdrom-…` value keeps
+	// working. A missing key is NotFound.
+	UpdateAPIKey(ctx context.Context, in *UpdateAPIKeyRequest, opts ...grpc.CallOption) (*v1.IDPAPIKey, error)
+	// RotateAPIKey generates a brand-new `cdrom-…` secret for a key, returns it
+	// exactly once (in the response's key field), and invalidates the previous
+	// one. A missing key is NotFound.
+	RotateAPIKey(ctx context.Context, in *RotateAPIKeyRequest, opts ...grpc.CallOption) (*RotateAPIKeyResponse, error)
+	// DeleteAPIKey removes a key by id. A missing key is NotFound.
+	DeleteAPIKey(ctx context.Context, in *DeleteAPIKeyRequest, opts ...grpc.CallOption) (*DeleteAPIKeyResponse, error)
+	// VerifyAPIKey checks a presented `username:apikey` credential against the
+	// stored key directory (hash, expiration, and the owner's lockout). On a
+	// miss it increments the owner's failure counter and locks the owner out at
+	// the configured maximum. A miss is Unauthenticated.
+	VerifyAPIKey(ctx context.Context, in *VerifyAPIKeyRequest, opts ...grpc.CallOption) (*VerifyAPIKeyResponse, error)
+	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+	// counter and the lockout instant). A missing user is NotFound.
+	ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLockoutRequest, opts ...grpc.CallOption) (*ResetAPIKeyLockoutResponse, error)
 }
 
 type idPClient struct {
@@ -150,6 +190,86 @@ func (c *idPClient) DeleteUser(ctx context.Context, in *DeleteUserRequest, opts 
 	return out, nil
 }
 
+func (c *idPClient) CreateAPIKey(ctx context.Context, in *CreateAPIKeyRequest, opts ...grpc.CallOption) (*CreateAPIKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateAPIKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_CreateAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) GetAPIKey(ctx context.Context, in *GetAPIKeyRequest, opts ...grpc.CallOption) (*v1.IDPAPIKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.IDPAPIKey)
+	err := c.cc.Invoke(ctx, IdP_GetAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) ListAPIKeys(ctx context.Context, in *ListAPIKeysRequest, opts ...grpc.CallOption) (*ListAPIKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAPIKeysResponse)
+	err := c.cc.Invoke(ctx, IdP_ListAPIKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) UpdateAPIKey(ctx context.Context, in *UpdateAPIKeyRequest, opts ...grpc.CallOption) (*v1.IDPAPIKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.IDPAPIKey)
+	err := c.cc.Invoke(ctx, IdP_UpdateAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) RotateAPIKey(ctx context.Context, in *RotateAPIKeyRequest, opts ...grpc.CallOption) (*RotateAPIKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RotateAPIKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_RotateAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) DeleteAPIKey(ctx context.Context, in *DeleteAPIKeyRequest, opts ...grpc.CallOption) (*DeleteAPIKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteAPIKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_DeleteAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) VerifyAPIKey(ctx context.Context, in *VerifyAPIKeyRequest, opts ...grpc.CallOption) (*VerifyAPIKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyAPIKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_VerifyAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLockoutRequest, opts ...grpc.CallOption) (*ResetAPIKeyLockoutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResetAPIKeyLockoutResponse)
+	err := c.cc.Invoke(ctx, IdP_ResetAPIKeyLockout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdPServer is the server API for IdP service.
 // All implementations must embed UnimplementedIdPServer
 // for forward compatibility.
@@ -191,6 +311,38 @@ type IdPServer interface {
 	UpdateUser(context.Context, *UpdateUserRequest) (*v1.IDPUser, error)
 	// DeleteUser removes a user by ID. A missing user is NotFound.
 	DeleteUser(context.Context, *DeleteUserRequest) (*DeleteUserResponse, error)
+	// CreateAPIKey generates a new `cdrom-…` API key for a user, hashes it,
+	// stores it, and returns the plaintext exactly once (in the response's
+	// key field). The key's metadata (description, expiration, pipeline scope)
+	// is set from the request. A key's expiration is validated to be at most
+	// one year in the future. The RPC is Unimplemented when no user store is
+	// attached.
+	CreateAPIKey(context.Context, *CreateAPIKeyRequest) (*CreateAPIKeyResponse, error)
+	// GetAPIKey returns a key's metadata and prefix (never the plaintext or
+	// hash) by key id. A missing key is NotFound.
+	GetAPIKey(context.Context, *GetAPIKeyRequest) (*v1.IDPAPIKey, error)
+	// ListAPIKeys returns API keys. When owner_id is set only that user's keys
+	// are returned; when empty, all keys in the system are returned (an admin
+	// listing every key). The plaintext is never returned.
+	ListAPIKeys(context.Context, *ListAPIKeysRequest) (*ListAPIKeysResponse, error)
+	// UpdateAPIKey edits a key's description, expiration, and/or pipeline scope
+	// without changing its secret (a "renew"); the same `cdrom-…` value keeps
+	// working. A missing key is NotFound.
+	UpdateAPIKey(context.Context, *UpdateAPIKeyRequest) (*v1.IDPAPIKey, error)
+	// RotateAPIKey generates a brand-new `cdrom-…` secret for a key, returns it
+	// exactly once (in the response's key field), and invalidates the previous
+	// one. A missing key is NotFound.
+	RotateAPIKey(context.Context, *RotateAPIKeyRequest) (*RotateAPIKeyResponse, error)
+	// DeleteAPIKey removes a key by id. A missing key is NotFound.
+	DeleteAPIKey(context.Context, *DeleteAPIKeyRequest) (*DeleteAPIKeyResponse, error)
+	// VerifyAPIKey checks a presented `username:apikey` credential against the
+	// stored key directory (hash, expiration, and the owner's lockout). On a
+	// miss it increments the owner's failure counter and locks the owner out at
+	// the configured maximum. A miss is Unauthenticated.
+	VerifyAPIKey(context.Context, *VerifyAPIKeyRequest) (*VerifyAPIKeyResponse, error)
+	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
+	// counter and the lockout instant). A missing user is NotFound.
+	ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error)
 	mustEmbedUnimplementedIdPServer()
 }
 
@@ -221,6 +373,30 @@ func (UnimplementedIdPServer) UpdateUser(context.Context, *UpdateUserRequest) (*
 }
 func (UnimplementedIdPServer) DeleteUser(context.Context, *DeleteUserRequest) (*DeleteUserResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteUser not implemented")
+}
+func (UnimplementedIdPServer) CreateAPIKey(context.Context, *CreateAPIKeyRequest) (*CreateAPIKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateAPIKey not implemented")
+}
+func (UnimplementedIdPServer) GetAPIKey(context.Context, *GetAPIKeyRequest) (*v1.IDPAPIKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAPIKey not implemented")
+}
+func (UnimplementedIdPServer) ListAPIKeys(context.Context, *ListAPIKeysRequest) (*ListAPIKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAPIKeys not implemented")
+}
+func (UnimplementedIdPServer) UpdateAPIKey(context.Context, *UpdateAPIKeyRequest) (*v1.IDPAPIKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateAPIKey not implemented")
+}
+func (UnimplementedIdPServer) RotateAPIKey(context.Context, *RotateAPIKeyRequest) (*RotateAPIKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateAPIKey not implemented")
+}
+func (UnimplementedIdPServer) DeleteAPIKey(context.Context, *DeleteAPIKeyRequest) (*DeleteAPIKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAPIKey not implemented")
+}
+func (UnimplementedIdPServer) VerifyAPIKey(context.Context, *VerifyAPIKeyRequest) (*VerifyAPIKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyAPIKey not implemented")
+}
+func (UnimplementedIdPServer) ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
 }
 func (UnimplementedIdPServer) mustEmbedUnimplementedIdPServer() {}
 func (UnimplementedIdPServer) testEmbeddedByValue()             {}
@@ -369,6 +545,150 @@ func _IdP_DeleteUser_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IdP_CreateAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).CreateAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_CreateAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).CreateAPIKey(ctx, req.(*CreateAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_GetAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).GetAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_GetAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).GetAPIKey(ctx, req.(*GetAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_ListAPIKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAPIKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).ListAPIKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_ListAPIKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).ListAPIKeys(ctx, req.(*ListAPIKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_UpdateAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).UpdateAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_UpdateAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).UpdateAPIKey(ctx, req.(*UpdateAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_RotateAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).RotateAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_RotateAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).RotateAPIKey(ctx, req.(*RotateAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_DeleteAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).DeleteAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_DeleteAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).DeleteAPIKey(ctx, req.(*DeleteAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_VerifyAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyAPIKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).VerifyAPIKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_VerifyAPIKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).VerifyAPIKey(ctx, req.(*VerifyAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_ResetAPIKeyLockout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetAPIKeyLockoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).ResetAPIKeyLockout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_ResetAPIKeyLockout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).ResetAPIKeyLockout(ctx, req.(*ResetAPIKeyLockoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IdP_ServiceDesc is the grpc.ServiceDesc for IdP service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -403,6 +723,38 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteUser",
 			Handler:    _IdP_DeleteUser_Handler,
+		},
+		{
+			MethodName: "CreateAPIKey",
+			Handler:    _IdP_CreateAPIKey_Handler,
+		},
+		{
+			MethodName: "GetAPIKey",
+			Handler:    _IdP_GetAPIKey_Handler,
+		},
+		{
+			MethodName: "ListAPIKeys",
+			Handler:    _IdP_ListAPIKeys_Handler,
+		},
+		{
+			MethodName: "UpdateAPIKey",
+			Handler:    _IdP_UpdateAPIKey_Handler,
+		},
+		{
+			MethodName: "RotateAPIKey",
+			Handler:    _IdP_RotateAPIKey_Handler,
+		},
+		{
+			MethodName: "DeleteAPIKey",
+			Handler:    _IdP_DeleteAPIKey_Handler,
+		},
+		{
+			MethodName: "VerifyAPIKey",
+			Handler:    _IdP_VerifyAPIKey_Handler,
+		},
+		{
+			MethodName: "ResetAPIKeyLockout",
+			Handler:    _IdP_ResetAPIKeyLockout_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
