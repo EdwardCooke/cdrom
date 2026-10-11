@@ -49,6 +49,11 @@ const (
 	PermServiceAccountsDelete  = "service-accounts.can-delete"
 	PermServiceAccountsAssign  = "service-accounts.can-assign-roles"
 	PermServiceAccountsRemove  = "service-accounts.can-remove-roles"
+	// Concurrency-limit management permissions (F-16). The concurrency limits
+	// (global / per-group / per-key caps, stored as regex-based rules in the
+	// database) are platform-wide: can-view reads them, can-manage edits them.
+	PermConcurrencyLimitsView   = "concurrency-limits.can-view"
+	PermConcurrencyLimitsManage = "concurrency-limits.can-manage"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -81,6 +86,8 @@ var AllPermissions = []string{
 	PermServiceAccountsDelete,
 	PermServiceAccountsAssign,
 	PermServiceAccountsRemove,
+	PermConcurrencyLimitsView,
+	PermConcurrencyLimitsManage,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a
@@ -166,6 +173,7 @@ func BuiltinRoles() map[string]RoleDefinition {
 				PermJobsApprove,
 				PermJobsReject,
 				PermWorkersView,
+				PermConcurrencyLimitsView,
 			},
 		},
 		RoleViewer: {
@@ -176,6 +184,7 @@ func BuiltinRoles() map[string]RoleDefinition {
 				PermPipelinesView,
 				PermSecretsView,
 				PermWorkersView,
+				PermConcurrencyLimitsView,
 			},
 		},
 		RoleUser: {
@@ -187,6 +196,7 @@ func BuiltinRoles() map[string]RoleDefinition {
 				PermSecretsView,
 				PermWorkersView,
 				PermAPIKeysManage,
+				PermConcurrencyLimitsView,
 			},
 		},
 	}

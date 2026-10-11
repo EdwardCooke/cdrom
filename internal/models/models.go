@@ -105,6 +105,16 @@ type Pipeline struct {
 	// run is bound to the definition that was active when it started and a
 	// re-run of an old run reproduces the old definition.
 	Version int `gorm:"not null;default:1" json:"version"`
+	// ConcurrencyKeys are the pipeline's concurrency keys (F-16): named,
+	// global locks that serialize a run of this pipeline against runs of any
+	// other pipeline that shares a key. The keys are OR'd: a run is blocked
+	// while any one of the pipeline's keys is held, and it holds all of them
+	// while it runs. A job's effective key set is the union of the pipeline's
+	// keys and the job's own keys (see JobSpec.ConcurrencyKeys). They are
+	// stored as a JSON document in a text column (portable across SQLite and
+	// PostgreSQL), like Params. Empty means the pipeline holds no concurrency
+	// keys.
+	ConcurrencyKeys []string `gorm:"type:text;serializer:json" json:"concurrency_keys,omitempty"`
 }
 
 // PipelineVersion is an immutable snapshot of a pipeline's definition at one
@@ -148,6 +158,11 @@ type PipelineVersion struct {
 	// carries a name and an encrypted value. They are stored as a JSON
 	// document in a text column, like Params.
 	Secrets []Secret `gorm:"type:text;serializer:json" json:"secrets,omitempty"`
+	// ConcurrencyKeys are the pipeline's concurrency keys at this version
+	// (F-16); see Pipeline.ConcurrencyKeys. They are captured in the snapshot
+	// so a run bound to this version is gated by the keys that were active
+	// when it started.
+	ConcurrencyKeys []string `gorm:"type:text;serializer:json" json:"concurrency_keys,omitempty"`
 }
 
 // JobDefinitionSnapshot is the declarative form of a job definition as captured
@@ -167,7 +182,9 @@ type JobDefinitionSnapshot struct {
 	// Needs lists the keys of the jobs this job depends on (F-08).
 	Needs []string `json:"needs,omitempty"`
 	// Spec is the execution spec to snapshot onto each of the job's run
-	// instances.
+	// instances. The job's own concurrency keys (F-16) are carried in the
+	// spec (JobSpec.ConcurrencyKeys), so a run bound to this version is gated
+	// by the keys that were active when it started.
 	Spec JobSpec `json:"spec,omitempty"`
 }
 
@@ -544,6 +561,14 @@ type JobSpec struct {
 	// cannot wedge the job. It only affects jobs that fan out to more than
 	// one worker; a job on a single target runs its steps unbarriered.
 	StepBarrier bool `json:"step_barrier,omitempty"`
+	// ConcurrencyKeys are the job's concurrency keys (F-16): named, global
+	// locks that serialize this job against other jobs (in any pipeline or
+	// run) that share a key. The keys are OR'd: the job is blocked while any
+	// one of its keys is held, and it holds all of its keys while it runs. A
+	// job's effective key set is the union of its own keys and its pipeline's
+	// keys (see Pipeline.ConcurrencyKeys). Empty means the job holds no
+	// concurrency keys.
+	ConcurrencyKeys []string `json:"concurrency_keys,omitempty"`
 }
 
 // Job is a single unit of work belonging to a pipeline.
@@ -663,6 +688,28 @@ type Job struct {
 	// plaintext to the execution target, where a step references it as
 	// `{{ .secrets.name }}`.
 	Secrets []Secret `gorm:"type:text;serializer:json" json:"secrets,omitempty"`
+	// ConcurrencyKeys are the job's concurrency keys (F-16): the union of the
+	// job's own keys (from its spec) and its pipeline's keys, denormalized
+	// onto the job instance when it is created (like the spec and needs). The
+	// scheduler's admission gate (F-16) holds these keys (via the Database
+	// service's slot accounting) while the job is admitted and releases them
+	// when the job reaches a terminal state. Empty means the job holds no
+	// concurrency keys.
+	ConcurrencyKeys []string `gorm:"type:text;serializer:json" json:"concurrency_keys,omitempty"`
+	// ConcurrencyAdmitted reports whether the job has been admitted (its
+	// concurrency keys and group/global slots acquired, F-16) for its current
+	// attempt. It is set when the scheduler dispatches the job and cleared
+	// when the job reaches a terminal state (or is reset for a retry). It is
+	// denormalized onto the job so the scheduler's admission loop can tell a
+	// pending job that is waiting for a free slot apart from one that has
+	// already been dispatched (and must not be dispatched again).
+	ConcurrencyAdmitted bool `json:"concurrency_admitted"`
+	// ConcurrencyAdmittedAt is when the job was admitted (F-16); nil when the
+	// job is not admitted. It is recorded so the scheduler's admission loop
+	// can detect a leaked slot (a job admitted long ago that never reached a
+	// terminal state, e.g. a target that died without reporting) and release
+	// it, freeing the resource for other jobs.
+	ConcurrencyAdmittedAt *time.Time `json:"concurrency_admitted_at,omitempty"`
 	// ApprovalMessage is the (rendered) message an approval gate (F-13) shows
 	// to the user while the job is awaiting approval. It is set by the
 	// execution target when it reports the job awaiting_approval and is
@@ -686,6 +733,55 @@ type Job struct {
 	// ApprovalReason is the (optional) free-text reason the user gave when they
 	// resolved the job's approval gate (F-13); empty when the user gave none.
 	ApprovalReason string `json:"approval_reason,omitempty"`
+}
+
+// ConcurrencyResource is the durable, atomic slot accounting for one
+// concurrency resource (F-16). A resource is a concurrency key, or the
+// synthetic "group:<name>" resource (a worker group's cap) or "global"
+// resource (the system-wide cap). Held is the number of jobs currently
+// holding a slot on the resource. The Database service enforces the resource's
+// limit by atomically incrementing Held (only while Held is below the limit)
+// when a job is admitted and decrementing it when the job is released: the
+// conditional update locks the resource row, so multiple scheduler replicas
+// can never double-allocate the last free slot. One row per resource; the
+// resource's limit is resolved from the ConcurrencyLimit rules (not stored
+// here).
+type ConcurrencyResource struct {
+	ID uint `gorm:"primaryKey"`
+	// Key is the concurrency resource: a concurrency key name, or the
+	// synthetic "group:<name>" / "global" resource.
+	Key string `gorm:"uniqueIndex;size:255;not null" json:"key"`
+	// Held is the number of jobs currently holding a slot on the resource.
+	Held int `gorm:"not null;default:0" json:"held"`
+}
+
+// ConcurrencyLimit is a concurrency limit rule (F-16): a named, regex-based
+// cap on how many jobs may run concurrently against one dimension. A rule has
+// a Kind (which dimension it bounds: "global" the system-wide cap, "group" a
+// worker group's cap, or "key" a concurrency key's cap), a Pattern (a regular
+// expression matched against the dimension's name — a worker group's name or a
+// concurrency key's name; empty for the single "global" resource), and a Limit
+// (the cap on concurrent jobs; 0 means unlimited).
+//
+// A concrete resource's effective limit is resolved by matching its name
+// against every rule of the matching kind: the most specific (longest)
+// matching pattern wins, and a resource that matches no rule falls back to a
+// default (a concurrency key defaults to a limit of 1 — a lock; a group or the
+// global resource defaults to unlimited). The rules live in the database (not
+// configuration) so they can be edited at runtime via the API without a
+// redeployment.
+type ConcurrencyLimit struct {
+	gorm.Model
+	// Kind is the dimension the rule bounds: "global", "group", or "key".
+	Kind string `gorm:"size:16;not null;index" json:"kind"`
+	// Pattern is a regular expression matched against the dimension's name (a
+	// worker group's name or a concurrency key's name). It is empty for the
+	// single "global" resource. It is validated (compiled) when the rule is
+	// saved, so a rule can never be stored that could not match.
+	Pattern string `gorm:"size:255;not null" json:"pattern"`
+	// Limit is the cap on the number of jobs running concurrently against the
+	// resource(s) the rule matches. A limit of 0 means unlimited.
+	Limit int `gorm:"not null;default:0" json:"limit"`
 }
 
 // StepCompletion records that one worker completed one step of a job's
@@ -1185,5 +1281,7 @@ func All() []any {
 		&Role{},
 		&RoleBinding{},
 		&AuditEvent{},
+		&ConcurrencyResource{},
+		&ConcurrencyLimit{},
 	}
 }

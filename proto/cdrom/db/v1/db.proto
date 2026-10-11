@@ -383,6 +383,78 @@ service Database {
   // retention policy, not an edit: it only drops whole old entries, never
   // changes one.
   rpc PruneAuditEvents(PruneAuditEventsRequest) returns (PruneAuditEventsResponse);
+
+  // Concurrency control (F-16). The Database service owns the durable, atomic
+  // slot accounting that bounds how much runs in parallel: a job is admitted
+  // (dispatched) only when it fits within every limit it is subject to — its
+  // concurrency keys (each a lock, OR'd), its target group's cap (when the
+  // group has a configured limit), and the global cap (when set). The limits
+  // are configured on the Database service; the scheduler's dispatch path
+  // calls AcquireJobSlots before dispatching a job and ReleaseJobSlots when
+  // the job reaches a terminal state (or is reset for a retry).
+  //
+  // AcquireJobSlots atomically admits a job for its current attempt: it
+  // checks that, for every resource the job consumes (each of its
+  // concurrency_keys, plus a synthetic group resource when the group has a
+  // limit, plus a synthetic global resource when a global limit is set), the
+  // number of current holders is below the resource's limit. When every
+  // resource has room it records the job as a holder of each (one row per
+  // resource, keyed by (resource, job, attempt)) and marks the job admitted;
+  // otherwise it admits nothing (the job stays pending). The check-and-record
+  // is a single transaction, so multiple scheduler replicas can never
+  // double-allocate the last free slot. When the job is already admitted for
+  // the attempt it is an idempotent no-op (acquired=false): the caller must
+  // not dispatch it again.
+  rpc AcquireJobSlots(AcquireJobSlotsRequest) returns (AcquireJobSlotsResponse);
+  // ReleaseJobSlots releases the slots a job holds for its current attempt:
+  // it deletes the job's holder rows for the attempt and clears the job's
+  // admitted flag. The scheduler calls it when a job reaches a terminal state
+  // (so its slots free for the next job) or when a job is reset for a retry
+  // (so the retry re-acquires fresh slots). It is a no-op when the job holds
+  // no slots for the attempt.
+  rpc ReleaseJobSlots(ReleaseJobSlotsRequest) returns (ReleaseJobSlotsResponse);
+  // GetQueueStatus returns the current concurrency/queue state (F-16): the
+  // pending jobs (with the resource blocking each, if any), the per-group
+  // load (running jobs vs the group's limit), the global load (running jobs
+  // vs the global limit), and the per-key load (holders vs the key's limit).
+  // This is what the UI's queue view (GET /api/queue) and the WebSocket
+  // snapshot show.
+  rpc GetQueueStatus(GetQueueStatusRequest) returns (QueueStatus);
+  // ReconcileConcurrency releases the slots of any job that reached a
+  // terminal state but still holds them (a missed release, e.g. a crash
+  // between the status change and the release). The scheduler's admission
+  // loop calls it as a safety net before admitting pending jobs: the
+  // terminal-status RPCs (UpdateJob, ReapJob, CancelJob, SkipJob) release a
+  // job's slots when they transition it to a terminal state, and this catches
+  // any that were missed, so a stuck job cannot wedge a concurrency resource
+  // forever.
+  rpc ReconcileConcurrency(ReconcileConcurrencyRequest) returns (ReconcileConcurrencyResponse);
+
+  // Concurrency limit rules (F-16). The limits that bound how much runs in
+  // parallel — the system-wide cap, per-worker-group caps, and per-concurrency-
+  // key caps — are stored as regex-based rules in the database (not
+  // configuration), so they can be edited at runtime via the API without a
+  // redeployment. A rule has a kind (global / group / key), a regex pattern
+  // matched against the dimension's name (empty for the single global
+  // resource), and a limit (0 = unlimited). A concrete resource's effective
+  // limit is the limit of the most specific (longest) matching rule of its
+  // kind; a resource matching no rule falls back to a default (a concurrency
+  // key defaults to a limit of 1 — a lock; a group or the global resource
+  // defaults to unlimited).
+  //
+  // ListConcurrencyLimits returns every limit rule, optionally filtered by
+  // kind.
+  rpc ListConcurrencyLimits(ListConcurrencyLimitsRequest) returns (ListConcurrencyLimitsResponse);
+  // CreateConcurrencyLimit adds a limit rule. It rejects an invalid (non-
+  // compiling) pattern, a limit that is not non-negative, and a duplicate
+  // (kind, pattern) rule.
+  rpc CreateConcurrencyLimit(CreateConcurrencyLimitRequest) returns (ConcurrencyLimit);
+  // UpdateConcurrencyLimit edits a limit rule's pattern and/or limit. A
+  // missing rule returns NotFound.
+  rpc UpdateConcurrencyLimit(UpdateConcurrencyLimitRequest) returns (ConcurrencyLimit);
+  // DeleteConcurrencyLimit removes a limit rule. A missing rule returns
+  // NotFound.
+  rpc DeleteConcurrencyLimit(DeleteConcurrencyLimitRequest) returns (google.protobuf.Empty);
 }
 
 // Parameter is a named, typed input a pipeline declares (F-10): a name, an
@@ -457,6 +529,14 @@ message Pipeline {
   // (denormalized from the pipeline) and the API hands the plaintext to the
   // execution target, where a step references it as `{{ .secrets.name }}`.
   repeated Secret secrets = 11;
+  // concurrency_keys are the pipeline's concurrency keys (F-16): named,
+  // global locks that serialize a run of this pipeline against runs of any
+  // other pipeline that shares a key. The keys are OR'd: a run is blocked
+  // while any one of the pipeline's keys is held, and it holds all of them
+  // while it runs. A job's effective key set is the union of the pipeline's
+  // keys and the job's own keys (see JobSpec.concurrency_keys). Empty means
+  // the pipeline holds no concurrency keys.
+  repeated string concurrency_keys = 12;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -549,6 +629,9 @@ message CreatePipelineRequest {
   // Each carries a name and an encrypted value (the API encrypts the
   // plaintext before calling).
   repeated Secret secrets = 7;
+  // concurrency_keys are the pipeline's concurrency keys (F-16); see
+  // Pipeline.concurrency_keys. They are persisted alongside the pipeline.
+  repeated string concurrency_keys = 8;
 }
 
 message GetPipelineRequest {
@@ -597,6 +680,9 @@ message UpdatePipelineRequest {
   // place, and they are validated (unique, non-empty names) before anything
   // is persisted. When absent the pipeline's secrets are left unchanged.
   repeated Secret secrets = 8;
+  // concurrency_keys, when present, replaces the pipeline's concurrency keys
+  // (F-16). When absent the pipeline's concurrency keys are left unchanged.
+  repeated string concurrency_keys = 9;
 }
 
 message DeletePipelineRequest {
@@ -809,6 +895,11 @@ message PipelineVersion {
   // secrets are the pipeline's named secrets at this version (F-12): each
   // carries a name and an encrypted value.
   repeated Secret secrets = 11;
+  // concurrency_keys are the pipeline's concurrency keys at this version
+  // (F-16); see Pipeline.concurrency_keys. They are captured in the snapshot
+  // so a run bound to this version is gated by the keys that were active when
+  // it started.
+  repeated string concurrency_keys = 12;
 }
 
 message ListPipelineVersionsRequest {
@@ -1056,6 +1147,14 @@ message JobSpec {
   // does not block the others). It only affects jobs that fan out to more
   // than one worker; a job on a single target is unaffected.
   bool step_barrier = 6;
+  // concurrency_keys are the job's concurrency keys (F-16): named, global
+  // locks that serialize this job against other jobs (in any pipeline or run)
+  // that share a key. The keys are OR'd: the job is blocked while any one of
+  // its keys is held, and it holds all of its keys while it runs. A job's
+  // effective key set is the union of its own keys and its pipeline's keys
+  // (see Pipeline.concurrency_keys). Empty means the job holds no concurrency
+  // keys.
+  repeated string concurrency_keys = 7;
 }
 
 message Job {
@@ -1193,6 +1292,27 @@ message Job {
   // approval_reason is the (optional) free-text reason the user gave when they
   // resolved the job's approval gate (F-13); empty when the user gave none.
   string approval_reason = 32;
+  // concurrency_keys are the job's concurrency keys (F-16): the union of the
+  // job's own keys (from its spec) and its pipeline's keys, denormalized onto
+  // the job instance when it is created (like the spec and needs). The
+  // scheduler's admission gate holds these keys (via the Database service's
+  // slot accounting) while the job is admitted and releases them when the job
+  // reaches a terminal state. Empty means the job holds no concurrency keys.
+  repeated string concurrency_keys = 33;
+  // concurrency_admitted reports whether the job has been admitted (its
+  // concurrency keys and group/global slots acquired, F-16) for its current
+  // attempt. It is set when the scheduler dispatches the job and cleared when
+  // the job reaches a terminal state (or is reset for a retry). It lets the
+  // scheduler's admission loop tell a pending job that is waiting for a free
+  // slot apart from one that has already been dispatched (and must not be
+  // dispatched again).
+  bool concurrency_admitted = 34;
+  // concurrency_admitted_at is when the job was admitted (F-16); unset when
+  // the job is not admitted. It is recorded so the scheduler's admission loop
+  // can detect a leaked slot (a job admitted long ago that never reached a
+  // terminal state, e.g. a target that died without reporting) and release
+  // it, freeing the resource for other jobs.
+  google.protobuf.Timestamp concurrency_admitted_at = 35;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -2444,4 +2564,201 @@ message PruneAuditEventsRequest {
 message PruneAuditEventsResponse {
   // pruned is the number of events deleted.
   int64 pruned = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency control (F-16)
+// ---------------------------------------------------------------------------
+
+// AcquireJobSlotsRequest asks the database to admit a job for its current
+// attempt (F-16): to record it as a holder of each resource it consumes (its
+// concurrency keys, plus a synthetic group resource when the group has a
+// limit, plus a synthetic global resource when a global limit is set), and to
+// mark it admitted. The database enforces the configured limits: the job is
+// admitted only when, for every resource it consumes, the number of current
+// holders is below the resource's limit.
+message AcquireJobSlotsRequest {
+  // job_id is the job to admit. The database reads the job's concurrency
+  // keys and target group from the job row (they are denormalized onto the
+  // job when it is created) and holds one slot per resource the job consumes.
+  int64 job_id = 1;
+  // attempt is the job attempt the slots are acquired for (F-04); a retry
+  // acquires a fresh set of slots.
+  int32 attempt = 2;
+}
+
+// AcquireJobSlotsResponse reports the outcome of an AcquireJobSlots call.
+message AcquireJobSlotsResponse {
+  // acquired is true when this call performed the admission (the job
+  // transitioned from not-admitted to admitted: its slots were recorded and
+  // it was marked admitted). The caller should dispatch the job only when
+  // acquired is true. It is false when the job was already admitted (an
+  // idempotent no-op — the caller must not dispatch again) or when the job
+  // could not be admitted (a resource it consumes is at its limit, see
+  // blocked_by) and it stays pending.
+  bool acquired = 1;
+  // blocked_by lists the names of the resources that are at their limit and
+  // blocked the admission (empty when acquired, or when the job was already
+  // admitted). The scheduler surfaces these so the UI can show what is
+  // blocking a pending job.
+  repeated string blocked_by = 2;
+}
+
+// ReleaseJobSlotsRequest asks the database to release the slots a job holds
+// for its current attempt (F-16): to delete the job's holder rows for the
+// attempt and clear the job's admitted flag.
+message ReleaseJobSlotsRequest {
+  // job_id is the job whose slots are released.
+  int64 job_id = 1;
+  // attempt is the job attempt whose slots are released (F-04).
+  int32 attempt = 2;
+}
+
+// ReleaseJobSlotsResponse is the (empty) result of a ReleaseJobSlots call.
+message ReleaseJobSlotsResponse {}
+
+// GetQueueStatusRequest is the (empty) request for GetQueueStatus; it is
+// present so the RPC has a request message and can grow filters later.
+message GetQueueStatusRequest {}
+
+// ReconcileConcurrencyRequest is the (empty) request for
+// ReconcileConcurrency; it is present so the RPC has a request message.
+message ReconcileConcurrencyRequest {}
+
+// ReconcileConcurrencyResponse is the result of a ReconcileConcurrency call.
+message ReconcileConcurrencyResponse {
+  // released is the number of jobs whose slots were released (jobs that had
+  // reached a terminal state but still held their slots).
+  int32 released = 1;
+}
+
+// QueuePendingJob is a pending job in the queue view (F-16): the job's
+// identity plus, when it is blocked, the resource(s) holding it.
+message QueuePendingJob {
+  // id is the job's id.
+  int64 id = 1;
+  // name is the job's display name.
+  string name = 2;
+  // pipeline_id is the job's pipeline (0 when it is not part of a pipeline).
+  int64 pipeline_id = 3;
+  // run_id is the job's run (0 when it is not part of a run).
+  int64 run_id = 4;
+  // target_group is the job's target worker group (empty for an ephemeral
+  // agent).
+  string target_group = 5;
+  // created_at is when the job was created (its position in the queue).
+  google.protobuf.Timestamp created_at = 6;
+  // blocked_by lists the names of the resources that are at their limit and
+  // are blocking the job (empty when the job is not blocked by a limit — it
+  // is waiting on dependencies, or it is about to be dispatched).
+  repeated string blocked_by = 7;
+}
+
+// QueueGroupLoad is the load of one worker group (F-16): how many jobs are
+// running in the group and the group's configured limit (0 = unlimited).
+message QueueGroupLoad {
+  // group is the worker group's name.
+  string group = 1;
+  // running is the number of jobs currently running in the group.
+  int32 running = 2;
+  // limit is the group's configured cap on concurrent jobs (0 = unlimited).
+  int32 limit = 3;
+}
+
+// QueueKeyLoad is the load of one concurrency key (F-16): how many jobs hold
+// the key and the key's configured limit (0 = unlimited; a key with no
+// configured limit defaults to a limit of 1).
+message QueueKeyLoad {
+  // key is the concurrency key's name.
+  string key = 1;
+  // holders is the number of jobs currently holding the key.
+  int32 holders = 2;
+  // limit is the key's configured cap on concurrent holders (0 = unlimited).
+  int32 limit = 3;
+}
+
+// QueueStatus is the current concurrency/queue state (F-16): the pending
+// jobs, the per-group load, the global load, and the per-key load. This is
+// what the UI's queue view (GET /api/queue) and the WebSocket snapshot show.
+message QueueStatus {
+  // pending are the jobs waiting to run (status pending), each with the
+  // resource(s) blocking it (if any).
+  repeated QueuePendingJob pending = 1;
+  // groups are the per-group loads (one per group that has a configured
+  // limit and at least one running job, plus any group with a limit).
+  repeated QueueGroupLoad groups = 2;
+  // global_running is the number of jobs running system-wide.
+  int32 global_running = 3;
+  // global_limit is the configured global cap on concurrent jobs (0 =
+  // unlimited).
+  int32 global_limit = 4;
+  // keys are the per-key loads (one per concurrency key that has a holder or
+  // a configured limit).
+  repeated QueueKeyLoad keys = 5;
+}
+
+// ConcurrencyLimit is a concurrency limit rule (F-16): a named, regex-based
+// cap on how many jobs may run concurrently against one dimension.
+message ConcurrencyLimit {
+  // id is the rule's id.
+  int64 id = 1;
+  // kind is the dimension the rule bounds: "global" (the system-wide cap),
+  // "group" (a worker group's cap), or "key" (a concurrency key's cap).
+  string kind = 2;
+  // pattern is a regular expression matched against the dimension's name (a
+  // worker group's name or a concurrency key's name). It is empty for the
+  // single "global" resource. It is validated (compiled) when the rule is
+  // saved.
+  string pattern = 3;
+  // limit is the cap on the number of jobs running concurrently against the
+  // resource(s) the rule matches. A limit of 0 means unlimited.
+  int32 limit = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// ListConcurrencyLimitsRequest lists concurrency limit rules, optionally
+// filtered by kind (an empty kind returns rules of every kind).
+message ListConcurrencyLimitsRequest {
+  // kind, when set, restricts the result to rules of that kind ("global",
+  // "group", or "key"); empty returns rules of every kind.
+  string kind = 1;
+}
+
+// ListConcurrencyLimitsResponse is the result of a ListConcurrencyLimits call.
+message ListConcurrencyLimitsResponse {
+  // limits are the concurrency limit rules (ordered by kind, then pattern).
+  repeated ConcurrencyLimit limits = 1;
+}
+
+// CreateConcurrencyLimitRequest is the request to add a concurrency limit
+// rule.
+message CreateConcurrencyLimitRequest {
+  // kind is the dimension the rule bounds: "global", "group", or "key".
+  string kind = 1;
+  // pattern is a regular expression matched against the dimension's name
+  // (empty for the single "global" resource). It must compile.
+  string pattern = 2;
+  // limit is the cap on concurrent jobs (0 = unlimited).
+  int32 limit = 3;
+}
+
+// UpdateConcurrencyLimitRequest edits a concurrency limit rule. Only the
+// fields set on the request are changed; an empty pattern leaves the existing
+// pattern unchanged, and a limit of 0 is treated as "unlimited" (it is always
+// applied when present).
+message UpdateConcurrencyLimitRequest {
+  // id is the rule to update.
+  int64 id = 1;
+  // pattern, when non-empty, replaces the rule's pattern.
+  string pattern = 2;
+  // limit, when present, replaces the rule's limit.
+  optional int32 limit = 3;
+}
+
+// DeleteConcurrencyLimitRequest is the request to remove a concurrency limit
+// rule.
+message DeleteConcurrencyLimitRequest {
+  // id is the rule to delete.
+  int64 id = 1;
 }

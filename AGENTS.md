@@ -151,7 +151,8 @@ is the summary index). Summary:
 | F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
 | F-14 | Roles & permissions (RBAC) (fine-grained permissions, built-in + custom roles with composition, user/service-account bindings optionally scoped per pipeline; deny-by-default; roles live in the Database service, evaluated in the API via `internal/authz` with a cache invalidated by `role_change` events on the shared event log; JWT claim mapping via `auth.roles`; delegation rules; synthetic admin when auth is off; backend-only — UI screens deferred) |
 | F-15 | Audit log (append-only record of who did what to which resource, when, from where, with what outcome and what changed; written to a local rotating file — separate from the default log, JSON or text, hourly/daily, `-` for stdout — and to the shared audit log in the Database service; queryable via `GET /api/audit` (requires `audit.can-view`); old entries pruned by age on a schedule; a secret's value is never stored or displayed (name only, redacted); the API records UI/gRPC actions and the scheduler records trigger-fired runs) |
-| F-16…F-22 | Roadmap: queueing, environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-16 | Concurrency control & queueing (per-group + global + per-key limits, a visible pending queue, and cross-pipeline **concurrency keys** — named, global locks a pipeline and/or job declares, **templatable** against run params/identity; a job's keys are OR'd, so it is blocked while any one is held and it holds all of them while running; the limits are **regex-based rules stored in the database** (a rule = kind + regex pattern + limit; a resource's limit is the most-specific matching rule, a key matching none defaults to 1 = a lock) managed at runtime via `GET/POST/PUT/DELETE /api/concurrency-limits` (gated on `concurrency-limits.can-view`/`can-manage`), not configuration; durable atomic slot accounting in the Database service; a scheduler admission gate on every dispatch path + a leader-gated admission loop; `GET /api/queue` + a `queue` WS event; priority deferred) |
+| F-17…F-22 | Roadmap: environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 | F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
 | F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; `api-keys.can-manage` lets a user manage their own keys, while acting on **another user's** keys (create-for-them, get/edit/rotate/delete) requires the explicit `api-keys.can-manage-all` permission (admins have it by default); `GET /api/api-keys` lists only the caller's own keys, while `GET /api/api-keys/all` lists **all** keys in the system and requires `api-keys.can-list-all`; an admin can reset a user's lockout; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
@@ -184,6 +185,44 @@ Cross-cutting execution concepts (full detail in `docs/features/` /
   job row. Approved → the step succeeds and the job resumes; rejected → the
   step fails the job; a timeout or cancellation ends the job as usual. The
   gate is job-level: one approval unblocks every worker of a fan-out job.
+- **Concurrency admission (F-16).** Before a job is dispatched the scheduler
+  asks the Database service to admit it (`AcquireJobSlots`): the database holds
+  one slot per resource the job consumes — each of its **concurrency keys**
+  (a key is a named, global lock; a job's keys are the union of its pipeline's
+  and its own, and are **OR'd**, so the job is blocked while any one is held
+  and it holds all of them while running), its target group's cap (when the
+  group has a limit), and the global cap (when set). A job is dispatched only
+  when it is admitted (every resource has room); otherwise it stays `pending`
+  and the leader-gated **admission loop** re-checks it once a slot frees. Slot
+  accounting is a durable `Held` counter per resource in the Database service
+  (a guarded atomic increment/decrement), so multiple scheduler replicas can
+  never double-allocate the last free slot. The dependency resolver no longer
+  dispatches a released job — it only clears `depends_on` and leaves it pending
+  for the admission loop, which is the single dispatch path. The queue is
+  surfaced via `GET /api/queue` and a `queue` WS event (published on every job
+  status change). Priority is deferred.
+- **Concurrency limits (F-16).** The limits that bound how much runs in
+  parallel — the system-wide cap, per-worker-group caps, and per-concurrency-key
+  caps — are **regex-based rules stored in the database** (the `ConcurrencyLimit`
+  table), not configuration, so they can be edited at runtime via the API
+  (`GET/POST/PUT/DELETE /api/concurrency-limits`) without a redeployment. A rule
+  has a `kind` (`global` / `group` / `key`), a `pattern` (a regex matched
+  against the dimension's name — a worker group's name or a concurrency key's
+  name; empty for the single `global` resource), and a `limit` (0 = unlimited).
+  A concrete resource's effective limit is the limit of the **most specific
+  (longest) matching rule** of its kind; a resource matching no rule falls back
+  to a default (a concurrency key defaults to a limit of 1 — a lock; a group or
+  the global resource defaults to unlimited). The Database service caches the
+  rules briefly (invalidated on change) so the dispatch path does not query per
+  job. Listing requires `concurrency-limits.can-view`; create/update/delete
+  require `concurrency-limits.can-manage` (admins have both). A change publishes
+  a `concurrency_limits` WS event and the rules are in the WS snapshot.
+- **Templatable concurrency keys (F-16).** A pipeline's and a job's concurrency
+  keys are **templatable**: each is rendered as a Go template against the run's
+  parameters and identity (run id, pipeline id, trigger) when the run's job
+  instances are created, so a key can be derived from a run parameter (e.g.
+  `{{ .params.env }}-db`). A key that references a parameter with no value fails
+  run creation (a run is never created with a key that could not be resolved).
 
 ### Logging
 

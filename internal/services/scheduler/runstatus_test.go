@@ -234,6 +234,12 @@ func (f *fakeCreateRunDB) PublishAssignment(ctx context.Context, in *dbpb.Publis
 	return &dbpb.PublishEventResponse{}, nil
 }
 
+// AcquireJobSlots always admits the job (F-16): the create-run tests are not
+// exercising concurrency limits, so the admission gate is a no-op passthrough.
+func (f *fakeCreateRunDB) AcquireJobSlots(ctx context.Context, in *dbpb.AcquireJobSlotsRequest, opts ...grpc.CallOption) (*dbpb.AcquireJobSlotsResponse, error) {
+	return &dbpb.AcquireJobSlotsResponse{Acquired: true}, nil
+}
+
 // TestCreateRunDrivesInstances verifies that the scheduler's CreateRun RPC
 // (F-07) creates the run via the Database service and then drives the
 // instances: dependency-free instances with a target group are dispatched to

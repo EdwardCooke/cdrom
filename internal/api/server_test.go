@@ -533,6 +533,16 @@ type fakeDatabase struct {
 	job                 *dbpb.Job
 	versions            *dbpb.ListPipelineVersionsResponse
 	version             *dbpb.PipelineVersion
+	queue               *dbpb.QueueStatus
+}
+
+// GetQueueStatus returns the canned queue status (F-16) for the /api/queue
+// handler tests.
+func (f *fakeDatabase) GetQueueStatus(ctx context.Context, in *dbpb.GetQueueStatusRequest, opts ...grpc.CallOption) (*dbpb.QueueStatus, error) {
+	if f.queue != nil {
+		return f.queue, nil
+	}
+	return &dbpb.QueueStatus{}, nil
 }
 
 func (f *fakeDatabase) CreatePipeline(ctx context.Context, in *dbpb.CreatePipelineRequest, opts ...grpc.CallOption) (*dbpb.Pipeline, error) {

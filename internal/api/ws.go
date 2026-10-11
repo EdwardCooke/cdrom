@@ -35,6 +35,14 @@ type wsSnapshot struct {
 	Jobs    []wsJob    `json:"jobs"`
 	Workers []wsWorker `json:"workers"`
 	Runs    []wsRun    `json:"runs"`
+	// Queue is the pending-queue state (F-16): the pending jobs (with the
+	// resource(s) blocking each), the per-group and global load, and the
+	// per-key load. It is nil when the database service is not wired up.
+	Queue *dbpb.QueueStatus `json:"queue,omitempty"`
+	// ConcurrencyLimits are the concurrency limit rules (F-16): the regex-based
+	// global / per-group / per-key caps. It is nil when the database service is
+	// not wired up.
+	ConcurrencyLimits []*dbpb.ConcurrencyLimit `json:"concurrency_limits,omitempty"`
 }
 
 type wsJob struct {
@@ -168,6 +176,23 @@ func (s *Server) snapshot() (*wsSnapshot, error) {
 				Trigger:         run.GetTrigger(),
 				PipelineVersion: run.GetPipelineVersion(),
 			})
+		}
+
+		// The pending queue (F-16): the pending jobs (with the resource(s)
+		// blocking each), the per-group and global load, and the per-key load.
+		// A failure to read the queue is not fatal to the snapshot: the client
+		// still gets the jobs, workers, and runs, and resynchronizes the queue
+		// from the next queue event.
+		if queue, err := s.clients.Database.GetQueueStatus(ctx, &dbpb.GetQueueStatusRequest{}); err == nil {
+			snap.Queue = queue
+		}
+
+		// The concurrency limit rules (F-16): the regex-based global /
+		// per-group / per-key caps. A failure to read them is not fatal to the
+		// snapshot: the client resynchronizes from the next concurrency_limits
+		// event.
+		if limits, err := s.clients.Database.ListConcurrencyLimits(ctx, &dbpb.ListConcurrencyLimitsRequest{}); err == nil {
+			snap.ConcurrencyLimits = limits.GetLimits()
 		}
 	}
 

@@ -92,10 +92,12 @@ func TestResolveJobDependenciesSkipsOnFailedDependency(t *testing.T) {
 	}
 }
 
-// TestResolveJobDependenciesDispatchesWhenAllSucceeded verifies that a
-// pending job whose dependencies all succeeded has its depends_on cleared
-// and is dispatched (F-06).
-func TestResolveJobDependenciesDispatchesWhenAllSucceeded(t *testing.T) {
+// TestResolveJobDependenciesReleasesWhenAllSucceeded verifies that a pending
+// job whose dependencies all succeeded has its depends_on cleared and is left
+// pending for the concurrency admission loop (F-16) to dispatch (F-06): the
+// resolver no longer dispatches directly, so it does not append an
+// "assignment" event here.
+func TestResolveJobDependenciesReleasesWhenAllSucceeded(t *testing.T) {
 	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
 		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED},
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
@@ -107,8 +109,8 @@ func TestResolveJobDependenciesDispatchesWhenAllSucceeded(t *testing.T) {
 	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
 		t.Fatalf("clearedDeps = %v, want [2]", db.clearedDeps)
 	}
-	if got := api.dispatchedIDs(); len(got) != 1 || got[0] != 2 {
-		t.Fatalf("dispatched = %v, want [2]", got)
+	if got := api.dispatchedIDs(); len(got) != 0 {
+		t.Fatalf("dispatched = %v, want none (the admission loop dispatches)", got)
 	}
 	if len(db.skipCalls) != 0 {
 		t.Errorf("skipCalls = %v, want none", db.skipCalls)
@@ -217,11 +219,12 @@ func TestResolveJobDependenciesSkipAlreadyStartedIsNoop(t *testing.T) {
 	}
 }
 
-// TestResolveJobDependenciesFailedDependencyWithIgnoreFailedDispatches
+// TestResolveJobDependenciesFailedDependencyWithIgnoreFailedReleases
 // verifies that a dependency that failed (or timed out) but has ignore_failed
-// set counts as satisfied (F-06): the dependent job is released and
-// dispatched rather than skipped.
-func TestResolveJobDependenciesFailedDependencyWithIgnoreFailedDispatches(t *testing.T) {
+// set counts as satisfied (F-06): the dependent job is released (its
+// depends_on cleared and left pending for the admission loop) rather than
+// skipped.
+func TestResolveJobDependenciesFailedDependencyWithIgnoreFailedReleases(t *testing.T) {
 	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
 		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_FAILED, IgnoreFailed: true},
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
@@ -236,15 +239,16 @@ func TestResolveJobDependenciesFailedDependencyWithIgnoreFailedDispatches(t *tes
 	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
 		t.Errorf("clearedDeps = %v, want [2]", db.clearedDeps)
 	}
-	if got := api.dispatchedIDs(); len(got) != 1 || got[0] != 2 {
-		t.Errorf("dispatched = %v, want [2]", got)
+	if got := api.dispatchedIDs(); len(got) != 0 {
+		t.Errorf("dispatched = %v, want none (the admission loop dispatches)", got)
 	}
 }
 
-// TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedDispatches
+// TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedReleases
 // verifies that a timed_out dependency with ignore_failed set is likewise
-// treated as satisfied (F-06).
-func TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedDispatches(t *testing.T) {
+// treated as satisfied (F-06): the dependent job is released (its depends_on
+// cleared and left pending for the admission loop) rather than skipped.
+func TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedReleases(t *testing.T) {
 	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
 		1: {Id: 1, Status: dbpb.JobStatus_JOB_STATUS_TIMED_OUT, IgnoreFailed: true},
 		2: {Id: 2, Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
@@ -256,8 +260,11 @@ func TestResolveJobDependenciesTimedOutDependencyWithIgnoreFailedDispatches(t *t
 	if len(db.skipCalls) != 0 {
 		t.Errorf("skipCalls = %v, want none", db.skipCalls)
 	}
-	if got := api.dispatchedIDs(); len(got) != 1 || got[0] != 2 {
-		t.Errorf("dispatched = %v, want [2]", got)
+	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
+		t.Errorf("clearedDeps = %v, want [2]", db.clearedDeps)
+	}
+	if got := api.dispatchedIDs(); len(got) != 0 {
+		t.Errorf("dispatched = %v, want none (the admission loop dispatches)", got)
 	}
 }
 

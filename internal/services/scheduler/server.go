@@ -78,12 +78,19 @@ func (s *Server) SubmitJob(ctx context.Context, req *schedpb.SubmitJobRequest) (
 
 	// A job with dependencies (needs, F-08, or depends_on, F-06) is never
 	// dispatched here: it is left pending and the background dependency
-	// resolver (dependencies.go) dispatches it once every dependency has
-	// succeeded, or marks it skipped if any of them does not. The database
+	// resolver (dependencies.go) releases it once every dependency has
+	// succeeded (or marks it skipped if any of them does not). The database
 	// service resolves needs to depends_on, so a job created with needs comes
 	// back with a non-empty depends_on.
 	if len(created.GetDependsOn()) > 0 {
 		s.logger.Info("scheduler: job held pending dependencies", "job", created.GetId(), "depends_on", created.GetDependsOn())
+		return job, nil
+	}
+	// A job is dispatched only when it is admitted (F-16): it fits within every
+	// limit it is subject to (its concurrency keys, its target group's cap, and
+	// the global cap). When a resource is at its limit the job is left pending
+	// and the background admission loop dispatches it once a slot frees.
+	if !s.tryAdmit(ctx, created) {
 		return job, nil
 	}
 	if req.GetTargetGroup() != "" {
@@ -239,6 +246,13 @@ func (s *Server) rerunJob(ctx context.Context, db jobRerunner, publisher jobPubl
 	if publisher == nil {
 		return job, nil
 	}
+	// A re-run job is dispatched only when it is admitted (F-16): it fits
+	// within every limit it is subject to. When a resource is at its limit the
+	// job is left pending and the background admission loop dispatches it once
+	// a slot frees.
+	if !s.tryAdmit(ctx, updated) {
+		return job, nil
+	}
 	if updated.GetTargetGroup() != "" {
 		if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: updated.GetId(), TargetGroup: updated.GetTargetGroup()}); err != nil {
 			s.logger.Warn("scheduler: publish re-run assignment failed; job left pending",
@@ -385,6 +399,14 @@ func (s *Server) TriggerRun(ctx context.Context, req *schedpb.TriggerRunRequest)
 func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
 	if len(job.GetDependsOn()) > 0 {
 		s.logger.Info("scheduler: run instance held pending dependencies", "job", job.GetId(), "run", job.GetRunId(), "depends_on", job.GetDependsOn())
+		return
+	}
+	// A run instance is dispatched only when it is admitted (F-16): it fits
+	// within every limit it is subject to (its concurrency keys, its target
+	// group's cap, and the global cap). When a resource is at its limit the
+	// instance is left pending and the background admission loop dispatches it
+	// once a slot frees.
+	if !s.tryAdmit(ctx, job) {
 		return
 	}
 	if job.GetTargetGroup() != "" {

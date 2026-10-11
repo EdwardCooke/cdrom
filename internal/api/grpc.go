@@ -1486,9 +1486,30 @@ func (s *GRPCServer) upstreamJobsFor(ctx context.Context, job *apipb.Job) []*dbp
 	return upstream
 }
 
-// publish sends an event to the hub, if one is configured.
+// publish sends an event to the hub, if one is configured. A job status
+// change frees or takes a concurrency slot (F-16), so it also refreshes the
+// pending queue for the UI (best-effort and async, so a slow database never
+// blocks the status event).
 func (s *GRPCServer) publish(ev Event) {
-	if s.hub != nil {
-		s.hub.Publish(ev)
+	if s.hub == nil {
+		return
 	}
+	s.hub.Publish(ev)
+	if ev.Type == EventJobStatus && s.db != nil {
+		go s.publishQueueRefresh()
+	}
+}
+
+// publishQueueRefresh reads the current pending queue (F-16) and publishes it
+// as a queue event. It is best-effort: a failure to read the queue is
+// silently dropped (the UI resynchronizes from the snapshot on reconnect).
+func (s *GRPCServer) publishQueueRefresh() {
+	if s.hub == nil || s.db == nil {
+		return
+	}
+	queue, err := s.db.GetQueueStatus(context.Background(), &dbpb.GetQueueStatusRequest{})
+	if err != nil {
+		return
+	}
+	s.hub.Publish(Event{Type: EventQueue, Queue: queue})
 }

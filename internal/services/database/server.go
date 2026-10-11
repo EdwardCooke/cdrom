@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -29,6 +30,16 @@ import (
 type Server struct {
 	dbpb.UnimplementedDatabaseServer
 	db *gorm.DB
+	// limitsMu guards limitsCache and limitsAt (F-16). The concurrency limit
+	// rules are loaded from the database and cached briefly so the scheduler's
+	// dispatch path (which resolves a job's limits on every admission attempt)
+	// does not issue a query per job. The cache is invalidated immediately when
+	// a limit rule is created, updated, or deleted, and it also expires after
+	// limitCacheTTL as a safety net (so a rule edited on another database
+	// replica takes effect without a restart).
+	limitsMu    sync.Mutex
+	limitsCache *limitRules
+	limitsAt    time.Time
 }
 
 // NewServer creates a Database gRPC server over db.
@@ -66,6 +77,10 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// create. The encrypted value is opaque to the database service (the
 		// API encrypted the plaintext before calling).
 		Secrets: secretsFromProto(req.GetSecrets()),
+		// The pipeline's concurrency keys (F-16): named, global locks that
+		// serialize a run of this pipeline against runs of any other pipeline
+		// that shares a key.
+		ConcurrencyKeys: req.GetConcurrencyKeys(),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -257,6 +272,12 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		pipeline.Secrets = secretsFromProto(req.GetSecrets())
+	}
+	// When concurrency keys are supplied (F-16) they replace the pipeline's
+	// existing concurrency keys. When none are supplied the pipeline's
+	// concurrency keys are left unchanged.
+	if req.GetConcurrencyKeys() != nil {
+		pipeline.ConcurrencyKeys = req.GetConcurrencyKeys()
 	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
@@ -491,6 +512,12 @@ type runDefinition struct {
 	// version. They are denormalized (as ciphertext) onto every job instance so
 	// the API can decrypt them and hand the plaintext to the execution target.
 	secrets []models.Secret
+	// concurrencyKeys are the pipeline's concurrency keys (F-16): the
+	// pipeline's ConcurrencyKeys for the current version, or the snapshot's for
+	// a specific version. They are denormalized (unioned with each job's own
+	// keys from its spec) onto every job instance so the scheduler's admission
+	// gate can hold them while the job is admitted.
+	concurrencyKeys []string
 	// needsByIndex[i] carries the needs (keys) of jobs[i] (F-08); non-nil only
 	// for a version snapshot, where the needs are keys that must be resolved to
 	// the run's instance ids. For the current version the needs are already
@@ -534,6 +561,19 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 	// target can interpolate them into the job's spec (env, command, workdir)
 	// before the job runs.
 	runParams := runParamsFor(def.params, run.Params)
+	// The run's concurrency keys are templatable (F-16): the pipeline's keys
+	// and each job's own keys (from its spec) are rendered as Go templates
+	// against the run's parameters and identity before they are denormalized
+	// onto the job instances. The pipeline's keys are the same for every job
+	// in the run, so they are rendered once; each job's own keys are rendered
+	// per job (below). A key that references a parameter with no value fails
+	// run creation (a run is never created with a concurrency key that could
+	// not be resolved).
+	keyData := concurrencyKeyData(runParams, int64(run.ID), int64(pipelineID), run.Trigger, run.TriggerName)
+	pipelineKeys, err := renderConcurrencyKeys(def.concurrencyKeys, keyData)
+	if err != nil {
+		return nil, nil, err
+	}
 	// Pass 1: create every job instance (without depends_on yet) so all
 	// instance ids are known, and record the key -> instance-id mapping used to
 	// remap each instance's dependencies to the run's own instance ids (a
@@ -566,6 +606,16 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
 		}
 		job.IgnoreFailed = jobDef.Spec.IgnoreFailed
+		// The instance's concurrency keys (F-16) are the union of the
+		// pipeline's keys and the job's own keys (from its spec), each rendered
+		// against the run's parameters and identity (above / below), and
+		// denormalized onto the instance so the scheduler's admission gate can
+		// hold them while the job is admitted.
+		jobKeys, err := renderConcurrencyKeys(jobDef.Spec.ConcurrencyKeys, keyData)
+		if err != nil {
+			return nil, nil, err
+		}
+		job.ConcurrencyKeys = jobConcurrencyKeys(pipelineKeys, jobKeys)
 		// The instance's step-barrier flag is denormalized from its
 		// definition's spec, mirroring CreateJob.
 		job.StepBarrier = jobDef.Spec.StepBarrier
@@ -639,7 +689,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Order("id").Find(&defs).Error; err != nil {
 			return nil, err
 		}
-		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets}, nil
+		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys}, nil
 	}
 	// A run against a specific version: use that version's snapshot.
 	var version models.PipelineVersion
@@ -662,7 +712,39 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		})
 		needsByIndex[i] = snapshot.Needs
 	}
-	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, needsByIndex: needsByIndex}, nil
+	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, needsByIndex: needsByIndex}, nil
+}
+
+// jobConcurrencyKeys returns a job's effective concurrency keys (F-16): the
+// union of the pipeline's concurrency keys and the job's own keys (from its
+// spec), de-duplicated and in a stable order (the pipeline's keys first, then
+// the job's own keys not already in the pipeline's set). The result is
+// denormalized onto the job instance so the scheduler's admission gate can
+// hold the keys while the job is admitted.
+func jobConcurrencyKeys(pipelineKeys, jobKeys []string) []string {
+	seen := make(map[string]struct{}, len(pipelineKeys)+len(jobKeys))
+	out := make([]string, 0, len(pipelineKeys)+len(jobKeys))
+	for _, key := range pipelineKeys {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	for _, key := range jobKeys {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
 }
 
 // remapRunDependencies computes a run instance's depends_on (the ids of the
@@ -980,6 +1062,11 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	if spec.Retry != nil {
 		job.MaxAttempts = spec.Retry.MaxAttempts
 	}
+	// The job's concurrency keys (F-16) are the union of its pipeline's keys
+	// and its own keys (from its spec). For a job with no pipeline the set is
+	// just its own keys. The pipeline's keys are read below (when the job
+	// belongs to a pipeline) and the union is computed after that.
+	var pipelineKeys []string
 	// The job's ignore-failed flag is denormalized from the spec so the
 	// scheduler's dependency resolver can treat a failed job with the flag set
 	// as satisfied without re-reading the spec (F-06).
@@ -998,6 +1085,7 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 		if err := s.db.WithContext(ctx).First(&pipeline, pipelineID).Error; err != nil {
 			return nil, grpcErr(err)
 		}
+		pipelineKeys = pipeline.ConcurrencyKeys
 		if job.FailureMode == "" {
 			job.FailureMode = pipeline.FailureMode
 		}
@@ -1043,6 +1131,11 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	if job.FailureMode == "" {
 		job.FailureMode = models.FailureModeAll
 	}
+	// The job's concurrency keys (F-16) are the union of its pipeline's keys
+	// (empty for a standalone job) and its own keys (from its spec),
+	// denormalized onto the job so the scheduler's admission gate can hold
+	// them while the job is admitted.
+	job.ConcurrencyKeys = jobConcurrencyKeys(pipelineKeys, spec.ConcurrencyKeys)
 	if req.GetRunId() > 0 {
 		runID := uint(req.GetRunId())
 		job.RunID = &runID
@@ -1232,6 +1325,14 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 			}
 			return toProtoJob(&job), nil
 		}
+		// When the update transitioned the job to a terminal state (F-16),
+		// release its concurrency slots so they free for the next job. A job
+		// that is not admitted (holds no slots) is a no-op.
+		if newStatus, ok := updates["status"].(models.JobStatus); ok && isTerminalJobStatus(newStatus) {
+			if err := s.releaseJobSlots(ctx, uint(req.GetId())); err != nil {
+				return nil, grpcErr(err)
+			}
+		}
 	}
 	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
@@ -1266,6 +1367,13 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
 	}
+	if result.RowsAffected > 0 {
+		// The job was reaped (timed_out, terminal): release its concurrency
+		// slots (F-16) so they free for the next job.
+		if err := s.releaseJobSlots(ctx, uint(req.GetId())); err != nil {
+			return nil, grpcErr(err)
+		}
+	}
 	return &dbpb.ReapJobResponse{Reaped: result.RowsAffected > 0}, nil
 }
 
@@ -1297,6 +1405,13 @@ func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*db
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
 	}
+	if result.RowsAffected > 0 {
+		// The job was cancelled (terminal): release its concurrency slots
+		// (F-16) so they free for the next job.
+		if err := s.releaseJobSlots(ctx, uint(req.GetId())); err != nil {
+			return nil, grpcErr(err)
+		}
+	}
 	return &dbpb.CancelJobResponse{Cancelled: result.RowsAffected > 0}, nil
 }
 
@@ -1326,6 +1441,13 @@ func (s *Server) SkipJob(ctx context.Context, req *dbpb.SkipJobRequest) (*dbpb.S
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
+	}
+	if result.RowsAffected > 0 {
+		// The job was skipped (terminal): release its concurrency slots
+		// (F-16) so they free for the next job.
+		if err := s.releaseJobSlots(ctx, uint(req.GetId())); err != nil {
+			return nil, grpcErr(err)
+		}
 	}
 	return &dbpb.SkipJobResponse{Skipped: result.RowsAffected > 0}, nil
 }
@@ -1773,6 +1895,12 @@ func (s *Server) ClaimJobRetry(ctx context.Context, req *dbpb.ClaimJobRetryReque
 		// it was not claimed.
 		return &dbpb.ClaimJobRetryResponse{Claimed: false, Attempt: int32(job.Attempt)}, nil
 	}
+	// The job was reset to pending for a retry (F-16): release its
+	// concurrency slots so the retry re-acquires them. A job that is not
+	// admitted is a no-op.
+	if err := s.releaseJobSlots(ctx, uint(req.GetId())); err != nil {
+		return nil, grpcErr(err)
+	}
 	return &dbpb.ClaimJobRetryResponse{Claimed: true, Attempt: int32(nextAttempt)}, nil
 }
 
@@ -1810,6 +1938,11 @@ func (s *Server) RerunJob(ctx context.Context, req *dbpb.RerunJobRequest) (*dbpb
 	}
 	if result.RowsAffected == 0 {
 		return nil, status.Errorf(codes.FailedPrecondition, "job %d is no longer in a terminal state", req.GetId())
+	}
+	// The job was reset to pending (F-16): release its concurrency slots so
+	// the re-run re-acquires them. A job that is not admitted is a no-op.
+	if err := s.releaseJobSlots(ctx, uint(req.GetId())); err != nil {
+		return nil, grpcErr(err)
 	}
 	updated, err := s.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
 	if err != nil {
@@ -3827,17 +3960,18 @@ func toProtoPipelineJobDefinitions(jobs []models.Job, keyMap map[uint]string) []
 
 func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 	return &dbpb.Pipeline{
-		Id:          int64(pipeline.ID),
-		Name:        pipeline.Name,
-		Description: pipeline.Description,
-		CreatedAt:   timestamppb.New(pipeline.CreatedAt),
-		UpdatedAt:   timestamppb.New(pipeline.UpdatedAt),
-		FailureMode: failureModeToProto(pipeline.FailureMode),
-		Jobs:        toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
-		Triggers:    triggersToProto(pipeline.Triggers),
-		Params:      pipelineParamsToProto(pipeline.Params),
-		Version:     int32(pipeline.Version),
-		Secrets:     secretsToProto(pipeline.Secrets),
+		Id:              int64(pipeline.ID),
+		Name:            pipeline.Name,
+		Description:     pipeline.Description,
+		CreatedAt:       timestamppb.New(pipeline.CreatedAt),
+		UpdatedAt:       timestamppb.New(pipeline.UpdatedAt),
+		FailureMode:     failureModeToProto(pipeline.FailureMode),
+		Jobs:            toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
+		Triggers:        triggersToProto(pipeline.Triggers),
+		Params:          pipelineParamsToProto(pipeline.Params),
+		Version:         int32(pipeline.Version),
+		Secrets:         secretsToProto(pipeline.Secrets),
+		ConcurrencyKeys: pipeline.ConcurrencyKeys,
 	}
 }
 
@@ -3847,17 +3981,18 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 // be re-executed or re-saved without loss.
 func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 	return &dbpb.PipelineVersion{
-		Id:          int64(v.ID),
-		PipelineId:  int64(v.PipelineID),
-		Version:     int32(v.Version),
-		Name:        v.Name,
-		Description: v.Description,
-		FailureMode: failureModeToProto(v.FailureMode),
-		Jobs:        jobDefinitionsToProto(v.Jobs),
-		Triggers:    triggersToProto(v.Triggers),
-		Params:      pipelineParamsToProto(v.Params),
-		CreatedAt:   timestamppb.New(v.CreatedAt),
-		Secrets:     secretsToProto(v.Secrets),
+		Id:              int64(v.ID),
+		PipelineId:      int64(v.PipelineID),
+		Version:         int32(v.Version),
+		Name:            v.Name,
+		Description:     v.Description,
+		FailureMode:     failureModeToProto(v.FailureMode),
+		Jobs:            jobDefinitionsToProto(v.Jobs),
+		Triggers:        triggersToProto(v.Triggers),
+		Params:          pipelineParamsToProto(v.Params),
+		CreatedAt:       timestamppb.New(v.CreatedAt),
+		Secrets:         secretsToProto(v.Secrets),
+		ConcurrencyKeys: v.ConcurrencyKeys,
 	}
 }
 
@@ -3896,15 +4031,16 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		})
 	}
 	return &models.PipelineVersion{
-		PipelineID:  pipeline.ID,
-		Version:     pipeline.Version,
-		Name:        pipeline.Name,
-		Description: pipeline.Description,
-		FailureMode: pipeline.FailureMode,
-		Jobs:        snapshots,
-		Triggers:    pipeline.Triggers,
-		Params:      pipeline.Params,
-		Secrets:     pipeline.Secrets,
+		PipelineID:      pipeline.ID,
+		Version:         pipeline.Version,
+		Name:            pipeline.Name,
+		Description:     pipeline.Description,
+		FailureMode:     pipeline.FailureMode,
+		Jobs:            snapshots,
+		Triggers:        pipeline.Triggers,
+		Params:          pipeline.Params,
+		Secrets:         pipeline.Secrets,
+		ConcurrencyKeys: pipeline.ConcurrencyKeys,
 	}
 }
 
@@ -3975,31 +4111,36 @@ func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 
 func toProtoJob(job *models.Job) *dbpb.Job {
 	proto := &dbpb.Job{
-		Id:               int64(job.ID),
-		Name:             job.Name,
-		Status:           jobStatusToProto(job.Status),
-		TargetGroup:      job.TargetGroup,
-		CreatedAt:        timestamppb.New(job.CreatedAt),
-		UpdatedAt:        timestamppb.New(job.UpdatedAt),
-		Spec:             specToProto(job.Spec),
-		Attempt:          int32(job.Attempt),
-		MaxAttempts:      int32(job.MaxAttempts),
-		DependsOn:        dependsOnToProto(job.DependsOn),
-		StepResults:      stepResultsToProto(job.StepResults),
-		Outputs:          job.Outputs,
-		IgnoreFailed:     job.IgnoreFailed,
-		FailureMode:      failureModeToProto(job.FailureMode),
-		StepBarrier:      job.StepBarrier,
-		Key:              job.Key,
-		TriggerName:      job.TriggerName,
-		TriggerType:      job.TriggerType,
-		UpstreamClaims:   upstreamClaimsToStruct(job.UpstreamClaims),
-		RunParams:        job.RunParams,
-		Secrets:          secretsToProto(job.Secrets),
-		ApprovalMessage:  job.ApprovalMessage,
-		ApprovalDecision: job.ApprovalDecision,
-		ApprovalActor:    job.ApprovalActor,
-		ApprovalReason:   job.ApprovalReason,
+		Id:                  int64(job.ID),
+		Name:                job.Name,
+		Status:              jobStatusToProto(job.Status),
+		TargetGroup:         job.TargetGroup,
+		CreatedAt:           timestamppb.New(job.CreatedAt),
+		UpdatedAt:           timestamppb.New(job.UpdatedAt),
+		Spec:                specToProto(job.Spec),
+		Attempt:             int32(job.Attempt),
+		MaxAttempts:         int32(job.MaxAttempts),
+		DependsOn:           dependsOnToProto(job.DependsOn),
+		StepResults:         stepResultsToProto(job.StepResults),
+		Outputs:             job.Outputs,
+		IgnoreFailed:        job.IgnoreFailed,
+		FailureMode:         failureModeToProto(job.FailureMode),
+		StepBarrier:         job.StepBarrier,
+		Key:                 job.Key,
+		TriggerName:         job.TriggerName,
+		TriggerType:         job.TriggerType,
+		UpstreamClaims:      upstreamClaimsToStruct(job.UpstreamClaims),
+		RunParams:           job.RunParams,
+		Secrets:             secretsToProto(job.Secrets),
+		ApprovalMessage:     job.ApprovalMessage,
+		ApprovalDecision:    job.ApprovalDecision,
+		ApprovalActor:       job.ApprovalActor,
+		ApprovalReason:      job.ApprovalReason,
+		ConcurrencyKeys:     job.ConcurrencyKeys,
+		ConcurrencyAdmitted: job.ConcurrencyAdmitted,
+	}
+	if job.ConcurrencyAdmittedAt != nil {
+		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)
 	}
 	if job.PipelineID != nil {
 		proto.PipelineId = int64(*job.PipelineID)
@@ -4129,12 +4270,13 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 		})
 	}
 	return models.JobSpec{
-		Steps:        steps,
-		Timeout:      spec.GetTimeout().AsDuration(),
-		Retry:        retryPolicyFromProto(spec.GetRetry()),
-		IgnoreFailed: spec.GetIgnoreFailed(),
-		FailureMode:  failureModeFromProto(spec.GetFailureMode()),
-		StepBarrier:  spec.GetStepBarrier(),
+		Steps:           steps,
+		Timeout:         spec.GetTimeout().AsDuration(),
+		Retry:           retryPolicyFromProto(spec.GetRetry()),
+		IgnoreFailed:    spec.GetIgnoreFailed(),
+		FailureMode:     failureModeFromProto(spec.GetFailureMode()),
+		StepBarrier:     spec.GetStepBarrier(),
+		ConcurrencyKeys: spec.GetConcurrencyKeys(),
 	}
 }
 
@@ -4142,7 +4284,7 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 // no steps, no timeout, and no retry policy yields a nil proto (so it
 // round-trips to an empty spec).
 func specToProto(spec models.JobSpec) *dbpb.JobSpec {
-	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil && spec.FailureMode == "" && !spec.StepBarrier {
+	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil && spec.FailureMode == "" && !spec.StepBarrier && len(spec.ConcurrencyKeys) == 0 {
 		return nil
 	}
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
@@ -4158,12 +4300,13 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 		})
 	}
 	return &dbpb.JobSpec{
-		Steps:        steps,
-		Timeout:      durationpb.New(spec.Timeout),
-		Retry:        retryPolicyToProto(spec.Retry),
-		IgnoreFailed: spec.IgnoreFailed,
-		FailureMode:  failureModeToProto(spec.FailureMode),
-		StepBarrier:  spec.StepBarrier,
+		Steps:           steps,
+		Timeout:         durationpb.New(spec.Timeout),
+		Retry:           retryPolicyToProto(spec.Retry),
+		IgnoreFailed:    spec.IgnoreFailed,
+		FailureMode:     failureModeToProto(spec.FailureMode),
+		StepBarrier:     spec.StepBarrier,
+		ConcurrencyKeys: spec.ConcurrencyKeys,
 	}
 }
 
@@ -4550,18 +4693,21 @@ var builtinRolePermissions = map[string][]string{
 		"service-accounts.can-edit", "service-accounts.can-rotate-keys",
 		"service-accounts.can-disable", "service-accounts.can-enable",
 		"service-accounts.can-delete", "service-accounts.can-assign-roles",
-		"service-accounts.can-remove-roles",
+		"service-accounts.can-remove-roles", "concurrency-limits.can-view",
+		"concurrency-limits.can-manage",
 	},
 	"operator": {
 		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",
 		"jobs.can-approve", "jobs.can-reject", "workers.can-view",
+		"concurrency-limits.can-view",
 	},
 	"viewer": {
 		"pipelines.can-view", "secrets.can-view", "workers.can-view",
+		"concurrency-limits.can-view",
 	},
 	"user": {
 		"pipelines.can-view", "secrets.can-view", "workers.can-view",
-		"api-keys.can-manage",
+		"api-keys.can-manage", "concurrency-limits.can-view",
 	},
 }
 
@@ -4635,7 +4781,8 @@ func knownPermission(p string) bool {
 		"service-accounts.can-edit", "service-accounts.can-rotate-keys",
 		"service-accounts.can-disable", "service-accounts.can-enable",
 		"service-accounts.can-delete", "service-accounts.can-assign-roles",
-		"service-accounts.can-remove-roles":
+		"service-accounts.can-remove-roles", "concurrency-limits.can-view",
+		"concurrency-limits.can-manage":
 		return true
 	default:
 		return false

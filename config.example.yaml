@@ -35,6 +35,7 @@ db:
 # future built-in implementations.
 #artifacts_store: filesystem
 
+
 # Worker identity (used by the worker).
 #worker_name: worker-1
 #worker_group: default

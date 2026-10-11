@@ -31,7 +31,16 @@ type Event struct {
 	// MaxAttempts is the job's retry budget (0 means the job is never
 	// retried), so the UI can render "attempt N of M" on a job_status event.
 	MaxAttempts int32 `json:"max_attempts,omitempty"`
-	At          int64 `json:"at"`
+	// Queue is the pending-queue state a queue event carries (F-16): the
+	// pending jobs (with the resource(s) blocking each), the per-group and
+	// global load, and the per-key load. It is set only on queue events.
+	Queue *dbpb.QueueStatus `json:"queue,omitempty"`
+	// ConcurrencyLimits is the set of concurrency limit rules a
+	// concurrency_limits event carries (F-16). It is set only on
+	// concurrency_limits events (published when a limit rule is created,
+	// updated, or deleted).
+	ConcurrencyLimits []*dbpb.ConcurrencyLimit `json:"concurrency_limits,omitempty"`
+	At                int64                    `json:"at"`
 }
 
 // Event type constants.
@@ -42,6 +51,16 @@ const (
 	// EventRunStatus is a pipeline run status change (F-07); the event carries
 	// the run's id and its derived status.
 	EventRunStatus = "run_status"
+	// EventQueue is a pending-queue refresh (F-16); the event carries the
+	// current queue status (pending jobs, per-group/global load, per-key
+	// load). It is published whenever a job's status changes, since that is
+	// what frees or takes a concurrency slot.
+	EventQueue = "queue"
+	// EventConcurrencyLimits is a concurrency-limit change (F-16); the event
+	// carries the current set of concurrency limit rules. It is published when
+	// a limit rule is created, updated, or deleted, so the UI's limits view
+	// stays in sync across replicas.
+	EventConcurrencyLimits = "concurrency_limits"
 )
 
 // Job log stream names (the Event.Stream values for job_log events).

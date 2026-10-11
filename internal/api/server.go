@@ -172,6 +172,21 @@ func (s *Server) Handler() http.Handler {
 	// Workers (via the scheduler service).
 	mux.HandleFunc("GET /api/workers", s.listWorkers)
 
+	// Pending queue (F-16): the jobs waiting to run (with the resource(s)
+	// blocking each), the per-group and global load, and the per-key load,
+	// via the database service.
+	mux.HandleFunc("GET /api/queue", s.getQueue)
+
+	// Concurrency limits (F-16): the regex-based global / per-group / per-key
+	// caps that bound how much runs in parallel. They are stored in the
+	// database (not configuration) so they can be edited at runtime without a
+	// redeployment. Listing requires concurrency-limits.can-view; create,
+	// update, and delete require concurrency-limits.can-manage.
+	mux.HandleFunc("GET /api/concurrency-limits", s.listConcurrencyLimits)
+	mux.HandleFunc("POST /api/concurrency-limits", s.createConcurrencyLimit)
+	mux.HandleFunc("PUT /api/concurrency-limits/{id}", s.updateConcurrencyLimit)
+	mux.HandleFunc("DELETE /api/concurrency-limits/{id}", s.deleteConcurrencyLimit)
+
 	// Artifacts (via the artifacts service).
 	mux.HandleFunc("GET /api/jobs/{id}/artifacts", s.listJobArtifacts)
 
@@ -938,12 +953,15 @@ type jobRequest struct {
 // jobSpecRequest is the JSON form of a job's execution spec. Timeout is a
 // duration string (e.g. "30s", "5m") bounding the whole job (all steps
 // combined); empty means no job-level timeout. Retry is the job's retry
-// policy (F-04); when omitted the job is never retried.
+// policy (F-04); when omitted the job is never retried. ConcurrencyKeys are
+// the job's concurrency keys (F-16): named, global locks that serialize this
+// job against other jobs (in any pipeline or run) that share a key.
 type jobSpecRequest struct {
-	Steps        []jobStepRequest    `json:"steps,omitempty"`
-	Timeout      string              `json:"timeout,omitempty"`
-	Retry        *retryPolicyRequest `json:"retry,omitempty"`
-	IgnoreFailed bool                `json:"ignore_failed,omitempty"`
+	Steps           []jobStepRequest    `json:"steps,omitempty"`
+	Timeout         string              `json:"timeout,omitempty"`
+	Retry           *retryPolicyRequest `json:"retry,omitempty"`
+	IgnoreFailed    bool                `json:"ignore_failed,omitempty"`
+	ConcurrencyKeys []string            `json:"concurrency_keys,omitempty"`
 }
 
 // retryPolicyRequest is the JSON form of a job's retry policy (F-04).
@@ -957,12 +975,13 @@ type retryPolicyRequest struct {
 
 // toProtoSpec converts the JSON spec into the proto JobSpec carried to the
 // scheduler. It returns nil when the spec is absent and has no steps, no job
-// level timeout, and no retry policy.
+// level timeout, no retry policy, and no concurrency keys.
 func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
-	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil) {
+	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil && len(r.ConcurrencyKeys) == 0) {
 		return nil, nil
 	}
 	spec := &dbpb.JobSpec{}
+	spec.ConcurrencyKeys = r.ConcurrencyKeys
 	if r.Timeout != "" {
 		duration, err := time.ParseDuration(r.Timeout)
 		if err != nil {
@@ -2810,11 +2829,32 @@ func parseServiceAccountSlot(value string) (int, bool) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// publish sends an event to the hub, if one is configured.
+// publish sends an event to the hub, if one is configured. A job status
+// change frees or takes a concurrency slot (F-16), so it also refreshes the
+// pending queue for the UI (best-effort and async, so a slow database never
+// blocks the status event).
 func (s *Server) publish(ev Event) {
-	if s.hub != nil {
-		s.hub.Publish(ev)
+	if s.hub == nil {
+		return
 	}
+	s.hub.Publish(ev)
+	if ev.Type == EventJobStatus && s.clients.Database != nil {
+		go s.publishQueueRefresh()
+	}
+}
+
+// publishQueueRefresh reads the current pending queue (F-16) and publishes it
+// as a queue event. It is best-effort: a failure to read the queue is
+// silently dropped (the UI resynchronizes from the snapshot on reconnect).
+func (s *Server) publishQueueRefresh() {
+	if s.hub == nil || s.clients.Database == nil {
+		return
+	}
+	queue, err := s.clients.Database.GetQueueStatus(context.Background(), &dbpb.GetQueueStatusRequest{})
+	if err != nil {
+		return
+	}
+	s.hub.Publish(Event{Type: EventQueue, Queue: queue})
 }
 
 func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {

@@ -88,6 +88,12 @@ func (f *fakeDispatchDB) PublishAssignment(ctx context.Context, in *dbpb.Publish
 	return &dbpb.PublishEventResponse{}, nil
 }
 
+// AcquireJobSlots always admits the job (F-16): the dispatch tests are not
+// exercising concurrency limits, so the admission gate is a no-op passthrough.
+func (f *fakeDispatchDB) AcquireJobSlots(ctx context.Context, in *dbpb.AcquireJobSlotsRequest, opts ...grpc.CallOption) (*dbpb.AcquireJobSlotsResponse, error) {
+	return &dbpb.AcquireJobSlotsResponse{Acquired: true}, nil
+}
+
 // TestDispatchRunInstanceHoldsNeeds verifies that a run's job instance with
 // needs (F-08) is held pending for the dependency resolver (not dispatched),
 // while a dependency-free instance with a target group is dispatched.
@@ -134,6 +140,12 @@ func (f *fakeTriggerRunDB) TriggerRun(ctx context.Context, in *dbpb.TriggerRunRe
 func (f *fakeTriggerRunDB) PublishAssignment(ctx context.Context, in *dbpb.PublishAssignmentRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error) {
 	f.assignments = append(f.assignments, in.GetJobId())
 	return &dbpb.PublishEventResponse{}, nil
+}
+
+// AcquireJobSlots always admits the job (F-16): the trigger-run tests are not
+// exercising concurrency limits, so the admission gate is a no-op passthrough.
+func (f *fakeTriggerRunDB) AcquireJobSlots(ctx context.Context, in *dbpb.AcquireJobSlotsRequest, opts ...grpc.CallOption) (*dbpb.AcquireJobSlotsResponse, error) {
+	return &dbpb.AcquireJobSlotsResponse{Acquired: true}, nil
 }
 
 // TestTriggerRunDispatchesWhenCreated verifies the scheduler's TriggerRun RPC

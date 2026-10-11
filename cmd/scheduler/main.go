@@ -127,6 +127,11 @@ func (m *loopManager) start() {
 	m.sched.StartJobStatusLoop(loopsCtx)
 	m.sched.StartCronLoop(loopsCtx)
 	m.sched.StartEventTriggerLoop(loopsCtx)
+	// The concurrency admission loop (F-16) re-checks pending jobs (dispatching
+	// the ones whose concurrency keys / group / global slots have freed) and
+	// reconciles (releasing the slots of stuck jobs). It runs on the leader,
+	// like the other loops, so the admission gate is applied consistently.
+	m.sched.StartAdmissionLoop(loopsCtx)
 }
 
 // stop halts the running loops, if any.

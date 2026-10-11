@@ -139,7 +139,7 @@ func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, publis
 	if !allSucceeded {
 		return
 	}
-	s.releaseJob(ctx, db, publisher, job)
+	s.releaseJob(ctx, db, job)
 }
 
 // skipJob conditionally marks job as skipped (Database.SkipJob) and, if it
@@ -171,25 +171,18 @@ func (s *Server) skipJob(ctx context.Context, db jobDependencyChecker, publisher
 }
 
 // releaseJob clears job's DependsOn (so it is not reconsidered on the next
-// tick) and appends an "assignment" event to the shared event log (F-23)
-// exactly like SubmitJob would have, had the job never had dependencies.
-// Clearing DependsOn first is best-effort: if it fails the resolver simply
-// reconsiders the job again next tick instead of risking a job that is
-// dispatched more than once.
-func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, publisher dependencyPublisher, job *dbpb.Job) {
+// tick) and leaves the job pending for the concurrency admission loop (F-16)
+// to dispatch: the admission loop admits the job (acquiring its concurrency
+// keys / group / global slots) and dispatches it once it fits within the
+// limits. Clearing DependsOn first is best-effort: if it fails the resolver
+// simply reconsiders the job again next tick instead of risking a job that is
+// dispatched more than once. The job is not dispatched here: dispatching
+// directly would bypass the admission gate, so the admission loop is the
+// single dispatch path for a dependency-released job.
+func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, job *dbpb.Job) {
 	if _, err := db.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: job.GetId(), ClearDependsOn: true}); err != nil {
 		s.logger.Warn("scheduler: clear job dependencies", "job", job.GetId(), "err", err)
 		return
 	}
 	s.logger.Info("scheduler: job dependencies satisfied", "job", job.GetId())
-	if publisher == nil {
-		return
-	}
-	if job.GetTargetGroup() == "" {
-		s.logger.Info("scheduler: job queued for ephemeral agent", "job", job.GetId())
-		return
-	}
-	if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: job.GetId(), TargetGroup: job.GetTargetGroup()}); err != nil {
-		s.logger.Warn("scheduler: publish released job assignment", "job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
-	}
 }

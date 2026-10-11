@@ -81,7 +81,7 @@ Control who can do what, protect secrets, and keep an accountable record.
 | F-13 | Approval gates | done | [F-13](features/f-13-approval-gates.md) |
 | F-14 | Roles & permissions (RBAC) | done | [F-14](features/f-14-rbac.md) |
 | F-15 | Audit log | done | [F-15](features/f-15-audit-log.md) |
-| F-16 | Concurrency control & queueing | planned | [F-16](features/f-16-concurrency-queueing.md) |
+| F-16 | Concurrency control & queueing (per-group/global/per-key limits as regex-based rules in the database, editable at runtime via the API, pending queue, cross-pipeline templatable concurrency keys) | done | [F-16](features/f-16-concurrency-queueing.md) |
 | F-17 | Environments & deployment targets | planned | [F-17](features/f-17-environments.md) |
 
 ### Phase 4 — Delivery & observability
@@ -128,17 +128,13 @@ election, cross-pod live logs, shared artifacts store) is in
 
 The phases are ordered so each builds on the last. A pragmatic first cut:
 
-6. **F-16 → F-17** — concurrency and environments.
-7. **F-18 → F-20 → F-21 → F-22 → F-19** — notifications, observability,
+1. **F-16 → F-17** — concurrency and environments.
+1. **F-18 → F-20 → F-21 → F-22 → F-19** — notifications, observability,
    config-as-code, verification/rollback, artifact promotion.
-11. **F-14 → F-25 → F-26** — service accounts (non-human role-bound
-    identities, two individually rotatable Database-generated keys,
-    granular management permissions, disable/enable, and irreversible
-    soft deletion with both key slots cleared). F-15 supplies audit history.
-12. **F-13 → F-14 → F-27** — approval groups (named approver sets an
+1. **F-13 → F-14 → F-27** — approval groups (named approver sets an
     `approval` step references instead of individual users; membership
     resolved at decision time; optional role references and N-of-M quorum).
-13. **F-24 → F-14 → F-28** — SCIM user provisioning (the corporate IdP
+1. **F-24 → F-14 → F-28** — SCIM user provisioning (the corporate IdP
     provisions/deprovisions users and groups into the IdP's user directory;
     users are soft-deleted, never hard-deleted, so audit attribution survives
     deprovisioning; groups map to F-14 roles / F-27 approval groups).
@@ -164,7 +160,7 @@ Tick each feature off as it lands.
 - [x] F-13 Approval gates
 - [x] F-14 Roles & permissions (RBAC)
 - [x] F-15 Audit log
-- [ ] F-16 Concurrency control & queueing
+- [x] F-16 Concurrency control & queueing
 - [ ] F-17 Environments & deployment targets
 - [ ] F-18 Notifications
 - [ ] F-19 Artifact promotion
@@ -174,6 +170,6 @@ Tick each feature off as it lands.
 - [x] F-23 High-availability control plane
 - [x] F-24 Username/password authentication
 - [x] F-25 API keys
-- [ ] F-26 Service accounts
+- [x] F-26 Service accounts
 - [ ] F-27 Approval groups (named approver sets)
 - [ ] F-28 SCIM user provisioning (external IdP; soft-delete only)

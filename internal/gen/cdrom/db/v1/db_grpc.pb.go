@@ -108,6 +108,14 @@ const (
 	Database_AppendAuditEvent_FullMethodName               = "/cdrom.db.v1.Database/AppendAuditEvent"
 	Database_ListAuditEvents_FullMethodName                = "/cdrom.db.v1.Database/ListAuditEvents"
 	Database_PruneAuditEvents_FullMethodName               = "/cdrom.db.v1.Database/PruneAuditEvents"
+	Database_AcquireJobSlots_FullMethodName                = "/cdrom.db.v1.Database/AcquireJobSlots"
+	Database_ReleaseJobSlots_FullMethodName                = "/cdrom.db.v1.Database/ReleaseJobSlots"
+	Database_GetQueueStatus_FullMethodName                 = "/cdrom.db.v1.Database/GetQueueStatus"
+	Database_ReconcileConcurrency_FullMethodName           = "/cdrom.db.v1.Database/ReconcileConcurrency"
+	Database_ListConcurrencyLimits_FullMethodName          = "/cdrom.db.v1.Database/ListConcurrencyLimits"
+	Database_CreateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/CreateConcurrencyLimit"
+	Database_UpdateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/UpdateConcurrencyLimit"
+	Database_DeleteConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/DeleteConcurrencyLimit"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -474,6 +482,76 @@ type DatabaseClient interface {
 	// retention policy, not an edit: it only drops whole old entries, never
 	// changes one.
 	PruneAuditEvents(ctx context.Context, in *PruneAuditEventsRequest, opts ...grpc.CallOption) (*PruneAuditEventsResponse, error)
+	// Concurrency control (F-16). The Database service owns the durable, atomic
+	// slot accounting that bounds how much runs in parallel: a job is admitted
+	// (dispatched) only when it fits within every limit it is subject to — its
+	// concurrency keys (each a lock, OR'd), its target group's cap (when the
+	// group has a configured limit), and the global cap (when set). The limits
+	// are configured on the Database service; the scheduler's dispatch path
+	// calls AcquireJobSlots before dispatching a job and ReleaseJobSlots when
+	// the job reaches a terminal state (or is reset for a retry).
+	//
+	// AcquireJobSlots atomically admits a job for its current attempt: it
+	// checks that, for every resource the job consumes (each of its
+	// concurrency_keys, plus a synthetic group resource when the group has a
+	// limit, plus a synthetic global resource when a global limit is set), the
+	// number of current holders is below the resource's limit. When every
+	// resource has room it records the job as a holder of each (one row per
+	// resource, keyed by (resource, job, attempt)) and marks the job admitted;
+	// otherwise it admits nothing (the job stays pending). The check-and-record
+	// is a single transaction, so multiple scheduler replicas can never
+	// double-allocate the last free slot. When the job is already admitted for
+	// the attempt it is an idempotent no-op (acquired=false): the caller must
+	// not dispatch it again.
+	AcquireJobSlots(ctx context.Context, in *AcquireJobSlotsRequest, opts ...grpc.CallOption) (*AcquireJobSlotsResponse, error)
+	// ReleaseJobSlots releases the slots a job holds for its current attempt:
+	// it deletes the job's holder rows for the attempt and clears the job's
+	// admitted flag. The scheduler calls it when a job reaches a terminal state
+	// (so its slots free for the next job) or when a job is reset for a retry
+	// (so the retry re-acquires fresh slots). It is a no-op when the job holds
+	// no slots for the attempt.
+	ReleaseJobSlots(ctx context.Context, in *ReleaseJobSlotsRequest, opts ...grpc.CallOption) (*ReleaseJobSlotsResponse, error)
+	// GetQueueStatus returns the current concurrency/queue state (F-16): the
+	// pending jobs (with the resource blocking each, if any), the per-group
+	// load (running jobs vs the group's limit), the global load (running jobs
+	// vs the global limit), and the per-key load (holders vs the key's limit).
+	// This is what the UI's queue view (GET /api/queue) and the WebSocket
+	// snapshot show.
+	GetQueueStatus(ctx context.Context, in *GetQueueStatusRequest, opts ...grpc.CallOption) (*QueueStatus, error)
+	// ReconcileConcurrency releases the slots of any job that reached a
+	// terminal state but still holds them (a missed release, e.g. a crash
+	// between the status change and the release). The scheduler's admission
+	// loop calls it as a safety net before admitting pending jobs: the
+	// terminal-status RPCs (UpdateJob, ReapJob, CancelJob, SkipJob) release a
+	// job's slots when they transition it to a terminal state, and this catches
+	// any that were missed, so a stuck job cannot wedge a concurrency resource
+	// forever.
+	ReconcileConcurrency(ctx context.Context, in *ReconcileConcurrencyRequest, opts ...grpc.CallOption) (*ReconcileConcurrencyResponse, error)
+	// Concurrency limit rules (F-16). The limits that bound how much runs in
+	// parallel — the system-wide cap, per-worker-group caps, and per-concurrency-
+	// key caps — are stored as regex-based rules in the database (not
+	// configuration), so they can be edited at runtime via the API without a
+	// redeployment. A rule has a kind (global / group / key), a regex pattern
+	// matched against the dimension's name (empty for the single global
+	// resource), and a limit (0 = unlimited). A concrete resource's effective
+	// limit is the limit of the most specific (longest) matching rule of its
+	// kind; a resource matching no rule falls back to a default (a concurrency
+	// key defaults to a limit of 1 — a lock; a group or the global resource
+	// defaults to unlimited).
+	//
+	// ListConcurrencyLimits returns every limit rule, optionally filtered by
+	// kind.
+	ListConcurrencyLimits(ctx context.Context, in *ListConcurrencyLimitsRequest, opts ...grpc.CallOption) (*ListConcurrencyLimitsResponse, error)
+	// CreateConcurrencyLimit adds a limit rule. It rejects an invalid (non-
+	// compiling) pattern, a limit that is not non-negative, and a duplicate
+	// (kind, pattern) rule.
+	CreateConcurrencyLimit(ctx context.Context, in *CreateConcurrencyLimitRequest, opts ...grpc.CallOption) (*ConcurrencyLimit, error)
+	// UpdateConcurrencyLimit edits a limit rule's pattern and/or limit. A
+	// missing rule returns NotFound.
+	UpdateConcurrencyLimit(ctx context.Context, in *UpdateConcurrencyLimitRequest, opts ...grpc.CallOption) (*ConcurrencyLimit, error)
+	// DeleteConcurrencyLimit removes a limit rule. A missing rule returns
+	// NotFound.
+	DeleteConcurrencyLimit(ctx context.Context, in *DeleteConcurrencyLimitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type databaseClient struct {
@@ -1364,6 +1442,86 @@ func (c *databaseClient) PruneAuditEvents(ctx context.Context, in *PruneAuditEve
 	return out, nil
 }
 
+func (c *databaseClient) AcquireJobSlots(ctx context.Context, in *AcquireJobSlotsRequest, opts ...grpc.CallOption) (*AcquireJobSlotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AcquireJobSlotsResponse)
+	err := c.cc.Invoke(ctx, Database_AcquireJobSlots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReleaseJobSlots(ctx context.Context, in *ReleaseJobSlotsRequest, opts ...grpc.CallOption) (*ReleaseJobSlotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseJobSlotsResponse)
+	err := c.cc.Invoke(ctx, Database_ReleaseJobSlots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetQueueStatus(ctx context.Context, in *GetQueueStatusRequest, opts ...grpc.CallOption) (*QueueStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QueueStatus)
+	err := c.cc.Invoke(ctx, Database_GetQueueStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReconcileConcurrency(ctx context.Context, in *ReconcileConcurrencyRequest, opts ...grpc.CallOption) (*ReconcileConcurrencyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReconcileConcurrencyResponse)
+	err := c.cc.Invoke(ctx, Database_ReconcileConcurrency_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListConcurrencyLimits(ctx context.Context, in *ListConcurrencyLimitsRequest, opts ...grpc.CallOption) (*ListConcurrencyLimitsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListConcurrencyLimitsResponse)
+	err := c.cc.Invoke(ctx, Database_ListConcurrencyLimits_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CreateConcurrencyLimit(ctx context.Context, in *CreateConcurrencyLimitRequest, opts ...grpc.CallOption) (*ConcurrencyLimit, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConcurrencyLimit)
+	err := c.cc.Invoke(ctx, Database_CreateConcurrencyLimit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateConcurrencyLimit(ctx context.Context, in *UpdateConcurrencyLimitRequest, opts ...grpc.CallOption) (*ConcurrencyLimit, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConcurrencyLimit)
+	err := c.cc.Invoke(ctx, Database_UpdateConcurrencyLimit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteConcurrencyLimit(ctx context.Context, in *DeleteConcurrencyLimitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteConcurrencyLimit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -1728,6 +1886,76 @@ type DatabaseServer interface {
 	// retention policy, not an edit: it only drops whole old entries, never
 	// changes one.
 	PruneAuditEvents(context.Context, *PruneAuditEventsRequest) (*PruneAuditEventsResponse, error)
+	// Concurrency control (F-16). The Database service owns the durable, atomic
+	// slot accounting that bounds how much runs in parallel: a job is admitted
+	// (dispatched) only when it fits within every limit it is subject to — its
+	// concurrency keys (each a lock, OR'd), its target group's cap (when the
+	// group has a configured limit), and the global cap (when set). The limits
+	// are configured on the Database service; the scheduler's dispatch path
+	// calls AcquireJobSlots before dispatching a job and ReleaseJobSlots when
+	// the job reaches a terminal state (or is reset for a retry).
+	//
+	// AcquireJobSlots atomically admits a job for its current attempt: it
+	// checks that, for every resource the job consumes (each of its
+	// concurrency_keys, plus a synthetic group resource when the group has a
+	// limit, plus a synthetic global resource when a global limit is set), the
+	// number of current holders is below the resource's limit. When every
+	// resource has room it records the job as a holder of each (one row per
+	// resource, keyed by (resource, job, attempt)) and marks the job admitted;
+	// otherwise it admits nothing (the job stays pending). The check-and-record
+	// is a single transaction, so multiple scheduler replicas can never
+	// double-allocate the last free slot. When the job is already admitted for
+	// the attempt it is an idempotent no-op (acquired=false): the caller must
+	// not dispatch it again.
+	AcquireJobSlots(context.Context, *AcquireJobSlotsRequest) (*AcquireJobSlotsResponse, error)
+	// ReleaseJobSlots releases the slots a job holds for its current attempt:
+	// it deletes the job's holder rows for the attempt and clears the job's
+	// admitted flag. The scheduler calls it when a job reaches a terminal state
+	// (so its slots free for the next job) or when a job is reset for a retry
+	// (so the retry re-acquires fresh slots). It is a no-op when the job holds
+	// no slots for the attempt.
+	ReleaseJobSlots(context.Context, *ReleaseJobSlotsRequest) (*ReleaseJobSlotsResponse, error)
+	// GetQueueStatus returns the current concurrency/queue state (F-16): the
+	// pending jobs (with the resource blocking each, if any), the per-group
+	// load (running jobs vs the group's limit), the global load (running jobs
+	// vs the global limit), and the per-key load (holders vs the key's limit).
+	// This is what the UI's queue view (GET /api/queue) and the WebSocket
+	// snapshot show.
+	GetQueueStatus(context.Context, *GetQueueStatusRequest) (*QueueStatus, error)
+	// ReconcileConcurrency releases the slots of any job that reached a
+	// terminal state but still holds them (a missed release, e.g. a crash
+	// between the status change and the release). The scheduler's admission
+	// loop calls it as a safety net before admitting pending jobs: the
+	// terminal-status RPCs (UpdateJob, ReapJob, CancelJob, SkipJob) release a
+	// job's slots when they transition it to a terminal state, and this catches
+	// any that were missed, so a stuck job cannot wedge a concurrency resource
+	// forever.
+	ReconcileConcurrency(context.Context, *ReconcileConcurrencyRequest) (*ReconcileConcurrencyResponse, error)
+	// Concurrency limit rules (F-16). The limits that bound how much runs in
+	// parallel — the system-wide cap, per-worker-group caps, and per-concurrency-
+	// key caps — are stored as regex-based rules in the database (not
+	// configuration), so they can be edited at runtime via the API without a
+	// redeployment. A rule has a kind (global / group / key), a regex pattern
+	// matched against the dimension's name (empty for the single global
+	// resource), and a limit (0 = unlimited). A concrete resource's effective
+	// limit is the limit of the most specific (longest) matching rule of its
+	// kind; a resource matching no rule falls back to a default (a concurrency
+	// key defaults to a limit of 1 — a lock; a group or the global resource
+	// defaults to unlimited).
+	//
+	// ListConcurrencyLimits returns every limit rule, optionally filtered by
+	// kind.
+	ListConcurrencyLimits(context.Context, *ListConcurrencyLimitsRequest) (*ListConcurrencyLimitsResponse, error)
+	// CreateConcurrencyLimit adds a limit rule. It rejects an invalid (non-
+	// compiling) pattern, a limit that is not non-negative, and a duplicate
+	// (kind, pattern) rule.
+	CreateConcurrencyLimit(context.Context, *CreateConcurrencyLimitRequest) (*ConcurrencyLimit, error)
+	// UpdateConcurrencyLimit edits a limit rule's pattern and/or limit. A
+	// missing rule returns NotFound.
+	UpdateConcurrencyLimit(context.Context, *UpdateConcurrencyLimitRequest) (*ConcurrencyLimit, error)
+	// DeleteConcurrencyLimit removes a limit rule. A missing rule returns
+	// NotFound.
+	DeleteConcurrencyLimit(context.Context, *DeleteConcurrencyLimitRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -2001,6 +2229,30 @@ func (UnimplementedDatabaseServer) ListAuditEvents(context.Context, *ListAuditEv
 }
 func (UnimplementedDatabaseServer) PruneAuditEvents(context.Context, *PruneAuditEventsRequest) (*PruneAuditEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PruneAuditEvents not implemented")
+}
+func (UnimplementedDatabaseServer) AcquireJobSlots(context.Context, *AcquireJobSlotsRequest) (*AcquireJobSlotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcquireJobSlots not implemented")
+}
+func (UnimplementedDatabaseServer) ReleaseJobSlots(context.Context, *ReleaseJobSlotsRequest) (*ReleaseJobSlotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReleaseJobSlots not implemented")
+}
+func (UnimplementedDatabaseServer) GetQueueStatus(context.Context, *GetQueueStatusRequest) (*QueueStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetQueueStatus not implemented")
+}
+func (UnimplementedDatabaseServer) ReconcileConcurrency(context.Context, *ReconcileConcurrencyRequest) (*ReconcileConcurrencyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReconcileConcurrency not implemented")
+}
+func (UnimplementedDatabaseServer) ListConcurrencyLimits(context.Context, *ListConcurrencyLimitsRequest) (*ListConcurrencyLimitsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListConcurrencyLimits not implemented")
+}
+func (UnimplementedDatabaseServer) CreateConcurrencyLimit(context.Context, *CreateConcurrencyLimitRequest) (*ConcurrencyLimit, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateConcurrencyLimit not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateConcurrencyLimit(context.Context, *UpdateConcurrencyLimitRequest) (*ConcurrencyLimit, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateConcurrencyLimit not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteConcurrencyLimit(context.Context, *DeleteConcurrencyLimitRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteConcurrencyLimit not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -3607,6 +3859,150 @@ func _Database_PruneAuditEvents_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_AcquireJobSlots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AcquireJobSlotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AcquireJobSlots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AcquireJobSlots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AcquireJobSlots(ctx, req.(*AcquireJobSlotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReleaseJobSlots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseJobSlotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReleaseJobSlots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReleaseJobSlots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReleaseJobSlots(ctx, req.(*ReleaseJobSlotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetQueueStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetQueueStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetQueueStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetQueueStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetQueueStatus(ctx, req.(*GetQueueStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReconcileConcurrency_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReconcileConcurrencyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReconcileConcurrency(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReconcileConcurrency_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReconcileConcurrency(ctx, req.(*ReconcileConcurrencyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListConcurrencyLimits_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListConcurrencyLimitsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListConcurrencyLimits(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListConcurrencyLimits_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListConcurrencyLimits(ctx, req.(*ListConcurrencyLimitsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CreateConcurrencyLimit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateConcurrencyLimitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateConcurrencyLimit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateConcurrencyLimit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateConcurrencyLimit(ctx, req.(*CreateConcurrencyLimitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateConcurrencyLimit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateConcurrencyLimitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateConcurrencyLimit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateConcurrencyLimit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateConcurrencyLimit(ctx, req.(*UpdateConcurrencyLimitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteConcurrencyLimit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteConcurrencyLimitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteConcurrencyLimit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteConcurrencyLimit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteConcurrencyLimit(ctx, req.(*DeleteConcurrencyLimitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3965,6 +4361,38 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PruneAuditEvents",
 			Handler:    _Database_PruneAuditEvents_Handler,
+		},
+		{
+			MethodName: "AcquireJobSlots",
+			Handler:    _Database_AcquireJobSlots_Handler,
+		},
+		{
+			MethodName: "ReleaseJobSlots",
+			Handler:    _Database_ReleaseJobSlots_Handler,
+		},
+		{
+			MethodName: "GetQueueStatus",
+			Handler:    _Database_GetQueueStatus_Handler,
+		},
+		{
+			MethodName: "ReconcileConcurrency",
+			Handler:    _Database_ReconcileConcurrency_Handler,
+		},
+		{
+			MethodName: "ListConcurrencyLimits",
+			Handler:    _Database_ListConcurrencyLimits_Handler,
+		},
+		{
+			MethodName: "CreateConcurrencyLimit",
+			Handler:    _Database_CreateConcurrencyLimit_Handler,
+		},
+		{
+			MethodName: "UpdateConcurrencyLimit",
+			Handler:    _Database_UpdateConcurrencyLimit_Handler,
+		},
+		{
+			MethodName: "DeleteConcurrencyLimit",
+			Handler:    _Database_DeleteConcurrencyLimit_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -165,10 +165,15 @@ const (
 	ActionServiceAccountAssignRole   = "service-account.assign-role"
 	ActionServiceAccountRemoveRole   = "service-account.remove-role"
 	ActionServiceAccountResetLockout = "service-account.reset-lockout"
-	ActionLogin                      = "auth.login"
-	ActionRegister           = "auth.register"
-	ActionWorkerRegister     = "worker.register"
-	ActionWorkerDeregister   = "worker.deregister"
+	// ActionConcurrencyLimit* are the concurrency-limit management actions
+	// (F-16): creating, updating, or deleting a concurrency limit rule.
+	ActionConcurrencyLimitCreate = "concurrency-limit.create"
+	ActionConcurrencyLimitUpdate = "concurrency-limit.update"
+	ActionConcurrencyLimitDelete = "concurrency-limit.delete"
+	ActionLogin                  = "auth.login"
+	ActionRegister               = "auth.register"
+	ActionWorkerRegister         = "worker.register"
+	ActionWorkerDeregister       = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
@@ -181,17 +186,20 @@ const (
 
 // Target kinds (F-15).
 const (
-	TargetPipeline    = "pipeline"
-	TargetRun         = "run"
-	TargetJob         = "job"
-	TargetRole        = "role"
-	TargetRoleBinding = "role-binding"
-	TargetUser        = "user"
-	TargetSecret      = "secret"
+	TargetPipeline       = "pipeline"
+	TargetRun            = "run"
+	TargetJob            = "job"
+	TargetRole           = "role"
+	TargetRoleBinding    = "role-binding"
+	TargetUser           = "user"
+	TargetSecret         = "secret"
 	TargetWorker         = "worker"
 	TargetLogin          = "login"
 	TargetAPIKey         = "api-key"
 	TargetServiceAccount = "service-account"
+	// TargetConcurrencyLimit is the target kind of a concurrency limit rule
+	// (F-16).
+	TargetConcurrencyLimit = "concurrency-limit"
 )
 
 // Outcomes (F-15).
