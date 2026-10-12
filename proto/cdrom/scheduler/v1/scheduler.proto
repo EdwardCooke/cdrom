@@ -42,6 +42,20 @@ service Scheduler {
   // A job that is no longer awaiting approval (it was cancelled, or the gate
   // was already resolved) is left untouched, so a late decision is a no-op.
   rpc ResolveApproval(ResolveApprovalRequest) returns (Job);
+  // ProceedRun releases the jobs of a run that are held by a `manual`
+  // environment (F-17): for each of the run's jobs that is awaiting_proceed
+  // it releases the hold (Database.ProceedJob, conditionally — only if the job
+  // is still awaiting_proceed) and dispatches it (an assignment event for a
+  // worker-group job, or a re-queue for an ephemeral agent). A job that is no
+  // longer awaiting_proceed (it was cancelled, or it was already proceeded) is
+  // left untouched, so a late proceed is a no-op. It returns the run and the
+  // number of jobs it proceeded.
+  rpc ProceedRun(ProceedRunRequest) returns (ProceedRunResponse);
+  // ProceedJob releases a single job held by a `manual` environment (F-17):
+  // it releases the hold (Database.ProceedJob, conditionally) and dispatches
+  // the job. A job that is no longer awaiting_proceed is left untouched, so a
+  // late proceed is a no-op.
+  rpc ProceedJob(ProceedJobRequest) returns (Job);
   // CreateRun starts a new execution of a pipeline (F-07): it creates a
   // PipelineRun and one job instance per job definition in the pipeline,
   // then drives them (dispatching the dependency-free instances to the API,
@@ -109,6 +123,9 @@ message Job {
   // approval_reason is the (optional) free-text reason the user gave when they
   // resolved the job's approval gate (F-13); empty when the user gave none.
   string approval_reason = 22;
+  // environment is the name of the environment this job targets (F-17); empty
+  // means the job targets its raw target_group.
+  string environment = 23;
 }
 
 message SubmitJobRequest {
@@ -163,6 +180,35 @@ message ResolveApprovalRequest {
   string actor = 3;
   // reason is the (optional) free-text reason the user gave for the decision.
   string reason = 4;
+}
+
+// ProceedRunRequest releases the jobs of a run held by a `manual` environment
+// (F-17).
+message ProceedRunRequest {
+  // run_id is the run whose held jobs are released.
+  int64 run_id = 1;
+  // actor is the identity (the OIDC subject) of the user who proceeded the run
+  // (recorded for audit, F-15).
+  string actor = 2;
+}
+
+// ProceedRunResponse is the result of a ProceedRun call.
+message ProceedRunResponse {
+  // run is the run the jobs belong to.
+  Run run = 1;
+  // proceeded is the number of the run's jobs that were awaiting_proceed and
+  // were released (dispatched) by this call.
+  int32 proceeded = 2;
+}
+
+// ProceedJobRequest releases a single job held by a `manual` environment
+// (F-17).
+message ProceedJobRequest {
+  // id is the job to release.
+  int64 id = 1;
+  // actor is the identity (the OIDC subject) of the user who proceeded the job
+  // (recorded for audit, F-15).
+  string actor = 2;
 }
 
 // Run is a pipeline run (F-07): one execution of a pipeline, owning a set of

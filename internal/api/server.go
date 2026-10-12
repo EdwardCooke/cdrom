@@ -187,6 +187,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/concurrency-limits/{id}", s.updateConcurrencyLimit)
 	mux.HandleFunc("DELETE /api/concurrency-limits/{id}", s.deleteConcurrencyLimit)
 
+	// Environments (F-17): named deployment targets that group execution
+	// targets and carry the deployment policy (an approval gate and an
+	// automatic/manual automation policy). They are stored in the database
+	// (not configuration) so they can be edited at runtime without a
+	// redeployment. Listing and fetching require environments.can-view; create,
+	// update, and delete require environments.can-manage.
+	mux.HandleFunc("GET /api/environments", s.listEnvironments)
+	mux.HandleFunc("POST /api/environments", s.createEnvironment)
+	mux.HandleFunc("GET /api/environments/{name}", s.getEnvironment)
+	mux.HandleFunc("PUT /api/environments/{name}", s.updateEnvironment)
+	mux.HandleFunc("DELETE /api/environments/{name}", s.deleteEnvironment)
+	// Proceed (F-17): release a run (or a single job) held by a `manual`
+	// environment. It requires runs.can-proceed.
+	mux.HandleFunc("POST /api/runs/{id}/proceed", s.proceedRun)
+	mux.HandleFunc("POST /api/jobs/{id}/proceed", s.proceedJob)
+
 	// Artifacts (via the artifacts service).
 	mux.HandleFunc("GET /api/jobs/{id}/artifacts", s.listJobArtifacts)
 

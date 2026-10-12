@@ -25,6 +25,8 @@ const (
 	Scheduler_CancelJob_FullMethodName       = "/cdrom.scheduler.v1.Scheduler/CancelJob"
 	Scheduler_RerunJob_FullMethodName        = "/cdrom.scheduler.v1.Scheduler/RerunJob"
 	Scheduler_ResolveApproval_FullMethodName = "/cdrom.scheduler.v1.Scheduler/ResolveApproval"
+	Scheduler_ProceedRun_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/ProceedRun"
+	Scheduler_ProceedJob_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/ProceedJob"
 	Scheduler_CreateRun_FullMethodName       = "/cdrom.scheduler.v1.Scheduler/CreateRun"
 	Scheduler_TriggerRun_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/TriggerRun"
 )
@@ -65,6 +67,20 @@ type SchedulerClient interface {
 	// A job that is no longer awaiting approval (it was cancelled, or the gate
 	// was already resolved) is left untouched, so a late decision is a no-op.
 	ResolveApproval(ctx context.Context, in *ResolveApprovalRequest, opts ...grpc.CallOption) (*Job, error)
+	// ProceedRun releases the jobs of a run that are held by a `manual`
+	// environment (F-17): for each of the run's jobs that is awaiting_proceed
+	// it releases the hold (Database.ProceedJob, conditionally — only if the job
+	// is still awaiting_proceed) and dispatches it (an assignment event for a
+	// worker-group job, or a re-queue for an ephemeral agent). A job that is no
+	// longer awaiting_proceed (it was cancelled, or it was already proceeded) is
+	// left untouched, so a late proceed is a no-op. It returns the run and the
+	// number of jobs it proceeded.
+	ProceedRun(ctx context.Context, in *ProceedRunRequest, opts ...grpc.CallOption) (*ProceedRunResponse, error)
+	// ProceedJob releases a single job held by a `manual` environment (F-17):
+	// it releases the hold (Database.ProceedJob, conditionally) and dispatches
+	// the job. A job that is no longer awaiting_proceed is left untouched, so a
+	// late proceed is a no-op.
+	ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*Job, error)
 	// CreateRun starts a new execution of a pipeline (F-07): it creates a
 	// PipelineRun and one job instance per job definition in the pipeline,
 	// then drives them (dispatching the dependency-free instances to the API,
@@ -148,6 +164,26 @@ func (c *schedulerClient) ResolveApproval(ctx context.Context, in *ResolveApprov
 	return out, nil
 }
 
+func (c *schedulerClient) ProceedRun(ctx context.Context, in *ProceedRunRequest, opts ...grpc.CallOption) (*ProceedRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProceedRunResponse)
+	err := c.cc.Invoke(ctx, Scheduler_ProceedRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *schedulerClient) ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*Job, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Job)
+	err := c.cc.Invoke(ctx, Scheduler_ProceedJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *schedulerClient) CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*Run, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Run)
@@ -204,6 +240,20 @@ type SchedulerServer interface {
 	// A job that is no longer awaiting approval (it was cancelled, or the gate
 	// was already resolved) is left untouched, so a late decision is a no-op.
 	ResolveApproval(context.Context, *ResolveApprovalRequest) (*Job, error)
+	// ProceedRun releases the jobs of a run that are held by a `manual`
+	// environment (F-17): for each of the run's jobs that is awaiting_proceed
+	// it releases the hold (Database.ProceedJob, conditionally — only if the job
+	// is still awaiting_proceed) and dispatches it (an assignment event for a
+	// worker-group job, or a re-queue for an ephemeral agent). A job that is no
+	// longer awaiting_proceed (it was cancelled, or it was already proceeded) is
+	// left untouched, so a late proceed is a no-op. It returns the run and the
+	// number of jobs it proceeded.
+	ProceedRun(context.Context, *ProceedRunRequest) (*ProceedRunResponse, error)
+	// ProceedJob releases a single job held by a `manual` environment (F-17):
+	// it releases the hold (Database.ProceedJob, conditionally) and dispatches
+	// the job. A job that is no longer awaiting_proceed is left untouched, so a
+	// late proceed is a no-op.
+	ProceedJob(context.Context, *ProceedJobRequest) (*Job, error)
 	// CreateRun starts a new execution of a pipeline (F-07): it creates a
 	// PipelineRun and one job instance per job definition in the pipeline,
 	// then drives them (dispatching the dependency-free instances to the API,
@@ -244,6 +294,12 @@ func (UnimplementedSchedulerServer) RerunJob(context.Context, *RerunJobRequest) 
 }
 func (UnimplementedSchedulerServer) ResolveApproval(context.Context, *ResolveApprovalRequest) (*Job, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveApproval not implemented")
+}
+func (UnimplementedSchedulerServer) ProceedRun(context.Context, *ProceedRunRequest) (*ProceedRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProceedRun not implemented")
+}
+func (UnimplementedSchedulerServer) ProceedJob(context.Context, *ProceedJobRequest) (*Job, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProceedJob not implemented")
 }
 func (UnimplementedSchedulerServer) CreateRun(context.Context, *CreateRunRequest) (*Run, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRun not implemented")
@@ -380,6 +436,42 @@ func _Scheduler_ResolveApproval_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Scheduler_ProceedRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProceedRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).ProceedRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_ProceedRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).ProceedRun(ctx, req.(*ProceedRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Scheduler_ProceedJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProceedJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).ProceedJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_ProceedJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).ProceedJob(ctx, req.(*ProceedJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Scheduler_CreateRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateRunRequest)
 	if err := dec(in); err != nil {
@@ -446,6 +538,14 @@ var Scheduler_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveApproval",
 			Handler:    _Scheduler_ResolveApproval_Handler,
+		},
+		{
+			MethodName: "ProceedRun",
+			Handler:    _Scheduler_ProceedRun_Handler,
+		},
+		{
+			MethodName: "ProceedJob",
+			Handler:    _Scheduler_ProceedJob_Handler,
 		},
 		{
 			MethodName: "CreateRun",

@@ -25,6 +25,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync"
 	"time"
 
@@ -282,7 +283,7 @@ func (s *GRPCServer) handleEvent(ctx context.Context, event *dbpb.Event) {
 			s.logger.Warn("api: bad assignment payload", "err", err)
 			return
 		}
-		s.nudgeWorkers(ctx, p.JobID, event.GetWorkerGroup())
+		s.nudgeWorkers(ctx, p.JobID, event.GetWorkerGroup(), event.GetEnvironment())
 	case "cancel":
 		var p cancelPayload
 		if err := json.Unmarshal([]byte(event.GetPayload()), &p); err != nil {
@@ -342,13 +343,19 @@ func (s *GRPCServer) handleEvent(ctx context.Context, event *dbpb.Event) {
 	}
 }
 
-// nudgeWorkers delivers a JobNudge to every local worker in the group. The
-// worker that receives it fetches the job via GetJob and claims it.
-func (s *GRPCServer) nudgeWorkers(ctx context.Context, jobID int64, group string) {
+// nudgeWorkers delivers a JobNudge to every local worker that serves the job:
+// the workers that belong to the environment (F-17) when one is set, or the
+// workers in the group otherwise. The worker that receives it fetches the job
+// via GetJob and claims it (the authoritative routing gate is StartJobExecution).
+func (s *GRPCServer) nudgeWorkers(ctx context.Context, jobID int64, group, environment string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for name, worker := range s.live {
-		if worker.group != group {
+		if environment != "" {
+			if !slices.Contains(worker.environments, environment) {
+				continue
+			}
+		} else if worker.group != group {
 			continue
 		}
 		channel, ok := s.watchers[name]

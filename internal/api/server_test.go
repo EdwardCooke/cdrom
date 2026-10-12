@@ -75,6 +75,14 @@ func (f *fakeScheduler) ResolveApproval(ctx context.Context, in *schedpb.Resolve
 	return f.job, nil
 }
 
+func (f *fakeScheduler) ProceedRun(ctx context.Context, in *schedpb.ProceedRunRequest, opts ...grpc.CallOption) (*schedpb.ProceedRunResponse, error) {
+	return &schedpb.ProceedRunResponse{Run: f.run, Proceeded: 0}, nil
+}
+
+func (f *fakeScheduler) ProceedJob(ctx context.Context, in *schedpb.ProceedJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
+	return f.job, nil
+}
+
 // TestSubmitJobWithSpec posts a job with a multi-step execution spec and
 // verifies the spec is converted and forwarded to the scheduler intact.
 func TestSubmitJobWithSpec(t *testing.T) {

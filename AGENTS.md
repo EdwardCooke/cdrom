@@ -152,7 +152,8 @@ is the summary index). Summary:
 | F-14 | Roles & permissions (RBAC) (fine-grained permissions, built-in + custom roles with composition, user/service-account bindings optionally scoped per pipeline; deny-by-default; roles live in the Database service, evaluated in the API via `internal/authz` with a cache invalidated by `role_change` events on the shared event log; JWT claim mapping via `auth.roles`; delegation rules; synthetic admin when auth is off; backend-only — UI screens deferred) |
 | F-15 | Audit log (append-only record of who did what to which resource, when, from where, with what outcome and what changed; written to a local rotating file — separate from the default log, JSON or text, hourly/daily, `-` for stdout — and to the shared audit log in the Database service; queryable via `GET /api/audit` (requires `audit.can-view`); old entries pruned by age on a schedule; a secret's value is never stored or displayed (name only, redacted); the API records UI/gRPC actions and the scheduler records trigger-fired runs) |
 | F-16 | Concurrency control & queueing (per-group + global + per-key limits, a visible pending queue, and cross-pipeline **concurrency keys** — named, global locks a pipeline and/or job declares, **templatable** against run params/identity; a job's keys are OR'd, so it is blocked while any one is held and it holds all of them while running; the limits are **regex-based rules stored in the database** (a rule = kind + regex pattern + limit; a resource's limit is the most-specific matching rule, a key matching none defaults to 1 = a lock) managed at runtime via `GET/POST/PUT/DELETE /api/concurrency-limits` (gated on `concurrency-limits.can-view`/`can-manage`), not configuration; durable atomic slot accounting in the Database service; a scheduler admission gate on every dispatch path + a leader-gated admission loop; `GET /api/queue` + a `queue` WS event; priority deferred) |
-| F-17…F-22 | Roadmap: environments, notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
+| F-17 | Environments & deployment targets (first-class **environments** — `dev`/`staging`/`prod`/`prod-auto` — that group targets and carry deployment policy; a worker declares which environments it belongs to (configurable, multiple) and a job targeting an environment dispatches to the workers registered for it; an environment's `requires_approval` inserts an F-13 approval gate before dispatch, and its `automation` policy (`automatic`/`manual`) governs whether a run proceeds on its own or pauses for an explicit proceed call — a `manual` environment overrides any trigger (cron/webhook/event) and the previous environment, an `automatic` one ignores the previous environment; a job's own automation setting is used only when the environment has none configured; environments live in the database and are managed via `GET/POST/PUT/DELETE /api/environments[/{name}]` (gated on `environments.can-view`/`can-manage`), proceeding a held run requires `runs.can-proceed`) |
+| F-18…F-22 | Roadmap: notifications, artifact promotion, observability, config-as-code, post-deploy verification (not yet implemented) |
 | F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
 | F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
 | F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; `api-keys.can-manage` lets a user manage their own keys, while acting on **another user's** keys (create-for-them, get/edit/rotate/delete) requires the explicit `api-keys.can-manage-all` permission (admins have it by default); `GET /api/api-keys` lists only the caller's own keys, while `GET /api/api-keys/all` lists **all** keys in the system and requires `api-keys.can-list-all`; an admin can reset a user's lockout; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
@@ -223,6 +224,23 @@ Cross-cutting execution concepts (full detail in `docs/features/` /
   instances are created, so a key can be derived from a run parameter (e.g.
   `{{ .params.env }}-db`). A key that references a parameter with no value fails
   run creation (a run is never created with a key that could not be resolved).
+- **Environments (F-17).** An **environment** (`dev`/`staging`/`prod`/`prod-auto`) is a
+  policy-bearing target: it names the workers that serve it and carries two gates.
+  A worker declares the environments it belongs to at registration
+  (`CDROM_WORKER_ENVIRONMENTS`, multiple allowed) and a job targeting environment
+  `E` is dispatched to the live workers registered for `E` (∩ `E.target_group` when
+  set). `requires_approval` inserts an F-13 approval gate before dispatch; the
+  `automation` policy (`automatic`/`manual`) decides whether a run proceeds on its
+  own or pauses for an explicit proceed call (`POST /api/runs/{id}/proceed` or
+  per-job `POST /api/jobs/{id}/proceed`, gated on `runs.can-proceed`). A `manual`
+  environment is authoritative: it overrides a
+  job's automation setting *and* any trigger (cron/webhook/event) and the previous
+  environment, holding the run until someone proceeds it; an `automatic` environment
+  ignores the previous environment. A job's own automation setting is consulted only
+  when the environment has none configured. Environments are stored in the database
+  and managed via `GET/POST/PUT/DELETE /api/environments[/{name}]` (gated on
+  `environments.can-view`/`can-manage`); a change publishes an `environment` WS
+  event.
 
 ### Logging
 
@@ -352,7 +370,8 @@ file → env vars.
 
 Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH`,
 `CDROM_DB_POSTGRES_DSN`, `CDROM_ARTIFACTS_ROOT`, `CDROM_ARTIFACTS_STORE`,
-`CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
+`CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_WORKER_ENVIRONMENTS` (comma-separated
+environment membership, F-17), `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
 the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
 auth vars `CDROM_AUTH_*` (incl. `CDROM_AUTH_USERPASS_ENABLED`, username/password
 auth, default on; the API-key vars `CDROM_AUTH_APIKEY_ENABLED` (default on),

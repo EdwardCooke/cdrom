@@ -188,8 +188,10 @@ flowchart TB
   hand-written SQL or migration scripts.
 - **Scheduler** (`cmd/scheduler`) — manages job lifecycle and dispatch. It
   holds **no durable state of its own**; all pipelines and jobs are persisted
-  through the Database service. When a job targets a worker group it pushes it
-  to the API (`DispatchJob`), which fans it out to the live workers.
+  through the Database service. When a job targets a worker group or an
+  environment (F-17) it pushes it to the API (`DispatchJob`), which fans it
+  out to the live workers that serve it. A job held by a `manual` environment
+  is kept `awaiting_proceed` until a proceed call releases it.
 - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
   store**, filesystem-backed with streamed uploads/downloads. Every file lives
   in an opaque *namespace* that groups related files; the service is agnostic
@@ -266,6 +268,10 @@ flowchart TB
   `WatchJobs` stream open; the API pushes `WatchMessage`s down the stream — a
   `JobAssignment` (a new job to run) or a `JobCancellation` (stop a job the
   worker is running, F-05). Workers must run on **Windows and Linux**.
+  A worker may also declare the **environments** it belongs to (F-17,
+  `CDROM_WORKER_ENVIRONMENTS`, multiple allowed) at registration; a job that
+  targets an environment is dispatched to the live workers registered for it
+  (intersected with the environment's `target_group` when set).
 - **Ephemeral agents** — short-lived processes that spin up in **Kubernetes**
   when a one-off job runs, execute it, and terminate. An agent fetches its job
   from the API (`GetJob`), reports status back to the API, and exits. An agent
@@ -274,7 +280,13 @@ flowchart TB
 
 A job with a **non-empty** `target_group` is dispatched to live workers in that
 group. A job with an **empty** `target_group` is left pending for an ephemeral
-agent.
+agent. A job that names an **environment** (F-17) is dispatched to the live
+workers that registered that environment (∩ the environment's `target_group`
+when set), and is subject to the environment's approval and automation policy:
+an environment that requires approval inserts an F-13 approval gate before
+dispatch, and a `manual` environment holds the job (`awaiting_proceed`) until
+an explicit proceed call — overriding any trigger and the job's own automation
+setting. The full spec is in `docs/features/f-17-environments.md`.
 
 ### Job execution spec
 
@@ -621,6 +633,10 @@ stateDiagram-v2
     AWAITING_APPROVAL --> FAILED: rejected
     AWAITING_APPROVAL --> CANCELLED: cancel requested
     AWAITING_APPROVAL --> TIMED_OUT: job timeout / watchdog reap
+    PENDING --> AWAITING_PROCEED: manual environment hold (F-17)
+    AWAITING_PROCEED --> RUNNING: proceed (F-17)
+    AWAITING_PROCEED --> CANCELLED: cancel requested
+    AWAITING_PROCEED --> TIMED_OUT: job timeout / watchdog reap
     FAILED --> PENDING: retry claimed (F-04, within budget)
     SUCCEEDED --> PENDING: re-run (F-04)
     FAILED --> PENDING: re-run (F-04)
@@ -639,12 +655,14 @@ stateDiagram-v2
 `GET /api/ws` is a WebSocket endpoint. On connect the client receives a state
 snapshot (jobs + workers + runs); afterwards it receives one message per
 event. Event types are `job_status` (job id + status — including `skipped`,
-F-06 — plus `attempt` / `max_attempts` for F-04), `worker` (name/group +
-action `registered` / `deregistered` / `watching`), `job_log` (job id + step
-index + stream `stdout`/`stderr` + a chunk of output, F-02), and `run_status`
-(run id + status, F-07). Events are published from the gRPC server (worker
-lifecycle, job status reports, streamed job logs, run status notifications)
-and the HTTP handlers (job submit / cancel / re-run, run trigger) through a
+F-06, and `awaiting_proceed`, F-17 — plus `attempt` / `max_attempts` for
+F-04), `worker` (name/group + action `registered` / `deregistered` /
+`watching`), `job_log` (job id + step index + stream `stdout`/`stderr` + a
+chunk of output, F-02), `run_status` (run id + status, F-07), and
+`environment` (an environment was created / updated / deleted, F-17). Events
+are published from the gRPC server (worker lifecycle, job status reports,
+streamed job logs, run status notifications) and the HTTP handlers (job
+submit / cancel / re-run, run trigger, environment management) through a
 shared `EventHub`; slow subscribers have
 events dropped and resync from the snapshot on reconnect.
 

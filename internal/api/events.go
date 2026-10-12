@@ -40,7 +40,12 @@ type Event struct {
 	// concurrency_limits events (published when a limit rule is created,
 	// updated, or deleted).
 	ConcurrencyLimits []*dbpb.ConcurrencyLimit `json:"concurrency_limits,omitempty"`
-	At                int64                    `json:"at"`
+	// Environments is the set of environments an environment event carries
+	// (F-17). It is set only on environment events (published when an
+	// environment is created, updated, or deleted), so the UI's environments
+	// view stays in sync across replicas.
+	Environments []*dbpb.Environment `json:"environments,omitempty"`
+	At           int64               `json:"at"`
 }
 
 // Event type constants.
@@ -61,6 +66,11 @@ const (
 	// a limit rule is created, updated, or deleted, so the UI's limits view
 	// stays in sync across replicas.
 	EventConcurrencyLimits = "concurrency_limits"
+	// EventEnvironment is an environment change (F-17); the event carries the
+	// current set of environments. It is published when an environment is
+	// created, updated, or deleted, so the UI's environments view stays in
+	// sync across replicas.
+	EventEnvironment = "environment"
 )
 
 // Job log stream names (the Event.Stream values for job_log events).

@@ -116,6 +116,13 @@ const (
 	Database_CreateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/CreateConcurrencyLimit"
 	Database_UpdateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/UpdateConcurrencyLimit"
 	Database_DeleteConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/DeleteConcurrencyLimit"
+	Database_CreateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/CreateEnvironment"
+	Database_GetEnvironment_FullMethodName                 = "/cdrom.db.v1.Database/GetEnvironment"
+	Database_ListEnvironments_FullMethodName               = "/cdrom.db.v1.Database/ListEnvironments"
+	Database_UpdateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/UpdateEnvironment"
+	Database_DeleteEnvironment_FullMethodName              = "/cdrom.db.v1.Database/DeleteEnvironment"
+	Database_ListWorkersByEnvironment_FullMethodName       = "/cdrom.db.v1.Database/ListWorkersByEnvironment"
+	Database_ProceedJob_FullMethodName                     = "/cdrom.db.v1.Database/ProceedJob"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -552,6 +559,42 @@ type DatabaseClient interface {
 	// DeleteConcurrencyLimit removes a limit rule. A missing rule returns
 	// NotFound.
 	DeleteConcurrencyLimit(ctx context.Context, in *DeleteConcurrencyLimitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Environments (F-17). Environments are named deployment targets that group
+	// execution targets and carry the deployment policy that governs how work
+	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
+	// automation policy (automatic / manual). They are stored in the database
+	// (owned by the Database service) and managed through the API (CRUD), so an
+	// admin can create `prod-auto`, flip `prod` to manual, or add a worker to an
+	// environment at runtime without a redeployment.
+	//
+	// CreateEnvironment adds an environment. It rejects an empty name and a
+	// name that collides with an existing environment.
+	CreateEnvironment(ctx context.Context, in *CreateEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error)
+	// GetEnvironment returns the named environment. A missing environment
+	// returns NotFound.
+	GetEnvironment(ctx context.Context, in *GetEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error)
+	// ListEnvironments returns every environment, optionally filtered by name
+	// prefix.
+	ListEnvironments(ctx context.Context, in *ListEnvironmentsRequest, opts ...grpc.CallOption) (*ListEnvironmentsResponse, error)
+	// UpdateEnvironment edits an environment's description, target group,
+	// approval policy, and automation policy. A missing environment returns
+	// NotFound.
+	UpdateEnvironment(ctx context.Context, in *UpdateEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error)
+	// DeleteEnvironment removes an environment. A missing environment returns
+	// NotFound.
+	DeleteEnvironment(ctx context.Context, in *DeleteEnvironmentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ListWorkersByEnvironment returns the workers that belong to the named
+	// environment (F-17): the workers whose declared environment list includes
+	// it. This is how the API resolves an environment to its target workers
+	// when it dispatches a job targeting the environment.
+	ListWorkersByEnvironment(ctx context.Context, in *ListWorkersByEnvironmentRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
+	// ProceedJob releases a job held by a `manual` environment (F-17): it
+	// conditionally marks the job as running (and stamps the started timestamp)
+	// only if the job is still awaiting_proceed. It returns whether the job was
+	// proceeded. This is how the API's proceed endpoint releases a held run: a
+	// job that is no longer awaiting_proceed (it was cancelled, or it was
+	// already proceeded) is left untouched, so a late proceed is a no-op.
+	ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*ProceedJobResponse, error)
 }
 
 type databaseClient struct {
@@ -1522,6 +1565,76 @@ func (c *databaseClient) DeleteConcurrencyLimit(ctx context.Context, in *DeleteC
 	return out, nil
 }
 
+func (c *databaseClient) CreateEnvironment(ctx context.Context, in *CreateEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Environment)
+	err := c.cc.Invoke(ctx, Database_CreateEnvironment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetEnvironment(ctx context.Context, in *GetEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Environment)
+	err := c.cc.Invoke(ctx, Database_GetEnvironment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListEnvironments(ctx context.Context, in *ListEnvironmentsRequest, opts ...grpc.CallOption) (*ListEnvironmentsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEnvironmentsResponse)
+	err := c.cc.Invoke(ctx, Database_ListEnvironments_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateEnvironment(ctx context.Context, in *UpdateEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Environment)
+	err := c.cc.Invoke(ctx, Database_UpdateEnvironment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteEnvironment(ctx context.Context, in *DeleteEnvironmentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteEnvironment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListWorkersByEnvironment(ctx context.Context, in *ListWorkersByEnvironmentRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWorkersResponse)
+	err := c.cc.Invoke(ctx, Database_ListWorkersByEnvironment_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*ProceedJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProceedJobResponse)
+	err := c.cc.Invoke(ctx, Database_ProceedJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -1956,6 +2069,42 @@ type DatabaseServer interface {
 	// DeleteConcurrencyLimit removes a limit rule. A missing rule returns
 	// NotFound.
 	DeleteConcurrencyLimit(context.Context, *DeleteConcurrencyLimitRequest) (*emptypb.Empty, error)
+	// Environments (F-17). Environments are named deployment targets that group
+	// execution targets and carry the deployment policy that governs how work
+	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
+	// automation policy (automatic / manual). They are stored in the database
+	// (owned by the Database service) and managed through the API (CRUD), so an
+	// admin can create `prod-auto`, flip `prod` to manual, or add a worker to an
+	// environment at runtime without a redeployment.
+	//
+	// CreateEnvironment adds an environment. It rejects an empty name and a
+	// name that collides with an existing environment.
+	CreateEnvironment(context.Context, *CreateEnvironmentRequest) (*Environment, error)
+	// GetEnvironment returns the named environment. A missing environment
+	// returns NotFound.
+	GetEnvironment(context.Context, *GetEnvironmentRequest) (*Environment, error)
+	// ListEnvironments returns every environment, optionally filtered by name
+	// prefix.
+	ListEnvironments(context.Context, *ListEnvironmentsRequest) (*ListEnvironmentsResponse, error)
+	// UpdateEnvironment edits an environment's description, target group,
+	// approval policy, and automation policy. A missing environment returns
+	// NotFound.
+	UpdateEnvironment(context.Context, *UpdateEnvironmentRequest) (*Environment, error)
+	// DeleteEnvironment removes an environment. A missing environment returns
+	// NotFound.
+	DeleteEnvironment(context.Context, *DeleteEnvironmentRequest) (*emptypb.Empty, error)
+	// ListWorkersByEnvironment returns the workers that belong to the named
+	// environment (F-17): the workers whose declared environment list includes
+	// it. This is how the API resolves an environment to its target workers
+	// when it dispatches a job targeting the environment.
+	ListWorkersByEnvironment(context.Context, *ListWorkersByEnvironmentRequest) (*ListWorkersResponse, error)
+	// ProceedJob releases a job held by a `manual` environment (F-17): it
+	// conditionally marks the job as running (and stamps the started timestamp)
+	// only if the job is still awaiting_proceed. It returns whether the job was
+	// proceeded. This is how the API's proceed endpoint releases a held run: a
+	// job that is no longer awaiting_proceed (it was cancelled, or it was
+	// already proceeded) is left untouched, so a late proceed is a no-op.
+	ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -2253,6 +2402,27 @@ func (UnimplementedDatabaseServer) UpdateConcurrencyLimit(context.Context, *Upda
 }
 func (UnimplementedDatabaseServer) DeleteConcurrencyLimit(context.Context, *DeleteConcurrencyLimitRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteConcurrencyLimit not implemented")
+}
+func (UnimplementedDatabaseServer) CreateEnvironment(context.Context, *CreateEnvironmentRequest) (*Environment, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateEnvironment not implemented")
+}
+func (UnimplementedDatabaseServer) GetEnvironment(context.Context, *GetEnvironmentRequest) (*Environment, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetEnvironment not implemented")
+}
+func (UnimplementedDatabaseServer) ListEnvironments(context.Context, *ListEnvironmentsRequest) (*ListEnvironmentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListEnvironments not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateEnvironment(context.Context, *UpdateEnvironmentRequest) (*Environment, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateEnvironment not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteEnvironment(context.Context, *DeleteEnvironmentRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteEnvironment not implemented")
+}
+func (UnimplementedDatabaseServer) ListWorkersByEnvironment(context.Context, *ListWorkersByEnvironmentRequest) (*ListWorkersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWorkersByEnvironment not implemented")
+}
+func (UnimplementedDatabaseServer) ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProceedJob not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -4003,6 +4173,132 @@ func _Database_DeleteConcurrencyLimit_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateEnvironmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateEnvironment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateEnvironment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateEnvironment(ctx, req.(*CreateEnvironmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetEnvironmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetEnvironment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetEnvironment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetEnvironment(ctx, req.(*GetEnvironmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListEnvironments_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEnvironmentsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListEnvironments(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListEnvironments_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListEnvironments(ctx, req.(*ListEnvironmentsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateEnvironmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateEnvironment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateEnvironment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateEnvironment(ctx, req.(*UpdateEnvironmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteEnvironmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteEnvironment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteEnvironment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteEnvironment(ctx, req.(*DeleteEnvironmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListWorkersByEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkersByEnvironmentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListWorkersByEnvironment(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListWorkersByEnvironment_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListWorkersByEnvironment(ctx, req.(*ListWorkersByEnvironmentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ProceedJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProceedJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ProceedJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ProceedJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ProceedJob(ctx, req.(*ProceedJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -4393,6 +4689,34 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteConcurrencyLimit",
 			Handler:    _Database_DeleteConcurrencyLimit_Handler,
+		},
+		{
+			MethodName: "CreateEnvironment",
+			Handler:    _Database_CreateEnvironment_Handler,
+		},
+		{
+			MethodName: "GetEnvironment",
+			Handler:    _Database_GetEnvironment_Handler,
+		},
+		{
+			MethodName: "ListEnvironments",
+			Handler:    _Database_ListEnvironments_Handler,
+		},
+		{
+			MethodName: "UpdateEnvironment",
+			Handler:    _Database_UpdateEnvironment_Handler,
+		},
+		{
+			MethodName: "DeleteEnvironment",
+			Handler:    _Database_DeleteEnvironment_Handler,
+		},
+		{
+			MethodName: "ListWorkersByEnvironment",
+			Handler:    _Database_ListWorkersByEnvironment_Handler,
+		},
+		{
+			MethodName: "ProceedJob",
+			Handler:    _Database_ProceedJob_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

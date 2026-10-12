@@ -136,12 +136,22 @@ message Worker {
   string group = 2;
   string address = 3;
   google.protobuf.Timestamp last_seen_at = 4;
+  // environments are the names of the environments this worker belongs to
+  // (F-17). Membership is many-to-many: a worker may list several
+  // environments, and an environment can be served by many workers. A job
+  // targeting an environment is dispatched to the live workers that
+  // registered it. Empty means the worker is reachable only by its group.
+  repeated string environments = 5;
 }
 
 message RegisterWorkerRequest {
   string name = 1;
   string group = 2;
   string address = 3;
+  // environments are the names of the environments this worker belongs to
+  // (F-17); the worker declares them at registration (configurable, multiple).
+  // Re-registration (e.g. after a restart) updates the membership.
+  repeated string environments = 4;
 }
 
 message DeregisterWorkerRequest {
@@ -262,6 +272,18 @@ message Job {
   // approval_reason is the (optional) free-text reason the user gave when they
   // resolved the job's approval gate (F-13); empty when the user gave none.
   string approval_reason = 31;
+  // environment is the name of the environment this job targets (F-17); empty
+  // means the job targets its raw target_group. The API uses it to route the
+  // job to the live workers that registered the environment (intersected with
+  // the environment's target_group when set).
+  string environment = 32;
+  // approval is the job's override of its environment's approval policy
+  // (F-17): NONE (skip the gate even if the environment requires one) or
+  // REQUIRED (insert a gate even if the environment does not require one).
+  // UNSPECIFIED means the job defers to the environment's requires_approval
+  // flag. The API uses it to decide whether to insert an F-13 approval step
+  // into the job's spec before it is handed to an execution target.
+  cdrom.db.v1.ApprovalPolicy approval = 33;
 }
 
 message JobAssignment {
@@ -308,6 +330,10 @@ message WatchMessage {
 message WatchJobsRequest {
   string worker_name = 1;
   string group = 2;
+  // environments are the names of the environments this worker belongs to
+  // (F-17); the API uses them to route jobs that target an environment to the
+  // workers that registered it.
+  repeated string environments = 3;
 }
 
 // CancelJobRequest asks the API to signal the execution target running the
@@ -347,6 +373,11 @@ message StartJobExecutionResponse {
 message ListPendingJobsRequest {
   // group is the worker group to list pending jobs for.
   string group = 1;
+  // environments are the environments the calling worker belongs to (F-17).
+  // A pending job that targets one of them is returned even when its target
+  // group differs from `group`, so a worker that serves an environment picks
+  // up its jobs on the poll (catch-up) path.
+  repeated string environments = 2;
 }
 
 message ListPendingJobsResponse {

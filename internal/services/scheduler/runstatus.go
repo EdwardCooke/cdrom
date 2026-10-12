@@ -165,9 +165,10 @@ func deriveRunStatus(jobs []*dbpb.Job) models.RunStatus {
 			return models.RunStatusFailed
 		case dbpb.JobStatus_JOB_STATUS_CANCELLED:
 			anyCancelled = true
-		case dbpb.JobStatus_JOB_STATUS_PENDING, dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
-			// Awaiting approval (F-13) is in-flight: a job paused at an
-			// approval gate keeps the run running until the gate is resolved.
+		case dbpb.JobStatus_JOB_STATUS_PENDING, dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL, dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED:
+			// Awaiting approval (F-13) and awaiting proceed (F-17) are
+			// in-flight: a job paused at an approval gate or held by a manual
+			// environment keeps the run running until it is resolved.
 			anyInFlight = true
 			// SUCCEEDED and SKIPPED are terminal and do not, on their own, fail
 			// the run.

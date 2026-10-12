@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 
 	"cdrom/internal/audit"
 	"cdrom/internal/authz"
+	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -117,8 +119,12 @@ type GRPCServer struct {
 type liveWorker struct {
 	name     string
 	group    string
-	address  string
-	lastSeen time.Time
+	// environments are the environments the worker belongs to (F-17); a job
+	// that targets an environment is dispatched to the live workers that
+	// registered it.
+	environments []string
+	address      string
+	lastSeen     time.Time
 }
 
 // NewGRPCServer creates the API gRPC service. db is the client for the
@@ -169,9 +175,10 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		return nil, status.Error(codes.InvalidArgument, "worker name is required")
 	}
 	registered, err := s.db.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{
-		Name:    req.GetName(),
-		Group:   req.GetGroup(),
-		Address: req.GetAddress(),
+		Name:         req.GetName(),
+		Group:        req.GetGroup(),
+		Address:      req.GetAddress(),
+		Environments: req.GetEnvironments(),
 	})
 	if err != nil {
 		return nil, err
@@ -186,10 +193,11 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	}
 	s.mu.Lock()
 	s.live[registered.GetName()] = &liveWorker{
-		name:     registered.GetName(),
-		group:    registered.GetGroup(),
-		address:  registered.GetAddress(),
-		lastSeen: time.Now(),
+		name:         registered.GetName(),
+		group:        registered.GetGroup(),
+		environments: registered.GetEnvironments(),
+		address:      registered.GetAddress(),
+		lastSeen:     time.Now(),
 	}
 	s.mu.Unlock()
 	s.logger.Info("api: worker registered", "worker", registered.GetName(), "group", registered.GetGroup())
@@ -204,10 +212,11 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	s.publish(Event{Type: EventWorker, Worker: registered.GetName(), Group: registered.GetGroup(), Action: WorkerRegistered})
 	s.publishWorkerEvent(ctx, registered.GetName(), registered.GetGroup(), WorkerRegistered)
 	return &apipb.Worker{
-		Name:       registered.GetName(),
-		Group:      registered.GetGroup(),
-		Address:    registered.GetAddress(),
-		LastSeenAt: registered.GetLastSeenAt(),
+		Name:         registered.GetName(),
+		Group:        registered.GetGroup(),
+		Address:      registered.GetAddress(),
+		Environments: registered.GetEnvironments(),
+		LastSeenAt:   registered.GetLastSeenAt(),
 	}, nil
 }
 
@@ -271,7 +280,7 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 		close(existing)
 	}
 	s.watchers[name] = assignmentChannel
-	s.live[name] = &liveWorker{name: name, group: req.GetGroup(), lastSeen: time.Now()}
+	s.live[name] = &liveWorker{name: name, group: req.GetGroup(), environments: req.GetEnvironments(), lastSeen: time.Now()}
 	s.mu.Unlock()
 
 	defer func() {
@@ -313,6 +322,9 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 	// Hand the agent the pipeline's secrets as plaintext (F-12), decrypted from
 	// the job's stored ciphertexts, so a step's spec can reference them.
 	s.resolveSecrets(ctx, apiJob, job)
+	// Insert an F-13 approval step when the job's environment requires approval
+	// (F-17), so the target pauses at the gate before it runs.
+	s.applyEnvironmentApprovalGate(ctx, apiJob)
 	// Hand the agent a job token so it can authenticate its status reports and
 	// any outside-resource calls for this job.
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
@@ -364,6 +376,9 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	// Hand the worker the pipeline's secrets as plaintext (F-12), decrypted
 	// from the job's stored ciphertexts, so a step's spec can reference them.
 	s.resolveSecrets(ctx, apiJob, job)
+	// Insert an F-13 approval step when the job's environment requires approval
+	// (F-17), so the target pauses at the gate before it runs.
+	s.applyEnvironmentApprovalGate(ctx, apiJob)
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
 		apiJob.Token = token
 	}
@@ -380,7 +395,10 @@ func (s *GRPCServer) ListPendingJobs(ctx context.Context, req *apipb.ListPending
 	if s.db == nil {
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
-	resp, err := s.db.ListPendingByGroup(ctx, &dbpb.ListPendingByGroupRequest{Group: req.GetGroup()})
+	resp, err := s.db.ListPendingByGroup(ctx, &dbpb.ListPendingByGroupRequest{
+		Group:        req.GetGroup(),
+		Environments: req.GetEnvironments(),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -865,16 +883,20 @@ func (s *GRPCServer) reportActor(workerName string, jobID int64) string {
 // Dispatch (called by the scheduler)
 // ---------------------------------------------------------------------------
 
-// DispatchJob fans a job out to the live workers in the job's target group.
-// Jobs with an empty target group are for ephemeral agents and are not
-// dispatched to live workers.
+// DispatchJob fans a job out to the live workers that serve it. A job that
+// targets an environment (F-17) is dispatched to the live workers that belong
+// to it; a job that targets a raw group (and no environment) is dispatched to
+// the live workers in that group. A job with neither an environment nor a
+// target group is for an ephemeral agent and is not dispatched to live
+// workers.
 func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequest) (*apipb.DispatchJobResponse, error) {
 	job := req.GetJob()
 	if job == nil {
 		return nil, status.Error(codes.InvalidArgument, "job is required")
 	}
 	group := job.GetTargetGroup()
-	if group == "" {
+	environment := job.GetEnvironment()
+	if group == "" && environment == "" {
 		return &apipb.DispatchJobResponse{Dispatched: 0}, nil
 	}
 	// Hand the workers the status/outputs of the jobs this job depends on
@@ -883,28 +905,29 @@ func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequ
 	// Mint a job token so the workers can authenticate their status reports
 	// and any outside-resource calls for this job.
 	token := s.mintJobToken(ctx, job)
-	dispatched := s.dispatch(group, job, token)
+	dispatched := s.dispatch(group, environment, job, token)
 	if dispatched == 0 {
-		s.logger.Warn("api: no live workers for group; job left pending",
-			"job", job.GetId(), "group", group)
+		s.logger.Warn("api: no live workers for job; job left pending",
+			"job", job.GetId(), "group", group, "environment", environment)
 	} else {
-		s.logger.Info("api: job dispatched", "job", job.GetId(), "group", group, "workers", dispatched)
+		s.logger.Info("api: job dispatched", "job", job.GetId(), "group", group, "environment", environment, "workers", dispatched)
 	}
 	// Append an assignment event to the shared event log (F-23) so other API
-	// pods can nudge their local workers in the group. This pod already pushed
-	// directly to its local workers above; the event log is the cross-pod path.
-	s.publishAssignment(ctx, job.GetId(), group)
+	// pods can nudge their local workers in the group (or, for an environment
+	// job, that belong to the environment). This pod already pushed directly
+	// to its local workers above; the event log is the cross-pod path.
+	s.publishAssignment(ctx, job.GetId(), group, environment)
 	return &apipb.DispatchJobResponse{Dispatched: int32(dispatched)}, nil
 }
 
 // publishAssignment appends an "assignment" event to the shared event log
 // (F-23). It is best-effort: a failure to append does not fail the dispatch
 // (the worker's periodic poll is the authoritative path).
-func (s *GRPCServer) publishAssignment(ctx context.Context, jobID int64, group string) {
+func (s *GRPCServer) publishAssignment(ctx context.Context, jobID int64, group, environment string) {
 	if s.db == nil {
 		return
 	}
-	resp, err := s.db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: jobID, TargetGroup: group})
+	resp, err := s.db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: jobID, TargetGroup: group, Environment: environment})
 	if err != nil {
 		s.logger.Warn("api: publish assignment event", "job", jobID, "err", err)
 		return
@@ -1083,14 +1106,24 @@ func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log str
 	s.markPublished(resp.GetId())
 }
 
-// dispatch pushes an assignment (with the job token) to every live worker in
-// the group and returns how many workers received it.
-func (s *GRPCServer) dispatch(group string, job *apipb.Job, token string) int {
+// dispatch pushes an assignment (with the job token) to every live worker that
+// serves the job and returns how many workers received it. A job that targets
+// an environment (F-17) is pushed to the live workers that belong to it; a job
+// that targets a raw group (and no environment) is pushed to the live workers
+// in that group. The push is best-effort: a worker that receives it but does
+// not actually serve the job (e.g. it is not in the environment's target
+// group) is rejected when it starts the job (StartJobExecution is the
+// authoritative routing gate).
+func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job, token string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var dispatchedCount int
 	for name, worker := range s.live {
-		if worker.group != group {
+		if environment != "" {
+			if !slices.Contains(worker.environments, environment) {
+				continue
+			}
+		} else if worker.group != group {
 			continue
 		}
 		assignmentChannel, ok := s.watchers[name]
@@ -1368,6 +1401,63 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		ApprovalReason:      job.GetApprovalReason(),
 		ApprovalRequestedAt: job.GetApprovalRequestedAt(),
 		ApprovalDecidedAt:   job.GetApprovalDecidedAt(),
+		Environment:         job.GetEnvironment(),
+		Approval:            job.GetApproval(),
+	}
+}
+
+// applyEnvironmentApprovalGate inserts an F-13 approval step at the front of
+// the job's spec when the job's environment requires approval (F-17). The
+// environment's requires_approval flag is the default; the job's own approval
+// override (none / required) takes precedence. A job that targets no
+// environment (or an environment that is missing) is left unchanged. The
+// inserted step pauses the job at the gate (awaiting_approval) until an
+// authorized user approves or rejects it, exactly like a pipeline-authored
+// approval step. It is a no-op when the job's spec is nil or the gate is not
+// required.
+func (s *GRPCServer) applyEnvironmentApprovalGate(ctx context.Context, apiJob *apipb.Job) {
+	if apiJob.GetEnvironment() == "" {
+		return
+	}
+	env, err := s.db.GetEnvironment(ctx, &dbpb.GetEnvironmentRequest{Name: apiJob.GetEnvironment()})
+	if err != nil {
+		// The environment is missing (it was deleted, or the Database client is
+		// unavailable): the gate is not applied (the job runs without it).
+		return
+	}
+	// The job's approval override takes precedence over the environment's
+	// requires_approval flag: required inserts a gate even if the environment
+	// does not require one; none skips the gate even if it does. When the job
+	// sets no override (unspecified) the environment's flag decides.
+	requires := env.GetRequiresApproval()
+	switch apiJob.GetApproval() {
+	case dbpb.ApprovalPolicy_APPROVAL_POLICY_NONE:
+		requires = false
+	case dbpb.ApprovalPolicy_APPROVAL_POLICY_REQUIRED:
+		requires = true
+	}
+	if !requires {
+		return
+	}
+	spec := apiJob.GetSpec()
+	if spec == nil {
+		spec = &dbpb.JobSpec{}
+	}
+	gate := &dbpb.JobStep{
+		Type: executor.TypeApproval,
+		Params: map[string]*dbpb.ParamValue{
+			"message": {String_: fmt.Sprintf("Approve deployment of job %q to environment %q", apiJob.GetName(), apiJob.GetEnvironment())},
+		},
+	}
+	steps := append([]*dbpb.JobStep{gate}, spec.GetSteps()...)
+	apiJob.Spec = &dbpb.JobSpec{
+		Steps:           steps,
+		Timeout:         spec.GetTimeout(),
+		Retry:           spec.GetRetry(),
+		IgnoreFailed:    spec.GetIgnoreFailed(),
+		FailureMode:     spec.GetFailureMode(),
+		StepBarrier:     spec.GetStepBarrier(),
+		ConcurrencyKeys: spec.GetConcurrencyKeys(),
 	}
 }
 

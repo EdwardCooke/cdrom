@@ -54,6 +54,13 @@ const (
 	// database) are platform-wide: can-view reads them, can-manage edits them.
 	PermConcurrencyLimitsView   = "concurrency-limits.can-view"
 	PermConcurrencyLimitsManage = "concurrency-limits.can-manage"
+	// Environment management permissions (F-17). Environments (named deployment
+	// targets that carry approval + automation policy) are platform-wide:
+	// can-view reads them, can-manage edits them. Proceeding a run held by a
+	// `manual` environment requires runs.can-proceed.
+	PermEnvironmentsView   = "environments.can-view"
+	PermEnvironmentsManage = "environments.can-manage"
+	PermRunsProceed        = "runs.can-proceed"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -88,6 +95,9 @@ var AllPermissions = []string{
 	PermServiceAccountsRemove,
 	PermConcurrencyLimitsView,
 	PermConcurrencyLimitsManage,
+	PermEnvironmentsView,
+	PermEnvironmentsManage,
+	PermRunsProceed,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

@@ -79,38 +79,26 @@ func (s *Server) SubmitJob(ctx context.Context, req *schedpb.SubmitJobRequest) (
 	// A job with dependencies (needs, F-08, or depends_on, F-06) is never
 	// dispatched here: it is left pending and the background dependency
 	// resolver (dependencies.go) releases it once every dependency has
-	// succeeded (or marks it skipped if any of them does not). The database
-	// service resolves needs to depends_on, so a job created with needs comes
-	// back with a non-empty depends_on.
-	if len(created.GetDependsOn()) > 0 {
-		s.logger.Info("scheduler: job held pending dependencies", "job", created.GetId(), "depends_on", created.GetDependsOn())
-		return job, nil
-	}
-	// A job is dispatched only when it is admitted (F-16): it fits within every
-	// limit it is subject to (its concurrency keys, its target group's cap, and
-	// the global cap). When a resource is at its limit the job is left pending
-	// and the background admission loop dispatches it once a slot frees.
-	if !s.tryAdmit(ctx, created) {
-		return job, nil
-	}
-	if req.GetTargetGroup() != "" {
-		s.publishAssignment(ctx, created.GetId(), req.GetTargetGroup())
-	} else {
-		s.logger.Info("scheduler: job queued for ephemeral agent", "job", created.GetId())
-	}
+	// succeeded (or marks it skipped if any of them does not). A job held by a
+	// `manual` environment (F-17) is likewise not dispatched: it is held
+	// (awaiting_proceed) until an explicit proceed call. The database service
+	// resolves needs to depends_on, so a job created with needs comes back with
+	// a non-empty depends_on.
+	s.dispatchJob(ctx, created)
 	return job, nil
 }
 
 // publishAssignment appends an "assignment" event to the shared event log
-// (F-23) so every API pod can nudge its local workers in the group. It is
-// best-effort: a failure to append does not fail the submit (the worker's
-// periodic poll is the authoritative path).
-func (s *Server) publishAssignment(ctx context.Context, jobID int64, group string) {
+// (F-23) so every API pod can nudge its local workers in the group (or, for a
+// job that targets an environment, F-17, its local workers that belong to the
+// environment). It is best-effort: a failure to append does not fail the
+// submit (the worker's periodic poll is the authoritative path).
+func (s *Server) publishAssignment(ctx context.Context, jobID int64, group, environment string) {
 	if s.db == nil {
 		return
 	}
-	if _, err := s.db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: jobID, TargetGroup: group}); err != nil {
-		s.logger.Warn("scheduler: publish assignment event", "job", jobID, "group", group, "err", err)
+	if _, err := s.db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: jobID, TargetGroup: group, Environment: environment}); err != nil {
+		s.logger.Warn("scheduler: publish assignment event", "job", jobID, "group", group, "environment", environment, "err", err)
 	}
 }
 
@@ -254,7 +242,7 @@ func (s *Server) rerunJob(ctx context.Context, db jobRerunner, publisher jobPubl
 		return job, nil
 	}
 	if updated.GetTargetGroup() != "" {
-		if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: updated.GetId(), TargetGroup: updated.GetTargetGroup()}); err != nil {
+		if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: updated.GetId(), TargetGroup: updated.GetTargetGroup(), Environment: updated.GetEnvironment()}); err != nil {
 			s.logger.Warn("scheduler: publish re-run assignment failed; job left pending",
 				"job", updated.GetId(), "group", updated.GetTargetGroup(), "err", err)
 		}
@@ -397,23 +385,149 @@ func (s *Server) TriggerRun(ctx context.Context, req *schedpb.TriggerRunRequest)
 // log (F-23), which every API pod tails and fans out to its local workers; an
 // instance with an empty target group is left pending for an ephemeral agent.
 func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
+	s.dispatchJob(ctx, job)
+}
+
+// dispatchJob drives a single job through the dispatch decision (F-17, F-16):
+// a job with dependencies (needs, F-08, or depends_on, F-06) is left pending
+// for the dependency resolver; a job held by a `manual` environment (F-17) is
+// held (awaiting_proceed) for an explicit proceed call; otherwise it is
+// dispatched only when it is admitted (F-16) — it fits within every limit it
+// is subject to (its concurrency keys, its target group's cap, and the global
+// cap). When a resource is at its limit the job is left pending and the
+// background admission loop dispatches it once a slot frees. A job with a
+// target group has an "assignment" event appended to the shared event log
+// (F-23); a job with an empty target group is left pending for an ephemeral
+// agent.
+func (s *Server) dispatchJob(ctx context.Context, job *dbpb.Job) {
 	if len(job.GetDependsOn()) > 0 {
-		s.logger.Info("scheduler: run instance held pending dependencies", "job", job.GetId(), "run", job.GetRunId(), "depends_on", job.GetDependsOn())
+		s.logger.Info("scheduler: job held pending dependencies", "job", job.GetId(), "run", job.GetRunId(), "depends_on", job.GetDependsOn())
 		return
 	}
-	// A run instance is dispatched only when it is admitted (F-16): it fits
-	// within every limit it is subject to (its concurrency keys, its target
-	// group's cap, and the global cap). When a resource is at its limit the
-	// instance is left pending and the background admission loop dispatches it
-	// once a slot frees.
+	// A pending job that targets a `manual` environment (F-17) is held
+	// (awaiting_proceed) for an explicit proceed call: it is not dispatched
+	// until someone proceeds it (ProceedRun / ProceedJob). A `manual`
+	// environment overrides any trigger (cron / webhook / event) and the job's
+	// own automation setting. The hold applies only to a pending job: a job
+	// that has already been proceeded (running) is dispatched, not re-held.
+	if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_PENDING && s.shouldHoldForProceed(ctx, job) {
+		s.holdForProceed(ctx, job.GetId())
+		return
+	}
+	// A job is dispatched only when it is admitted (F-16): it fits within every
+	// limit it is subject to. When a resource is at its limit the job is left
+	// pending and the background admission loop dispatches it once a slot frees.
 	if !s.tryAdmit(ctx, job) {
 		return
 	}
-	if job.GetTargetGroup() != "" {
-		s.publishAssignment(ctx, job.GetId(), job.GetTargetGroup())
+	if job.GetTargetGroup() != "" || job.GetEnvironment() != "" {
+		s.publishAssignment(ctx, job.GetId(), job.GetTargetGroup(), job.GetEnvironment())
 	} else {
-		s.logger.Info("scheduler: run instance queued for ephemeral agent", "job", job.GetId(), "run", job.GetRunId())
+		s.logger.Info("scheduler: job queued for ephemeral agent", "job", job.GetId(), "run", job.GetRunId())
 	}
+}
+
+// shouldHoldForProceed reports whether a job should be held (awaiting_proceed)
+// for an explicit proceed call (F-17): its effective automation is manual. The
+// environment's automation policy is authoritative when set (a job's own
+// automation setting is consulted only when the environment has none
+// configured); when neither the environment nor the job sets a policy the job
+// is automatic (it proceeds on its own). A job that targets no environment is
+// never held.
+func (s *Server) shouldHoldForProceed(ctx context.Context, job *dbpb.Job) bool {
+	envName := job.GetEnvironment()
+	if envName == "" {
+		return false
+	}
+	env, err := s.db.GetEnvironment(ctx, &dbpb.GetEnvironmentRequest{Name: envName})
+	if err != nil {
+		// The environment is missing (it was deleted, or the Database client is
+		// unavailable): the job is not held (it is dispatched on its own).
+		return false
+	}
+	automation := env.GetAutomation()
+	if automation == dbpb.Automation_AUTOMATION_UNSPECIFIED {
+		// The environment sets no automation policy: the job's own setting
+		// decides (both automatic and manual are valid in that case).
+		automation = job.GetAutomation()
+	}
+	return automation == dbpb.Automation_AUTOMATION_MANUAL
+}
+
+// holdForProceed marks a job as awaiting_proceed (F-17): it is held for an
+// explicit proceed call (ProceedRun / ProceedJob) before it is dispatched.
+// Best-effort: a failure to persist the hold does not fail the dispatch
+// (the job is left pending and the admission loop re-checks it).
+func (s *Server) holdForProceed(ctx context.Context, jobID int64) {
+	if _, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: jobID, Status: dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED}); err != nil {
+		s.logger.Warn("scheduler: hold job for proceed", "job", jobID, "err", err)
+		return
+	}
+	s.logger.Info("scheduler: job held for manual environment", "job", jobID)
+}
+
+// ProceedRun releases the jobs of a run that are held by a `manual` environment
+// (F-17): for each of the run's jobs that is awaiting_proceed it releases the
+// hold (Database.ProceedJob, conditionally) and dispatches it. A job that is no
+// longer awaiting_proceed (it was cancelled, or it was already proceeded) is
+// left untouched, so a late proceed is a no-op. It returns the run and the
+// number of jobs it proceeded.
+func (s *Server) ProceedRun(ctx context.Context, req *schedpb.ProceedRunRequest) (*schedpb.ProceedRunResponse, error) {
+	if req.GetRunId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "run_id is required")
+	}
+	run, err := s.db.GetRun(ctx, &dbpb.GetRunRequest{Id: req.GetRunId()})
+	if err != nil {
+		return nil, err
+	}
+	response := &schedpb.ProceedRunResponse{Run: toProtoRun(run)}
+	jobs, err := s.db.ListJobs(ctx, &dbpb.ListJobsRequest{RunId: req.GetRunId()})
+	if err != nil {
+		return nil, err
+	}
+	for _, job := range jobs.GetJobs() {
+		if job.GetStatus() != dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED {
+			continue
+		}
+		if _, err := s.ProceedJob(ctx, &schedpb.ProceedJobRequest{Id: job.GetId(), Actor: req.GetActor()}); err != nil {
+			s.logger.Warn("scheduler: proceed job", "job", job.GetId(), "err", err)
+			continue
+		}
+		response.Proceeded++
+	}
+	return response, nil
+}
+
+// ProceedJob releases a single job held by a `manual` environment (F-17): it
+// releases the hold (Database.ProceedJob, conditionally — only if the job is
+// still awaiting_proceed) and dispatches the job. A job that is no longer
+// awaiting_proceed is left untouched, so a late proceed is a no-op.
+func (s *Server) ProceedJob(ctx context.Context, req *schedpb.ProceedJobRequest) (*schedpb.Job, error) {
+	if req.GetId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job id is required")
+	}
+	resp, err := s.db.ProceedJob(ctx, &dbpb.ProceedJobRequest{JobId: req.GetId(), Actor: req.GetActor()})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.GetProceeded() {
+		// The job is no longer awaiting_proceed (it was cancelled, or it was
+		// already proceeded): a late proceed is a no-op. Return its current
+		// state.
+		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+		if err != nil {
+			return nil, err
+		}
+		return toProtoJob(job), nil
+	}
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+	if err != nil {
+		return nil, err
+	}
+	// The job was released from its hold: dispatch it (admit it and publish an
+	// assignment, or queue it for an ephemeral agent).
+	s.dispatchJob(ctx, job)
+	return toProtoJob(job), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +558,7 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		ApprovalDecision: job.GetApprovalDecision(),
 		ApprovalActor:    job.GetApprovalActor(),
 		ApprovalReason:   job.GetApprovalReason(),
+		Environment:      job.GetEnvironment(),
 	}
 }
 

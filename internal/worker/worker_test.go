@@ -236,7 +236,7 @@ func TestWorkerCancelInterruptsRunningJob(t *testing.T) {
 		jobs:      map[int64]*apipb.Job{42: job},
 		startable: map[int64]bool{42: true},
 	}
-	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
+	w := New("w1", "pool-a", nil, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -266,7 +266,7 @@ func TestWorkerCancelForUnknownJobIsNoop(t *testing.T) {
 	watchCh := make(chan *apipb.WatchMessage, 8)
 	t.Cleanup(func() { close(watchCh) })
 	api := &fakeAPIClient{watchCh: watchCh}
-	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
+	w := New("w1", "pool-a", nil, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -324,7 +324,7 @@ func TestWorkerStepBarrierSyncs(t *testing.T) {
 		jobs:      map[int64]*apipb.Job{77: job},
 		startable: map[int64]bool{77: true},
 	}
-	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
+	w := New("w1", "pool-a", nil, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -387,7 +387,7 @@ func TestWorkerStepBarrierCancelled(t *testing.T) {
 			{jobID: 78, step: 0}: {cancelled: true},
 		},
 	}
-	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
+	w := New("w1", "pool-a", nil, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -426,7 +426,7 @@ func TestWorkerTokenExchangeStep(t *testing.T) {
 		jobs:      map[int64]*apipb.Job{55: job},
 		startable: map[int64]bool{55: true},
 	}
-	w := New("w1", "pool-a", Dependencies{API: api}, testLogger())
+	w := New("w1", "pool-a", nil, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -179,6 +179,17 @@ type JobDefinitionSnapshot struct {
 	// TargetGroup selects a group of long-lived workers; empty means the job
 	// runs on an ephemeral Kubernetes agent.
 	TargetGroup string `json:"target_group,omitempty"`
+	// Environment is the environment the job targets (F-17); empty means the
+	// job targets its raw TargetGroup. It is captured in the snapshot so a run
+	// bound to this version is dispatched to, and gated by, the environment
+	// that was active when it started.
+	Environment string `json:"environment,omitempty"`
+	// Automation is the job's own automation setting (F-17); empty means the
+	// job sets none (it defers to its environment's policy).
+	Automation Automation `json:"automation,omitempty"`
+	// Approval is the job's override of its environment's approval policy
+	// (F-17); empty means the job defers to the environment's flag.
+	Approval ApprovalPolicy `json:"approval,omitempty"`
 	// Needs lists the keys of the jobs this job depends on (F-08).
 	Needs []string `json:"needs,omitempty"`
 	// Spec is the execution spec to snapshot onto each of the job's run
@@ -371,6 +382,44 @@ const (
 	// (approved → running, rejected → failed) or the job is cancelled/timed
 	// out.
 	JobStatusAwaitingApproval JobStatus = "awaiting_approval"
+	// JobStatusAwaitingProceed is a non-terminal, in-flight state (F-17): the
+	// job targets a `manual` environment and is held (its triggers and
+	// dependencies are satisfied) waiting for an explicit proceed call before
+	// it is dispatched. It is distinct from pending (not yet ready) and
+	// running (actively executing) so the UI can show the hold and offer a
+	// proceed action. The job leaves this state when it is proceeded
+	// (→ running) or cancelled / timed out.
+	JobStatusAwaitingProceed JobStatus = "awaiting_proceed"
+)
+
+// Automation is how a job (or an environment, F-17) is governed once its
+// triggers and dependencies are satisfied:
+//
+//   - AutomationAutomatic: the job is dispatched on its own (the previous
+//     environment is irrelevant).
+//   - AutomationManual: the job is held (awaiting_proceed) and waits for an
+//     explicit proceed call before it is dispatched.
+type Automation string
+
+const (
+	// AutomationAutomatic dispatches the job on its own.
+	AutomationAutomatic Automation = "automatic"
+	// AutomationManual holds the job for an explicit proceed call.
+	AutomationManual Automation = "manual"
+)
+
+// ApprovalPolicy is a job's override of its environment's approval policy
+// (F-17). It selects whether an F-13 approval gate is inserted before the job
+// runs, taking precedence over the environment's requires_approval flag.
+type ApprovalPolicy string
+
+const (
+	// ApprovalPolicyNone skips the approval gate even if the environment
+	// requires one.
+	ApprovalPolicyNone ApprovalPolicy = "none"
+	// ApprovalPolicyRequired inserts an approval gate even if the environment
+	// does not require one.
+	ApprovalPolicyRequired ApprovalPolicy = "required"
 )
 
 // RunStatus is the lifecycle state of a pipeline run (F-07). A run's status
@@ -733,6 +782,25 @@ type Job struct {
 	// ApprovalReason is the (optional) free-text reason the user gave when they
 	// resolved the job's approval gate (F-13); empty when the user gave none.
 	ApprovalReason string `json:"approval_reason,omitempty"`
+	// Environment is the name of the environment this job targets (F-17);
+	// empty means the job targets its raw TargetGroup (the pre-F-17 behavior).
+	// A job targeting an environment is dispatched to the live workers that
+	// registered that environment (intersected with the environment's
+	// target_group when set), and is subject to the environment's approval and
+	// automation policies. It is denormalized from the job definition onto the
+	// job instance when it is created.
+	Environment string `gorm:"index" json:"environment,omitempty"`
+	// Automation is the job's own automation setting (F-17): automatic or
+	// manual. It is consulted only when the job's environment has no automation
+	// policy configured (both are valid in that case — the job decides); when
+	// the environment has a policy it is authoritative and overrides this.
+	// Empty means the job sets no automation of its own.
+	Automation Automation `json:"automation,omitempty"`
+	// Approval is the job's override of its environment's approval policy
+	// (F-17): none (skip the gate even if the environment requires one) or
+	// required (insert a gate even if the environment does not require one).
+	// Empty means the job defers to the environment's requires_approval flag.
+	Approval ApprovalPolicy `json:"approval,omitempty"`
 }
 
 // ConcurrencyResource is the durable, atomic slot accounting for one
@@ -852,6 +920,57 @@ type Worker struct {
 	Group      string     `gorm:"column:worker_group;index;not null" json:"group"`
 	Address    string     `json:"address"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	// Environments are the names of the environments this worker belongs to
+	// (F-17). Membership is many-to-many: a worker may list several
+	// environments (a `prod-auto` worker can also serve `staging`), and an
+	// environment can be served by many workers. A job targeting environment
+	// E is dispatched to the live workers that registered E. A worker that
+	// belongs to no environment is reachable only by its raw Group (the
+	// pre-F-17 behavior). It is stored as a JSON document in a text column
+	// (portable across SQLite and PostgreSQL), like the other list fields.
+	Environments []string `gorm:"type:text;serializer:json" json:"environments,omitempty"`
+}
+
+// Environment is a named deployment target that groups execution targets and
+// carries the deployment policy that governs how work reaches it (F-17). An
+// environment is the unit of "where does this run, and how strictly is it
+// gated": it names the workers that serve it (via worker membership and an
+// optional target group) and carries two gates — an approval policy
+// (RequiresApproval, an F-13 approval gate) and an automation policy
+// (Automation, automatic/manual) that decides whether a run proceeds on its
+// own or pauses for an explicit proceed call.
+//
+// Environments are stored in the database (owned by the Database service) and
+// managed through the API (CRUD), so an admin can create `prod-auto`, flip
+// `prod` to manual, or add a worker to an environment at runtime without a
+// redeployment.
+type Environment struct {
+	gorm.Model
+	// Name is the environment's unique name (e.g. "dev", "staging", "prod",
+	// "prod-auto").
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
+	// Description is a human-readable description of the environment.
+	Description string `json:"description"`
+	// TargetGroup is the worker group that serves the environment; empty means
+	// the environment is served by ephemeral agents (or, when a worker
+	// declares the environment, by the workers that registered it). A job
+	// targeting the environment is dispatched to the live workers that
+	// registered it, intersected with this group when one is set.
+	TargetGroup string `gorm:"column:target_group;index" json:"target_group"`
+	// RequiresApproval, when true, inserts an F-13 approval gate before a job
+	// targeting this environment is dispatched (a job's approval override
+	// takes precedence over this flag, see Job.Approval).
+	RequiresApproval bool `gorm:"not null;default:false" json:"requires_approval"`
+	// Automation is the environment's automation policy (F-17): automatic
+	// (a run proceeds on its own once its triggers and dependencies are
+	// satisfied) or manual (a run pauses and waits for an explicit proceed
+	// call). It is authoritative when set: a job's own automation setting is
+	// consulted only when the environment has none configured (an empty value
+	// means the environment sets no policy, so the job's own setting — or,
+	// when the job sets none, automatic — decides). A manual environment
+	// overrides any trigger (cron/webhook/event) and the previous environment,
+	// holding the run until someone proceeds it.
+	Automation Automation `gorm:"not null" json:"automation"`
 }
 
 // IDPSigningKey is a single RSA signing key used by the IdP to sign JWTs.
@@ -1096,6 +1215,10 @@ type Event struct {
 	// It is stored as a JSON document in a text column (portable across
 	// SQLite and PostgreSQL).
 	Payload string `gorm:"type:text" json:"payload"`
+	// Environment is the environment the event is relevant to (F-17); set for
+	// assignment events of a job that targets an environment, so an API pod can
+	// nudge its local workers that belong to it. Empty otherwise.
+	Environment string `gorm:"index" json:"environment"`
 }
 
 // Lease is a named, expiring lock used for leader election (F-23, high
@@ -1283,5 +1406,6 @@ func All() []any {
 		&AuditEvent{},
 		&ConcurrencyResource{},
 		&ConcurrencyLimit{},
+		&Environment{},
 	}
 }

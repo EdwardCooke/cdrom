@@ -34,8 +34,11 @@ type Dependencies struct {
 type Worker struct {
 	name   string
 	group  string
-	deps   Dependencies
-	logger *slog.Logger
+	// environments are the environments the worker belongs to (F-17); a job
+	// that targets one of them is dispatched to this worker.
+	environments []string
+	deps         Dependencies
+	logger       *slog.Logger
 
 	// sem bounds the worker to one job at a time (preserving the previous
 	// sequential behavior) while the watch loop stays free to receive
@@ -47,17 +50,20 @@ type Worker struct {
 }
 
 // New creates a worker with the given identity and service dependencies.
-func New(name, group string, deps Dependencies, logger *slog.Logger) *Worker {
+// environments are the environments the worker belongs to (F-17); they are
+// declared at registration and used to route environment jobs to this worker.
+func New(name, group string, environments []string, deps Dependencies, logger *slog.Logger) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Worker{
-		name:     name,
-		group:    group,
-		deps:     deps,
-		logger:   logger,
-		sem:      make(chan struct{}, 1),
-		inflight: make(map[int64]*jobRun),
+		name:         name,
+		group:        group,
+		environments: environments,
+		deps:         deps,
+		logger:       logger,
+		sem:          make(chan struct{}, 1),
+		inflight:     make(map[int64]*jobRun),
 	}
 }
 
@@ -65,13 +71,14 @@ func New(name, group string, deps Dependencies, logger *slog.Logger) *Worker {
 // returns nil on a clean shutdown.
 func (w *Worker) Run(ctx context.Context) error {
 	if _, err := w.deps.API.RegisterWorker(ctx, &apipb.RegisterWorkerRequest{
-		Name:    w.name,
-		Group:   w.group,
-		Address: w.name,
+		Name:         w.name,
+		Group:        w.group,
+		Address:      w.name,
+		Environments: w.environments,
 	}); err != nil {
 		return fmt.Errorf("worker: register: %w", err)
 	}
-	w.logger.Info("worker: registered", "name", w.name, "group", w.group)
+	w.logger.Info("worker: registered", "name", w.name, "group", w.group, "environments", w.environments)
 
 	defer func() {
 		if _, err := w.deps.API.DeregisterWorker(context.WithoutCancel(ctx), &apipb.DeregisterWorkerRequest{Name: w.name}); err != nil {
@@ -114,8 +121,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // by the database).
 func (w *Worker) watch(ctx context.Context) error {
 	stream, err := w.deps.API.WatchJobs(ctx, &apipb.WatchJobsRequest{
-		WorkerName: w.name,
-		Group:      w.group,
+		WorkerName:   w.name,
+		Group:        w.group,
+		Environments: w.environments,
 	})
 	if err != nil {
 		return fmt.Errorf("worker: watch: %w", err)
@@ -173,9 +181,13 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 }
 
-// pollOnce lists the pending jobs in the worker's group and starts each one.
+// pollOnce lists the pending jobs in the worker's group and environments and
+// starts each one.
 func (w *Worker) pollOnce(ctx context.Context) {
-	resp, err := w.deps.API.ListPendingJobs(ctx, &apipb.ListPendingJobsRequest{Group: w.group})
+	resp, err := w.deps.API.ListPendingJobs(ctx, &apipb.ListPendingJobsRequest{
+		Group:        w.group,
+		Environments: w.environments,
+	})
 	if err != nil {
 		w.logger.Warn("worker: list pending jobs", "err", err)
 		return

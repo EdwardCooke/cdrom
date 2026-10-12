@@ -170,7 +170,16 @@ const (
 	ActionConcurrencyLimitCreate = "concurrency-limit.create"
 	ActionConcurrencyLimitUpdate = "concurrency-limit.update"
 	ActionConcurrencyLimitDelete = "concurrency-limit.delete"
-	ActionLogin                  = "auth.login"
+	// ActionEnvironment* are the environment management actions (F-17): creating,
+	// updating, or deleting an environment (a named deployment target that
+	// carries approval + automation policy).
+	ActionEnvironmentCreate = "environment.create"
+	ActionEnvironmentUpdate = "environment.update"
+	ActionEnvironmentDelete = "environment.delete"
+	// ActionRunProceed is a user's explicit proceed call that releases a run
+	// (or job) held by a `manual` environment (F-17).
+	ActionRunProceed = "run.proceed"
+	ActionLogin      = "auth.login"
 	ActionRegister               = "auth.register"
 	ActionWorkerRegister         = "worker.register"
 	ActionWorkerDeregister       = "worker.deregister"
@@ -200,6 +209,9 @@ const (
 	// TargetConcurrencyLimit is the target kind of a concurrency limit rule
 	// (F-16).
 	TargetConcurrencyLimit = "concurrency-limit"
+	// TargetEnvironment is the target kind of an environment (F-17): a named
+	// deployment target that carries approval + automation policy.
+	TargetEnvironment = "environment"
 )
 
 // Outcomes (F-15).

@@ -455,6 +455,43 @@ service Database {
   // DeleteConcurrencyLimit removes a limit rule. A missing rule returns
   // NotFound.
   rpc DeleteConcurrencyLimit(DeleteConcurrencyLimitRequest) returns (google.protobuf.Empty);
+
+  // Environments (F-17). Environments are named deployment targets that group
+  // execution targets and carry the deployment policy that governs how work
+  // reaches them: an approval policy (requires_approval, an F-13 gate) and an
+  // automation policy (automatic / manual). They are stored in the database
+  // (owned by the Database service) and managed through the API (CRUD), so an
+  // admin can create `prod-auto`, flip `prod` to manual, or add a worker to an
+  // environment at runtime without a redeployment.
+  //
+  // CreateEnvironment adds an environment. It rejects an empty name and a
+  // name that collides with an existing environment.
+  rpc CreateEnvironment(CreateEnvironmentRequest) returns (Environment);
+  // GetEnvironment returns the named environment. A missing environment
+  // returns NotFound.
+  rpc GetEnvironment(GetEnvironmentRequest) returns (Environment);
+  // ListEnvironments returns every environment, optionally filtered by name
+  // prefix.
+  rpc ListEnvironments(ListEnvironmentsRequest) returns (ListEnvironmentsResponse);
+  // UpdateEnvironment edits an environment's description, target group,
+  // approval policy, and automation policy. A missing environment returns
+  // NotFound.
+  rpc UpdateEnvironment(UpdateEnvironmentRequest) returns (Environment);
+  // DeleteEnvironment removes an environment. A missing environment returns
+  // NotFound.
+  rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (google.protobuf.Empty);
+  // ListWorkersByEnvironment returns the workers that belong to the named
+  // environment (F-17): the workers whose declared environment list includes
+  // it. This is how the API resolves an environment to its target workers
+  // when it dispatches a job targeting the environment.
+  rpc ListWorkersByEnvironment(ListWorkersByEnvironmentRequest) returns (ListWorkersResponse);
+  // ProceedJob releases a job held by a `manual` environment (F-17): it
+  // conditionally marks the job as running (and stamps the started timestamp)
+  // only if the job is still awaiting_proceed. It returns whether the job was
+  // proceeded. This is how the API's proceed endpoint releases a held run: a
+  // job that is no longer awaiting_proceed (it was cancelled, or it was
+  // already proceeded) is left untouched, so a late proceed is a no-op.
+  rpc ProceedJob(ProceedJobRequest) returns (ProceedJobResponse);
 }
 
 // Parameter is a named, typed input a pipeline declares (F-10): a name, an
@@ -943,6 +980,33 @@ enum JobStatus {
   // its message. The job leaves this state when the gate is resolved
   // (approved → running, rejected → failed) or the job is cancelled/timed out.
   JOB_STATUS_AWAITING_APPROVAL = 8;
+  // JOB_STATUS_AWAITING_PROCEED is a non-terminal, in-flight state (F-17):
+  // the job targets a `manual` environment and is held (its triggers and
+  // dependencies are satisfied) waiting for an explicit proceed call before
+  // it is dispatched. It is distinct from PENDING (not yet ready) and RUNNING
+  // (actively executing) so the UI can show the hold and offer a proceed
+  // action. The job leaves this state when it is proceeded (→ running) or
+  // cancelled / timed out.
+  JOB_STATUS_AWAITING_PROCEED = 9;
+}
+// Automation is how a job (or an environment, F-17) is governed once its
+// triggers and dependencies are satisfied: AUTOMATIC dispatches the job on
+// its own (the previous environment is irrelevant); MANUAL holds the job
+// (awaiting_proceed) and waits for an explicit proceed call before it is
+// dispatched.
+enum Automation {
+  AUTOMATION_UNSPECIFIED = 0;
+  AUTOMATION_AUTOMATIC = 1;
+  AUTOMATION_MANUAL = 2;
+}
+// ApprovalPolicy is a job's override of its environment's approval policy
+// (F-17): NONE skips the approval gate even if the environment requires one;
+// REQUIRED inserts a gate even if the environment does not require one.
+// UNSPECIFIED means the job defers to the environment's requires_approval.
+enum ApprovalPolicy {
+  APPROVAL_POLICY_UNSPECIFIED = 0;
+  APPROVAL_POLICY_NONE = 1;
+  APPROVAL_POLICY_REQUIRED = 2;
 }
 // FailureMode controls how a job that runs on several workers (a job targeting
 // a worker group, which runs on every worker in the group) is judged from the
@@ -1313,6 +1377,26 @@ message Job {
   // terminal state, e.g. a target that died without reporting) and release
   // it, freeing the resource for other jobs.
   google.protobuf.Timestamp concurrency_admitted_at = 35;
+  // environment is the name of the environment this job targets (F-17); empty
+  // means the job targets its raw target_group (the pre-F-17 behavior). A job
+  // targeting an environment is dispatched to the live workers that registered
+  // that environment (intersected with the environment's target_group when
+  // set), and is subject to the environment's approval and automation
+  // policies. It is denormalized from the job definition onto the job
+  // instance when it is created.
+  string environment = 36;
+  // automation is the job's own automation setting (F-17): AUTOMATIC or
+  // MANUAL. It is consulted only when the job's environment has no automation
+  // policy configured (both are valid in that case — the job decides); when
+  // the environment has a policy it is authoritative and overrides this.
+  // UNSPECIFIED means the job sets no automation of its own.
+  Automation automation = 37;
+  // approval is the job's override of its environment's approval policy
+  // (F-17): NONE (skip the gate even if the environment requires one) or
+  // REQUIRED (insert a gate even if the environment does not require one).
+  // UNSPECIFIED means the job defers to the environment's requires_approval
+  // flag.
+  ApprovalPolicy approval = 38;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -1346,6 +1430,17 @@ message JobDefinition {
   // updated with job definitions, the returned definitions carry the ids of
   // the job rows that were created, so a caller can reference them.
   int64 id = 6;
+  // environment is the environment the job targets (F-17); empty means the
+  // job targets its raw target_group. It is captured in the version snapshot
+  // so a run bound to this version is dispatched to, and gated by, the
+  // environment that was active when it started.
+  string environment = 7;
+  // automation is the job's own automation setting (F-17); UNSPECIFIED means
+  // the job sets none (it defers to its environment's policy).
+  Automation automation = 8;
+  // approval is the job's override of its environment's approval policy
+  // (F-17); UNSPECIFIED means the job defers to the environment's flag.
+  ApprovalPolicy approval = 9;
 }
 
 message CreateJobRequest {
@@ -1471,6 +1566,12 @@ message ClaimJobResponse {
 message ListPendingByGroupRequest {
   // group is the worker group to list pending jobs for.
   string group = 1;
+  // environments are the environments the calling worker belongs to (F-17).
+  // A pending job that targets one of them is returned even when its target
+  // group differs from `group`, so a worker that serves an environment picks
+  // up its jobs on the poll (catch-up) path. The authoritative target_group
+  // intersection is enforced when the worker starts the job.
+  repeated string environments = 2;
 }
 
 // JobExecution is one worker's run of a job (fan-out). A job that targets a
@@ -1664,6 +1765,10 @@ message Event {
   // payload is the small JSON object that carries the event's data.
   string payload = 4;
   google.protobuf.Timestamp created_at = 5;
+  // environment is the environment the event is relevant to (F-17); set for
+  // assignment events of a job that targets an environment, so an API pod can
+  // nudge its local workers that belong to it. Empty otherwise.
+  string environment = 6;
 }
 
 message PublishAssignmentRequest {
@@ -1671,6 +1776,10 @@ message PublishAssignmentRequest {
   // target_group is the group the job targets (recorded so an API pod can
   // filter the event against the groups of its local workers).
   string target_group = 2;
+  // environment is the environment the job targets (F-17); empty for a job
+  // that targets a raw group. Recorded so an API pod can nudge its local
+  // workers that belong to the environment.
+  string environment = 3;
 }
 
 message PublishCancelRequest {
@@ -1812,12 +1921,22 @@ message Worker {
   string group = 3;
   string address = 4;
   google.protobuf.Timestamp last_seen_at = 5;
+  // environments are the names of the environments this worker belongs to
+  // (F-17). Membership is many-to-many: a worker may list several
+  // environments, and an environment can be served by many workers. A job
+  // targeting an environment is dispatched to the live workers that
+  // registered it. Empty means the worker is reachable only by its group.
+  repeated string environments = 6;
 }
 
 message RegisterWorkerRequest {
   string name = 1;
   string group = 2;
   string address = 3;
+  // environments are the names of the environments this worker belongs to
+  // (F-17); the worker declares them at registration (configurable, multiple).
+  // Re-registration (e.g. after a restart) updates the membership.
+  repeated string environments = 4;
 }
 
 message GetWorkerRequest {
@@ -1839,6 +1958,94 @@ message HeartbeatWorkerRequest {
 
 message DeleteWorkerRequest {
   string name = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Environments (F-17)
+// ---------------------------------------------------------------------------
+
+// Environment is a named deployment target that groups execution targets and
+// carries the deployment policy that governs how work reaches it (F-17). It
+// names the workers that serve it (via worker membership and an optional
+// target group) and carries two gates: an approval policy (requires_approval,
+// an F-13 gate) and an automation policy (automatic / manual) that decides
+// whether a run proceeds on its own or pauses for an explicit proceed call.
+message Environment {
+  int64 id = 1;
+  // name is the environment's unique name (e.g. "dev", "staging", "prod",
+  // "prod-auto").
+  string name = 2;
+  // description is a human-readable description of the environment.
+  string description = 3;
+  // target_group is the worker group that serves the environment; empty means
+  // the environment is served by ephemeral agents (or, when a worker declares
+  // the environment, by the workers that registered it). A job targeting the
+  // environment is dispatched to the live workers that registered it,
+  // intersected with this group when one is set.
+  string target_group = 4;
+  // requires_approval, when true, inserts an F-13 approval gate before a job
+  // targeting this environment is dispatched (a job's approval override takes
+  // precedence over this flag).
+  bool requires_approval = 5;
+  // automation is the environment's automation policy (F-17): AUTOMATIC (a run
+  // proceeds on its own once its triggers and dependencies are satisfied) or
+  // MANUAL (a run pauses and waits for an explicit proceed call). It is
+  // authoritative when set: a job's own automation setting is consulted only
+  // when the environment has none configured.
+  Automation automation = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+message CreateEnvironmentRequest {
+  string name = 1;
+  string description = 2;
+  string target_group = 3;
+  bool requires_approval = 4;
+  Automation automation = 5;
+}
+
+message GetEnvironmentRequest {
+  string name = 1;
+}
+
+message ListEnvironmentsRequest {
+  // name_prefix, when set, filters to environments whose name starts with it.
+  string name_prefix = 1;
+}
+
+message ListEnvironmentsResponse {
+  repeated Environment environments = 1;
+}
+
+message UpdateEnvironmentRequest {
+  string name = 1;
+  string description = 2;
+  string target_group = 3;
+  bool requires_approval = 4;
+  Automation automation = 5;
+}
+
+message DeleteEnvironmentRequest {
+  string name = 1;
+}
+
+message ListWorkersByEnvironmentRequest {
+  string environment = 1;
+}
+
+message ProceedJobRequest {
+  int64 job_id = 1;
+  // actor is the identity of the principal that proceeded the job (recorded
+  // for audit, F-15).
+  string actor = 2;
+}
+
+message ProceedJobResponse {
+  // proceeded is true when the job was still awaiting_proceed and was
+  // released to running; false when it was already in another state (a late
+  // proceed is a no-op).
+  bool proceeded = 1;
 }
 
 // ---------------------------------------------------------------------------

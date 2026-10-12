@@ -82,7 +82,7 @@ Control who can do what, protect secrets, and keep an accountable record.
 | F-14 | Roles & permissions (RBAC) | done | [F-14](features/f-14-rbac.md) |
 | F-15 | Audit log | done | [F-15](features/f-15-audit-log.md) |
 | F-16 | Concurrency control & queueing (per-group/global/per-key limits as regex-based rules in the database, editable at runtime via the API, pending queue, cross-pipeline templatable concurrency keys) | done | [F-16](features/f-16-concurrency-queueing.md) |
-| F-17 | Environments & deployment targets | planned | [F-17](features/f-17-environments.md) |
+| F-17 | Environments & deployment targets (first-class environments that group targets and carry deployment policy: worker-declared environment membership (multiple, configurable), an approval gate (`requires_approval`, F-13), and an `automatic`/`manual` automation policy — a `manual` environment holds a run for an explicit proceed call and overrides any trigger and the previous environment; managed in the database via the API) | done | [F-17](features/f-17-environments.md) |
 
 ### Phase 4 — Delivery & observability
 
@@ -161,7 +161,7 @@ Tick each feature off as it lands.
 - [x] F-14 Roles & permissions (RBAC)
 - [x] F-15 Audit log
 - [x] F-16 Concurrency control & queueing
-- [ ] F-17 Environments & deployment targets
+- [x] F-17 Environments & deployment targets
 - [ ] F-18 Notifications
 - [ ] F-19 Artifact promotion
 - [ ] F-20 Observability & metrics

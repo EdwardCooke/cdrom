@@ -80,11 +80,13 @@ func (s *Server) StartWatchdog(ctx context.Context) {
 // concrete clients in production, fakes in tests); publisher may be nil to
 // skip the event append.
 func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, publisher jobStatusPublisher) {
-	// In-flight jobs are those that are running or paused at an approval gate
-	// (F-13). A target that goes silent while waiting at a gate would otherwise
-	// leave the job awaiting_approval forever, so the watchdog reaps it too.
+	// In-flight jobs are those that are running, paused at an approval gate
+	// (F-13), or held by a manual environment (F-17). A target that goes
+	// silent while waiting at a gate — or a job held at a manual environment
+	// that is never proceeded — would otherwise sit in-flight forever, so the
+	// watchdog reaps them too.
 	var jobs []*dbpb.Job
-	for _, status := range []dbpb.JobStatus{dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL} {
+	for _, status := range []dbpb.JobStatus{dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL, dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED} {
 		response, err := db.ListJobs(ctx, &dbpb.ListJobsRequest{Status: status})
 		if err != nil {
 			s.logger.Warn("scheduler: watchdog list in-flight jobs", "status", status, "err", err)
@@ -162,6 +164,14 @@ func jobDeadline(job *dbpb.Job) (time.Time, bool) {
 	}
 	started := job.GetStartedAt()
 	if started == nil {
+		// A job held by a manual environment (F-17) has no started_at (it is
+		// held before dispatch); use created_at as the reference so the watchdog
+		// can still reap it if it is held past its timeout. (Among the in-flight
+		// statuses the watchdog lists, this is the only one that lacks a
+		// started_at; running and awaiting-approval jobs always have one.)
+		if created := job.GetCreatedAt(); created != nil {
+			return created.AsTime().Add(timeout), true
+		}
 		return time.Time{}, false
 	}
 	return started.AsTime().Add(timeout), true

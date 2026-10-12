@@ -70,6 +70,11 @@ type Config struct {
 	WorkerName  string
 	WorkerGroup string
 
+	// WorkerEnvironments are the environments a worker belongs to (F-17). A
+	// worker may belong to several; jobs targeting an environment are dispatched
+	// to the live workers registered for it.
+	WorkerEnvironments []string
+
 	// AgentJobID is the job an ephemeral agent was spawned to execute.
 	AgentJobID string
 
@@ -583,14 +588,17 @@ func Load() (*Config, error) {
 // empty string skips the file layer.
 func LoadWithFile(file string) (*Config, error) {
 	cfg := &Config{
-		DBAddress:        DefaultDBAddress,
-		SchedulerAddress: DefaultSchedulerAddress,
-		ArtifactsAddress: DefaultArtifactsAddress,
-		APIAddress:       DefaultAPIAddress,
-		APIHTTPAddress:   DefaultAPIHTTPAddress,
-		ArtifactsRoot:    "artifacts", ArtifactsStore: "filesystem", WorkerName: "worker-1",
-		WorkerGroup: "default",
-		AgentName:   defaultAgentName(),
+		DBAddress:          DefaultDBAddress,
+		SchedulerAddress:   DefaultSchedulerAddress,
+		ArtifactsAddress:   DefaultArtifactsAddress,
+		APIAddress:         DefaultAPIAddress,
+		APIHTTPAddress:     DefaultAPIHTTPAddress,
+		ArtifactsRoot:      "artifacts",
+		ArtifactsStore:     "filesystem",
+		WorkerName:         "worker-1",
+		WorkerGroup:        "default",
+		WorkerEnvironments: []string{},
+		AgentName:          defaultAgentName(),
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
 			SQLitePath:  "cdrom.db",
@@ -658,19 +666,20 @@ func LoadWithFile(file string) (*Config, error) {
 // distinguish "absent" from "set" so a file only overrides the values it
 // actually contains.
 type fileConfig struct {
-	ListenAddress    *string `yaml:"listen_address"`
-	DBAddress        *string `yaml:"db_address"`
-	SchedulerAddress *string `yaml:"scheduler_address"`
-	ArtifactsAddress *string `yaml:"artifacts_address"`
-	APIAddress       *string `yaml:"api_address"`
-	APIHTTPAddress   *string `yaml:"api_http_address"`
-	ArtifactsRoot    *string `yaml:"artifacts_root"`
-	ArtifactsStore   *string `yaml:"artifacts_store"`
-	WorkerName       *string `yaml:"worker_name"`
-	WorkerGroup      *string `yaml:"worker_group"`
-	AgentJobID       *string `yaml:"agent_job_id"`
-	AgentName        *string `yaml:"agent_name"`
-	DB               *struct {
+	ListenAddress      *string   `yaml:"listen_address"`
+	DBAddress          *string   `yaml:"db_address"`
+	SchedulerAddress   *string   `yaml:"scheduler_address"`
+	ArtifactsAddress   *string   `yaml:"artifacts_address"`
+	APIAddress         *string   `yaml:"api_address"`
+	APIHTTPAddress     *string   `yaml:"api_http_address"`
+	ArtifactsRoot      *string   `yaml:"artifacts_root"`
+	ArtifactsStore     *string   `yaml:"artifacts_store"`
+	WorkerName         *string   `yaml:"worker_name"`
+	WorkerGroup        *string   `yaml:"worker_group"`
+	WorkerEnvironments *[]string `yaml:"worker_environments"`
+	AgentJobID         *string   `yaml:"agent_job_id"`
+	AgentName          *string   `yaml:"agent_name"`
+	DB                 *struct {
 		Backend     *string `yaml:"backend"`
 		SQLitePath  *string `yaml:"sqlite_path"`
 		PostgresDSN *string `yaml:"postgres_dsn"`
@@ -774,6 +783,9 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.WorkerGroup != nil {
 		cfg.WorkerGroup = *f.WorkerGroup
+	}
+	if f.WorkerEnvironments != nil {
+		cfg.WorkerEnvironments = *f.WorkerEnvironments
 	}
 	if f.AgentJobID != nil {
 		cfg.AgentJobID = *f.AgentJobID
@@ -981,6 +993,9 @@ func applyEnv(cfg *Config) {
 	cfg.ArtifactsStore = envOr("CDROM_ARTIFACTS_STORE", cfg.ArtifactsStore)
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.WorkerGroup = envOr("CDROM_WORKER_GROUP", cfg.WorkerGroup)
+	if v := os.Getenv("CDROM_WORKER_ENVIRONMENTS"); v != "" {
+		cfg.WorkerEnvironments = splitAndTrim(v)
+	}
 	cfg.AgentJobID = envOr("CDROM_AGENT_JOB_ID", cfg.AgentJobID)
 	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
 	cfg.DB.Backend = database.Backend(envOr("CDROM_DB_BACKEND", string(cfg.DB.Backend)))

@@ -39,6 +39,10 @@ db:
 # Worker identity (used by the worker).
 #worker_name: worker-1
 #worker_group: default
+# Environments the worker belongs to (F-17). A worker may belong to several;
+# jobs targeting an environment are dispatched to the live workers registered
+# for it. Comma-separated via CDROM_WORKER_ENVIRONMENTS.
+#worker_environments: [dev, staging]
 
 # Job an ephemeral agent was spawned to execute (used by the agent).
 #agent_job_id: "123"

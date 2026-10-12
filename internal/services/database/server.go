@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -592,6 +593,13 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			TargetGroup: jobDef.TargetGroup,
 			Status:      models.JobStatusPending,
 			Spec:        jobDef.Spec,
+			// The job's environment (F-17) and its automation / approval
+			// settings are denormalized from the definition onto the instance
+			// so the scheduler can apply the environment's policy (approval
+			// gate, manual hold) when it drives the instance.
+			Environment: jobDef.Environment,
+			Automation:  jobDef.Automation,
+			Approval:    jobDef.Approval,
 			// A new instance starts on its first attempt (F-04); the retry
 			// budget and ignore-failed flag are denormalized from the
 			// definition's spec, mirroring CreateJob.
@@ -1312,7 +1320,7 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 		// awaiting_approval is an updatable state like pending and running.
 		result := s.db.WithContext(ctx).
 			Model(&models.Job{}).
-			Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval}).
+			Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval, models.JobStatusAwaitingProceed}).
 			Updates(updates)
 		if result.Error != nil {
 			return nil, grpcErr(result.Error)
@@ -1358,7 +1366,7 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 	}
 	result := s.db.WithContext(ctx).
 		Model(&models.Job{}).
-		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval}).
+		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval, models.JobStatusAwaitingProceed}).
 		Updates(map[string]any{
 			"status":      models.JobStatusTimedOut,
 			"finished_at": &finishedAt,
@@ -1396,7 +1404,7 @@ func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*db
 	}
 	result := s.db.WithContext(ctx).
 		Model(&models.Job{}).
-		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval}).
+		Where("id = ? AND status IN ?", req.GetId(), []models.JobStatus{models.JobStatusPending, models.JobStatusRunning, models.JobStatusAwaitingApproval, models.JobStatusAwaitingProceed}).
 		Updates(map[string]any{
 			"status":      models.JobStatusCancelled,
 			"finished_at": &finishedAt,
@@ -1530,18 +1538,37 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 }
 
 // ListPendingByGroup returns the pending jobs that target the given worker
-// group (F-23). This is the pull path: a worker (or the API on its behalf)
+// group (F-23), or — when the caller names environments (F-17) — that target
+// one of them. This is the pull path: a worker (or the API on its behalf)
 // polls it to pick up jobs that were published while it was unreachable, so
 // no job is stranded pending. Filtering in the database keeps the poll from
-// pulling every pending job over the wire as the system grows.
+// pulling every pending job over the wire as the system grows. A job that
+// targets an environment the worker belongs to is returned even when its
+// target group differs from the worker's group; the authoritative target-group
+// intersection is enforced when the worker starts the job (StartJobExecution).
 func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingByGroupRequest) (*dbpb.ListJobsResponse, error) {
+	db := s.db.WithContext(ctx).Model(&models.Job{}).Where("status = ?", models.JobStatusPending)
+	// A pending job is relevant to the caller when it targets the caller's
+	// group (pre-F-17) or one of the caller's environments (F-17). The two
+	// are OR'd: a worker that serves an environment picks up its jobs even
+	// when the environment's target group differs from the worker's own group.
+	var conds []string
+	var args []any
+	if group := req.GetGroup(); group != "" {
+		conds = append(conds, "target_group = ?")
+		args = append(args, group)
+	}
+	if envs := req.GetEnvironments(); len(envs) > 0 {
+		conds = append(conds, "environment IN ?")
+		args = append(args, envs)
+	}
+	if len(conds) == 0 {
+		// The caller names neither a group nor an environment: nothing matches.
+		return &dbpb.ListJobsResponse{}, nil
+	}
+	db = db.Where("("+strings.Join(conds, " OR ")+")", args...)
 	var jobs []models.Job
-	err := s.db.WithContext(ctx).
-		Model(&models.Job{}).
-		Where("status = ? AND target_group = ?", models.JobStatusPending, req.GetGroup()).
-		Order("id").
-		Find(&jobs).Error
-	if err != nil {
+	if err := db.Order("id").Find(&jobs).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	response := &dbpb.ListJobsResponse{}
@@ -1583,9 +1610,20 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if isTerminalJobStatus(job.Status) {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	if job.TargetGroup == "" {
-		// A job with an empty target group runs on an ephemeral agent, not on
-		// a long-lived worker; a worker starting it is a no-op.
+	if job.Environment != "" {
+		// The job targets an environment (F-17): only a worker that belongs to
+		// the environment (intersected with the environment's target group when
+		// one is set) may start it. A worker that does not serve the
+		// environment is rejected, so a job delivered to the wrong worker is
+		// not run. This is the authoritative routing gate for environment
+		// jobs.
+		if !s.workerServesEnvironment(ctx, req.GetWorkerName(), job.Environment) {
+			return &dbpb.StartJobExecutionResponse{Started: false}, nil
+		}
+	} else if job.TargetGroup == "" {
+		// A job with an empty target group and no environment runs on an
+		// ephemeral agent, not on a long-lived worker; a worker starting it is
+		// a no-op.
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
 	startedAt := time.Now()
@@ -1613,6 +1651,30 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 			"updated_at": &now,
 		})
 	return &dbpb.StartJobExecutionResponse{Started: true, Execution: toProtoJobExecution(execution)}, nil
+}
+
+// workerServesEnvironment reports whether the named worker is a valid target
+// for a job that targets the named environment (F-17): the worker must belong
+// to the environment (its declared membership), and, when the environment
+// names a target group, the worker must also be in that group. A missing
+// worker or environment is not a valid target.
+func (s *Server) workerServesEnvironment(ctx context.Context, workerName, environment string) bool {
+	db := s.db.WithContext(ctx)
+	var worker models.Worker
+	if err := db.Where("name = ?", workerName).First(&worker).Error; err != nil {
+		return false
+	}
+	if !slices.Contains(worker.Environments, environment) {
+		return false
+	}
+	var env models.Environment
+	if err := db.Where("name = ?", environment).First(&env).Error; err != nil {
+		return false
+	}
+	if env.TargetGroup != "" && worker.Group != env.TargetGroup {
+		return false
+	}
+	return true
 }
 
 // ListJobExecutions returns a job's executions (one per worker that started
@@ -1978,6 +2040,10 @@ func (s *Server) RegisterWorker(ctx context.Context, req *dbpb.RegisterWorkerReq
 	}
 	worker.Group = req.GetGroup()
 	worker.Address = req.GetAddress()
+	// The worker's environment membership (F-17) is declared at registration
+	// (configurable, multiple). Re-registration (e.g. after a restart) updates
+	// it: the worker's declared environments replace its stored list.
+	worker.Environments = req.GetEnvironments()
 	now := time.Now()
 	worker.LastSeenAt = &now
 	if err := s.db.WithContext(ctx).Save(worker).Error; err != nil {
@@ -2036,6 +2102,169 @@ func (s *Server) DeleteWorker(ctx context.Context, req *dbpb.DeleteWorkerRequest
 		return nil, status.Error(codes.NotFound, "worker not found")
 	}
 	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Environments (F-17)
+// ---------------------------------------------------------------------------
+
+// CreateEnvironment adds an environment (F-17). It rejects an empty name and
+// a name that collides with an existing environment.
+func (s *Server) CreateEnvironment(ctx context.Context, req *dbpb.CreateEnvironmentRequest) (*dbpb.Environment, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "environment name is required")
+	}
+	env := &models.Environment{
+		Name:             req.GetName(),
+		Description:      req.GetDescription(),
+		TargetGroup:      req.GetTargetGroup(),
+		RequiresApproval: req.GetRequiresApproval(),
+		Automation:       automationFromProto(req.GetAutomation()),
+	}
+	if err := s.db.WithContext(ctx).Create(env).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoEnvironment(env), nil
+}
+
+// GetEnvironment returns the named environment. A missing environment returns
+// NotFound.
+func (s *Server) GetEnvironment(ctx context.Context, req *dbpb.GetEnvironmentRequest) (*dbpb.Environment, error) {
+	var env models.Environment
+	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&env).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoEnvironment(&env), nil
+}
+
+// ListEnvironments returns every environment, optionally filtered by name
+// prefix.
+func (s *Server) ListEnvironments(ctx context.Context, req *dbpb.ListEnvironmentsRequest) (*dbpb.ListEnvironmentsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.Environment{})
+	if req.GetNamePrefix() != "" {
+		query = query.Where("name LIKE ?", req.GetNamePrefix()+"%")
+	}
+	var envs []models.Environment
+	if err := query.Order("name").Find(&envs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListEnvironmentsResponse{}
+	for i := range envs {
+		response.Environments = append(response.Environments, toProtoEnvironment(&envs[i]))
+	}
+	return response, nil
+}
+
+// UpdateEnvironment edits an environment's description, target group,
+// approval policy, and automation policy. A missing environment returns
+// NotFound.
+func (s *Server) UpdateEnvironment(ctx context.Context, req *dbpb.UpdateEnvironmentRequest) (*dbpb.Environment, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "environment name is required")
+	}
+	var env models.Environment
+	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&env).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	updates := map[string]any{
+		"description":       req.GetDescription(),
+		"target_group":      req.GetTargetGroup(),
+		"requires_approval": req.GetRequiresApproval(),
+	}
+	if req.GetAutomation() != dbpb.Automation_AUTOMATION_UNSPECIFIED {
+		updates["automation"] = automationFromProto(req.GetAutomation())
+	}
+	if err := s.db.WithContext(ctx).Model(&env).Updates(updates).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// Reload so the returned environment reflects the update (GORM's Updates
+	// does not populate the in-memory struct with the new values).
+	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&env).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoEnvironment(&env), nil
+}
+
+// DeleteEnvironment removes an environment. A missing environment returns
+// NotFound.
+func (s *Server) DeleteEnvironment(ctx context.Context, req *dbpb.DeleteEnvironmentRequest) (*emptypb.Empty, error) {
+	result := s.db.WithContext(ctx).Where("name = ?", req.GetName()).Delete(&models.Environment{})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, status.Error(codes.NotFound, "environment not found")
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ListWorkersByEnvironment returns the workers that belong to the named
+// environment (F-17): the workers whose declared environment list includes it.
+// This is how the API resolves an environment to its target workers when it
+// dispatches a job targeting the environment.
+func (s *Server) ListWorkersByEnvironment(ctx context.Context, req *dbpb.ListWorkersByEnvironmentRequest) (*dbpb.ListWorkersResponse, error) {
+	if req.GetEnvironment() == "" {
+		return nil, status.Error(codes.InvalidArgument, "environment is required")
+	}
+	var workers []models.Worker
+	if err := s.db.WithContext(ctx).Order("id").Find(&workers).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListWorkersResponse{}
+	for i := range workers {
+		if workerInEnvironment(&workers[i], req.GetEnvironment()) {
+			response.Workers = append(response.Workers, toProtoWorker(&workers[i]))
+		}
+	}
+	return response, nil
+}
+
+// ProceedJob releases a job held by a `manual` environment (F-17): it
+// conditionally marks the job as running (and stamps the started timestamp)
+// only if the job is still awaiting_proceed. It returns whether the job was
+// proceeded. A job that is no longer awaiting_proceed (it was cancelled, or it
+// was already proceeded) is left untouched, so a late proceed is a no-op.
+func (s *Server) ProceedJob(ctx context.Context, req *dbpb.ProceedJobRequest) (*dbpb.ProceedJobResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	now := time.Now()
+	result := s.db.WithContext(ctx).
+		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusAwaitingProceed).
+		Updates(map[string]any{
+			"status":      models.JobStatusRunning,
+			"started_at":  now,
+		})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	return &dbpb.ProceedJobResponse{Proceeded: result.RowsAffected > 0}, nil
+}
+
+// workerInEnvironment reports whether the worker belongs to the named
+// environment (its declared environment list includes it).
+func workerInEnvironment(worker *models.Worker, environment string) bool {
+	for _, env := range worker.Environments {
+		if env == environment {
+			return true
+		}
+	}
+	return false
+}
+
+// toProtoEnvironment converts a model Environment into its proto form.
+func toProtoEnvironment(env *models.Environment) *dbpb.Environment {
+	proto := &dbpb.Environment{
+		Id:             int64(env.ID),
+		Name:           env.Name,
+		Description:    env.Description,
+		TargetGroup:    env.TargetGroup,
+		RequiresApproval: env.RequiresApproval,
+		Automation:     automationToProto(env.Automation),
+		CreatedAt:      timestamppb.New(env.CreatedAt),
+		UpdatedAt:      timestamppb.New(env.UpdatedAt),
+	}
+	return proto
 }
 
 // ---------------------------------------------------------------------------
@@ -3217,8 +3446,10 @@ const defaultLeaseHeartbeatTTL = 30 * time.Second
 // shorten it.
 var workerAliveThreshold = 30 * time.Second
 
-// appendEvent inserts a single event row and returns its id.
-func (s *Server) appendEvent(ctx context.Context, name, workerGroup string, payload any) (int64, error) {
+// appendEvent inserts a single event row and returns its id. workerGroup and
+// environment are the group- and environment-scoped routing hints (F-17); both
+// are empty for events that are not scoped to a group or environment.
+func (s *Server) appendEvent(ctx context.Context, name, workerGroup, environment string, payload any) (int64, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return 0, fmt.Errorf("database: marshal event payload: %w", err)
@@ -3226,6 +3457,7 @@ func (s *Server) appendEvent(ctx context.Context, name, workerGroup string, payl
 	event := &models.Event{
 		Name:        name,
 		WorkerGroup: workerGroup,
+		Environment: environment,
 		Payload:     string(data),
 	}
 	if err := s.db.WithContext(ctx).Create(event).Error; err != nil {
@@ -3240,7 +3472,7 @@ func (s *Server) PublishAssignment(ctx context.Context, req *dbpb.PublishAssignm
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	id, err := s.appendEvent(ctx, "assignment", req.GetTargetGroup(), map[string]any{
+	id, err := s.appendEvent(ctx, "assignment", req.GetTargetGroup(), req.GetEnvironment(), map[string]any{
 		"job_id": req.GetJobId(),
 	})
 	if err != nil {
@@ -3254,7 +3486,7 @@ func (s *Server) PublishCancel(ctx context.Context, req *dbpb.PublishCancelReque
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	id, err := s.appendEvent(ctx, "cancel", "", map[string]any{"job_id": req.GetJobId()})
+	id, err := s.appendEvent(ctx, "cancel", "", "", map[string]any{"job_id": req.GetJobId()})
 	if err != nil {
 		return nil, err
 	}
@@ -3269,7 +3501,7 @@ func (s *Server) PublishJobStatus(ctx context.Context, req *dbpb.PublishJobStatu
 	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
 		return nil, status.Error(codes.InvalidArgument, "status is required")
 	}
-	id, err := s.appendEvent(ctx, "job_status", "", map[string]any{
+	id, err := s.appendEvent(ctx, "job_status", "", "", map[string]any{
 		"job_id":       req.GetJobId(),
 		"status":       jobStatusName(req.GetStatus()),
 		"attempt":      req.GetAttempt(),
@@ -3289,7 +3521,7 @@ func (s *Server) PublishRunStatus(ctx context.Context, req *dbpb.PublishRunStatu
 	if req.GetStatus() == dbpb.RunStatus_RUN_STATUS_UNSPECIFIED {
 		return nil, status.Error(codes.InvalidArgument, "status is required")
 	}
-	id, err := s.appendEvent(ctx, "run_status", "", map[string]any{
+	id, err := s.appendEvent(ctx, "run_status", "", "", map[string]any{
 		"run_id": req.GetRunId(),
 		"status": runStatusName(req.GetStatus()),
 	})
@@ -3304,7 +3536,7 @@ func (s *Server) PublishWorkerEvent(ctx context.Context, req *dbpb.PublishWorker
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
-	id, err := s.appendEvent(ctx, "worker", req.GetGroup(), map[string]any{
+	id, err := s.appendEvent(ctx, "worker", req.GetGroup(), "", map[string]any{
 		"name":   req.GetName(),
 		"action": req.GetAction(),
 	})
@@ -3321,7 +3553,7 @@ func (s *Server) PublishLogUpdated(ctx context.Context, req *dbpb.PublishLogUpda
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	id, err := s.appendEvent(ctx, "job_log_updated", "", map[string]any{
+	id, err := s.appendEvent(ctx, "job_log_updated", "", "", map[string]any{
 		"job_id":     req.GetJobId(),
 		"log":        req.GetLog(),
 		"step_index": req.GetStepIndex(),
@@ -3493,6 +3725,7 @@ func toProtoEvent(event *models.Event) *dbpb.Event {
 		WorkerGroup: event.WorkerGroup,
 		Payload:     event.Payload,
 		CreatedAt:   timestamppb.New(event.CreatedAt),
+		Environment: event.Environment,
 	}
 }
 
@@ -3854,6 +4087,12 @@ func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
 			Name:        name,
 			TargetGroup: def.GetTargetGroup(),
 			Spec:        specFromProto(def.GetSpec()),
+			// The job's environment (F-17) and its automation / approval
+			// settings are captured on the definition so a run's instances
+			// inherit them (denormalized in createRunAndInstances).
+			Environment: def.GetEnvironment(),
+			Automation:  automationFromProto(def.GetAutomation()),
+			Approval:    approvalPolicyFromProto(def.GetApproval()),
 		})
 	}
 	return jobs
@@ -4138,6 +4377,9 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		ApprovalReason:      job.ApprovalReason,
 		ConcurrencyKeys:     job.ConcurrencyKeys,
 		ConcurrencyAdmitted: job.ConcurrencyAdmitted,
+		Environment:         job.Environment,
+		Automation:          automationToProto(job.Automation),
+		Approval:            approvalPolicyToProto(job.Approval),
 	}
 	if job.ConcurrencyAdmittedAt != nil {
 		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)
@@ -4365,11 +4607,65 @@ func paramsToProto(in map[string]*models.ParamValue) map[string]*dbpb.ParamValue
 }
 
 func toProtoWorker(worker *models.Worker) *dbpb.Worker {
-	proto := &dbpb.Worker{Id: int64(worker.ID), Name: worker.Name, Group: worker.Group, Address: worker.Address}
+	proto := &dbpb.Worker{Id: int64(worker.ID), Name: worker.Name, Group: worker.Group, Address: worker.Address, Environments: worker.Environments}
 	if worker.LastSeenAt != nil {
 		proto.LastSeenAt = timestamppb.New(*worker.LastSeenAt)
 	}
 	return proto
+}
+
+// automationToProto maps a model Automation onto the proto enum. An empty
+// value maps to AUTOMATION_UNSPECIFIED (the job sets no automation of its own).
+func automationToProto(a models.Automation) dbpb.Automation {
+	switch a {
+	case models.AutomationAutomatic:
+		return dbpb.Automation_AUTOMATION_AUTOMATIC
+	case models.AutomationManual:
+		return dbpb.Automation_AUTOMATION_MANUAL
+	default:
+		return dbpb.Automation_AUTOMATION_UNSPECIFIED
+	}
+}
+
+// automationFromProto maps a proto Automation onto the model type.
+// AUTOMATION_UNSPECIFIED maps to the empty value (no automation set).
+func automationFromProto(a dbpb.Automation) models.Automation {
+	switch a {
+	case dbpb.Automation_AUTOMATION_AUTOMATIC:
+		return models.AutomationAutomatic
+	case dbpb.Automation_AUTOMATION_MANUAL:
+		return models.AutomationManual
+	default:
+		return ""
+	}
+}
+
+// approvalPolicyToProto maps a model ApprovalPolicy onto the proto enum. An
+// empty value maps to APPROVAL_POLICY_UNSPECIFIED (the job defers to its
+// environment's flag).
+func approvalPolicyToProto(p models.ApprovalPolicy) dbpb.ApprovalPolicy {
+	switch p {
+	case models.ApprovalPolicyNone:
+		return dbpb.ApprovalPolicy_APPROVAL_POLICY_NONE
+	case models.ApprovalPolicyRequired:
+		return dbpb.ApprovalPolicy_APPROVAL_POLICY_REQUIRED
+	default:
+		return dbpb.ApprovalPolicy_APPROVAL_POLICY_UNSPECIFIED
+	}
+}
+
+// approvalPolicyFromProto maps a proto ApprovalPolicy onto the model type.
+// APPROVAL_POLICY_UNSPECIFIED maps to the empty value (defer to the
+// environment's flag).
+func approvalPolicyFromProto(p dbpb.ApprovalPolicy) models.ApprovalPolicy {
+	switch p {
+	case dbpb.ApprovalPolicy_APPROVAL_POLICY_NONE:
+		return models.ApprovalPolicyNone
+	case dbpb.ApprovalPolicy_APPROVAL_POLICY_REQUIRED:
+		return models.ApprovalPolicyRequired
+	default:
+		return ""
+	}
 }
 
 func toProtoJobExecution(execution *models.JobExecution) *dbpb.JobExecution {
@@ -4572,6 +4868,8 @@ func jobStatusToProto(status models.JobStatus) dbpb.JobStatus {
 		return dbpb.JobStatus_JOB_STATUS_SKIPPED
 	case models.JobStatusAwaitingApproval:
 		return dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL
+	case models.JobStatusAwaitingProceed:
+		return dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED
 	default:
 		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED
 	}
@@ -4595,6 +4893,8 @@ func jobStatusFromProto(status dbpb.JobStatus) (models.JobStatus, error) {
 		return models.JobStatusSkipped, nil
 	case dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
 		return models.JobStatusAwaitingApproval, nil
+	case dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED:
+		return models.JobStatusAwaitingProceed, nil
 	default:
 		return "", fmt.Errorf("unknown job status %v", status)
 	}
@@ -4622,6 +4922,8 @@ func jobStatusName(status dbpb.JobStatus) string {
 		return "skipped"
 	case dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
 		return "awaiting_approval"
+	case dbpb.JobStatus_JOB_STATUS_AWAITING_PROCEED:
+		return "awaiting_proceed"
 	default:
 		return "unknown"
 	}
@@ -5007,7 +5309,7 @@ func (s *Server) DeleteRoleBinding(ctx context.Context, req *dbpb.DeleteRoleBind
 // role/binding RPCs; this only appends the event so the other replicas see
 // the change without a restart.
 func (s *Server) PublishRoleChange(ctx context.Context, _ *dbpb.PublishRoleChangeRequest) (*dbpb.PublishEventResponse, error) {
-	id, err := s.appendEvent(ctx, "role_change", "", map[string]any{})
+	id, err := s.appendEvent(ctx, "role_change", "", "", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
