@@ -258,6 +258,35 @@ No central logs service. Every process logs locally via `internal/logging` to
 sets the minimum level. Custom handlers via `logging.NewHandler` /
 `logging.NewWithHandler`.
 
+### Metrics (F-20)
+
+Every component exposes **Prometheus metrics** (built on
+`github.com/prometheus/client_golang`) at a `/metrics` endpoint, plus a
+`/healthz` probe, on a **dedicated metrics port** — separate from the
+component's service ports. Every binary starts a small HTTP server on
+`metrics.addr` (`CDROM_METRICS_ADDR`, default `127.0.0.1:9100`–`9105`, one
+per component) serving only `/metrics` and `/healthz`; the API and IdP serve
+it on this port too, not on their UI/OIDC HTTP servers. Keeping metrics on
+their own port means the service ports (gRPC, UI HTTP, the IdP's OIDC
+surface) can sit behind a firewall while only the metrics port is exposed to
+a scraper — and the metrics port needs no token (it is not behind the auth
+middleware). Disable with `CDROM_METRICS_ENABLED=false`.
+
+The shared plumbing (registry, `promhttp` handler, `/healthz`, label
+conventions, histogram bucket presets, and a gRPC server-side `stats.Handler`)
+lives in `internal/metrics`, which also holds one per-component metric set
+(`api.go`, `scheduler.go`, `database.go`, `artifacts.go`, `idp.go`,
+`worker.go`). All metrics are prefixed `cdrom_`; domain labels are
+low-cardinality (`status`, `trigger`, `environment`, `group`, `step_type`,
+`method`, `code`, `route`, `kind`, `resource`, `op`, `outcome`) — never a job
+id, run id, user, worker name, or secret name. The catalog covers job/run
+throughput and duration, success/failure rates, queue depth and wait, worker
+utilization, artifact volume, and control-plane health (event-log tail lag,
+leader state, loop health); the run metrics also yield the DORA-style
+deployment indicators (deployment frequency, lead time, change failure rate,
+MTTR) per environment. The UI's dashboards are DB-fed (existing API routes),
+not Prometheus-fed. Full spec: `docs/features/f-20-observability.md`.
+
 ## Tech Stack & Constraints
 
 - **Everything except the frontend is Go**; the frontend is React.
@@ -303,6 +332,9 @@ internal/
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)
   grpcutil/   shared gRPC plumbing (client dial, serve-until-signal, TLS creds)
   logging/    centralized logging (stdout or CDROM_LOG_FILE)
+  metrics/    Prometheus metrics (F-20): shared plumbing (registry, /metrics +
+              /healthz handler, label conventions, bucket presets, gRPC
+              stats.Handler) + per-component metric sets
   logstream/  executor.LogSink streaming a job's step output to the API (worker + agent)
   tokenexchange/ shared executor.TokenExchange via the API's ExchangeJobToken (worker + agent)
   approval/   executor.Approval gate via the API (worker + agent): report
@@ -375,6 +407,7 @@ file → env vars.
 | api (gRPC)   | 127.0.0.1:7105  | `CDROM_LISTEN_ADDR`   |
 | api (HTTP)   | 127.0.0.1:8080  | `CDROM_API_HTTP_ADDR` |
 | worker/agent | —               | `CDROM_API_ADDR`      |
+| metrics      | 127.0.0.1:9100–9105 (one per component) | `CDROM_METRICS_ADDR` |
 
 Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH`,
 `CDROM_DB_POSTGRES_DSN`, `CDROM_ARTIFACTS_ROOT`, `CDROM_ARTIFACTS_STORE`,
@@ -395,7 +428,10 @@ when unset, secrets are disabled), and the audit-log vars `CDROM_AUDIT_FILE`
 (path of the current audit log file, separate from `CDROM_LOG_FILE`; `-` for
 stdout), `CDROM_AUDIT_FORMAT` (`json`/`text`), `CDROM_AUDIT_ROTATION`
 (`hourly`/`daily`), `CDROM_AUDIT_RETENTION` (max age of database audit
-entries), and `CDROM_AUDIT_PRUNE_INTERVAL` (F-15).
+entries), and `CDROM_AUDIT_PRUNE_INTERVAL` (F-15), and the metrics vars
+`CDROM_METRICS_ENABLED` (default on) and `CDROM_METRICS_ADDR` (the
+`/metrics` + `/healthz` listen address, on a dedicated port separate from
+the component's service ports) (F-20).
 
 A minimal local run (plaintext, no certs):
 

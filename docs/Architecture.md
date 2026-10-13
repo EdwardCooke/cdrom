@@ -923,6 +923,17 @@ flowchart LR
   stdout, or to the file named by `CDROM_LOG_FILE` when set (append mode).
   Format and level are controlled by `CDROM_LOG_FORMAT` and
   `CDROM_LOG_LEVEL`.
+- **Metrics:** every component exposes Prometheus metrics (built on
+  `github.com/prometheus/client_golang`) at a `/metrics` endpoint plus a
+  `/healthz` probe, via the shared plumbing in `internal/metrics` (F-20).
+  Each component serves it on a **dedicated metrics port** (`CDROM_METRICS_ADDR`)
+  — a small HTTP server separate from its service ports — so the service
+  ports (gRPC, the UI HTTP, the IdP's OIDC surface) can sit behind a
+  firewall while only the metrics port is exposed to a scraper. All metrics
+  are prefixed `cdrom_` and use only low-cardinality labels. The run metrics
+  yield the DORA-style deployment indicators (deployment frequency, lead
+  time, change failure rate, MTTR) per environment. Full spec:
+  `docs/features/f-20-observability.md`.
 
 ---
 
@@ -951,6 +962,9 @@ internal/
   gen/        generated gRPC/protobuf Go code (committed; `make proto`)
   grpcutil/   shared gRPC plumbing (client dial, serve-until-signal, TLS credentials)
   logging/    centralized logging (stdout or CDROM_LOG_FILE)
+  metrics/    Prometheus metrics (F-20): shared plumbing (registry, /metrics +
+              /healthz handler, label conventions, bucket presets, gRPC
+              stats.Handler) + per-component metric sets
   logstream/  executor.LogSink that streams a job's step output to the API's
               StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
   executor/   shared job-step executor: the generic dispatch engine (selects a
