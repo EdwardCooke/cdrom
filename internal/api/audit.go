@@ -160,6 +160,28 @@ func (s *GRPCServer) SetAudit(r *audit.Recorder) {
 	s.audit = r
 }
 
+// SetEmailConfig sets the API's SMTP configuration (F-18). It is the sender
+// and server the API uses when an email step handler asks it to send a message.
+// A zero value (no host) means no email server is configured, so an email step
+// fails with a clear error.
+func (s *GRPCServer) SetEmailConfig(e config.EmailConfig) {
+	s.email = e
+}
+
+// SetWebhookConfig sets the API's webhook response-timeout bounds (F-18): the
+// default timeout the API waits for a webhook's response and the maximum a
+// step's per-request timeout can reach.
+func (s *GRPCServer) SetWebhookConfig(w config.WebhookConfig) {
+	s.webhook = w
+}
+
+// SetWebhookClient sets the HTTP client the API uses to send webhooks (F-18).
+// It carries no global timeout: each request is bounded by its own clamped
+// timeout. When nil the API uses a default client.
+func (s *GRPCServer) SetWebhookClient(c *http.Client) {
+	s.webhookClient = c
+}
+
 // recordAuditGRPC records an audit event for a gRPC action. actor and
 // actorKind are supplied by the caller (the gRPC surface has no HTTP request
 // context to derive them from: a worker action's actor is the worker's name, a

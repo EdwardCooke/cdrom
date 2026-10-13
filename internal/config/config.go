@@ -129,6 +129,24 @@ type Config struct {
 	// queries via GET /api/audit). Only the API (and the scheduler, for
 	// trigger-fired runs) records audit events; other binaries ignore this.
 	Audit AuditConfig
+
+	// Email configures the SMTP server the API uses to send notification
+	// emails (F-18). The API is the only component that sends email: a
+	// notification step handler on an execution target renders the step's
+	// fields and calls the API's SendEmail RPC, which sends the message from
+	// this server. When Host is empty no email server is configured and an
+	// email step fails with a clear error. Only the API uses it; other
+	// binaries ignore it.
+	Email EmailConfig
+
+	// Webhook configures the API's webhook notification settings (F-18): the
+	// response timeout the API waits for a webhook's response (Timeout,
+	// default 10s) and the maximum a step's per-request timeout can reach
+	// (TimeoutMax). The API is the only component that sends webhooks: a
+	// notification step handler on an execution target renders the step's
+	// fields and calls the API's SendWebhook RPC, which performs the HTTP
+	// request. Only the API uses it; other binaries ignore it.
+	Webhook WebhookConfig
 }
 
 // AuditConfig configures the audit log (F-15).
@@ -213,6 +231,102 @@ func (a AuditConfig) Validate() error {
 		return fmt.Errorf("audit: unknown rotation %q (want hourly or daily)", a.Rotation)
 	}
 	return nil
+}
+
+// EmailConfig configures the SMTP server the API uses to send notification
+// emails (F-18). The API is the only component that sends email: a
+// notification step handler on an execution target renders the step's fields
+// and calls the API's SendEmail RPC, which sends the message from this server.
+// A step names its recipients and content; the API supplies the sender (the
+// default From, or a step's from override) and the SMTP server. When Host is
+// empty no email server is configured and an email step fails with a clear
+// error.
+type EmailConfig struct {
+	// Host is the SMTP server's host (e.g. "smtp.example.com"). Empty means
+	// no email server is configured.
+	Host string
+	// Port is the SMTP server's port. Defaults to 587 when zero.
+	Port int
+	// Username, when set, authenticates to the SMTP server (plain auth).
+	Username string
+	// Password is the SMTP server's password (used with Username).
+	Password string
+	// From is the default sender address (the message's From header). A step's
+	// `from` param, when set, overrides it for that message.
+	From string
+	// StartTLS, when set, selects whether the API upgrades the connection to
+	// TLS via STARTTLS. When nil (the default) the API uses STARTTLS (true).
+	// Set it to false for servers that require an implicit TLS connection
+	// (port 465) or for plaintext local servers.
+	StartTLS *bool
+	// Insecure, when true, skips verification of the SMTP server's TLS
+	// certificate (for self-signed servers).
+	Insecure bool
+}
+
+// Configured reports whether an email server is configured (a host is set).
+func (e EmailConfig) Configured() bool {
+	return e.Host != ""
+}
+
+// EffectivePort returns the configured SMTP port, or the default (587) when
+// zero.
+func (e EmailConfig) EffectivePort() int {
+	if e.Port <= 0 {
+		return 587
+	}
+	return e.Port
+}
+
+// EffectiveStartTLS returns the configured STARTTLS setting, or the default
+// (true) when StartTLS is nil. A pointer distinguishes "unset" (use the
+// default) from an explicit false.
+func (e EmailConfig) EffectiveStartTLS() bool {
+	if e.StartTLS == nil {
+		return true
+	}
+	return *e.StartTLS
+}
+
+// WebhookConfig configures the API's webhook notification settings (F-18):
+// the response timeout the API waits for a webhook's response and the maximum
+// a step's per-request timeout can reach. The API is the only component that
+// sends webhooks: a notification step handler on an execution target renders
+// the step's fields and calls the API's SendWebhook RPC, which performs the
+// HTTP request within these bounds.
+type WebhookConfig struct {
+	// Timeout is the default response timeout the API waits for a webhook's
+	// response. Defaults to 10s when zero. A step's `timeout` param, when set,
+	// overrides it (clamped to TimeoutMax).
+	Timeout time.Duration
+	// TimeoutMax is the maximum a step's per-request `timeout` can reach.
+	// Defaults to 60s when zero. A step's timeout is honored but clamped to
+	// this value.
+	TimeoutMax time.Duration
+}
+
+// defaultWebhookTimeout is the default webhook response timeout.
+const defaultWebhookTimeout = 10 * time.Second
+
+// defaultWebhookTimeoutMax is the default cap on a step's webhook timeout.
+const defaultWebhookTimeoutMax = 60 * time.Second
+
+// EffectiveTimeout returns the configured default webhook response timeout, or
+// the default (10s) when zero.
+func (w WebhookConfig) EffectiveTimeout() time.Duration {
+	if w.Timeout <= 0 {
+		return defaultWebhookTimeout
+	}
+	return w.Timeout
+}
+
+// EffectiveTimeoutMax returns the configured cap on a step's webhook timeout,
+// or the default (60s) when zero.
+func (w WebhookConfig) EffectiveTimeoutMax() time.Duration {
+	if w.TimeoutMax <= 0 {
+		return defaultWebhookTimeoutMax
+	}
+	return w.TimeoutMax
 }
 
 // AuthConfig configures OIDC authentication for the API's HTTP surface (the
@@ -637,6 +751,14 @@ func LoadWithFile(file string) (*Config, error) {
 			Retention:     90 * 24 * time.Hour,
 			PruneInterval: 24 * time.Hour,
 		},
+		// Email (F-18) is unconfigured by default (no SMTP host): an email
+		// step fails with a clear error until a host is set.
+		Email: EmailConfig{},
+		// Webhook (F-18) defaults to a 10s response timeout capped at 60s.
+		Webhook: WebhookConfig{
+			Timeout:    defaultWebhookTimeout,
+			TimeoutMax: defaultWebhookTimeoutMax,
+		},
 	}
 	if file != "" {
 		if err := applyFile(cfg, file); err != nil {
@@ -742,6 +864,19 @@ type fileConfig struct {
 		Retention     *string `yaml:"retention"`
 		PruneInterval *string `yaml:"prune_interval"`
 	} `yaml:"audit"`
+	Email *struct {
+		Host     *string `yaml:"host"`
+		Port     *int    `yaml:"port"`
+		Username *string `yaml:"username"`
+		Password *string `yaml:"password"`
+		From     *string `yaml:"from"`
+		StartTLS *bool   `yaml:"starttls"`
+		Insecure *bool   `yaml:"insecure"`
+	} `yaml:"email"`
+	Webhook *struct {
+		Timeout    *string `yaml:"timeout"`
+		TimeoutMax *string `yaml:"timeout_max"`
+	} `yaml:"webhook"`
 }
 
 // applyFile overlays the values from the YAML file at path onto cfg.
@@ -978,6 +1113,45 @@ func applyFile(cfg *Config, path string) error {
 			}
 		}
 	}
+	if f.Email != nil {
+		if f.Email.Host != nil {
+			cfg.Email.Host = *f.Email.Host
+		}
+		if f.Email.Port != nil {
+			cfg.Email.Port = *f.Email.Port
+		}
+		if f.Email.Username != nil {
+			cfg.Email.Username = *f.Email.Username
+		}
+		if f.Email.Password != nil {
+			cfg.Email.Password = *f.Email.Password
+		}
+		if f.Email.From != nil {
+			cfg.Email.From = *f.Email.From
+		}
+		if f.Email.StartTLS != nil {
+			cfg.Email.StartTLS = f.Email.StartTLS
+		}
+		if f.Email.Insecure != nil {
+			cfg.Email.Insecure = *f.Email.Insecure
+		}
+	}
+	if f.Webhook != nil {
+		if f.Webhook.Timeout != nil {
+			if d, err := time.ParseDuration(*f.Webhook.Timeout); err == nil {
+				cfg.Webhook.Timeout = d
+			} else {
+				return fmt.Errorf("config: parse webhook.timeout %q: %w", *f.Webhook.Timeout, err)
+			}
+		}
+		if f.Webhook.TimeoutMax != nil {
+			if d, err := time.ParseDuration(*f.Webhook.TimeoutMax); err == nil {
+				cfg.Webhook.TimeoutMax = d
+			} else {
+				return fmt.Errorf("config: parse webhook.timeout_max %q: %w", *f.Webhook.TimeoutMax, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1103,6 +1277,34 @@ func applyEnv(cfg *Config) {
 	if v := envOr("CDROM_AUDIT_PRUNE_INTERVAL", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Audit.PruneInterval = d
+		}
+	}
+	// Email (F-18): the SMTP server the API sends notification emails from.
+	cfg.Email.Host = envOr("CDROM_EMAIL_HOST", cfg.Email.Host)
+	if v := envOr("CDROM_EMAIL_PORT", ""); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Email.Port = n
+		}
+	}
+	cfg.Email.Username = envOr("CDROM_EMAIL_USERNAME", cfg.Email.Username)
+	cfg.Email.Password = envOr("CDROM_EMAIL_PASSWORD", cfg.Email.Password)
+	cfg.Email.From = envOr("CDROM_EMAIL_FROM", cfg.Email.From)
+	if v := os.Getenv("CDROM_EMAIL_STARTTLS"); v != "" {
+		b := v == "true" || v == "1"
+		cfg.Email.StartTLS = &b
+	}
+	if v := os.Getenv("CDROM_EMAIL_INSECURE"); v != "" {
+		cfg.Email.Insecure = v == "true" || v == "1"
+	}
+	// Webhook (F-18): the API's webhook response timeout and its cap.
+	if v := envOr("CDROM_WEBHOOK_TIMEOUT", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Webhook.Timeout = d
+		}
+	}
+	if v := envOr("CDROM_WEBHOOK_TIMEOUT_MAX", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Webhook.TimeoutMax = d
 		}
 	}
 }

@@ -91,7 +91,7 @@ tool.
 
 | ID | Feature | Status | Spec |
 |----|---------|--------|------|
-| F-18 | Notifications | planned | [F-18](features/f-18-notifications.md) |
+| F-18 | Notifications | done | [F-18](features/f-18-notifications.md) |
 | F-19 | Artifact promotion | planned | [F-19](features/f-19-artifact-promotion.md) |
 | F-20 | Observability & metrics | planned | [F-20](features/f-20-observability.md) |
 | F-21 | Config as code | planned | [F-21](features/f-21-config-as-code.md) |
@@ -128,7 +128,6 @@ election, cross-pod live logs, shared artifacts store) is in
 
 The phases are ordered so each builds on the last. A pragmatic first cut:
 
-1. **F-16 → F-17** — concurrency and environments.
 1. **F-18 → F-20 → F-21 → F-22 → F-19** — notifications, observability,
    config-as-code, verification/rollback, artifact promotion.
 1. **F-13 → F-14 → F-27** — approval groups (named approver sets an
@@ -162,7 +161,7 @@ Tick each feature off as it lands.
 - [x] F-15 Audit log
 - [x] F-16 Concurrency control & queueing
 - [x] F-17 Environments & deployment targets
-- [ ] F-18 Notifications
+- [x] F-18 Notifications
 - [ ] F-19 Artifact promotion
 - [ ] F-20 Observability & metrics
 - [ ] F-21 Config as code

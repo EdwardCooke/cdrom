@@ -13,6 +13,7 @@ import (
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logstream"
+	"cdrom/internal/notify"
 	"cdrom/internal/tokenexchange"
 )
 
@@ -91,6 +92,16 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	// message shown to the user) and polls the API for the gate's decision
 	// (approved or rejected), presenting the job's own token.
 	ctx = executor.ContextWithApproval(ctx, approval.New(tc.API, job.GetId(), tc.Token))
+	// A step handler (the built-in "email" and "webhook" handlers, F-18) sends
+	// its notification from the API server: the target renders the step's
+	// fields against the step's condition context and asks the API to send,
+	// presenting the job's own token.
+	ctx = executor.ContextWithNotifier(ctx, notify.NewNotifier(tc.API, job.GetId(), tc.Token))
+	// A step's "once" field (F-01) runs the step on at most one target of a
+	// fan-out job: the target claims a durable slot (job id + step index +
+	// attempt) through the API before running it, and a target that does not
+	// claim it skips the step. A retry (a new attempt) may run it again.
+	ctx = executor.ContextWithOnceClaimer(ctx, notify.NewClaimer(tc.API, job.GetId(), tc.Token, job.GetAttempt()))
 	// The cross-worker step barrier: when the job has the step-barrier flag set
 	// and targets a worker group, the workers synchronize at each step boundary
 	// (after a worker completes a step it waits until every worker alive at the

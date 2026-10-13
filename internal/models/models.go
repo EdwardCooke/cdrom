@@ -562,6 +562,11 @@ type JobStep struct {
 	// the job continues to the next step. A step that fails without
 	// IgnoreFailed stops the job.
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
+	// Once (F-01), when true, means the step runs on at most one target of a
+	// job that fans out to a worker group: the first target to claim the
+	// step's slot runs it, the others skip it (recorded skipped, not failed).
+	// A retry (a new attempt) may run it again.
+	Once bool `json:"once,omitempty"`
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -870,6 +875,26 @@ type StepCompletion struct {
 	// Attempt is the job attempt this completion belongs to (F-04); a retry
 	// starts a fresh set of completions.
 	Attempt int `gorm:"uniqueIndex:idx_step_completion_unique,priority:4" json:"attempt"`
+}
+
+// StepOnceClaim is the durable "run this step" slot for a step of a job that
+// fans out to a worker group (F-01). A step with `once` set runs on at most
+// one target: the first target to claim (job id + step index + attempt) creates
+// this row and runs the step; every other target that reaches the same step in
+// the same attempt finds the row already claimed and skips the step. A retry
+// (F-04) is a new attempt, so it claims a fresh slot. The unique index on
+// (job_id, step_index, attempt) is what makes the claim atomic: at most one
+// concurrent caller can create the row, so the dedup is correct across every
+// API replica and worker process.
+type StepOnceClaim struct {
+	gorm.Model
+	// JobID is the job the step belongs to.
+	JobID uint `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:1;not null" json:"job_id"`
+	// StepIndex is the 0-based index of the step in the job's spec.
+	StepIndex int `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:2" json:"step_index"`
+	// Attempt is the job attempt this claim belongs to (F-04); a retry claims
+	// a fresh slot.
+	Attempt int `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:3" json:"attempt"`
 }
 
 // JobExecution is one worker's run of a job (fan-out). A job that targets a
@@ -1391,6 +1416,7 @@ func All() []any {
 		&Job{},
 		&JobExecution{},
 		&StepCompletion{},
+		&StepOnceClaim{},
 		&Worker{},
 		&IDPSigningKey{},
 		&IDPAuthCode{},

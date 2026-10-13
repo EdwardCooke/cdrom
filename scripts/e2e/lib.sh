@@ -32,6 +32,13 @@ WORKDIR="${WORKDIR:-}"
 PIDS=()
 E2E_OWN_STACK=0
 
+# F-18 notification sinks: the fake SMTP server and fake webhook HTTP server
+# the API's email/webhook sends reach. They run on fixed localhost ports and
+# record what they receive under WORK (the test scripts read those files).
+E2E_SMTP_PORT=1025
+E2E_WEBHOOK_PORT=10080
+E2E_WEBHOOK_FAIL_PORT=10081
+
 # --- logging -----------------------------------------------------------------
 log() { printf '%s\n' "$*"; }
 
@@ -109,11 +116,17 @@ e2e_boot_stack() {
   done
   curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
     || { echo ">> IdP did not start serving" >&2; exit 1; }
+  # The F-18 notification sinks (a fake SMTP server and a fake webhook HTTP
+  # server) are started before the API so the API's email/webhook sends have a
+  # target. The API is configured to send email to the SMTP sink (plaintext,
+  # STARTTLS disabled); a webhook step's url points at the webhook sink.
+  e2e_start_sinks
   # Enable job-token auth on the API's gRPC surface: the API mints a job token
   # for the worker (audience cdrom-api, the IdP's default) and verifies it on
   # the worker's job-scoped calls, including the token_exchange step's
-  # ExchangeJobToken RPC.
-  e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
+  # ExchangeJobToken RPC. The email config points the API's SMTP sender at the
+  # fake SMTP sink (F-18).
+  e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
   if [ "$with_worker" = "with-worker" ]; then
     e2e_start worker  "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
     # Gate on the API having the worker's WatchJobs stream open before
@@ -153,11 +166,40 @@ e2e_start() {
   exit 1
 }
 
+# e2e_start_sinks
+# Starts the F-18 notification sinks (a fake SMTP server on E2E_SMTP_PORT and
+# a fake webhook HTTP server on E2E_WEBHOOK_PORT, plus a second webhook server
+# on E2E_WEBHOOK_FAIL_PORT that returns 500 for the failure-semantics case).
+# Each records what it receives under WORK (smtp.log / webhook.log /
+# webhook-fail.log). The sinks are started before the API so the API's
+# email/webhook sends have a target; they are killed by e2e_cleanup.
+e2e_start_sinks() {
+  python3 "${E2E_ROOT}/sinks/smtp_sink.py" "$E2E_SMTP_PORT" "$WORK/smtp.log" &
+  PIDS+=($!)
+  python3 "${E2E_ROOT}/sinks/webhook_sink.py" "$E2E_WEBHOOK_PORT" "$WORK/webhook.log" 200 &
+  PIDS+=($!)
+  python3 "${E2E_ROOT}/sinks/webhook_sink.py" "$E2E_WEBHOOK_FAIL_PORT" "$WORK/webhook-fail.log" 500 &
+  PIDS+=($!)
+  # Wait for the sinks to be listening before the API (and any test) uses them.
+  local i
+  for i in $(seq 1 50); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$E2E_SMTP_PORT") 2>/dev/null; then
+      exec 3>&- 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+  done
+}
+
 # e2e_wait_for <logfile> <pattern> <what>
+# Polls <logfile> until it contains <pattern>. The pattern is matched as a
+# fixed string (grep -F), not a regex: callers pass literal log lines (which
+# may contain regex metacharacters such as the '?' in a templated webhook url),
+# so a regex interpretation would silently fail to match.
 e2e_wait_for() {
   local logfile="$1" pattern="$2" what="$3" i
   for i in $(seq 1 100); do
-    if grep -qE "$pattern" "$logfile" 2>/dev/null; then
+    if grep -qF -- "$pattern" "$logfile" 2>/dev/null; then
       return 0
     fi
     sleep 0.2
@@ -169,11 +211,14 @@ e2e_wait_for() {
 
 # e2e_wait_for_job <jobid> <pattern> <what>
 # Polls the job's combined log (GET /api/jobs/{id}/logs/job.log) until it
-# matches <pattern>.
+# contains <pattern>. The pattern is matched as a fixed string (grep -F), not
+# a regex, for the same reason as e2e_wait_for. Each request is bounded
+# (--max-time) so a transiently slow API response is retried rather than
+# blocking the test forever.
 e2e_wait_for_job() {
   local jobid="$1" pattern="$2" what="$3" i
   for i in $(seq 1 100); do
-    if curl -s http://127.0.0.1:8080/api/jobs/${jobid}/logs/job.log | grep -qE "$pattern" 2>/dev/null; then
+    if curl -s --max-time 5 http://127.0.0.1:8080/api/jobs/${jobid}/logs/job.log | grep -qF -- "$pattern" 2>/dev/null; then
       return 0
     fi
     sleep 0.2
@@ -185,12 +230,17 @@ e2e_wait_for_job() {
 # e2e_wait_for_status <jobid> <status> <what>
 # Polls GET /api/jobs/{id} until the job's status equals <status> (the numeric
 # JobStatus value, e.g. 8 for awaiting_approval, 3 for succeeded, 4 for
-# failed). Returns the last observed job JSON on stdout.
+# failed). Returns the last observed job JSON on stdout. Each request is
+# bounded (--max-time) so a transiently slow API response is retried rather
+# than blocking the test forever.
 e2e_wait_for_status() {
   local jobid="$1" status="$2" what="$3" i body
   for i in $(seq 1 100); do
-    body=$(curl -s "http://127.0.0.1:8080/api/jobs/${jobid}")
-    if [ "$(printf '%s' "$body" | jq -r '.status')" = "$status" ]; then
+    # A transiently slow or unreachable API response is treated as "not ready
+    # yet" (retry) rather than aborting the test: `|| true` keeps the
+    # assignment's exit status 0 so set -e does not stop on a failed curl.
+    body=$(curl -s --max-time 5 "http://127.0.0.1:8080/api/jobs/${jobid}" || true)
+    if [ "$(printf '%s' "$body" | jq -r '.status' 2>/dev/null)" = "$status" ]; then
       printf '%s' "$body"
       return 0
     fi

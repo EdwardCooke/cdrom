@@ -96,6 +96,7 @@ const (
 	Database_RecordServiceAccountKeyAttempt_FullMethodName = "/cdrom.db.v1.Database/RecordServiceAccountKeyAttempt"
 	Database_ResetServiceAccountLockout_FullMethodName     = "/cdrom.db.v1.Database/ResetServiceAccountLockout"
 	Database_NextSecretNonce_FullMethodName                = "/cdrom.db.v1.Database/NextSecretNonce"
+	Database_ClaimStepOnce_FullMethodName                  = "/cdrom.db.v1.Database/ClaimStepOnce"
 	Database_CreateRole_FullMethodName                     = "/cdrom.db.v1.Database/CreateRole"
 	Database_GetRole_FullMethodName                        = "/cdrom.db.v1.Database/GetRole"
 	Database_ListRoles_FullMethodName                      = "/cdrom.db.v1.Database/ListRoles"
@@ -433,6 +434,14 @@ type DatabaseClient interface {
 	// unique (key, nonce) pair is what makes AES-GCM safe. The counter is
 	// persisted here so it survives API restarts and is shared by all replicas.
 	NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error)
+	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
+	// step of a job that fans out to a worker group: the first target to claim
+	// (job id + step index + attempt) wins and runs the step; every other target
+	// that reaches the same step in the same attempt sees the slot already
+	// claimed and skips the step. A retry (F-04) is a new attempt, so it may
+	// claim again. The claim is durable and shared by every API replica, so the
+	// dedup is correct across pods and worker processes.
+	ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error)
 	// Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
 	// effective permissions are the union of the permissions of every role
 	// bound to it (via a token's roles claim, a configured claim mapping, or a
@@ -1365,6 +1374,16 @@ func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonc
 	return out, nil
 }
 
+func (c *databaseClient) ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimStepOnceResponse)
+	err := c.cc.Invoke(ctx, Database_ClaimStepOnce_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) CreateRole(ctx context.Context, in *CreateRoleRequest, opts ...grpc.CallOption) (*Role, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Role)
@@ -1943,6 +1962,14 @@ type DatabaseServer interface {
 	// unique (key, nonce) pair is what makes AES-GCM safe. The counter is
 	// persisted here so it survives API restarts and is shared by all replicas.
 	NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error)
+	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
+	// step of a job that fans out to a worker group: the first target to claim
+	// (job id + step index + attempt) wins and runs the step; every other target
+	// that reaches the same step in the same attempt sees the slot already
+	// claimed and skips the step. A retry (F-04) is a new attempt, so it may
+	// claim again. The claim is durable and shared by every API replica, so the
+	// dedup is correct across pods and worker processes.
+	ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error)
 	// Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
 	// effective permissions are the union of the permissions of every role
 	// bound to it (via a token's roles claim, a configured claim mapping, or a
@@ -2342,6 +2369,9 @@ func (UnimplementedDatabaseServer) ResetServiceAccountLockout(context.Context, *
 }
 func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
+}
+func (UnimplementedDatabaseServer) ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimStepOnce not implemented")
 }
 func (UnimplementedDatabaseServer) CreateRole(context.Context, *CreateRoleRequest) (*Role, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateRole not implemented")
@@ -3813,6 +3843,24 @@ func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ClaimStepOnce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimStepOnceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ClaimStepOnce(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ClaimStepOnce_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ClaimStepOnce(ctx, req.(*ClaimStepOnceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_CreateRole_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateRoleRequest)
 	if err := dec(in); err != nil {
@@ -4609,6 +4657,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "NextSecretNonce",
 			Handler:    _Database_NextSecretNonce_Handler,
+		},
+		{
+			MethodName: "ClaimStepOnce",
+			Handler:    _Database_ClaimStepOnce_Handler,
 		},
 		{
 			MethodName: "CreateRole",

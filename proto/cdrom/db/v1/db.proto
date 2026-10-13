@@ -326,6 +326,15 @@ service Database {
   // persisted here so it survives API restarts and is shared by all replicas.
   rpc NextSecretNonce(NextSecretNonceRequest) returns (NextSecretNonceResponse);
 
+  // ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
+  // step of a job that fans out to a worker group: the first target to claim
+  // (job id + step index + attempt) wins and runs the step; every other target
+  // that reaches the same step in the same attempt sees the slot already
+  // claimed and skips the step. A retry (F-04) is a new attempt, so it may
+  // claim again. The claim is durable and shared by every API replica, so the
+  // dedup is correct across pods and worker processes.
+  rpc ClaimStepOnce(ClaimStepOnceRequest) returns (ClaimStepOnceResponse);
+
   // Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
   // effective permissions are the union of the permissions of every role
   // bound to it (via a token's roles claim, a configured claim mapping, or a
@@ -1154,6 +1163,15 @@ message JobStep {
   // job continues to the next step. A step that fails without ignore_failed
   // stops the job.
   bool ignore_failed = 10;
+  // once, when true, means the step runs on at most one target of a job that
+  // fans out to a worker group (F-01): the first target to reach the step
+  // claims a durable slot (job id + step index + attempt) and runs it; every
+  // other target that reaches the same step in the same attempt sees the slot
+  // already claimed and skips the step (recorded skipped, not failed). A
+  // retry (F-04) is a new attempt, so it may run the step again. A job on a
+  // single target (an ephemeral agent) is unaffected. This is what keeps a
+  // notification step (F-18) from sending once per worker.
+  bool once = 12;
 }
 
 // RetryPolicy is a job's retry policy (F-04): how many times a failed job is
@@ -2505,6 +2523,35 @@ message NextSecretNonceResponse {
   // atomically increments the counter, so no two callers ever get the same
   // value).
   int64 nonce = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Step "once" claims (F-01)
+// ---------------------------------------------------------------------------
+
+// ClaimStepOnceRequest asks the database to claim the "run this step" slot for
+// a step of a job that fans out to a worker group (F-01): the first target to
+// claim (job id + step index + attempt) wins and runs the step; every other
+// target that reaches the same step in the same attempt sees the slot already
+// claimed and skips the step. A retry (F-04) is a new attempt, so it may claim
+// again.
+message ClaimStepOnceRequest {
+  // job_id is the job the step belongs to.
+  int64 job_id = 1;
+  // step_index is the 0-based index of the step in the job's spec.
+  int32 step_index = 2;
+  // attempt is the 1-based attempt number of the job (F-04); a retry claims a
+  // fresh slot.
+  int32 attempt = 3;
+}
+
+// ClaimStepOnceResponse is the result of a ClaimStepOnce call.
+message ClaimStepOnceResponse {
+  // claimed is true when this call performed the claim (the slot was free and
+  // is now held by the caller): the caller runs the step. It is false when the
+  // slot was already claimed by another target in the same attempt: the caller
+  // skips the step.
+  bool claimed = 1;
 }
 
 // ---------------------------------------------------------------------------

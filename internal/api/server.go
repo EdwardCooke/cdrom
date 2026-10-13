@@ -944,7 +944,11 @@ type jobStepRequest struct {
 	Timeout      string                        `json:"timeout,omitempty"`
 	Condition    string                        `json:"condition,omitempty"`
 	IgnoreFailed bool                          `json:"ignore_failed,omitempty"`
-	Params       map[string]*paramValueRequest `json:"params,omitempty"`
+	// Once (F-01) marks the step to run on at most one target of a job that
+	// fans out to a worker group: the first target to claim the step's slot
+	// runs it, the others skip it.
+	Once   bool                          `json:"once,omitempty"`
+	Params map[string]*paramValueRequest `json:"params,omitempty"`
 }
 
 // jobRequest is the body of POST /api/jobs. Spec is the execution spec to
@@ -1030,6 +1034,7 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 			Env:          step.Env,
 			Condition:    step.Condition,
 			IgnoreFailed: step.IgnoreFailed,
+			Once:         step.Once,
 			Params:       paramsToProto(step.Params),
 		}
 		if step.Timeout != "" {

@@ -27,6 +27,7 @@ import (
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
 	"cdrom/internal/secrets"
+	"cdrom/internal/webhook"
 )
 
 func main() {
@@ -282,6 +283,25 @@ func main() {
 	if authzEngine != nil {
 		grpcServer.SetAuthz(authzEngine)
 	}
+
+	// Notifications (F-18): the API is the only component that sends an email
+	// (SMTP) or performs a webhook's HTTP request. The email step handler on an
+	// execution target renders the step's fields and asks the API to send; the
+	// API supplies the sender and the SMTP server. The webhook step handler
+	// likewise renders the step's fields and the API performs the request
+	// within the configured response-timeout bounds. The webhook client carries
+	// no global timeout (each request is bounded by its own clamped timeout);
+	// it verifies a webhook's TLS certificate against the system store plus the
+	// shared CA, and when TLS is configured it presents the API's client
+	// certificate.
+	grpcServer.SetEmailConfig(cfg.Email)
+	grpcServer.SetWebhookConfig(cfg.Webhook)
+	webhookClient, err := webhook.NewClient(cfg.TLS)
+	if err != nil {
+		logger.Error("webhook: http client", "err", err)
+		os.Exit(1)
+	}
+	grpcServer.SetWebhookClient(webhookClient)
 
 	// The audit log (F-15): an append-only record of significant actions (who
 	// did what, when, from where, with what outcome, and what changed). Each

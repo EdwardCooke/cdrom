@@ -137,6 +137,31 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(StepStatusSkipped)})
 			continue
 		}
+		// A step with `once` set (F-01) runs on at most one target of a job
+		// that fans out to a worker group: before running it, this target
+		// claims a durable slot (job id + step index + attempt) through the
+		// OnceClaimer. When another target already claimed it in the same
+		// attempt, this target skips the step (recorded skipped, not failed).
+		// A target with no claimer (an ephemeral agent, or a single-target
+		// job) runs the step. The claim is made after the condition check, so
+		// a condition-skipped step does not consume the slot.
+		if step.GetOnce() {
+			claimer := OnceClaimerFromContext(ctx)
+			if claimer != nil {
+				claimed, err := claimer.Claim(jobCtx, i)
+				if err != nil {
+					err := fmt.Errorf("executor: step %d: claim once: %w", i, err)
+					reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
+					return err
+				}
+				if !claimed {
+					logger.Info("executor: step skipped (once: already claimed by another target)", "step", i)
+					reportStepStatus(ctx, i, StepStatusSkipped, "", nil)
+					priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(StepStatusSkipped)})
+					continue
+				}
+			}
+		}
 		// Every step gets a per-step output directory, exposed to it via
 		// StepOutputDirEnv (F-06): the step writes one file per output it
 		// produces into it, and the executor reads them all back after the
@@ -222,6 +247,17 @@ const DefaultType = "shell"
 // user approves or rejects it. The built-in handler (internal/stephandlers)
 // registers itself under this name.
 const TypeApproval = "approval"
+
+// TypeEmail is the step type of the built-in email notification handler
+// (F-18): a step of this type sends an SMTP message from the API. The
+// built-in handler (internal/stephandlers) registers itself under this name.
+const TypeEmail = "email"
+
+// TypeWebhook is the step type of the built-in webhook notification handler
+// (F-18): a step of this type performs an HTTP request from the API to the
+// step's URL. The built-in handler (internal/stephandlers) registers itself
+// under this name.
+const TypeWebhook = "webhook"
 
 // LogSink receives a job's step output (stdout/stderr) as it is produced, so
 // an execution target can stream it to the API in near-real-time (F-02). A
@@ -412,6 +448,137 @@ func ContextWithApproval(ctx context.Context, gate Approval) context.Context {
 func ApprovalFromContext(ctx context.Context) Approval {
 	gate, _ := ctx.Value(approvalKey{}).(Approval)
 	return gate
+}
+
+// Notifier lets a step handler send a notification through the API (F-18):
+// the execution target renders the step's fields against the step's condition
+// context and hands the rendered values to the API, which performs the actual
+// send (SMTP for email, HTTP for webhook) using its own configuration. The
+// target never opens an SMTP or outbound HTTP connection itself. The execution
+// target (worker or agent) implements it by calling the API's SendEmail /
+// SendWebhook RPCs, presenting the job's own token. A step handler that sends
+// a notification (the built-in "email" and "webhook" handlers) obtains the
+// notifier from the context (via NotifierFromContext).
+//
+// Implementations must be safe for concurrent use. Both methods are called
+// with the step's context (already bounded by the step's per-step timeout, when
+// set) and must return promptly when that context is done.
+type Notifier interface {
+	// SendEmail asks the API to send an SMTP message (F-18). The fields are the
+	// step's rendered values (the target rendered them against the step's
+	// condition context).
+	SendEmail(ctx context.Context, email *EmailRequest) error
+	// SendWebhook asks the API to perform an HTTP request to the step's URL
+	// (F-18). The fields are the step's rendered values.
+	SendWebhook(ctx context.Context, webhook *WebhookRequest) error
+}
+
+// EmailRequest is the rendered payload a notification step handler hands to the
+// API's SendEmail RPC (F-18). The target renders the step's fields against the
+// step's condition context and fills these in; the API supplies the sender and
+// the SMTP server.
+type EmailRequest struct {
+	// To are the recipient addresses (required).
+	To []string
+	// CC are the carbon-copy recipients (optional).
+	CC []string
+	// BCC are the blind-carbon-copy recipients (optional).
+	BCC []string
+	// Subject is the message subject (optional).
+	Subject string
+	// Body is the message body (rendered by the target).
+	Body string
+	// ContentType selects how the body is sent: "plain", "html", or "markdown"
+	// (rendered to HTML by the API). Empty means "markdown".
+	ContentType string
+	// From, when set, overrides the API's configured sender for this message.
+	From string
+	// ReplyTo, when set, sets the message's Reply-To header.
+	ReplyTo string
+}
+
+// WebhookRequest is the rendered payload a notification step handler hands to
+// the API's SendWebhook RPC (F-18). The target renders the step's fields
+// against the step's condition context and fills these in; the API performs
+// the HTTP request within its configured response timeout.
+type WebhookRequest struct {
+	// URL is the request URL (required).
+	URL string
+	// Method is the HTTP method (default "POST").
+	Method string
+	// Headers are the request headers, each a "Name: Value" entry (the target
+	// renders each entry and splits it on the first ":" into name and value).
+	Headers []string
+	// Body is the request body (rendered by the target).
+	Body string
+	// ContentType selects how the body is sent: "plain" (sent as-is), "html"
+	// (sent as-is), or "markdown" (rendered to HTML by the API). Empty means
+	// "plain".
+	ContentType string
+	// Timeout, when set, is the response timeout the step requests; the API
+	// clamps it to its configured maximum. When zero the API uses its
+	// configured default.
+	Timeout time.Duration
+}
+
+type notifierKey struct{}
+
+// ContextWithNotifier returns a context that carries notifier, so step
+// handlers can send a notification through the API. A nil notifier returns ctx
+// unchanged.
+func ContextWithNotifier(ctx context.Context, notifier Notifier) context.Context {
+	if notifier == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, notifierKey{}, notifier)
+}
+
+// NotifierFromContext returns the Notifier carried by ctx, or nil when none is
+// set. Step handlers call this to send a notification through the API.
+func NotifierFromContext(ctx context.Context) Notifier {
+	notifier, _ := ctx.Value(notifierKey{}).(Notifier)
+	return notifier
+}
+
+// OnceClaimer lets the executor enforce a step's `once` field (F-01): a step
+// with `once` set runs on at most one target of a job that fans out to a
+// worker group. The execution target (worker or agent) implements it by
+// calling the API's ClaimStepOnce RPC (which claims a durable slot in the
+// Database service, keyed by job id + step index + attempt), presenting the
+// job's own token. The executor calls Claim before running a step with `once`
+// set: when it returns false the step was already claimed by another target in
+// the same attempt, so the executor skips the step (recorded skipped, not
+// failed). A target that is not part of a fan-out (an ephemeral agent, or a
+// group with one worker) returns true so the step runs.
+//
+// Implementations must be safe for concurrent use. Claim is called with the
+// step's context (already bounded by the step's per-step timeout, when set)
+// and must return promptly when that context is done.
+type OnceClaimer interface {
+	// Claim claims the "run this step" slot for stepIndex of the job. It
+	// returns true when this target won the claim (it should run the step) and
+	// false when another target already claimed it in the same attempt (this
+	// target should skip the step).
+	Claim(ctx context.Context, stepIndex int) (bool, error)
+}
+
+type onceClaimerKey struct{}
+
+// ContextWithOnceClaimer returns a context that carries claimer, so the
+// executor can enforce a step's `once` field. A nil claimer returns ctx
+// unchanged.
+func ContextWithOnceClaimer(ctx context.Context, claimer OnceClaimer) context.Context {
+	if claimer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, onceClaimerKey{}, claimer)
+}
+
+// OnceClaimerFromContext returns the OnceClaimer carried by ctx, or nil when
+// none is set. The executor calls this to enforce a step's `once` field.
+func OnceClaimerFromContext(ctx context.Context) OnceClaimer {
+	claimer, _ := ctx.Value(onceClaimerKey{}).(OnceClaimer)
+	return claimer
 }
 
 // ConditionContext is the data a step's condition (and, for the approval
@@ -743,11 +910,14 @@ func interpolateStep(step *dbpb.JobStep, data map[string]any) (*dbpb.JobStep, er
 	}
 	if len(step.GetParams()) > 0 {
 		params := make(map[string]*dbpb.ParamValue, len(step.GetParams()))
+		stepType := step.GetType()
 		for k, v := range step.GetParams() {
-			// The approval handler's message (F-13) is rendered lazily against
-			// the step's condition context (which has prior steps' outputs and
-			// upstream jobs); it is not rendered here.
-			if step.GetType() == TypeApproval && k == "message" {
+			// The approval handler's message (F-13) and the notification
+			// handlers' fields (F-18: email's to/cc/bcc/subject/body,
+			// webhook's url/headers/body) are rendered lazily against the
+			// step's condition context (which has prior steps' outputs and
+			// upstream jobs); they are not rendered here.
+			if stepType == TypeEmail || stepType == TypeWebhook || (stepType == TypeApproval && k == "message") {
 				params[k] = v
 				continue
 			}

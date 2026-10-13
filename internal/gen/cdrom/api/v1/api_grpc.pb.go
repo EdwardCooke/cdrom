@@ -43,6 +43,9 @@ const (
 	API_GetArtifact_FullMethodName          = "/cdrom.api.v1.API/GetArtifact"
 	API_ListArtifacts_FullMethodName        = "/cdrom.api.v1.API/ListArtifacts"
 	API_DeleteArtifact_FullMethodName       = "/cdrom.api.v1.API/DeleteArtifact"
+	API_SendEmail_FullMethodName            = "/cdrom.api.v1.API/SendEmail"
+	API_SendWebhook_FullMethodName          = "/cdrom.api.v1.API/SendWebhook"
+	API_ClaimStepOnce_FullMethodName        = "/cdrom.api.v1.API/ClaimStepOnce"
 )
 
 // APIClient is the client API for API service.
@@ -154,6 +157,27 @@ type APIClient interface {
 	GetArtifact(ctx context.Context, in *v1.GetArtifactRequest, opts ...grpc.CallOption) (*v1.Artifact, error)
 	ListArtifacts(ctx context.Context, in *v1.ListArtifactsRequest, opts ...grpc.CallOption) (*v1.ListArtifactsResponse, error)
 	DeleteArtifact(ctx context.Context, in *v1.DeleteArtifactRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Notifications (F-18). A notification step handler (email or webhook) on an
+	// execution target renders the step's fields against the step's condition
+	// context and calls one of these RPCs; the API performs the actual send
+	// (SMTP for email, HTTP for webhook) using its own configuration. The target
+	// never opens an SMTP or outbound HTTP connection itself. When job-token
+	// auth is enabled the caller must present a job token scoped to the job.
+	//
+	// SendEmail sends an SMTP message from the API's configured email server.
+	SendEmail(ctx context.Context, in *SendEmailRequest, opts ...grpc.CallOption) (*SendEmailResponse, error)
+	// SendWebhook performs an HTTP request from the API to the step's URL, with
+	// the step's headers and body, within the API's configured response timeout.
+	SendWebhook(ctx context.Context, in *SendWebhookRequest, opts ...grpc.CallOption) (*SendWebhookResponse, error)
+	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
+	// step of a job that fans out to a worker group: the first target to claim
+	// (job id + step index + attempt) wins and runs the step; every other target
+	// that reaches the same step in the same attempt sees the slot already
+	// claimed and skips the step. The API proxies the claim to the Database
+	// service (which holds the durable slot), so the dedup is correct across
+	// every API replica and worker process. When job-token auth is enabled the
+	// caller must present a job token scoped to the job.
+	ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error)
 }
 
 type aPIClient struct {
@@ -408,6 +432,36 @@ func (c *aPIClient) DeleteArtifact(ctx context.Context, in *v1.DeleteArtifactReq
 	return out, nil
 }
 
+func (c *aPIClient) SendEmail(ctx context.Context, in *SendEmailRequest, opts ...grpc.CallOption) (*SendEmailResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendEmailResponse)
+	err := c.cc.Invoke(ctx, API_SendEmail_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) SendWebhook(ctx context.Context, in *SendWebhookRequest, opts ...grpc.CallOption) (*SendWebhookResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendWebhookResponse)
+	err := c.cc.Invoke(ctx, API_SendWebhook_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimStepOnceResponse)
+	err := c.cc.Invoke(ctx, API_ClaimStepOnce_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // APIServer is the server API for API service.
 // All implementations must embed UnimplementedAPIServer
 // for forward compatibility.
@@ -517,6 +571,27 @@ type APIServer interface {
 	GetArtifact(context.Context, *v1.GetArtifactRequest) (*v1.Artifact, error)
 	ListArtifacts(context.Context, *v1.ListArtifactsRequest) (*v1.ListArtifactsResponse, error)
 	DeleteArtifact(context.Context, *v1.DeleteArtifactRequest) (*emptypb.Empty, error)
+	// Notifications (F-18). A notification step handler (email or webhook) on an
+	// execution target renders the step's fields against the step's condition
+	// context and calls one of these RPCs; the API performs the actual send
+	// (SMTP for email, HTTP for webhook) using its own configuration. The target
+	// never opens an SMTP or outbound HTTP connection itself. When job-token
+	// auth is enabled the caller must present a job token scoped to the job.
+	//
+	// SendEmail sends an SMTP message from the API's configured email server.
+	SendEmail(context.Context, *SendEmailRequest) (*SendEmailResponse, error)
+	// SendWebhook performs an HTTP request from the API to the step's URL, with
+	// the step's headers and body, within the API's configured response timeout.
+	SendWebhook(context.Context, *SendWebhookRequest) (*SendWebhookResponse, error)
+	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
+	// step of a job that fans out to a worker group: the first target to claim
+	// (job id + step index + attempt) wins and runs the step; every other target
+	// that reaches the same step in the same attempt sees the slot already
+	// claimed and skips the step. The API proxies the claim to the Database
+	// service (which holds the durable slot), so the dedup is correct across
+	// every API replica and worker process. When job-token auth is enabled the
+	// caller must present a job token scoped to the job.
+	ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error)
 	mustEmbedUnimplementedAPIServer()
 }
 
@@ -592,6 +667,15 @@ func (UnimplementedAPIServer) ListArtifacts(context.Context, *v1.ListArtifactsRe
 }
 func (UnimplementedAPIServer) DeleteArtifact(context.Context, *v1.DeleteArtifactRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteArtifact not implemented")
+}
+func (UnimplementedAPIServer) SendEmail(context.Context, *SendEmailRequest) (*SendEmailResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendEmail not implemented")
+}
+func (UnimplementedAPIServer) SendWebhook(context.Context, *SendWebhookRequest) (*SendWebhookResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendWebhook not implemented")
+}
+func (UnimplementedAPIServer) ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimStepOnce not implemented")
 }
 func (UnimplementedAPIServer) mustEmbedUnimplementedAPIServer() {}
 func (UnimplementedAPIServer) testEmbeddedByValue()             {}
@@ -974,6 +1058,60 @@ func _API_DeleteArtifact_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _API_SendEmail_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendEmailRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).SendEmail(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_SendEmail_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).SendEmail(ctx, req.(*SendEmailRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_SendWebhook_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendWebhookRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).SendWebhook(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_SendWebhook_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).SendWebhook(ctx, req.(*SendWebhookRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_ClaimStepOnce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimStepOnceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).ClaimStepOnce(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_ClaimStepOnce_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).ClaimStepOnce(ctx, req.(*ClaimStepOnceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // API_ServiceDesc is the grpc.ServiceDesc for API service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1052,6 +1190,18 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteArtifact",
 			Handler:    _API_DeleteArtifact_Handler,
+		},
+		{
+			MethodName: "SendEmail",
+			Handler:    _API_SendEmail_Handler,
+		},
+		{
+			MethodName: "SendWebhook",
+			Handler:    _API_SendWebhook_Handler,
+		},
+		{
+			MethodName: "ClaimStepOnce",
+			Handler:    _API_ClaimStepOnce_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

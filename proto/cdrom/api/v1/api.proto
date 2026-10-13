@@ -129,6 +129,28 @@ service API {
       returns (cdrom.artifacts.v1.ListArtifactsResponse);
   rpc DeleteArtifact(cdrom.artifacts.v1.DeleteArtifactRequest)
       returns (google.protobuf.Empty);
+
+  // Notifications (F-18). A notification step handler (email or webhook) on an
+  // execution target renders the step's fields against the step's condition
+  // context and calls one of these RPCs; the API performs the actual send
+  // (SMTP for email, HTTP for webhook) using its own configuration. The target
+  // never opens an SMTP or outbound HTTP connection itself. When job-token
+  // auth is enabled the caller must present a job token scoped to the job.
+  //
+  // SendEmail sends an SMTP message from the API's configured email server.
+  rpc SendEmail(SendEmailRequest) returns (SendEmailResponse);
+  // SendWebhook performs an HTTP request from the API to the step's URL, with
+  // the step's headers and body, within the API's configured response timeout.
+  rpc SendWebhook(SendWebhookRequest) returns (SendWebhookResponse);
+  // ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
+  // step of a job that fans out to a worker group: the first target to claim
+  // (job id + step index + attempt) wins and runs the step; every other target
+  // that reaches the same step in the same attempt sees the slot already
+  // claimed and skips the step. The API proxies the claim to the Database
+  // service (which holds the durable slot), so the dedup is correct across
+  // every API replica and worker process. When job-token auth is enabled the
+  // caller must present a job token scoped to the job.
+  rpc ClaimStepOnce(ClaimStepOnceRequest) returns (ClaimStepOnceResponse);
 }
 
 message Worker {
@@ -544,4 +566,101 @@ message ExchangeJobTokenResponse {
   // token is the new job token, scoped to the same job but the requested
   // audience.
   string token = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (F-18)
+// ---------------------------------------------------------------------------
+
+// SendEmailRequest asks the API to send an SMTP message from its configured
+// email server. The execution target renders the step's fields against the
+// step's condition context (F-06) and hands the rendered values here; the API
+// supplies the sender (the configured `from`, or the step's `from` override)
+// and the SMTP server. When content_type is "markdown" the API renders the
+// body from markdown to HTML before sending.
+message SendEmailRequest {
+  // job_id is the job the notification step belongs to.
+  int64 job_id = 1;
+  // to are the recipient addresses (required).
+  repeated string to = 2;
+  // cc are the carbon-copy recipients (optional).
+  repeated string cc = 3;
+  // bcc are the blind-carbon-copy recipients (optional).
+  repeated string bcc = 4;
+  // subject is the message subject (optional).
+  string subject = 5;
+  // body is the message body (rendered by the target against the condition
+  // context).
+  string body = 6;
+  // content_type selects how the body is sent: "plain" (a text/plain message),
+  // "html" (a text/html message, sent as-is), or "markdown" (rendered to HTML
+  // and sent as text/html). Empty means "markdown".
+  string content_type = 7;
+  // from, when set, overrides the API's configured sender for this message.
+  string from = 8;
+  // reply_to, when set, sets the message's Reply-To header.
+  string reply_to = 9;
+}
+
+// SendEmailResponse is the (empty) result of a SendEmail call; a non-OK status
+// means the send failed.
+message SendEmailResponse {}
+
+// SendWebhookRequest asks the API to perform an HTTP request to the step's
+// URL, with the step's headers and body, within the API's configured response
+// timeout. The execution target renders the step's fields (url, headers,
+// body) against the step's condition context (F-06) and hands the rendered
+// values here. When content_type is "markdown" the API renders the body from
+// markdown to HTML before sending.
+message SendWebhookRequest {
+  // job_id is the job the notification step belongs to.
+  int64 job_id = 1;
+  // url is the request URL (required).
+  string url = 2;
+  // method is the HTTP method (default "POST").
+  string method = 3;
+  // headers are the request headers, each a "Name: Value" entry (the target
+  // renders each entry against the condition context and splits it on the
+  // first ":" into name and value).
+  repeated string headers = 4;
+  // body is the request body (rendered by the target against the condition
+  // context).
+  string body = 5;
+  // content_type selects how the body is sent: "plain" (sent as-is, e.g.
+  // JSON/YAML), "html" (sent as-is), or "markdown" (rendered to HTML). Empty
+  // means "plain".
+  string content_type = 6;
+  // timeout, when set, is the response timeout the step requests (a Go
+  // duration); the API clamps it to its configured maximum. When empty the
+  // API uses its configured default.
+  google.protobuf.Duration timeout = 7;
+}
+
+// SendWebhookResponse is the result of a SendWebhook call.
+message SendWebhookResponse {
+  // status_code is the HTTP status code the webhook returned (0 when the
+  // request failed before a response, e.g. a connection error or timeout).
+  int32 status_code = 1;
+}
+
+// ClaimStepOnceRequest asks the API to claim the "run this step" slot for a
+// step of a job that fans out to a worker group (F-01). The API proxies the
+// claim to the Database service, which holds the durable slot.
+message ClaimStepOnceRequest {
+  // job_id is the job the step belongs to.
+  int64 job_id = 1;
+  // step_index is the 0-based index of the step in the job's spec.
+  int32 step_index = 2;
+  // attempt is the 1-based attempt number of the job (F-04); a retry claims a
+  // fresh slot.
+  int32 attempt = 3;
+}
+
+// ClaimStepOnceResponse is the result of a ClaimStepOnce call.
+message ClaimStepOnceResponse {
+  // claimed is true when this call performed the claim (the slot was free and
+  // is now held by the caller): the caller runs the step. It is false when the
+  // slot was already claimed by another target in the same attempt: the caller
+  // skips the step.
+  bool claimed = 1;
 }

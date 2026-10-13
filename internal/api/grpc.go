@@ -1,10 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"net/smtp"
 	"slices"
 	"sort"
 	"strconv"
@@ -13,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gomarkdown/markdown"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -21,6 +27,7 @@ import (
 
 	"cdrom/internal/audit"
 	"cdrom/internal/authz"
+	"cdrom/internal/config"
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
@@ -113,12 +120,23 @@ type GRPCServer struct {
 	// It is nil when the audit log is not configured (or in tests), in which
 	// case no audit events are recorded on the gRPC surface.
 	audit *audit.Recorder
+
+	// email and webhook back the notification step handlers (F-18): the API is
+	// the only component that sends an email (SMTP) or performs a webhook's
+	// HTTP request. email is the API's SMTP configuration (a zero value means
+	// no email server is configured, so an email step fails with a clear
+	// error); webhook holds the response-timeout bounds, and webhookClient is
+	// the HTTP client the API uses to send webhooks (it carries no global
+	// timeout — each request is bounded by its own clamped timeout).
+	email         config.EmailConfig
+	webhook       config.WebhookConfig
+	webhookClient *http.Client
 }
 
 // liveWorker is a worker with an open WatchJobs stream.
 type liveWorker struct {
-	name     string
-	group    string
+	name  string
+	group string
 	// environments are the environments the worker belongs to (F-17); a job
 	// that targets an environment is dispatched to the live workers that
 	// registered it.
@@ -877,6 +895,271 @@ func (s *GRPCServer) reportActor(workerName string, jobID int64) string {
 		return workerName
 	}
 	return "job:" + strconv.FormatInt(jobID, 10)
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (F-18)
+// ---------------------------------------------------------------------------
+
+// SendEmail sends an SMTP message from the API's configured email server
+// (F-18). The execution target renders the email step's fields against the
+// step's condition context and hands the rendered values to the API; the API is
+// the only component that opens an SMTP connection. When job-token auth is
+// enabled the caller must present a job token scoped to the job.
+//
+// The body's content type selects how it is sent: "plain" (a text/plain
+// message), "html" (a text/html message, sent as-is), or "markdown" (rendered
+// to HTML by the API). A send that fails (an SMTP error) is reported as an
+// error, which fails the step (and the job) unless the step sets
+// ignore_failed (F-06).
+func (s *GRPCServer) SendEmail(ctx context.Context, req *apipb.SendEmailRequest) (*apipb.SendEmailResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
+		return nil, err
+	}
+	if !s.email.Configured() {
+		return nil, status.Error(codes.FailedPrecondition, "no email server is configured on the API")
+	}
+	if len(req.GetTo()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "at least one recipient (to) is required")
+	}
+	// The sender: the step's from override, else the API's configured sender.
+	from := req.GetFrom()
+	if from == "" {
+		from = s.email.From
+	}
+	if from == "" {
+		return nil, status.Error(codes.FailedPrecondition, "no sender (from) is configured; set the API's email.from or the step's from")
+	}
+	// The content type selects how the body is sent (plain / html / markdown).
+	contentType := strings.ToLower(req.GetContentType())
+	if contentType == "" {
+		contentType = "markdown"
+	}
+	var body, mimeSubtype string
+	switch contentType {
+	case "plain":
+		body, mimeSubtype = req.GetBody(), "plain"
+	case "html":
+		body, mimeSubtype = req.GetBody(), "html"
+	case "markdown":
+		body, mimeSubtype = string(renderMarkdown(req.GetBody())), "html"
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported content_type %q (want plain, html, or markdown)", req.GetContentType())
+	}
+	// Build the MIME message. BCC recipients are in the message but not in the
+	// SMTP envelope (so they are not revealed to the other recipients); the
+	// envelope carries the To and Cc recipients.
+	var msg bytes.Buffer
+	fmt.Fprintf(&msg, "From: %s\r\n", from)
+	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(req.GetTo(), ", "))
+	if len(req.GetCc()) > 0 {
+		fmt.Fprintf(&msg, "Cc: %s\r\n", strings.Join(req.GetCc(), ", "))
+	}
+	if len(req.GetBcc()) > 0 {
+		fmt.Fprintf(&msg, "Bcc: %s\r\n", strings.Join(req.GetBcc(), ", "))
+	}
+	if req.GetReplyTo() != "" {
+		fmt.Fprintf(&msg, "Reply-To: %s\r\n", req.GetReplyTo())
+	}
+	if req.GetSubject() != "" {
+		fmt.Fprintf(&msg, "Subject: %s\r\n", req.GetSubject())
+	}
+	msg.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&msg, "Content-Type: text/%s; charset=UTF-8\r\n", mimeSubtype)
+	msg.WriteString("\r\n")
+	msg.WriteString(body)
+
+	// The SMTP envelope recipients: To and Cc (BCC is hidden from the envelope).
+	recipients := make([]string, 0, len(req.GetTo())+len(req.GetCc()))
+	recipients = append(recipients, req.GetTo()...)
+	recipients = append(recipients, req.GetCc()...)
+
+	addr := net.JoinHostPort(s.email.Host, strconv.Itoa(s.email.EffectivePort()))
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "email: dial %s: %v", addr, err)
+	}
+	client, err := smtp.NewClient(conn, s.email.Host)
+	if err != nil {
+		_ = conn.Close()
+		return nil, status.Errorf(codes.Internal, "email: %v", err)
+	}
+	defer client.Close()
+	// Upgrade to TLS via STARTTLS when the API is configured to (the default).
+	if s.email.EffectiveStartTLS() {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			if err := client.StartTLS(&tls.Config{ServerName: s.email.Host, InsecureSkipVerify: s.email.Insecure}); err != nil {
+				return nil, status.Errorf(codes.Internal, "email: starttls: %v", err)
+			}
+		}
+	}
+	// Authenticate to the SMTP server when a username is configured.
+	if s.email.Username != "" {
+		if ok, _ := client.Extension("AUTH"); ok {
+			if err := client.Auth(smtp.PlainAuth("", s.email.Username, s.email.Password, s.email.Host)); err != nil {
+				return nil, status.Errorf(codes.Internal, "email: auth: %v", err)
+			}
+		}
+	}
+	if err := client.Mail(from); err != nil {
+		return nil, status.Errorf(codes.Internal, "email: mail: %v", err)
+	}
+	for _, rcpt := range recipients {
+		if err := client.Rcpt(rcpt); err != nil {
+			return nil, status.Errorf(codes.Internal, "email: rcpt %s: %v", rcpt, err)
+		}
+	}
+	wr, err := client.Data()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "email: data: %v", err)
+	}
+	if _, err := wr.Write(msg.Bytes()); err != nil {
+		return nil, status.Errorf(codes.Internal, "email: write: %v", err)
+	}
+	if err := wr.Close(); err != nil {
+		return nil, status.Errorf(codes.Internal, "email: close: %v", err)
+	}
+	if err := client.Quit(); err != nil {
+		return nil, status.Errorf(codes.Internal, "email: quit: %v", err)
+	}
+	s.logger.Info("api: sent email", "job", req.GetJobId(), "to", req.GetTo(), "content_type", contentType)
+	return &apipb.SendEmailResponse{}, nil
+}
+
+// SendWebhook performs an HTTP request from the API to the step's URL (F-18).
+// The execution target renders the step's fields against the step's condition
+// context and hands the rendered values to the API; the API is the only
+// component that opens the outbound HTTP connection. When job-token auth is
+// enabled the caller must present a job token scoped to the job.
+//
+// The body's content type selects how it is sent: "plain" (sent as-is, e.g.
+// JSON/YAML — the step's own headers, e.g. Content-Type, apply), "html" (sent
+// as-is), or "markdown" (rendered to HTML by the API). The response timeout is
+// the step's requested timeout clamped to the API's configured maximum, or the
+// API's configured default when the step sets none. A request that fails (a
+// connection error, a non-2xx response, or a timeout) is reported as an error,
+// which fails the step (and the job) unless the step sets ignore_failed (F-06).
+func (s *GRPCServer) SendWebhook(ctx context.Context, req *apipb.SendWebhookRequest) (*apipb.SendWebhookResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
+		return nil, err
+	}
+	if req.GetUrl() == "" {
+		return nil, status.Error(codes.InvalidArgument, "url is required")
+	}
+	// The response timeout: the step's requested timeout (clamped to the
+	// configured maximum), or the configured default when the step sets none.
+	timeout := s.webhook.EffectiveTimeout()
+	if d := req.GetTimeout(); d != nil {
+		if t := d.AsDuration(); t > 0 {
+			if max := s.webhook.EffectiveTimeoutMax(); t > max {
+				t = max
+			}
+			timeout = t
+		}
+	}
+	// The content type selects how the body is sent (plain / html / markdown).
+	contentType := strings.ToLower(req.GetContentType())
+	if contentType == "" {
+		contentType = "plain"
+	}
+	body := req.GetBody()
+	var bodyCT string
+	switch contentType {
+	case "plain":
+		// Sent as-is; the step's own headers (e.g. Content-Type) apply.
+	case "html":
+		bodyCT = "text/html; charset=UTF-8"
+	case "markdown":
+		body = string(renderMarkdown(req.GetBody()))
+		bodyCT = "text/html; charset=UTF-8"
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported content_type %q (want plain, html, or markdown)", req.GetContentType())
+	}
+	method := req.GetMethod()
+	if method == "" {
+		method = http.MethodPost
+	}
+	// Bound the request by the clamped timeout (on top of the step's own
+	// context, which is already bounded by the step's timeout when set).
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(reqCtx, method, req.GetUrl(), strings.NewReader(body))
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "webhook: %v", err)
+	}
+	// The step's headers (each a "Name: Value" entry). A step-supplied
+	// Content-Type takes precedence over the one derived from the content type.
+	for _, h := range req.GetHeaders() {
+		name, value, ok := strings.Cut(h, ":")
+		if !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "webhook: header %q is not a \"Name: Value\" entry", h)
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, status.Errorf(codes.InvalidArgument, "webhook: header %q has an empty name", h)
+		}
+		httpReq.Header.Set(name, strings.TrimSpace(value))
+	}
+	if bodyCT != "" && httpReq.Header.Get("Content-Type") == "" {
+		httpReq.Header.Set("Content-Type", bodyCT)
+	}
+	client := s.webhookClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "webhook: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, status.Errorf(codes.Internal, "webhook: %s %s returned %d", method, req.GetUrl(), resp.StatusCode)
+	}
+	s.logger.Info("api: sent webhook", "job", req.GetJobId(), "url", req.GetUrl(), "status", resp.StatusCode)
+	return &apipb.SendWebhookResponse{StatusCode: int32(resp.StatusCode)}, nil
+}
+
+// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a step
+// of a job. The execution target calls it before running a step with the
+// `once` field set: when it returns true this target won the claim (it should
+// run the step) and when it returns false another target already claimed it in
+// the same attempt (this target should skip the step). The claim is durable in
+// the Database service (keyed by job id + step index + attempt), so a retry
+// (a new attempt) may run the step again. When job-token auth is enabled the
+// caller must present a job token scoped to the job.
+func (s *GRPCServer) ClaimStepOnce(ctx context.Context, req *apipb.ClaimStepOnceRequest) (*apipb.ClaimStepOnceResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	resp, err := s.db.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{
+		JobId:     req.GetJobId(),
+		StepIndex: req.GetStepIndex(),
+		Attempt:   req.GetAttempt(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &apipb.ClaimStepOnceResponse{Claimed: resp.GetClaimed()}, nil
+}
+
+// renderMarkdown renders markdown to HTML using gomarkdown. It is used to
+// render a notification body whose content type is "markdown" (F-18) before it
+// is sent (an email's HTML body, or a webhook's HTML body).
+func renderMarkdown(md string) []byte {
+	return markdown.ToHTML([]byte(md), nil, nil)
 }
 
 // ---------------------------------------------------------------------------

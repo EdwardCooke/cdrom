@@ -2232,8 +2232,8 @@ func (s *Server) ProceedJob(ctx context.Context, req *dbpb.ProceedJobRequest) (*
 	result := s.db.WithContext(ctx).
 		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusAwaitingProceed).
 		Updates(map[string]any{
-			"status":      models.JobStatusRunning,
-			"started_at":  now,
+			"status":     models.JobStatusRunning,
+			"started_at": now,
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2255,14 +2255,14 @@ func workerInEnvironment(worker *models.Worker, environment string) bool {
 // toProtoEnvironment converts a model Environment into its proto form.
 func toProtoEnvironment(env *models.Environment) *dbpb.Environment {
 	proto := &dbpb.Environment{
-		Id:             int64(env.ID),
-		Name:           env.Name,
-		Description:    env.Description,
-		TargetGroup:    env.TargetGroup,
+		Id:               int64(env.ID),
+		Name:             env.Name,
+		Description:      env.Description,
+		TargetGroup:      env.TargetGroup,
 		RequiresApproval: env.RequiresApproval,
-		Automation:     automationToProto(env.Automation),
-		CreatedAt:      timestamppb.New(env.CreatedAt),
-		UpdatedAt:      timestamppb.New(env.UpdatedAt),
+		Automation:       automationToProto(env.Automation),
+		CreatedAt:        timestamppb.New(env.CreatedAt),
+		UpdatedAt:        timestamppb.New(env.UpdatedAt),
 	}
 	return proto
 }
@@ -3403,6 +3403,48 @@ func (s *Server) NextSecretNonce(ctx context.Context, _ *dbpb.NextSecretNonceReq
 	return &dbpb.NextSecretNonceResponse{Nonce: nonce}, nil
 }
 
+// ClaimStepOnce atomically claims the "run this step" slot for a step of a job
+// that fans out to a worker group (F-01): the first target to claim
+// (job id + step index + attempt) wins and runs the step; every other target
+// that reaches the same step in the same attempt sees the slot already claimed
+// and skips the step. A retry (F-04) is a new attempt, so it may claim again.
+//
+// The claim is a single atomic `FirstOrCreate` on the unique (job_id,
+// step_index, attempt) index: at most one concurrent caller can create the row,
+// so the dedup is correct across every API replica and worker process. The
+// created flag (RowsAffected == 1) reports whether this call won the claim.
+func (s *Server) ClaimStepOnce(ctx context.Context, req *dbpb.ClaimStepOnceRequest) (*dbpb.ClaimStepOnceResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	resp := &dbpb.ClaimStepOnceResponse{}
+	claim := &models.StepOnceClaim{
+		JobID:     uint(req.GetJobId()),
+		StepIndex: int(req.GetStepIndex()),
+		Attempt:   int(req.GetAttempt()),
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// FirstOrCreate is atomic against the unique index: the first caller
+		// creates the row (RowsAffected == 1, it won the claim); a later
+		// caller in the same attempt finds it already created (RowsAffected
+		// == 0, it lost and should skip the step).
+		result := tx.Where(&models.StepOnceClaim{
+			JobID:     claim.JobID,
+			StepIndex: claim.StepIndex,
+			Attempt:   claim.Attempt,
+		}).FirstOrCreate(claim)
+		if result.Error != nil {
+			return result.Error
+		}
+		resp.Claimed = result.RowsAffected == 1
+		return nil
+	})
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	return resp, nil
+}
+
 // ---------------------------------------------------------------------------
 // Event log (F-23, high availability)
 // ---------------------------------------------------------------------------
@@ -4509,6 +4551,7 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 			Params:       paramsFromProto(step.GetParams()),
 			Condition:    step.GetCondition(),
 			IgnoreFailed: step.GetIgnoreFailed(),
+			Once:         step.GetOnce(),
 		})
 	}
 	return models.JobSpec{
@@ -4539,6 +4582,7 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 			Params:       paramsToProto(step.Params),
 			Condition:    step.Condition,
 			IgnoreFailed: step.IgnoreFailed,
+			Once:         step.Once,
 		})
 	}
 	return &dbpb.JobSpec{

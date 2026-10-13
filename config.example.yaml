@@ -247,3 +247,45 @@ db:
 #  rotation: daily
 #  retention: 2160h
 #  prune_interval: 24h
+
+# Email (used by the API, F-18). The SMTP server the API sends notification
+# emails from. A notification step handler (an `email` step) on an execution
+# target renders the step's fields (to/cc/bcc/subject/body) against the step's
+# condition context and calls the API's SendEmail RPC; the API sends the
+# message from this server. The target never opens an SMTP connection itself.
+#
+# When host is empty no email server is configured and an `email` step fails
+# with a clear error.
+#
+# host is the SMTP server's host (e.g. smtp.example.com).
+# port is the SMTP server's port (default: 587).
+# username / password, when set, authenticate to the server (plain auth).
+# from is the default sender address (the message's From header); a step's
+# `from` param, when set, overrides it for that message.
+# starttls (default: true) upgrades the connection to TLS via STARTTLS; set it
+# to false for implicit-TLS (port 465) or plaintext local servers.
+# insecure (default: false) skips verification of the server's TLS certificate
+# (self-signed servers).
+#email:
+#  host: smtp.example.com
+#  port: 587
+#  username: cdrom
+#  password: <smtp-password>
+#  from: cdrom@example.com
+#  starttls: true
+#  insecure: false
+
+# Webhook (used by the API, F-18). The API's webhook notification settings. A
+# notification step handler (a `webhook` step) on an execution target renders
+# the step's fields (url/headers/body) against the step's condition context and
+# calls the API's SendWebhook RPC; the API performs the HTTP request within
+# these bounds. The target never opens an outbound HTTP connection itself.
+#
+# timeout is the default response timeout the API waits for a webhook's
+# response (default: 10s). A step's `timeout` param, when set, overrides it
+# (clamped to timeout_max).
+# timeout_max is the maximum a step's per-request `timeout` can reach
+# (default: 60s).
+#webhook:
+#  timeout: 10s
+#  timeout_max: 60s

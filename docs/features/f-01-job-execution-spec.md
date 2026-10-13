@@ -53,6 +53,10 @@ missing piece.
       API's `ExchangeJobToken` RPC) and writes the exchanged token to the step's
       output directory, so later steps and jobs can read it through the
       condition context.
+- [ ] A step's `once` field runs the step on at most one target of a fan-out
+      job: the first worker to reach it claims a durable slot (job id + step
+      index + attempt) and runs it; the other workers skip it (recorded
+      `skipped`, not failed), and a retry (a new attempt) may run it again.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
 **Design decisions (folded into AGENTS.md / Architecture.md).**
@@ -105,6 +109,20 @@ missing piece.
   (`.steps`/`.jobs` `.Outputs`). A step with no `audience`, an invalid
   `expires_in`, or a target with no
   `TokenExchange` fails the job.
+- **`once` (run a step on one target of a fan-out job).** A step may set
+  `once` (a boolean field on `JobStep`, alongside `condition` and
+  `ignore_failed`). When set, the executor runs the step on at most one target
+  of a job that fans out to a worker group: before running it, the target
+  claims a durable slot (job id + step index + attempt) in the Database service
+  (a guarded atomic claim, like F-16's slot accounting); the first target to
+  claim it runs the step, and every other target that reaches the same step in
+  the same attempt sees the slot already claimed and **skips** the step
+  (recorded `skipped`, not failed, so it does not stop the job). A retry
+  (F-04) is a new attempt, so it may run the step again. A job on a single
+  target (an ephemeral agent) is unaffected — there is only one target to
+  claim. This is what keeps a notification step (F-18) from sending once per
+  worker, and lets any step type (e.g. a one-shot `shell` command) run on a
+  single worker of a group.
 - Per-step `timeout` is enforced by the target via a derived context; a
   job-level `timeout` bounds the whole job (F-03), and a scheduler-side
   watchdog reaps jobs whose target goes silent (F-03).
