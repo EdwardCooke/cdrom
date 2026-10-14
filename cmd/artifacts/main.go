@@ -7,15 +7,18 @@
 package main
 
 import (
+	"context"
 	"net"
 	"os"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 
 	"cdrom/internal/config"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
+	"cdrom/internal/metrics"
 	"cdrom/internal/services/artifacts"
 )
 
@@ -37,12 +40,39 @@ func main() {
 		addr = config.DefaultArtifactsAddress
 	}
 
+	ctx := context.Background()
+
+	// Metrics (F-20): the Artifacts service serves /metrics and /healthz on a
+	// dedicated metrics port (separate from its gRPC port). When disabled
+	// (metrics.enabled: false) the listener is not started and recording is a
+	// no-op (the metric set is nil).
+	var artMetrics *metrics.ArtifactsMetrics
+	var artStatsHandler stats.Handler
+	metricsAddr := cfg.Metrics.Addr
+	if metricsAddr == "" {
+		metricsAddr = metrics.DefaultMetricsAddr("artifacts")
+	}
+	if cfg.Metrics.Enabled {
+		collector := metrics.NewCollector()
+		artMetrics = metrics.NewArtifactsMetrics(collector.Registry)
+		artStatsHandler = metrics.NewStatsHandler(collector.Registry)
+		go func() {
+			if err := collector.StartMetrics(ctx, metricsAddr); err != nil {
+				logger.Error("metrics: start", "addr", metricsAddr, "err", err)
+			}
+		}()
+		logger.Info("cdrom artifacts metrics starting", "addr", metricsAddr)
+	}
+
 	store, err := artifacts.NewStore(artifacts.StoreKind(cfg.ArtifactsStore), cfg.ArtifactsRoot)
 	if err != nil {
 		logger.Error("artifacts: init store", "store", cfg.ArtifactsStore, "err", err)
 		os.Exit(1)
 	}
 	srvImpl := artifacts.NewServer(store)
+	// Attach the Artifacts service's Prometheus metric set (F-20) so the
+	// operations record their counters, bytes, and durations.
+	srvImpl.SetMetrics(artMetrics)
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -55,7 +85,11 @@ func main() {
 		logger.Error("tls: server creds", "err", err)
 		os.Exit(1)
 	}
-	srv := grpc.NewServer(grpc.Creds(creds))
+	srvOpts := []grpc.ServerOption{grpc.Creds(creds)}
+	if artStatsHandler != nil {
+		srvOpts = append(srvOpts, grpc.StatsHandler(artStatsHandler))
+	}
+	srv := grpc.NewServer(srvOpts...)
 	artifactspb.RegisterArtifactsServer(srv, srvImpl)
 
 	logger.Info("cdrom artifacts service starting", "addr", addr, "store", cfg.ArtifactsStore, "root", cfg.ArtifactsRoot)

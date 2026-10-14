@@ -84,6 +84,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Track the live WebSocket client count (F-20) so the cdrom_api_ws_clients
+	// gauge reflects this pod's UI connections.
+	s.wsClients.Add(1)
+	s.updateWSClients()
+	defer func() {
+		s.wsClients.Add(-1)
+		s.updateWSClients()
+	}()
+
 	// Send the current state so the client can resynchronize.
 	if snapshot, err := s.snapshot(); err == nil {
 		_ = conn.WriteJSON(wsMessage{Snapshot: snapshot})
@@ -125,6 +134,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// updateWSClients mirrors the live WebSocket client count to the
+// cdrom_api_ws_clients gauge (F-20). It is a no-op when metrics are disabled.
+func (s *Server) updateWSClients() {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.SetWSClients(int(s.wsClients.Load()))
 }
 
 // snapshot builds the current jobs and workers for a WebSocket subscriber.

@@ -17,6 +17,7 @@ import (
 
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	"cdrom/internal/metrics"
 	"cdrom/internal/target"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
@@ -42,6 +43,9 @@ type Worker struct {
 	tags   map[string]string
 	deps   Dependencies
 	logger *slog.Logger
+	// metrics is the worker's metric set (F-20); nil when metrics are
+	// disabled, in which case all recording is a no-op.
+	metrics *metrics.WorkerMetrics
 
 	// sem bounds the worker to one job at a time (preserving the previous
 	// sequential behavior) while the watch loop stays free to receive
@@ -71,6 +75,12 @@ func New(name, group string, environments []string, tags map[string]string, deps
 		sem:          make(chan struct{}, 1),
 		inflight:     make(map[int64]*jobRun),
 	}
+}
+
+// SetMetrics sets the worker's metric set (F-20). It must be called before
+// Run. A nil set disables all metric recording.
+func (w *Worker) SetMetrics(m *metrics.WorkerMetrics) {
+	w.metrics = m
 }
 
 // Run registers the worker, then serves jobs until ctx is cancelled. It
@@ -107,6 +117,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				return nil
 			}
 			w.logger.Warn("worker: watch stream ended; reconnecting", "err", err)
+			w.metrics.SetWatchState("reconnecting")
 			select {
 			case <-ctx.Done():
 				return nil
@@ -135,6 +146,7 @@ func (w *Worker) watch(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("worker: watch: %w", err)
 	}
+	w.metrics.SetWatchState("connected")
 	for {
 		message, err := stream.Recv()
 		if err != nil {
@@ -199,6 +211,11 @@ func (w *Worker) pollOnce(ctx context.Context) {
 		w.logger.Warn("worker: list pending jobs", "err", err)
 		return
 	}
+	if len(resp.GetJobs()) == 0 {
+		w.metrics.RecordPoll("idle")
+		return
+	}
+	w.metrics.RecordPoll("claimed")
 	for _, job := range resp.GetJobs() {
 		w.startAndExecute(ctx, job.GetId())
 	}
@@ -277,6 +294,7 @@ func (w *Worker) heartbeat(ctx context.Context) {
 		case <-ticker.C:
 			if _, err := w.deps.API.Heartbeat(ctx, &apipb.HeartbeatRequest{Name: w.name}); err != nil {
 				w.logger.Warn("worker: heartbeat", "err", err)
+				w.metrics.RecordHeartbeatFailure()
 			}
 		}
 	}
@@ -311,22 +329,26 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	run := &jobRun{cancel: cancel}
 	w.mu.Lock()
 	w.inflight[job.GetId()] = run
+	w.metrics.SetInflight(len(w.inflight))
 	w.mu.Unlock()
 	defer func() {
 		cancel()
 		w.mu.Lock()
 		delete(w.inflight, job.GetId())
+		w.metrics.SetInflight(len(w.inflight))
 		w.mu.Unlock()
 	}()
 
 	// The shared execution context: the target's API client, the worker's
 	// name (so a fan-out job's outcome is recorded against this worker's
-	// execution), the job's token, and the worker's step barrier (when the
-	// job has the step-barrier flag set and targets a worker group).
+	// execution), the job's token, the worker's step metrics (F-20), and the
+	// worker's step barrier (when the job has the step-barrier flag set and
+	// targets a worker group).
 	tc := &target.Context{
 		API:        w.deps.API,
 		WorkerName: w.name,
 		Token:      token,
+		Metrics:    w.metrics,
 		Logger:     w.logger,
 	}
 	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
@@ -336,6 +358,7 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	target.ReportRunning(ctx, tc, job.GetId())
 	w.logger.Info("job started", "job", job.GetId())
 	collector := &executor.StepResultCollector{}
+	start := time.Now()
 	err := target.RunJob(jobCtx, tc, job, collector)
 	// A cancellation delivered on the WatchJobs stream (F-05) marks the run
 	// as user-cancelled; FinishJob reports the job as cancelled, distinct
@@ -343,5 +366,8 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 	w.mu.Lock()
 	userCancelled := run.userCancel
 	w.mu.Unlock()
-	target.FinishJob(ctx, tc, job.GetId(), collector, err, userCancelled)
+	finalStatus := target.FinishJob(ctx, tc, job.GetId(), collector, err, userCancelled)
+	// Record the job's terminal status and duration (F-20), matching the
+	// status the API records for the same job.
+	w.metrics.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
 }

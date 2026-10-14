@@ -155,6 +155,29 @@ type Config struct {
 	// fields and calls the API's SendWebhook RPC, which performs the HTTP
 	// request. Only the API uses it; other binaries ignore it.
 	Webhook WebhookConfig
+
+	// Metrics configures the component's Prometheus metrics endpoint (F-20).
+	// Every binary serves /metrics and /healthz on a dedicated metrics port
+	// (separate from its service ports) so a deployment can firewall the
+	// service ports and expose only the metrics port to a scraper. Enabled
+	// defaults to true; when false the metrics listener is not started and
+	// recording is a no-op. Addr, when set, is the metrics listen address;
+	// when empty the component's default (one per component, 0.0.0.0 for
+	// local dev) is used.
+	Metrics MetricsConfig
+}
+
+// MetricsConfig configures the component's Prometheus metrics endpoint
+// (F-20). Every binary serves /metrics and /healthz on a dedicated metrics
+// port (separate from its service ports).
+type MetricsConfig struct {
+	// Enabled turns the metrics endpoint on. It defaults to true; when false
+	// the metrics listener is not started and recording is a no-op.
+	Enabled bool
+	// Addr is the metrics listen address. When empty the component's default
+	// (one per component, 127.0.0.1 for local development; see
+	// metrics.DefaultMetricsAddr) is used.
+	Addr string
 }
 
 // AuditConfig configures the audit log (F-15).
@@ -768,6 +791,10 @@ func LoadWithFile(file string) (*Config, error) {
 			Timeout:    defaultWebhookTimeout,
 			TimeoutMax: defaultWebhookTimeoutMax,
 		},
+		// Metrics (F-20) is enabled by default: every binary serves /metrics
+		// and /healthz on its dedicated metrics port. Set enabled: false (or
+		// CDROM_METRICS_ENABLED=false) to disable the endpoint and recording.
+		Metrics: MetricsConfig{Enabled: true},
 	}
 	if file != "" {
 		if err := applyFile(cfg, file); err != nil {
@@ -887,6 +914,10 @@ type fileConfig struct {
 		Timeout    *string `yaml:"timeout"`
 		TimeoutMax *string `yaml:"timeout_max"`
 	} `yaml:"webhook"`
+	Metrics *struct {
+		Enabled *bool   `yaml:"enabled"`
+		Addr    *string `yaml:"addr"`
+	} `yaml:"metrics"`
 }
 
 // applyFile overlays the values from the YAML file at path onto cfg.
@@ -1165,6 +1196,14 @@ func applyFile(cfg *Config, path string) error {
 			}
 		}
 	}
+	if f.Metrics != nil {
+		if f.Metrics.Enabled != nil {
+			cfg.Metrics.Enabled = *f.Metrics.Enabled
+		}
+		if f.Metrics.Addr != nil {
+			cfg.Metrics.Addr = *f.Metrics.Addr
+		}
+	}
 	return nil
 }
 
@@ -1323,6 +1362,12 @@ func applyEnv(cfg *Config) {
 			cfg.Webhook.TimeoutMax = d
 		}
 	}
+	// Metrics (F-20): the dedicated metrics endpoint. Enabled by default; the
+	// address defaults to the component's own port when unset.
+	if v := os.Getenv("CDROM_METRICS_ENABLED"); v != "" {
+		cfg.Metrics.Enabled = v == "true" || v == "1"
+	}
+	cfg.Metrics.Addr = envOr("CDROM_METRICS_ADDR", cfg.Metrics.Addr)
 }
 
 func envOr(key, def string) string {

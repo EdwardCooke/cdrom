@@ -32,6 +32,7 @@ import (
 
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/metrics"
 )
 
 // signingKey is a single RSA signing key with its validity window and a
@@ -100,13 +101,21 @@ func (s *dbKeyStore) SetKeys(ctx context.Context, keys []*signingKey) error {
 // state survives restarts and is shared across replicas. It is safe for
 // concurrent use.
 type KeyManager struct {
-	cfg    config.IdPConfig
-	store  KeyStore
-	logger *slog.Logger
+	cfg     config.IdPConfig
+	store   KeyStore
+	logger  *slog.Logger
+	metrics *metrics.IDPMetrics
 
 	mu      sync.RWMutex
 	current *signingKey
 	keys    []*signingKey // current + not-yet-expired predecessors
+}
+
+// SetMetrics attaches the IdP's Prometheus metric set (F-20). The key manager
+// uses it to keep the signing-keyring size gauge (cdrom_idp_keys) current and
+// to count key rotations. When left nil (metrics disabled) it is a no-op.
+func (k *KeyManager) SetMetrics(m *metrics.IDPMetrics) {
+	k.metrics = m
 }
 
 // NewKeyManager loads the keyring from the store (or generates a fresh key
@@ -167,8 +176,29 @@ func (k *KeyManager) load() error {
 	if err := k.persist(); err != nil {
 		return err
 	}
+	k.updateKeyMetrics()
 	k.RotateIfNeeded()
 	return nil
+}
+
+// updateKeyMetrics sets the signing-keyring size gauge (F-20) from the
+// current keyring. It is a no-op when metrics are disabled.
+func (k *KeyManager) updateKeyMetrics() {
+	if k.metrics == nil {
+		return
+	}
+	k.mu.RLock()
+	n := len(k.keys)
+	k.mu.RUnlock()
+	k.metrics.SetKeys(n)
+}
+
+// RefreshMetrics sets the signing-keyring size gauge (F-20) from the current
+// keyring. It is called after metrics are attached (the keyring is loaded
+// before the metric set is attached, so the initial gauge is not set by
+// load). It is a no-op when metrics are disabled.
+func (k *KeyManager) RefreshMetrics() {
+	k.updateKeyMetrics()
 }
 
 // generateKey creates a new 2048-bit RSA signing key valid for the
@@ -232,7 +262,14 @@ func (k *KeyManager) rotate() error {
 
 	k.logger.Info("idp: rotated signing key",
 		"old_kid", oldKid, "new_kid", newKey.kid, "new_expires", newKey.expiresAt)
-	return k.persist()
+	if k.metrics != nil {
+		k.metrics.RecordKeyRotation()
+	}
+	if err := k.persist(); err != nil {
+		return err
+	}
+	k.updateKeyMetrics()
+	return nil
 }
 
 // persist writes the current keyring (current + not-yet-expired keys) to the

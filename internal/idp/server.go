@@ -21,6 +21,7 @@ import (
 
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/metrics"
 )
 
 // codeTTL is how long an issued authorization code stays valid.
@@ -115,11 +116,12 @@ func (s *dbAuthCodeStore) Prune(ctx context.Context, before time.Time) error {
 // they are called only by the API, which authenticates with its mTLS client
 // certificate.
 type Server struct {
-	cfg    config.IdPConfig
-	issuer string
-	km     *KeyManager
-	codes  AuthCodeStore
-	logger *slog.Logger
+	cfg     config.IdPConfig
+	issuer  string
+	km      *KeyManager
+	codes   AuthCodeStore
+	logger  *slog.Logger
+	metrics *metrics.IDPMetrics
 }
 
 // NewServer creates the IdP HTTP server over the given key manager and
@@ -135,6 +137,13 @@ func NewServer(cfg config.IdPConfig, km *KeyManager, codes AuthCodeStore, logger
 		codes:  codes,
 		logger: logger,
 	}
+}
+
+// SetMetrics attaches the IdP's Prometheus metric set (F-20). The HTTP OIDC
+// surface uses it to count the UI tokens minted by the authorization_code
+// grant. When left nil (metrics disabled) it is a no-op.
+func (s *Server) SetMetrics(m *metrics.IDPMetrics) {
+	s.metrics = m
 }
 
 // Handler builds the IdP's HTTP handler (the OIDC surface).
@@ -340,6 +349,9 @@ func (s *Server) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) err
 		"expires_in":   int(s.cfg.TokenLifetime.Seconds()),
 		"id_token":     idToken,
 	})
+	if s.metrics != nil {
+		s.metrics.RecordTokenMinted("ui")
+	}
 	return nil
 }
 

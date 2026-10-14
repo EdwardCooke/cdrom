@@ -19,6 +19,7 @@ package scheduler
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -46,18 +47,20 @@ type concurrencyAdmitter interface {
 }
 
 // tryAdmit asks the Database service to admit a job (F-16) and reports whether
-// it was admitted by this call. A job is admitted only when it fits within
-// every limit it is subject to (its concurrency keys, its target group's cap,
-// and the global cap); when a resource is at its limit the job is not admitted
-// (it stays pending and the background admission loop re-checks it once a slot
-// frees). When the job is already admitted (an idempotent no-op) it is not
-// admitted again, so the caller must not dispatch it a second time. It returns
-// true (admitted, dispatch the job) only when this call performed the
-// admission. It is a no-op (returns true) when the Database client is nil
-// (tests that do not exercise admission, or a deployment with no limits).
-func (s *Server) tryAdmit(ctx context.Context, job *dbpb.Job) bool {
+// it was admitted by this call, along with the names of the resources that are
+// at their limit (empty when the job was admitted or there is no Database
+// client). A job is admitted only when it fits within every limit it is
+// subject to (its concurrency keys, its target group's cap, and the global
+// cap); when a resource is at its limit the job is not admitted (it stays
+// pending and the background admission loop re-checks it once a slot frees).
+// When the job is already admitted (an idempotent no-op) it is not admitted
+// again, so the caller must not dispatch it a second time. It returns true
+// (admitted, dispatch the job) only when this call performed the admission. It
+// is a no-op (returns true) when the Database client is nil (tests that do not
+// exercise admission, or a deployment with no limits).
+func (s *Server) tryAdmit(ctx context.Context, job *dbpb.Job) (bool, []string) {
 	if s.db == nil {
-		return true
+		return true, nil
 	}
 	resp, err := s.db.AcquireJobSlots(ctx, &dbpb.AcquireJobSlotsRequest{
 		JobId:   job.GetId(),
@@ -65,7 +68,7 @@ func (s *Server) tryAdmit(ctx context.Context, job *dbpb.Job) bool {
 	})
 	if err != nil {
 		s.logger.Warn("scheduler: admit job", "job", job.GetId(), "err", err)
-		return false
+		return false, nil
 	}
 	if !resp.GetAcquired() {
 		// The job was not admitted by this call: either it is blocked by a
@@ -74,9 +77,40 @@ func (s *Server) tryAdmit(ctx context.Context, job *dbpb.Job) bool {
 		if len(resp.GetBlockedBy()) > 0 {
 			s.logger.Info("scheduler: job held pending concurrency", "job", job.GetId(), "blocked_by", resp.GetBlockedBy())
 		}
-		return false
+		return false, resp.GetBlockedBy()
 	}
-	return true
+	return true, nil
+}
+
+// dispatchOutcome classifies a job's dispatch decision for the
+// cdrom_scheduler_dispatches_total metric (F-20): "dispatched" when the job
+// was dispatched, "held_manual" when it is held by a manual environment, and
+// a blocked outcome (blocked_key / blocked_group / blocked_global) when it is
+// held by a concurrency resource at its limit. blockedBy are the resource
+// names the Database service reported as at their limit (a concurrency key's
+// name, "group:<name>", or "global").
+func dispatchOutcome(blockedBy []string) string {
+	sawKey, sawGroup, sawGlobal := false, false, false
+	for _, b := range blockedBy {
+		switch {
+		case b == "global":
+			sawGlobal = true
+		case strings.HasPrefix(b, "group:"):
+			sawGroup = true
+		default:
+			sawKey = true
+		}
+	}
+	switch {
+	case sawKey:
+		return "blocked_key"
+	case sawGroup:
+		return "blocked_group"
+	case sawGlobal:
+		return "blocked_global"
+	default:
+		return "dispatched"
+	}
 }
 
 // StartAdmissionLoop runs the concurrency admission loop in the background
@@ -110,6 +144,12 @@ func (s *Server) StartAdmissionLoop(ctx context.Context) {
 // that is not yet admitted. db is the Database client (the concrete client in
 // production, a fake in tests).
 func (s *Server) runAdmission(ctx context.Context, db concurrencyAdmitter) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.RecordAdmission(time.Since(start))
+		}
+	}()
 	// Reconcile first: release the slots of any job that reached a terminal
 	// state but still holds them (a missed release, e.g. a crash between the
 	// status change and the release), so a stuck job cannot wedge a resource.
@@ -132,9 +172,17 @@ func (s *Server) runAdmission(ctx context.Context, db concurrencyAdmitter) {
 		if job.GetConcurrencyAdmitted() {
 			continue // already dispatched
 		}
-		if !s.tryAdmit(ctx, job) {
+		admitted, blockedBy := s.tryAdmit(ctx, job)
+		if !admitted {
+			if s.metrics != nil {
+				s.metrics.RecordDispatch(dispatchOutcome(blockedBy))
+			}
 			continue // blocked by a resource at its limit; re-check next pass
 		}
+		if s.metrics != nil {
+			s.metrics.RecordDispatch("dispatched")
+		}
+		s.recordQueueWait(job)
 		if job.GetTargetGroup() != "" {
 			db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: job.GetId(), TargetGroup: job.GetTargetGroup()})
 		} else {

@@ -267,6 +267,16 @@ func (s *GRPCServer) tailEvents(ctx context.Context) {
 	if len(resp.GetEvents()) > 0 {
 		s.tailCursor.Store(resp.GetCursor())
 	}
+	// Expose how far this pod's tail cursor is behind the shared log's head
+	// (F-20): the key HA health signal. It is ~0 on a healthy pod and grows
+	// when the tail stops making progress.
+	if s.metrics != nil {
+		if head := resp.GetHead(); head > s.tailCursor.Load() {
+			s.metrics.SetEventLogLag(head - s.tailCursor.Load())
+		} else {
+			s.metrics.SetEventLogLag(0)
+		}
+	}
 }
 
 // handleEvent fans a single event out to the pod's local state.

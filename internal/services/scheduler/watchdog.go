@@ -66,10 +66,23 @@ func (s *Server) StartWatchdog(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.reapTimedOutJobs(ctx, s.db, s.db)
+				s.observeLoopTick("watchdog", func() {
+					s.reapTimedOutJobs(ctx, s.db, s.db)
+				})
 			}
 		}
 	}()
+}
+
+// observeLoopTick runs fn and records the tick's duration against the named
+// loop's cdrom_scheduler_loop_duration_seconds histogram (F-20). It is a
+// no-op for the recording when metrics are disabled.
+func (s *Server) observeLoopTick(loop string, fn func()) {
+	start := time.Now()
+	fn()
+	if s.metrics != nil {
+		s.metrics.ObserveLoopDuration(loop, time.Since(start))
+	}
 }
 
 // reapTimedOutJobs lists the in-flight jobs (running, or paused at an approval
@@ -135,6 +148,9 @@ func (s *Server) reap(ctx context.Context, db jobReaper, publisher jobStatusPubl
 	if !resp.GetReaped() {
 		// The job already reached a terminal state; nothing to do.
 		return false
+	}
+	if s.metrics != nil {
+		s.metrics.RecordWatchdogReap()
 	}
 	// Append the status change to the shared event log (F-23). A nil publisher
 	// (e.g. in tests) simply skips the event — the persisted status is the

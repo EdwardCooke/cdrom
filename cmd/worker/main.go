@@ -15,6 +15,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
+	"cdrom/internal/metrics"
 	"cdrom/internal/worker"
 )
 
@@ -35,6 +36,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Metrics (F-20): the worker serves /metrics and /healthz on a dedicated
+	// metrics port (separate from the API's service ports). When disabled
+	// (metrics.enabled: false) the listener is not started and recording is a
+	// no-op (the metric set is nil).
+	var workerMetrics *metrics.WorkerMetrics
+	metricsAddr := cfg.Metrics.Addr
+	if metricsAddr == "" {
+		metricsAddr = metrics.DefaultMetricsAddr("worker")
+	}
+	if cfg.Metrics.Enabled {
+		collector := metrics.NewCollector()
+		workerMetrics = metrics.NewWorkerMetrics(collector.Registry)
+		go func() {
+			if err := collector.StartMetrics(ctx, metricsAddr); err != nil {
+				logger.Error("metrics: start", "addr", metricsAddr, "err", err)
+			}
+		}()
+		logger.Info("cdrom worker metrics starting", "addr", metricsAddr)
+	}
+
 	apiConn, err := grpcutil.Dial(ctx, cfg.APIAddress, cfg.TLS)
 	if err != nil {
 		logger.Error("dial api", "addr", cfg.APIAddress, "err", err)
@@ -45,6 +66,9 @@ func main() {
 	w := worker.New(cfg.WorkerName, cfg.WorkerGroup, cfg.WorkerEnvironments, cfg.WorkerTags, worker.Dependencies{
 		API: apipb.NewAPIClient(apiConn),
 	}, logger)
+	// Attach the worker's Prometheus metric set (F-20) so it records its jobs,
+	// steps, in-flight count, watch state, polls, and heartbeat failures.
+	w.SetMetrics(workerMetrics)
 
 	logger.Info("cdrom worker starting", "name", cfg.WorkerName, "group", cfg.WorkerGroup,
 		"environments", cfg.WorkerEnvironments, "tags", cfg.WorkerTags, "api", cfg.APIAddress)

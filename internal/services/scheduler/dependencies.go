@@ -73,7 +73,9 @@ func (s *Server) StartDependencyResolver(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.resolveJobDependencies(ctx, s.db, s.db)
+				s.observeLoopTick("dependencies", func() {
+					s.resolveJobDependencies(ctx, s.db, s.db)
+				})
 			}
 		}
 	}()
@@ -157,6 +159,9 @@ func (s *Server) skipJob(ctx context.Context, db jobDependencyChecker, publisher
 		return
 	}
 	s.logger.Info("scheduler: job skipped (a dependency did not succeed)", "job", job.GetId(), "depends_on", job.GetDependsOn())
+	if s.metrics != nil {
+		s.metrics.RecordDependencyResolution("skipped")
+	}
 	if publisher == nil {
 		return
 	}
@@ -185,4 +190,7 @@ func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, job *d
 		return
 	}
 	s.logger.Info("scheduler: job dependencies satisfied", "job", job.GetId())
+	if s.metrics != nil {
+		s.metrics.RecordDependencyResolution("released")
+	}
 }

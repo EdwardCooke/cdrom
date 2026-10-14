@@ -181,6 +181,8 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		// (e.g. an approval message) against the same data a step's condition
 		// uses (secrets, prior steps' outputs, run parameters, upstream jobs).
 		stepCtx := ContextWithConditionContext(jobCtx, condCtx)
+		observeStep(ctx, step, i)
+		stepStart := time.Now()
 		stepErr := runStep(stepCtx, i, stepToRun, logger)
 		stepStatus := StepStatusSucceeded
 		if stepErr != nil {
@@ -189,6 +191,7 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 				stepStatus = StepStatusTimedOut
 			}
 		}
+		finishStep(ctx, step, stepStatus, time.Since(stepStart))
 		// Read the step's outputs from its output directory: every file the
 		// step wrote into it becomes an output keyed by its file name.
 		var outputs map[string]string
@@ -1126,6 +1129,66 @@ func reportStepStatus(ctx context.Context, index int, status StepStatus, errMsg 
 	if reporter := StepStatusReporterFromContext(ctx); reporter != nil {
 		reporter.ReportStepStatus(index, status, errMsg, outputs)
 	}
+}
+
+// StepObserver is an optional observer of each step's execution (F-20), set
+// in the context via ContextWithStepObserver. Unlike the StepStatusReporter
+// (which receives only a step's terminal status), an observer is told when a
+// step starts and when it finishes, so a caller (the worker or agent) can
+// record per-step metrics — the step's type and its duration — without the
+// executor knowing about metrics. When absent, steps are simply not observed.
+//
+// Implementations must be safe for concurrent use.
+type StepObserver interface {
+	// StepStarted is called just before a step runs, with the step's type
+	// (an empty type is dispatched to DefaultType) and its index in the spec.
+	StepStarted(stepType string, stepIndex int)
+	// StepFinished is called when a step reaches a terminal status, with the
+	// step's type, its terminal status, and how long it ran (zero for a step
+	// that was skipped by its condition or by another target's once claim).
+	StepFinished(stepType string, status StepStatus, d time.Duration)
+}
+
+type stepObserverKey struct{}
+
+// ContextWithStepObserver returns a context that carries observer, so Execute
+// observes each step's start and finish. A nil observer returns ctx unchanged.
+func ContextWithStepObserver(ctx context.Context, observer StepObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, stepObserverKey{}, observer)
+}
+
+// StepObserverFromContext returns the StepObserver carried by ctx, or nil when
+// none is set.
+func StepObserverFromContext(ctx context.Context) StepObserver {
+	observer, _ := ctx.Value(stepObserverKey{}).(StepObserver)
+	return observer
+}
+
+// observeStep calls observer.StepStarted for step, when an observer is set.
+func observeStep(ctx context.Context, step *dbpb.JobStep, index int) {
+	if observer := StepObserverFromContext(ctx); observer != nil {
+		observer.StepStarted(stepTypeOf(step), index)
+	}
+}
+
+// finishStep calls observer.StepFinished for step's terminal status, when an
+// observer is set.
+func finishStep(ctx context.Context, step *dbpb.JobStep, status StepStatus, d time.Duration) {
+	if observer := StepObserverFromContext(ctx); observer != nil {
+		observer.StepFinished(stepTypeOf(step), status, d)
+	}
+}
+
+// stepTypeOf returns the step's type, or DefaultType when it is empty (the
+// type a step is dispatched to).
+func stepTypeOf(step *dbpb.JobStep) string {
+	if t := step.GetType(); t != "" {
+		return t
+	}
+	return DefaultType
 }
 
 // StepResultCollector is a StepStatusReporter that accumulates each step's

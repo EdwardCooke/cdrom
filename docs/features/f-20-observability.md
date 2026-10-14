@@ -258,43 +258,43 @@ environment (F-17), either as Grafana queries or in the UI dashboard:
   existing API routes, not Prometheus).
 
 **Acceptance criteria.**
-- [ ] `GET /metrics` on every component's dedicated metrics port
+- [x] `GET /metrics` on every component's dedicated metrics port
       (`metrics.addr`, separate from the component's service ports) returns
       the Prometheus text format and includes the component's metric set
       plus `go_goroutines`; `GET /healthz` returns 200. The service ports
       (gRPC, the UI HTTP, the IdP's OIDC surface) do not serve `/metrics`.
-- [ ] The API records `cdrom_api_http_requests_total` /
+- [x] The API records `cdrom_api_http_requests_total` /
       `cdrom_api_http_request_duration_seconds` for the UI surface and
       `cdrom_grpc_server_handled_total{method,code}` (including streaming
       RPCs such as `WatchJobs`) for the gRPC surface.
-- [ ] A job that runs to completion increments `cdrom_api_job_status_total`
+- [x] A job that runs to completion increments `cdrom_api_job_status_total`
       and `cdrom_worker_jobs_total` (matching statuses) and is observed in
       both `cdrom_api_job_duration_seconds` and
       `cdrom_worker_job_duration_seconds`; a step of each built-in type is
       counted in `cdrom_worker_steps_total{step_type}`.
-- [ ] A run that completes increments `cdrom_scheduler_runs_total{status,trigger,environment}`
+- [x] A run that completes increments `cdrom_scheduler_runs_total{status,trigger,environment}`
       and is observed in `cdrom_scheduler_run_duration_seconds` and
       `cdrom_scheduler_run_lead_time_seconds`; a cron-fired run is labeled
       `trigger="cron"`.
-- [ ] A job blocked by a concurrency limit is visible in
+- [x] A job blocked by a concurrency limit is visible in
       `cdrom_db_queue_depth` and its pending→running wait is observed in
       `cdrom_scheduler_queue_wait_seconds`; held slots are visible in
       `cdrom_db_concurrency_slots`.
-- [ ] `cdrom_api_event_log_lag` is ~0 on a healthy pod and grows when its
+- [x] `cdrom_api_event_log_lag` is ~0 on a healthy pod and grows when its
       tail is stopped; `cdrom_scheduler_leader` is 1 on exactly one
       scheduler replica at a time.
-- [ ] Artifact upload/download and log streaming are counted in
+- [x] Artifact upload/download and log streaming are counted in
       `cdrom_api_artifact_bytes_total` / `cdrom_artifacts_bytes_total`.
-- [ ] IdP sign-ins and job-token minting are counted in
+- [x] IdP sign-ins and job-token minting are counted in
       `cdrom_idp_logins_total` / `cdrom_idp_tokens_minted_total`.
-- [ ] No metric label takes an unbounded value (no job id, run id, user,
+- [x] No metric label takes an unbounded value (no job id, run id, user,
       worker name, or secret name appears in any label).
-- [ ] `CDROM_METRICS_ENABLED=false` disables the endpoint (and recording)
+- [x] `CDROM_METRICS_ENABLED=false` disables the endpoint (and recording)
       on every binary.
-- [ ] The UI shows per-pipeline run history with durations and outcomes, a
+- [x] The UI shows per-pipeline run history with durations and outcomes, a
       failure-trend view, worker load (in-flight vs. limit), and queue
       depth.
-- [ ] The DORA-style indicators (deployment frequency, lead time, change
+- [x] The DORA-style indicators (deployment frequency, lead time, change
       failure rate, MTTR) can be computed per environment from the exposed
       metrics (the Grafana queries are documented in `docs/`).
-- [ ] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
+- [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.

@@ -76,7 +76,9 @@ func (s *Server) StartJobStatusLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.processJobStatuses(ctx, s.db, s.db)
+				s.observeLoopTick("job_status", func() {
+					s.processJobStatuses(ctx, s.db, s.db)
+				})
 			}
 		}
 	}()

@@ -29,6 +29,7 @@ import (
 	"cdrom/internal/authz"
 	"cdrom/internal/config"
 	"cdrom/internal/executor"
+	"cdrom/internal/metrics"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -120,6 +121,11 @@ type GRPCServer struct {
 	// It is nil when the audit log is not configured (or in tests), in which
 	// case no audit events are recorded on the gRPC surface.
 	audit *audit.Recorder
+	// metrics records the API's Prometheus metrics (F-20) at the gRPC surface's
+	// hot spots (job status, log bytes, token minting, secret decryption,
+	// notifications, artifact bytes, worker hub, event-log lag). It is nil
+	// when metrics are disabled, in which case all recording is a no-op.
+	metrics *metrics.APIMetrics
 
 	// email and webhook back the notification step handlers (F-18): the API is
 	// the only component that sends an email (SMTP) or performs a webhook's
@@ -185,6 +191,12 @@ func (s *GRPCServer) SetAuthz(e *authz.Engine) {
 	s.authz = e
 }
 
+// SetMetrics attaches the API's Prometheus metric set (F-20). When left nil
+// (metrics disabled) all recording on the gRPC surface is a no-op.
+func (s *GRPCServer) SetMetrics(m *metrics.APIMetrics) {
+	s.metrics = m
+}
+
 // ---------------------------------------------------------------------------
 // Worker lifecycle
 // ---------------------------------------------------------------------------
@@ -234,6 +246,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	}, registered.GetName(), audit.ActorKindWorker, auditPeerAddr(ctx))
 	s.publish(Event{Type: EventWorker, Worker: registered.GetName(), Group: registered.GetGroup(), Action: WorkerRegistered})
 	s.publishWorkerEvent(ctx, registered.GetName(), registered.GetGroup(), WorkerRegistered)
+	s.updateWorkerMetrics()
 	return &apipb.Worker{
 		Name:         registered.GetName(),
 		Group:        registered.GetGroup(),
@@ -254,6 +267,7 @@ func (s *GRPCServer) DeregisterWorker(ctx context.Context, req *apipb.Deregister
 		return nil, err
 	}
 	s.removeLive(req.GetName())
+	s.updateWorkerMetrics()
 	s.logger.Info("api: worker deregistered", "worker", req.GetName())
 	s.recordAuditGRPC(audit.Event{
 		Action:     audit.ActionWorkerDeregister,
@@ -319,14 +333,17 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 	s.logger.Info("api: worker watching", "worker", name, "group", req.GetGroup())
 	s.publish(Event{Type: EventWorker, Worker: name, Group: req.GetGroup(), Action: WorkerWatching})
 	s.publishWorkerEvent(stream.Context(), name, req.GetGroup(), WorkerWatching)
+	s.updateWorkerMetrics()
 	for {
 		select {
 		case <-stream.Context().Done():
 			s.logger.Info("api: worker stream closed", "worker", name)
+			s.updateWorkerMetrics()
 			return nil
 		case message := <-assignmentChannel:
 			if err := stream.Send(message); err != nil {
 				s.logger.Warn("api: failed to send watch message", "worker", name, "err", err)
+				s.updateWorkerMetrics()
 				return nil
 			}
 		}
@@ -480,6 +497,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			MaxAttempts: updated.GetMaxAttempts(),
 		})
 		s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
+		s.recordJobStatusMetrics(updated)
 		return toAPIJob(updated), nil
 	}
 	// A report from a named worker for a job that targets a worker group is a
@@ -511,6 +529,9 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 				Outcome:    audit.OutcomeSuccess,
 				Details:    auditJSON(map[string]any{"status": jobStatusName(req.GetStatus()), "worker": req.GetWorkerName()}),
 			}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
+			if s.metrics != nil {
+				s.metrics.RecordJobStatus(jobStatusName(req.GetStatus()))
+			}
 			return toAPIJob(job), nil
 		}
 	}
@@ -549,6 +570,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	// Append the status change to the shared event log so other API pods fan
 	// it out to their UI clients (F-23).
 	s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
+	s.recordJobStatusMetrics(updated)
 	return toAPIJob(updated), nil
 }
 
@@ -755,6 +777,9 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 		}
 	}
 	*received += int64(len(data))
+	if s.metrics != nil {
+		s.metrics.AddLogStreamBytes(int64(len(data)))
+	}
 	s.publish(Event{
 		Type:      EventJobLog,
 		JobID:     jobID,
@@ -882,6 +907,9 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		return nil, status.Errorf(codes.Internal, "api: exchange job token: %v", err)
 	}
 	s.logger.Info("api: job token exchanged", "job", req.GetJobId(), "audience", req.GetAudience(), "expires_in", expiresIn)
+	if s.metrics != nil {
+		s.metrics.RecordTokenMinted("exchanged")
+	}
 	s.recordAuditGRPC(audit.Event{
 		Action:     audit.ActionTokenExchange,
 		TargetKind: audit.TargetJob,
@@ -918,7 +946,16 @@ func (s *GRPCServer) reportActor(workerName string, jobID int64) string {
 // to HTML by the API). A send that fails (an SMTP error) is reported as an
 // error, which fails the step (and the job) unless the step sets
 // ignore_failed (F-06).
-func (s *GRPCServer) SendEmail(ctx context.Context, req *apipb.SendEmailRequest) (*apipb.SendEmailResponse, error) {
+func (s *GRPCServer) SendEmail(ctx context.Context, req *apipb.SendEmailRequest) (resp *apipb.SendEmailResponse, err error) {
+	if s.metrics != nil {
+		defer func() {
+			if err == nil {
+				s.metrics.RecordNotification("email", "sent")
+			} else {
+				s.metrics.RecordNotification("email", "failed")
+			}
+		}()
+	}
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
@@ -1048,7 +1085,16 @@ func (s *GRPCServer) SendEmail(ctx context.Context, req *apipb.SendEmailRequest)
 // API's configured default when the step sets none. A request that fails (a
 // connection error, a non-2xx response, or a timeout) is reported as an error,
 // which fails the step (and the job) unless the step sets ignore_failed (F-06).
-func (s *GRPCServer) SendWebhook(ctx context.Context, req *apipb.SendWebhookRequest) (*apipb.SendWebhookResponse, error) {
+func (s *GRPCServer) SendWebhook(ctx context.Context, req *apipb.SendWebhookRequest) (resp *apipb.SendWebhookResponse, err error) {
+	if s.metrics != nil {
+		defer func() {
+			if err == nil {
+				s.metrics.RecordNotification("webhook", "sent")
+			} else {
+				s.metrics.RecordNotification("webhook", "failed")
+			}
+		}()
+	}
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
@@ -1119,17 +1165,17 @@ func (s *GRPCServer) SendWebhook(ctx context.Context, req *apipb.SendWebhookRequ
 	if client == nil {
 		client = http.DefaultClient
 	}
-	resp, err := client.Do(httpReq)
+	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "webhook: %v", err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, status.Errorf(codes.Internal, "webhook: %s %s returned %d", method, req.GetUrl(), resp.StatusCode)
+	defer httpResp.Body.Close()
+	_, _ = io.Copy(io.Discard, httpResp.Body)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return nil, status.Errorf(codes.Internal, "webhook: %s %s returned %d", method, req.GetUrl(), httpResp.StatusCode)
 	}
-	s.logger.Info("api: sent webhook", "job", req.GetJobId(), "url", req.GetUrl(), "status", resp.StatusCode)
-	return &apipb.SendWebhookResponse{StatusCode: int32(resp.StatusCode)}, nil
+	s.logger.Info("api: sent webhook", "job", req.GetJobId(), "url", req.GetUrl(), "status", httpResp.StatusCode)
+	return &apipb.SendWebhookResponse{StatusCode: int32(httpResp.StatusCode)}, nil
 }
 
 // ClaimStepOnce (F-01) atomically claims the "run this step" slot for a step
@@ -1451,6 +1497,9 @@ func (s *GRPCServer) mintJobToken(ctx context.Context, job *apipb.Job) string {
 		s.logger.Warn("api: mint job token failed; dispatching without token", "job", job.GetId(), "err", err)
 		return ""
 	}
+	if s.metrics != nil {
+		s.metrics.RecordTokenMinted("job")
+	}
 	return token
 }
 
@@ -1474,9 +1523,11 @@ func (s *GRPCServer) UploadArtifact(stream grpc.ClientStreamingServer[artifactsp
 	if err != nil {
 		return err
 	}
+	var uploaded int64
 	if err := remote.Send(first); err != nil {
 		return err
 	}
+	uploaded += int64(len(first.GetData()))
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {
@@ -1488,10 +1539,14 @@ func (s *GRPCServer) UploadArtifact(stream grpc.ClientStreamingServer[artifactsp
 		if err := remote.Send(chunk); err != nil {
 			return err
 		}
+		uploaded += int64(len(chunk.GetData()))
 	}
 	resp, err := remote.CloseAndRecv()
 	if err != nil {
 		return err
+	}
+	if s.metrics != nil {
+		s.metrics.AddArtifactBytes("upload", "artifact", uploaded)
 	}
 	return stream.SendAndClose(resp)
 }
@@ -1506,9 +1561,13 @@ func (s *GRPCServer) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, 
 	if err != nil {
 		return err
 	}
+	var downloaded int64
 	for {
 		chunk, err := remote.Recv()
 		if err == io.EOF {
+			if s.metrics != nil {
+				s.metrics.AddArtifactBytes("download", "artifact", downloaded)
+			}
 			return nil
 		}
 		if err != nil {
@@ -1517,6 +1576,7 @@ func (s *GRPCServer) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, 
 		if err := stream.Send(chunk); err != nil {
 			return err
 		}
+		downloaded += int64(len(chunk.GetData()))
 	}
 }
 
@@ -1576,6 +1636,55 @@ func (s *GRPCServer) removeLive(name string) {
 	if assignmentChannel, ok := s.watchers[name]; ok {
 		close(assignmentChannel)
 		delete(s.watchers, name)
+	}
+}
+
+// workerStates snapshots the live workers' identity and state for the workers
+// gauge (F-20): a worker that holds an open WatchJobs stream is "watching",
+// otherwise it is "registered".
+func (s *GRPCServer) workerStates() []metrics.WorkerState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	states := make([]metrics.WorkerState, 0, len(s.live))
+	for name, w := range s.live {
+		state := "registered"
+		if _, ok := s.watchers[name]; ok {
+			state = "watching"
+		}
+		states = append(states, metrics.WorkerState{
+			Group:        w.group,
+			Environments: w.environments,
+			State:        state,
+		})
+	}
+	return states
+}
+
+// updateWorkerMetrics refreshes the workers gauge from the live registry. It
+// is a no-op when metrics are disabled.
+func (s *GRPCServer) updateWorkerMetrics() {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.UpdateWorkers(s.workerStates())
+}
+
+// recordJobStatusMetrics records a job status transition (F-20) and, when the
+// job reached a terminal state with both a start and finish timestamp, its
+// duration. It is a no-op when metrics are disabled.
+func (s *GRPCServer) recordJobStatusMetrics(job *dbpb.Job) {
+	if s.metrics == nil || job == nil {
+		return
+	}
+	status := jobStatusName(job.GetStatus())
+	s.metrics.RecordJobStatus(status)
+	if started := job.GetStartedAt(); started != nil {
+		if finished := job.GetFinishedAt(); finished != nil {
+			d := finished.AsTime().Sub(started.AsTime())
+			if d >= 0 {
+				s.metrics.ObserveJobDuration(status, d)
+			}
+		}
 	}
 }
 
@@ -1763,6 +1872,7 @@ func (s *GRPCServer) resolveSecrets(ctx context.Context, apiJob *apipb.Job, dbJo
 		return
 	}
 	plaintext := make(map[string]string, len(dbJob.GetSecrets()))
+	var decrypted int
 	for _, secret := range dbJob.GetSecrets() {
 		value, err := s.secretStore.Decrypt(ctx, secret.GetEncrypted())
 		if err != nil {
@@ -1770,6 +1880,10 @@ func (s *GRPCServer) resolveSecrets(ctx context.Context, apiJob *apipb.Job, dbJo
 			continue
 		}
 		plaintext[secret.GetName()] = value
+		decrypted++
+	}
+	if decrypted > 0 && s.metrics != nil {
+		s.metrics.AddSecretsDecrypted(decrypted)
 	}
 	if len(plaintext) > 0 {
 		apiJob.Secrets = plaintext

@@ -6034,7 +6034,12 @@ type TailEventsResponse struct {
 	// cursor is the id of the last event returned (the value to pass as cursor
 	// on the next call); equal to the request's cursor when no events were
 	// returned.
-	Cursor        int64 `protobuf:"varint,2,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Cursor int64 `protobuf:"varint,2,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	// head is the id of the newest event in the log (the log's high-water
+	// mark). A consumer's lag is head minus its cursor: it is ~0 on a healthy
+	// consumer and grows when the consumer falls behind (F-20, F-23). It is 0
+	// when the log is empty.
+	Head          int64 `protobuf:"varint,3,opt,name=head,proto3" json:"head,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6079,6 +6084,13 @@ func (x *TailEventsResponse) GetEvents() []*Event {
 func (x *TailEventsResponse) GetCursor() int64 {
 	if x != nil {
 		return x.Cursor
+	}
+	return 0
+}
+
+func (x *TailEventsResponse) GetHead() int64 {
+	if x != nil {
+		return x.Head
 	}
 	return 0
 }
@@ -13609,10 +13621,11 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"A\n" +
 	"\x11TailEventsRequest\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\x03R\x06cursor\x12\x14\n" +
-	"\x05limit\x18\x02 \x01(\x05R\x05limit\"X\n" +
+	"\x05limit\x18\x02 \x01(\x05R\x05limit\"l\n" +
 	"\x12TailEventsResponse\x12*\n" +
 	"\x06events\x18\x01 \x03(\v2\x12.cdrom.db.v1.EventR\x06events\x12\x16\n" +
-	"\x06cursor\x18\x02 \x01(\x03R\x06cursor\"\xae\x01\n" +
+	"\x06cursor\x18\x02 \x01(\x03R\x06cursor\x12\x12\n" +
+	"\x04head\x18\x03 \x01(\x03R\x04head\"\xae\x01\n" +
 	"\x13AcquireLeaseRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06holder\x18\x02 \x01(\tR\x06holder\x12+\n" +

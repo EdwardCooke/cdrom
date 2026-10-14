@@ -65,7 +65,9 @@ func (s *Server) StartRetryLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.retryFailedJobs(ctx, s.db, s.db)
+				s.observeLoopTick("retry", func() {
+					s.retryFailedJobs(ctx, s.db, s.db)
+				})
 			}
 		}
 	}()
@@ -109,6 +111,9 @@ func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, publishe
 	}
 	job.Attempt = resp.GetAttempt()
 	s.logger.Info("scheduler: retrying job", "job", job.GetId(), "attempt", resp.GetAttempt(), "max", job.GetMaxAttempts())
+	if s.metrics != nil {
+		s.metrics.RecordRetry()
+	}
 	if publisher == nil {
 		return true
 	}
@@ -155,9 +160,17 @@ func (s *Server) dispatchForRetry(ctx context.Context, publisher retryPublisher,
 	if job.GetTargetGroup() == "" {
 		return
 	}
-	if !s.tryAdmit(ctx, job) {
+	admitted, blockedBy := s.tryAdmit(ctx, job)
+	if !admitted {
+		if s.metrics != nil {
+			s.metrics.RecordDispatch(dispatchOutcome(blockedBy))
+		}
 		return
 	}
+	if s.metrics != nil {
+		s.metrics.RecordDispatch("dispatched")
+	}
+	s.recordQueueWait(job)
 	if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: job.GetId(), TargetGroup: job.GetTargetGroup()}); err != nil {
 		s.logger.Warn("scheduler: publish retried job assignment", "job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
 	}

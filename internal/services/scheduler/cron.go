@@ -81,7 +81,9 @@ func (s *Server) StartCronLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.processCronTriggers(ctx, s.db, &mu, state)
+				s.observeLoopTick("cron", func() {
+					s.processCronTriggers(ctx, s.db, &mu, state)
+				})
 			}
 		}
 	}()

@@ -86,7 +86,9 @@ func (s *Server) StartEventTriggerLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.processEventTriggers(ctx, s.db, processed)
+				s.observeLoopTick("event", func() {
+					s.processEventTriggers(ctx, s.db, processed)
+				})
 			}
 		}
 	}()

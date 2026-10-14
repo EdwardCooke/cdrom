@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -38,6 +39,7 @@ import (
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/idp"
 	"cdrom/internal/logging"
+	"cdrom/internal/metrics"
 )
 
 func main() {
@@ -102,6 +104,36 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Metrics (F-20): the IdP serves /metrics and /healthz on a dedicated
+	// metrics port (separate from its OIDC HTTP surface and its gRPC port).
+	// When disabled (metrics.enabled: false) the listener is not started and
+	// recording is a no-op (the metric set is nil). The metric set is shared
+	// by the key manager (keyring size, rotations), the HTTP OIDC surface
+	// (UI tokens minted), and the gRPC surface (job tokens, logins, users).
+	var idpMetrics *metrics.IDPMetrics
+	var idpStatsHandler stats.Handler
+	metricsAddr := cfg.Metrics.Addr
+	if metricsAddr == "" {
+		metricsAddr = metrics.DefaultMetricsAddr("idp")
+	}
+	if cfg.Metrics.Enabled {
+		collector := metrics.NewCollector()
+		idpMetrics = metrics.NewIDPMetrics(collector.Registry)
+		idpStatsHandler = metrics.NewStatsHandler(collector.Registry)
+		go func() {
+			if err := collector.StartMetrics(ctx, metricsAddr); err != nil {
+				logger.Error("metrics: start", "addr", metricsAddr, "err", err)
+			}
+		}()
+		logger.Info("cdrom idp metrics starting", "addr", metricsAddr)
+	}
+	km.SetMetrics(idpMetrics)
+	srv.SetMetrics(idpMetrics)
+	// The keyring was loaded before metrics were attached, so refresh the
+	// keyring-size gauge now that the metric set is available.
+	km.RefreshMetrics()
+
 	go srv.StartRotation(ctx)
 
 	// When TLS is configured the IdP's HTTP server serves HTTPS: it presents
@@ -137,10 +169,17 @@ func main() {
 		logger.Error("idp: tls creds", "err", err)
 		os.Exit(1)
 	}
-	grpcSrv := grpc.NewServer(grpc.Creds(creds))
+	grpcSrvOpts := []grpc.ServerOption{grpc.Creds(creds)}
+	if idpStatsHandler != nil {
+		grpcSrvOpts = append(grpcSrvOpts, grpc.StatsHandler(idpStatsHandler))
+	}
+	grpcSrv := grpc.NewServer(grpcSrvOpts...)
 	idpGRPC := idp.NewGRPCServer(cfg.IdP, km, userStore, logger)
 	idpGRPC.SetAPIKeyStore(apiKeyStore)
 	idpGRPC.SetServiceAccountStore(serviceAccountStore)
+	// Attach the IdP's Prometheus metric set (F-20) so the gRPC surface
+	// records job-token minting, logins, and the user-directory size.
+	idpGRPC.SetMetrics(idpMetrics)
 	idppb.RegisterIdPServer(grpcSrv, idpGRPC)
 	grpcLis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {

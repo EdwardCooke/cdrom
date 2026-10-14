@@ -5,6 +5,7 @@ package artifacts
 import (
 	"context"
 	"io"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
+	"cdrom/internal/metrics"
 )
 
 // maxChunkSize bounds a single streamed chunk to keep memory bounded.
@@ -21,11 +23,41 @@ const maxChunkSize = 4 << 20 // 4 MiB
 type Server struct {
 	artifactspb.UnimplementedArtifactsServer
 	store Store
+	// metrics records the Artifacts service's Prometheus metrics (F-20): the
+	// operation counters (by op and gRPC status code), the bytes moved, and
+	// the operation durations. It is nil when metrics are disabled, in which
+	// case all recording is a no-op.
+	metrics *metrics.ArtifactsMetrics
 }
 
 // NewServer creates an Artifacts gRPC service over the given store.
 func NewServer(store Store) *Server {
 	return &Server{store: store}
+}
+
+// SetMetrics attaches the Artifacts service's Prometheus metric set (F-20).
+// When left nil (metrics disabled) all recording is a no-op.
+func (s *Server) SetMetrics(m *metrics.ArtifactsMetrics) {
+	s.metrics = m
+}
+
+// recordOp records an artifacts operation's outcome (F-20): the operation
+// counter (by op and gRPC status code) and, when bytes > 0, the bytes moved.
+// It is a no-op when metrics are disabled.
+func (s *Server) recordOp(op string, err error, bytes int64) {
+	if s.metrics == nil {
+		return
+	}
+	code := codes.OK
+	if err != nil {
+		if st, _ := status.FromError(err); st != nil {
+			code = st.Code()
+		}
+	}
+	s.metrics.RecordOperation(op, code.String())
+	if bytes > 0 {
+		s.metrics.AddBytes(op, bytes)
+	}
 }
 
 // NewFilesystemServer creates an Artifacts gRPC service backed by a local
@@ -45,38 +77,61 @@ func NewFilesystemServer(root string) (*Server, error) {
 // UploadArtifact consumes a client stream of chunks. The first chunk must
 // carry metadata (namespace and name); the rest carry data. The data is
 // written to the store as it arrives (streamed, not buffered in memory).
-func (s *Server) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) error {
-	firstChunk, err := stream.Recv()
-	if err != nil {
-		return grpcErr(err)
+func (s *Server) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) (err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("upload", time.Since(start))
+		}
+	}()
+	firstChunk, recvErr := stream.Recv()
+	if recvErr != nil {
+		recvErr = grpcErr(recvErr)
+		s.recordOp("upload", recvErr, 0)
+		return recvErr
 	}
 	metadata := firstChunk.GetMetadata()
 	if metadata == nil || metadata.GetNamespace() == "" || metadata.GetName() == "" {
-		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
+		invalidErr := status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
+		s.recordOp("upload", invalidErr, 0)
+		return invalidErr
 	}
 	reader := &streamReader{stream: stream, first: firstChunk}
-	artifact, err := s.store.UploadArtifact(stream.Context(), metadata.GetNamespace(), metadata.GetName(), reader)
-	if err != nil {
-		return err
+	artifact, uploadErr := s.store.UploadArtifact(stream.Context(), metadata.GetNamespace(), metadata.GetName(), reader)
+	if uploadErr != nil {
+		s.recordOp("upload", uploadErr, 0)
+		return uploadErr
 	}
+	s.recordOp("upload", nil, artifact.GetSize())
 	return stream.SendAndClose(&artifactspb.UploadArtifactResponse{Artifact: artifact})
 }
 
 // DownloadArtifact streams an artifact back: the first chunk carries
 // metadata, subsequent chunks carry data.
-func (s *Server) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
+func (s *Server) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) (err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("download", time.Since(start))
+		}
+	}()
 	namespace, name := req.GetNamespace(), req.GetName()
 	if namespace == "" || name == "" {
-		return status.Error(codes.InvalidArgument, "namespace and name are required")
+		invalidErr := status.Error(codes.InvalidArgument, "namespace and name are required")
+		s.recordOp("download", invalidErr, 0)
+		return invalidErr
 	}
-	artifact, reader, err := s.store.DownloadArtifact(stream.Context(), namespace, name)
-	if err != nil {
-		return err
+	artifact, reader, dlErr := s.store.DownloadArtifact(stream.Context(), namespace, name)
+	if dlErr != nil {
+		s.recordOp("download", dlErr, 0)
+		return dlErr
 	}
 	defer reader.Close()
 	if err := stream.Send(&artifactspb.ArtifactChunk{Metadata: artifact}); err != nil {
+		s.recordOp("download", grpcErr(err), 0)
 		return grpcErr(err)
 	}
+	s.recordOp("download", nil, artifact.GetSize())
 	return streamFromReader(stream, reader)
 }
 
@@ -89,6 +144,7 @@ func (s *Server) GetArtifact(ctx context.Context, req *artifactspb.GetArtifactRe
 
 func (s *Server) ListArtifacts(ctx context.Context, req *artifactspb.ListArtifactsRequest) (*artifactspb.ListArtifactsResponse, error) {
 	artifacts, err := s.store.ListArtifacts(ctx, req.GetNamespace())
+	s.recordOp("list", err, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -112,48 +168,72 @@ func (s *Server) DeleteArtifact(ctx context.Context, req *artifactspb.DeleteArti
 // AppendLog consumes a client stream of chunks and appends them to a log.
 // The first chunk must carry metadata (namespace and name); the rest carry
 // data. The server returns the updated log's metadata once the stream ends.
-func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) error {
-	firstChunk, err := stream.Recv()
-	if err != nil {
-		return grpcErr(err)
+func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) (err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("append_log", time.Since(start))
+		}
+	}()
+	firstChunk, recvErr := stream.Recv()
+	if recvErr != nil {
+		recvErr = grpcErr(recvErr)
+		s.recordOp("append_log", recvErr, 0)
+		return recvErr
 	}
 	metadata := firstChunk.GetMetadata()
 	if metadata == nil || metadata.GetNamespace() == "" || metadata.GetName() == "" {
-		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
+		invalidErr := status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
+		s.recordOp("append_log", invalidErr, 0)
+		return invalidErr
 	}
 	var artifact *artifactspb.Artifact
+	var appended int64
 	if len(firstChunk.GetData()) > 0 {
-		artifact, err = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), firstChunk.GetData())
-		if err != nil {
-			return err
+		appended += int64(len(firstChunk.GetData()))
+		var appendErr error
+		artifact, appendErr = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), firstChunk.GetData())
+		if appendErr != nil {
+			s.recordOp("append_log", appendErr, 0)
+			return appendErr
 		}
 	}
 	for {
-		chunk, err := stream.Recv()
-		if err == io.EOF {
+		chunk, recvErr := stream.Recv()
+		if recvErr == io.EOF {
 			break
 		}
-		if err != nil {
-			return grpcErr(err)
+		if recvErr != nil {
+			recvErr = grpcErr(recvErr)
+			s.recordOp("append_log", recvErr, 0)
+			return recvErr
 		}
 		if size := len(chunk.GetData()); size > maxChunkSize {
-			return status.Errorf(codes.InvalidArgument, "chunk of %d bytes exceeds limit of %d", size, maxChunkSize)
+			tooLargeErr := status.Errorf(codes.InvalidArgument, "chunk of %d bytes exceeds limit of %d", size, maxChunkSize)
+			s.recordOp("append_log", tooLargeErr, 0)
+			return tooLargeErr
 		}
 		if len(chunk.GetData()) == 0 {
 			continue
 		}
-		artifact, err = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), chunk.GetData())
-		if err != nil {
-			return err
+		appended += int64(len(chunk.GetData()))
+		var appendErr error
+		artifact, appendErr = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), chunk.GetData())
+		if appendErr != nil {
+			s.recordOp("append_log", appendErr, 0)
+			return appendErr
 		}
 	}
 	if artifact == nil {
 		// No data was sent; report the (possibly newly created) log's state.
-		artifact, err = s.store.GetLog(stream.Context(), metadata.GetNamespace(), metadata.GetName())
-		if err != nil {
-			return err
+		var getErr error
+		artifact, getErr = s.store.GetLog(stream.Context(), metadata.GetNamespace(), metadata.GetName())
+		if getErr != nil {
+			s.recordOp("append_log", getErr, 0)
+			return getErr
 		}
 	}
+	s.recordOp("append_log", nil, appended)
 	return stream.SendAndClose(&artifactspb.UploadArtifactResponse{Artifact: artifact})
 }
 
@@ -163,19 +243,30 @@ func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.Artifac
 // than zero the stream begins at that byte offset (a range read of the log's
 // tail); this is how a consumer that has already read up to a size fetches
 // only the new bytes (F-23 cross-pod near-live logs).
-func (s *Server) DownloadLog(req *artifactspb.DownloadLogRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
+func (s *Server) DownloadLog(req *artifactspb.DownloadLogRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) (err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("download", time.Since(start))
+		}
+	}()
 	namespace, name := req.GetNamespace(), req.GetName()
 	if namespace == "" || name == "" {
-		return status.Error(codes.InvalidArgument, "namespace and name are required")
+		invalidErr := status.Error(codes.InvalidArgument, "namespace and name are required")
+		s.recordOp("download", invalidErr, 0)
+		return invalidErr
 	}
-	artifact, reader, err := s.store.DownloadLog(stream.Context(), namespace, name, req.GetOffset())
-	if err != nil {
-		return err
+	artifact, reader, dlErr := s.store.DownloadLog(stream.Context(), namespace, name, req.GetOffset())
+	if dlErr != nil {
+		s.recordOp("download", dlErr, 0)
+		return dlErr
 	}
 	defer reader.Close()
 	if err := stream.Send(&artifactspb.ArtifactChunk{Metadata: artifact}); err != nil {
+		s.recordOp("download", grpcErr(err), 0)
 		return grpcErr(err)
 	}
+	s.recordOp("download", nil, artifact.GetSize())
 	return streamFromReader(stream, reader)
 }
 

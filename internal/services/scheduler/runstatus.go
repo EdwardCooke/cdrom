@@ -64,7 +64,9 @@ func (s *Server) StartRunStatusLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.processRunStatuses(ctx, s.db, s.db)
+				s.observeLoopTick("run_status", func() {
+					s.processRunStatuses(ctx, s.db, s.db)
+				})
 			}
 		}
 	}()
@@ -133,6 +135,7 @@ func (s *Server) processRun(ctx context.Context, db runStatusDB, publisher runSt
 		return
 	}
 	s.logger.Info("scheduler: run status changed", "run", run.GetId(), "status", derived)
+	s.recordRunMetrics(run, derived, jobsResp.GetJobs(), now)
 	if publisher == nil {
 		return
 	}
@@ -142,6 +145,74 @@ func (s *Server) processRun(ctx context.Context, db runStatusDB, publisher runSt
 	}); err != nil {
 		s.logger.Warn("scheduler: publish run status", "run", run.GetId(), "err", err)
 	}
+}
+
+// recordRunMetrics records the run's status transition and, when the run
+// reached a terminal state, its duration (start → finish) and lead time
+// (creation → completion) for the DORA-style deployment indicators (F-20).
+// The environment label is the highest environment the run's jobs targeted
+// (empty when none). It is a no-op when metrics are disabled.
+func (s *Server) recordRunMetrics(run *dbpb.PipelineRun, derived models.RunStatus, jobs []*dbpb.Job, now *timestamppb.Timestamp) {
+	if s.metrics == nil {
+		return
+	}
+	status := string(derived)
+	trigger := run.GetTrigger()
+	if trigger == "" {
+		trigger = "manual"
+	}
+	environment := highestEnvironment(jobs)
+	s.metrics.RecordRun(status, trigger, environment)
+	if !isTerminalRunStatus(derived) {
+		return
+	}
+	finished := now.AsTime()
+	if started := run.GetStartedAt(); started != nil {
+		if d := finished.Sub(started.AsTime()); d >= 0 {
+			s.metrics.ObserveRunDuration(status, trigger, environment, d)
+		}
+	}
+	if created := run.GetCreatedAt(); created != nil {
+		if d := finished.Sub(created.AsTime()); d >= 0 {
+			s.metrics.ObserveRunLeadTime(trigger, environment, d)
+		}
+	}
+}
+
+// environmentRank orders the built-in environments from least to most
+// significant (F-17); an unknown environment ranks 0 (treated as the least
+// significant).
+func environmentRank(name string) int {
+	switch name {
+	case "dev":
+		return 1
+	case "staging":
+		return 2
+	case "prod":
+		return 3
+	case "prod-auto":
+		return 4
+	default:
+		return 0
+	}
+}
+
+// highestEnvironment returns the most significant environment any of the run's
+// jobs targeted (F-17), or the empty string when none targets an environment.
+func highestEnvironment(jobs []*dbpb.Job) string {
+	best := ""
+	bestRank := 0
+	for _, job := range jobs {
+		env := job.GetEnvironment()
+		if env == "" {
+			continue
+		}
+		if rank := environmentRank(env); rank > bestRank {
+			bestRank = rank
+			best = env
+		}
+	}
+	return best
 }
 
 // deriveRunStatus derives a run's overall status from the statuses of its job

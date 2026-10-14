@@ -125,6 +125,9 @@ func (s *Server) tryAcquire(ctx context.Context, holder string, isLeader *bool, 
 		// loops stop rather than run on a stale belief of leadership.
 		if *isLeader {
 			*isLeader = false
+			if s.metrics != nil {
+				s.metrics.SetLeader(false)
+			}
 			if onLose != nil {
 				onLose()
 			}
@@ -136,12 +139,18 @@ func (s *Server) tryAcquire(ctx context.Context, holder string, isLeader *bool, 
 	case acquired && !*isLeader:
 		*isLeader = true
 		s.logger.Info("scheduler: acquired leader lease", "holder", holder)
+		if s.metrics != nil {
+			s.metrics.SetLeader(true)
+		}
 		if onAcquire != nil {
 			onAcquire()
 		}
 	case !acquired && *isLeader:
 		*isLeader = false
 		s.logger.Info("scheduler: lost leader lease", "holder", holder)
+		if s.metrics != nil {
+			s.metrics.SetLeader(false)
+		}
 		if onLose != nil {
 			onLose()
 		}

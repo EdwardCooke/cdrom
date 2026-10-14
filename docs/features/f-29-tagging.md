@@ -212,42 +212,42 @@ resolve it to the matching owner / run ids before filtering.
   permission to set another worker's tags.
 
 **Acceptance criteria.**
-- [ ] A pipeline, a job in a pipeline, an environment, a worker group, and a
+- [x] A pipeline, a job in a pipeline, an environment, a worker group, and a
       worker can each carry a set of key/value tags; a resource with no tags
       has an empty set.
-- [ ] Environment tags are settable through `POST/PUT /api/environments[/{name}]`
+- [x] Environment tags are settable through `POST/PUT /api/environments[/{name}]`
       and persisted in the database; worker-group tags are settable through
       `PUT /api/worker-groups/{name}` (and readable through `GET`) and persisted
       in the database — both reachable from the UI without a redeployment.
-- [ ] A worker declares its tags at registration (`CDROM_WORKER_TAGS` / config
+- [x] A worker declares its tags at registration (`CDROM_WORKER_TAGS` / config
       `worker_tags`); re-registration updates them; they are persisted and
       visible on `GET /api/workers`.
-- [ ] When a run is created, each job instance's stored `Tags` equal the union
+- [x] When a run is created, each job instance's stored `Tags` equal the union
       of the pipeline's, the job's, the targeted environment's (if any), and
       the targeted worker group's (if any) tags, with the more-specific source
       winning on a key collision (`worker group > environment > job >
       pipeline` for the base set).
-- [ ] When a job is dispatched to a worker, that worker's execution's `Tags`
+- [x] When a job is dispatched to a worker, that worker's execution's `Tags`
       equal the instance's base set plus the worker's tags (worker winning on
       collision); a fan-out job's each-worker execution carries that worker's
       tags.
-- [ ] The combined set is a **snapshot**: relabeling a pipeline, environment,
+- [x] The combined set is a **snapshot**: relabeling a pipeline, environment,
       or worker group after a run started does not change the tags stored on
       that run's job instances.
-- [ ] A job that targets no environment and no worker group (an ephemeral
+- [x] A job that targets no environment and no worker group (an ephemeral
       agent) combines only the pipeline's and the job's tags.
-- [ ] Pipeline and job tags are captured in a pipeline's version snapshot
+- [x] Pipeline and job tags are captured in a pipeline's version snapshot
       (F-11); a run bound to a specific version uses that version's tags.
-- [ ] Worker-group management is gated on `worker-groups.can-view` /
+- [x] Worker-group management is gated on `worker-groups.can-view` /
       `worker-groups.can-manage` (F-14); environment tags on
       `environments.can-view` / `can-manage`; pipeline/job tags on
       `pipelines.can-view` / `can-edit`.
-- [ ] Tags are metadata only: they never affect dispatch, gating, or
+- [x] Tags are metadata only: they never affect dispatch, gating, or
       concurrency (F-16/F-17 behavior is unchanged by the presence of tags).
-- [ ] The combined set is visible on the job run (instance) and on each
+- [x] The combined set is visible on the job run (instance) and on each
       execution, and is surfaced to the UI (run/job detail) and in the
       WebSocket snapshot.
-- [ ] Pipelines and runs are searchable by tag: `GET /api/pipelines?tag=key=value`
+- [x] Pipelines and runs are searchable by tag: `GET /api/pipelines?tag=key=value`
       returns only pipelines carrying that tag, and
       `GET /api/pipelines/{id}/runs?tag=key=value` returns only runs having a job
       instance that carries it; multiple `tag=` parameters are ANDed, and a tag

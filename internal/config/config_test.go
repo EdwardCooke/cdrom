@@ -324,3 +324,70 @@ func TestParseFlags(t *testing.T) {
 		t.Error("ParseFlags: expected error for unknown flag")
 	}
 }
+
+func TestMetricsConfig(t *testing.T) {
+	// Metrics are enabled by default (F-20): every binary serves /metrics and
+	// /healthz on its dedicated metrics port.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled = false, want true (default)")
+	}
+
+	// Disabled via the environment (CDROM_METRICS_ENABLED=false).
+	t.Setenv("CDROM_METRICS_ENABLED", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled = true, want false (env CDROM_METRICS_ENABLED=false)")
+	}
+
+	// Re-enabled via the environment (CDROM_METRICS_ENABLED=true).
+	t.Setenv("CDROM_METRICS_ENABLED", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled = false, want true (env CDROM_METRICS_ENABLED=true)")
+	}
+
+	// Disabled via the config file. Clear the env var (t.Setenv does not
+	// auto-clear between subtests) so the file value is what's under test.
+	t.Setenv("CDROM_METRICS_ENABLED", "")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("metrics:\n  enabled: false\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled = true, want false (from file)")
+	}
+
+	// The environment overrides the file.
+	t.Setenv("CDROM_METRICS_ENABLED", "true")
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Errorf("Metrics.Enabled = false, want true (env must override file)")
+	}
+
+	// The metrics listen address is set from the environment.
+	t.Setenv("CDROM_METRICS_ADDR", "127.0.0.1:9999")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Metrics.Addr != "127.0.0.1:9999" {
+		t.Errorf("Metrics.Addr = %q, want 127.0.0.1:9999 (env CDROM_METRICS_ADDR)", cfg.Metrics.Addr)
+	}
+}

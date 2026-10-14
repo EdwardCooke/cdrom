@@ -22,12 +22,14 @@ import (
 	"sync"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
+	"cdrom/internal/metrics"
 	"cdrom/internal/services/scheduler"
 )
 
@@ -50,6 +52,29 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// Metrics (F-20): the scheduler serves /metrics and /healthz on a
+	// dedicated metrics port (separate from its gRPC port). When disabled
+	// (metrics.enabled: false) the listener is not started and recording is a
+	// no-op (the metric set is nil).
+	var schedMetrics *metrics.SchedulerMetrics
+	var schedStatsHandler stats.Handler
+	metricsAddr := cfg.Metrics.Addr
+	if metricsAddr == "" {
+		metricsAddr = metrics.DefaultMetricsAddr("scheduler")
+	}
+	if cfg.Metrics.Enabled {
+		collector := metrics.NewCollector()
+		schedMetrics = metrics.NewSchedulerMetrics(collector.Registry)
+		schedStatsHandler = metrics.NewStatsHandler(collector.Registry)
+		go func() {
+			if err := collector.StartMetrics(ctx, metricsAddr); err != nil {
+				logger.Error("metrics: start", "addr", metricsAddr, "err", err)
+			}
+		}()
+		logger.Info("cdrom scheduler metrics starting", "addr", metricsAddr)
+	}
+
 	dbConn, err := grpcutil.Dial(ctx, cfg.DBAddress, cfg.TLS)
 	if err != nil {
 		logger.Error("dial database service", "addr", cfg.DBAddress, "err", err)
@@ -69,6 +94,9 @@ func main() {
 		os.Exit(1)
 	}
 	sched := scheduler.NewServer(dbpb.NewDatabaseClient(dbConn), logger)
+	// Attach the scheduler's Prometheus metric set (F-20) so the dispatch
+	// paths and background loops record their metrics.
+	sched.SetMetrics(schedMetrics)
 
 	// The background loops (F-03 watchdog, F-04 retry, F-06 dependency
 	// resolver, F-07 run-status, job-status, F-09 cron trigger, F-09 event
@@ -81,7 +109,11 @@ func main() {
 	defer stopElection()
 	sched.StartLeaderElection(electionCtx, loops.start, loops.stop)
 
-	srv := grpc.NewServer(grpc.Creds(creds))
+	srvOpts := []grpc.ServerOption{grpc.Creds(creds)}
+	if schedStatsHandler != nil {
+		srvOpts = append(srvOpts, grpc.StatsHandler(schedStatsHandler))
+	}
+	srv := grpc.NewServer(srvOpts...)
 	schedpb.RegisterSchedulerServer(srv, sched)
 
 	logger.Info("cdrom scheduler service starting", "addr", addr, "db", cfg.DBAddress)

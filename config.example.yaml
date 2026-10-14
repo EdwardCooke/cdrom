@@ -289,3 +289,20 @@ db:
 #webhook:
 #  timeout: 10s
 #  timeout_max: 60s
+
+# Prometheus metrics (F-20). Every binary serves /metrics and /healthz on a
+# dedicated metrics port — separate from its service ports (gRPC, the UI HTTP,
+# the IdP's OIDC surface) — so a deployment can firewall the service ports and
+# expose only the metrics port to a scraper. The metrics port is not behind the
+# auth middleware (a scraper needs no token).
+#
+# enabled (default: true) turns the metrics endpoint on. When false the
+# metrics listener is not started and all metric recording is a no-op.
+#
+# addr is the metrics listen address. When empty the component's default port
+# is used (worker/agent 127.0.0.1:9100, database :9101, scheduler :9102,
+# artifacts :9103, api :9104, idp :9105). Set it explicitly when a single host
+# runs several components and their default ports would collide.
+#metrics:
+#  enabled: true
+#  #addr: 127.0.0.1:9104

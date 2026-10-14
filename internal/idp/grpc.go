@@ -13,6 +13,7 @@ import (
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	idppb "cdrom/internal/gen/cdrom/idp/v1"
+	"cdrom/internal/metrics"
 )
 
 // GRPCServer is the IdP's gRPC surface: its API-only operations (minting job
@@ -30,6 +31,7 @@ type GRPCServer struct {
 	keys            APIKeyStore
 	serviceAccounts ServiceAccountStore
 	logger          *slog.Logger
+	metrics         *metrics.IDPMetrics
 }
 
 // NewGRPCServer creates the IdP's gRPC server over the given key manager and
@@ -52,6 +54,14 @@ func (s *GRPCServer) SetAPIKeyStore(keys APIKeyStore) {
 // nil the service-account RPCs respond with Unimplemented.
 func (s *GRPCServer) SetServiceAccountStore(store ServiceAccountStore) {
 	s.serviceAccounts = store
+}
+
+// SetMetrics attaches the IdP's Prometheus metric set (F-20). The gRPC surface
+// uses it to count job-token minting and username/password sign-ins, and to
+// keep the user-directory size gauge current. When left nil (metrics
+// disabled) all recording is a no-op.
+func (s *GRPCServer) SetMetrics(m *metrics.IDPMetrics) {
+	s.metrics = m
 }
 
 // MintJobToken mints a job token for a dispatched job. The token is scoped to
@@ -116,6 +126,9 @@ func (s *GRPCServer) MintJobToken(ctx context.Context, req *idppb.MintJobTokenRe
 	s.logger.Info("idp: minted job token", "job", jobID, "pipeline", req.GetPipelineId(),
 		"group", req.GetTargetGroup(), "audience", audience, "trigger", req.GetTriggerName(),
 		"trigger_type", req.GetTriggerType(), "lifetime", lifetime)
+	if s.metrics != nil {
+		s.metrics.RecordTokenMinted("job")
+	}
 	return &idppb.MintJobTokenResponse{
 		AccessToken: token,
 		TokenType:   "Bearer",
@@ -150,9 +163,15 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 	if err != nil {
 		// Unknown user: fail with the same response as a bad password so the
 		// endpoint does not reveal which emails are registered.
+		if s.metrics != nil {
+			s.metrics.RecordLogin("invalid_username")
+		}
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 	if !VerifyPassword(user.PasswordHash, req.GetPassword()) {
+		if s.metrics != nil {
+			s.metrics.RecordLogin("invalid_password")
+		}
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
 	audience := req.GetAudience()
@@ -185,6 +204,10 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 		return nil, status.Errorf(codes.Internal, "idp: sign user token: %v", err)
 	}
 	s.logger.Info("idp: user login", "email", user.Email, "roles", user.Roles)
+	if s.metrics != nil {
+		s.metrics.RecordLogin("success")
+		s.metrics.RecordTokenMinted("ui")
+	}
 	return &idppb.LoginResponse{
 		AccessToken: token,
 		TokenType:   "Bearer",
@@ -240,6 +263,7 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 		return nil, status.Errorf(codes.Internal, "idp: create user: %v", err)
 	}
 	s.logger.Info("idp: registered user", "email", user.Email, "roles", user.Roles)
+	s.refreshUserMetrics(ctx)
 	return userToProto(user), nil
 }
 
@@ -253,6 +277,20 @@ func (s *GRPCServer) defaultRoles(ctx context.Context) []string {
 		return []string{"admin"}
 	}
 	return []string{"user"}
+}
+
+// refreshUserMetrics sets the user-directory size gauge (F-20) from the
+// current user directory. It is a no-op when metrics are disabled or the user
+// store is not configured.
+func (s *GRPCServer) refreshUserMetrics(ctx context.Context) {
+	if s.metrics == nil || s.users == nil {
+		return
+	}
+	users, err := s.users.List(ctx)
+	if err != nil {
+		return
+	}
+	s.metrics.SetUsers(len(users))
 }
 
 // ListUsers returns all registered users (profile + roles, no password hash).
@@ -298,6 +336,7 @@ func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserReques
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: create user: %v", err)
 	}
+	s.refreshUserMetrics(ctx)
 	return userToProto(user), nil
 }
 
@@ -326,6 +365,7 @@ func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserReques
 		}
 		return nil, status.Errorf(codes.Internal, "idp: update user: %v", err)
 	}
+	s.refreshUserMetrics(ctx)
 	return userToProto(user), nil
 }
 
@@ -344,6 +384,7 @@ func (s *GRPCServer) DeleteUser(ctx context.Context, req *idppb.DeleteUserReques
 		}
 		return nil, status.Errorf(codes.Internal, "idp: delete user: %v", err)
 	}
+	s.refreshUserMetrics(ctx)
 	return &idppb.DeleteUserResponse{Status: "deleted"}, nil
 }
 

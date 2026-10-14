@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -13,6 +14,7 @@ import (
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logstream"
+	"cdrom/internal/metrics"
 	"cdrom/internal/notify"
 	"cdrom/internal/tokenexchange"
 )
@@ -30,7 +32,12 @@ type Context struct {
 	WorkerName  string
 	Token       string
 	StepBarrier executor.StepBarrier
-	Logger      *slog.Logger
+	// Metrics, when set, is the target's step/job metric set (F-20). RunJob
+	// derives from it the executor's step observer (each step's type and
+	// duration) and wraps the job's log sink so the target counts the log
+	// bytes it streams to the API. Nil when the target records no metrics.
+	Metrics *metrics.WorkerMetrics
+	Logger  *slog.Logger
 }
 
 // RunJob executes job's spec through the shared executor, building the
@@ -58,9 +65,15 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	if err != nil {
 		logger.Warn("target: open log stream; continuing without streaming", "job", job.GetId(), "err", err)
 	}
-	defer sink.Close()
-	ctx = executor.ContextWithLogSink(ctx, sink)
+	// Wrap the sink so the target can count the log bytes it streams to the
+	// API (F-20); a nil sink (streaming disabled) is a no-op.
+	counting := &countingSink{sink: sink, m: tc.Metrics}
+	defer counting.Close()
+	ctx = executor.ContextWithLogSink(ctx, counting)
 	ctx = executor.ContextWithStepStatusReporter(ctx, collector)
+	// The target's step observer (F-20) records each step's type and duration
+	// in the target's metrics; nil when the target records no step metrics.
+	ctx = executor.ContextWithStepObserver(ctx, stepObserverAdapter(tc.Metrics))
 	// A step's condition (F-06) can reference the status/outputs of the jobs
 	// this job depends on (carried by the API) and the job's own identity.
 	ctx = executor.ContextWithUpstreamJobs(ctx, job.GetUpstreamJobs())
@@ -186,4 +199,91 @@ func FinishJob(ctx context.Context, tc *Context, jobID int64, collector *executo
 	tc.Logger.Info("job succeeded", "job", jobID)
 	ReportStatus(ctx, tc, jobID, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
 	return dbpb.JobStatus_JOB_STATUS_SUCCEEDED
+}
+
+// stepObserverAdapter adapts a target's step metrics (F-20) to the executor's
+// StepObserver seam: it records each step's type and status in the target's
+// step counters and its duration in the target's step-duration histogram. A
+// nil metrics set (metrics disabled) yields a nil observer, so the executor
+// records nothing.
+func stepObserverAdapter(m *metrics.WorkerMetrics) executor.StepObserver {
+	if m == nil {
+		return nil
+	}
+	return &stepObserver{m: m}
+}
+
+type stepObserver struct {
+	m *metrics.WorkerMetrics
+}
+
+// StepStarted implements executor.StepObserver.
+func (a *stepObserver) StepStarted(stepType string, stepIndex int) {}
+
+// StepFinished implements executor.StepObserver.
+func (a *stepObserver) StepFinished(stepType string, status executor.StepStatus, d time.Duration) {
+	a.m.RecordStep(stepType, stepStatusName(status), d)
+}
+
+// stepStatusName maps a step's terminal status to its metric label value.
+func stepStatusName(status executor.StepStatus) string {
+	switch status {
+	case executor.StepStatusSucceeded:
+		return "succeeded"
+	case executor.StepStatusFailed:
+		return "failed"
+	case executor.StepStatusSkipped:
+		return "skipped"
+	case executor.StepStatusTimedOut:
+		return "timed_out"
+	default:
+		return "unknown"
+	}
+}
+
+// JobStatusName maps a job's terminal status to its metric label value (the
+// same convention the API uses for cdrom_api_job_status_total, so a job's
+// status is labeled identically on both sides). The worker and agent use it
+// to label their cdrom_worker_jobs_total / job-duration metrics.
+func JobStatusName(status dbpb.JobStatus) string {
+	switch status {
+	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
+		return "succeeded"
+	case dbpb.JobStatus_JOB_STATUS_FAILED:
+		return "failed"
+	case dbpb.JobStatus_JOB_STATUS_CANCELLED:
+		return "cancelled"
+	case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
+		return "timed_out"
+	case dbpb.JobStatus_JOB_STATUS_SKIPPED:
+		return "skipped"
+	default:
+		return "unknown"
+	}
+}
+
+// countingSink wraps a logstream.Sink and counts the bytes it streams to the
+// API (F-20, cdrom_worker_log_bytes_total). It is the value a target puts in
+// the executor's context as the job's log sink. When the underlying sink is
+// nil (streaming disabled) it is a no-op.
+type countingSink struct {
+	sink *logstream.Sink
+	m    *metrics.WorkerMetrics
+}
+
+// WriteStepOutput implements executor.LogSink.
+func (s *countingSink) WriteStepOutput(stepIndex int, stream string, data []byte) {
+	if s.sink != nil {
+		s.sink.WriteStepOutput(stepIndex, stream, data)
+	}
+	if s.m != nil {
+		s.m.AddLogBytes(int64(len(data)))
+	}
+}
+
+// Close ends the underlying sink.
+func (s *countingSink) Close() {
+	if s.sink != nil {
+		s.sink.Close()
+	}
 }

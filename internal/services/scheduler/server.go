@@ -17,6 +17,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -25,13 +26,15 @@ import (
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
+	"cdrom/internal/metrics"
 )
 
 // Server implements the Scheduler gRPC service.
 type Server struct {
 	schedpb.UnimplementedSchedulerServer
-	db     dbpb.DatabaseClient
-	logger *slog.Logger
+	db      dbpb.DatabaseClient
+	logger  *slog.Logger
+	metrics *metrics.SchedulerMetrics
 }
 
 // NewServer creates a Scheduler service. db is the client for the Database
@@ -42,6 +45,12 @@ func NewServer(db dbpb.DatabaseClient, logger *slog.Logger) *Server {
 		logger = slog.Default()
 	}
 	return &Server{db: db, logger: logger}
+}
+
+// SetMetrics attaches the scheduler's Prometheus metric set (F-20). When left
+// nil (metrics disabled) all recording is a no-op.
+func (s *Server) SetMetrics(m *metrics.SchedulerMetrics) {
+	s.metrics = m
 }
 
 // ---------------------------------------------------------------------------
@@ -238,9 +247,17 @@ func (s *Server) rerunJob(ctx context.Context, db jobRerunner, publisher jobPubl
 	// within every limit it is subject to. When a resource is at its limit the
 	// job is left pending and the background admission loop dispatches it once
 	// a slot frees.
-	if !s.tryAdmit(ctx, updated) {
+	admitted, blockedBy := s.tryAdmit(ctx, updated)
+	if !admitted {
+		if s.metrics != nil {
+			s.metrics.RecordDispatch(dispatchOutcome(blockedBy))
+		}
 		return job, nil
 	}
+	if s.metrics != nil {
+		s.metrics.RecordDispatch("dispatched")
+	}
+	s.recordQueueWait(updated)
 	if updated.GetTargetGroup() != "" {
 		if _, err := publisher.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: updated.GetId(), TargetGroup: updated.GetTargetGroup(), Environment: updated.GetEnvironment()}); err != nil {
 			s.logger.Warn("scheduler: publish re-run assignment failed; job left pending",
@@ -375,7 +392,25 @@ func (s *Server) TriggerRun(ctx context.Context, req *schedpb.TriggerRunRequest)
 		s.dispatchRunInstance(ctx, job)
 	}
 	s.logger.Info("scheduler: trigger run created", "run", run.GetId(), "pipeline", req.GetPipelineId(), "trigger", req.GetTriggerName(), "jobs", len(created.GetJobs()))
+	if s.metrics != nil {
+		s.metrics.RecordTriggerFired(triggerTypeKind(req.GetTriggerType()))
+	}
 	return run, nil
+}
+
+// triggerTypeKind maps a trigger's type to the short kind label used by the
+// cdrom_scheduler_triggers_fired_total metric (F-20).
+func triggerTypeKind(t dbpb.TriggerType) string {
+	switch t {
+	case dbpb.TriggerType_TRIGGER_TYPE_CRON:
+		return "cron"
+	case dbpb.TriggerType_TRIGGER_TYPE_WEBHOOK:
+		return "webhook"
+	case dbpb.TriggerType_TRIGGER_TYPE_EVENT:
+		return "event"
+	default:
+		return "unknown"
+	}
 }
 
 // dispatchRunInstance drives a single job instance of a run (F-07), mirroring
@@ -399,6 +434,21 @@ func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
 // target group has an "assignment" event appended to the shared event log
 // (F-23); a job with an empty target group is left pending for an ephemeral
 // agent.
+// recordQueueWait observes a job's pending→running wait (F-20,
+// cdrom_scheduler_queue_wait_seconds): the time from the job's creation (when
+// it entered the pending queue) to now, when it is dispatched. It is recorded
+// by the replica that dispatches the job, by target group (empty for a job
+// with no group). It is a no-op when metrics are disabled or the job has no
+// creation timestamp.
+func (s *Server) recordQueueWait(job *dbpb.Job) {
+	if s.metrics == nil {
+		return
+	}
+	if created := job.GetCreatedAt(); created != nil {
+		s.metrics.ObserveQueueWait(job.GetTargetGroup(), time.Since(created.AsTime()))
+	}
+}
+
 func (s *Server) dispatchJob(ctx context.Context, job *dbpb.Job) {
 	if len(job.GetDependsOn()) > 0 {
 		s.logger.Info("scheduler: job held pending dependencies", "job", job.GetId(), "run", job.GetRunId(), "depends_on", job.GetDependsOn())
@@ -412,14 +462,25 @@ func (s *Server) dispatchJob(ctx context.Context, job *dbpb.Job) {
 	// that has already been proceeded (running) is dispatched, not re-held.
 	if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_PENDING && s.shouldHoldForProceed(ctx, job) {
 		s.holdForProceed(ctx, job.GetId())
+		if s.metrics != nil {
+			s.metrics.RecordDispatch("held_manual")
+		}
 		return
 	}
 	// A job is dispatched only when it is admitted (F-16): it fits within every
 	// limit it is subject to. When a resource is at its limit the job is left
 	// pending and the background admission loop dispatches it once a slot frees.
-	if !s.tryAdmit(ctx, job) {
+	admitted, blockedBy := s.tryAdmit(ctx, job)
+	if !admitted {
+		if s.metrics != nil {
+			s.metrics.RecordDispatch(dispatchOutcome(blockedBy))
+		}
 		return
 	}
+	if s.metrics != nil {
+		s.metrics.RecordDispatch("dispatched")
+	}
+	s.recordQueueWait(job)
 	if job.GetTargetGroup() != "" || job.GetEnvironment() != "" {
 		s.publishAssignment(ctx, job.GetId(), job.GetTargetGroup(), job.GetEnvironment())
 	} else {

@@ -17,6 +17,7 @@ import (
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/metrics"
 	"cdrom/internal/target"
 
 	// Register the built-in step handlers (e.g. the shell handler) with the
@@ -44,6 +45,11 @@ type Agent struct {
 	deps   Dependencies
 	logger *slog.Logger
 	token  string // job token handed over by the API via GetJob
+	// metrics is the agent's metric set (F-20); nil when metrics are
+	// disabled, in which case all recording is a no-op. An agent records only
+	// the job/step/in-flight/log metrics (it holds no WatchJobs stream and
+	// polls no queue).
+	metrics *metrics.WorkerMetrics
 }
 
 // New creates an agent that will execute jobID. name is the agent's identity
@@ -54,6 +60,12 @@ func New(name string, jobID int64, deps Dependencies, logger *slog.Logger) *Agen
 		logger = slog.Default()
 	}
 	return &Agent{name: name, jobID: jobID, deps: deps, logger: logger}
+}
+
+// SetMetrics sets the agent's metric set (F-20). It must be called before
+// Run. A nil set disables all metric recording.
+func (a *Agent) SetMetrics(m *metrics.WorkerMetrics) {
+	a.metrics = m
 }
 
 // Run executes the job and returns the final status. The process should exit
@@ -70,15 +82,20 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	a.logger.Info("agent: executing job", "job", job.GetId(), "name", job.GetName())
 
 	// The shared execution context: the target's API client, the agent's name
-	// (its host name, so the API can record which target ran the job), and the
-	// job's token. An ephemeral agent has no step barrier (it runs its steps
-	// unbarriered).
+	// (its host name, so the API can record which target ran the job), the
+	// job's token, and the agent's step metrics (F-20). An ephemeral agent has
+	// no step barrier (it runs its steps unbarriered).
 	tc := &target.Context{
 		API:        a.deps.API,
 		WorkerName: a.name,
 		Token:      a.token,
+		Metrics:    a.metrics,
 		Logger:     a.logger,
 	}
+
+	// The agent runs exactly one job, so it is in flight for the whole run.
+	a.metrics.SetInflight(1)
+	defer a.metrics.SetInflight(0)
 
 	target.ReportRunning(ctx, tc, a.jobID)
 	a.logger.Info("job started", "job", a.jobID)
@@ -90,11 +107,16 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	go a.watchCancellation(jobCtx, cancel)
 
 	collector := &executor.StepResultCollector{}
+	start := time.Now()
 	err = target.RunJob(jobCtx, tc, job, collector)
 	// A cancellation observed by the agent's status poller (F-05) — or the
 	// agent's own shutdown — cancelled the job's context; FinishJob reports
 	// the job as cancelled, distinct from a failure.
-	return target.FinishJob(ctx, tc, a.jobID, collector, err, jobCtx.Err() == context.Canceled), nil
+	finalStatus := target.FinishJob(ctx, tc, a.jobID, collector, err, jobCtx.Err() == context.Canceled)
+	// Record the job's terminal status and duration (F-20), matching the
+	// status the API records for the same job.
+	a.metrics.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
+	return finalStatus, nil
 }
 
 // watchCancellation polls the job's status (F-05) and cancels the job's

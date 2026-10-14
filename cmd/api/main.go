@@ -14,6 +14,7 @@ import (
 	"os"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/stats"
 
 	"cdrom/internal/api"
 	"cdrom/internal/auth"
@@ -26,6 +27,7 @@ import (
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
+	"cdrom/internal/metrics"
 	"cdrom/internal/secrets"
 	"cdrom/internal/webhook"
 )
@@ -57,6 +59,29 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// Metrics (F-20): the API serves /metrics and /healthz on a dedicated
+	// metrics port (separate from its gRPC and UI HTTP ports). When disabled
+	// (metrics.enabled: false) the listener is not started and recording is a
+	// no-op (the metric set is nil).
+	var apiMetrics *metrics.APIMetrics
+	var apiStatsHandler stats.Handler
+	metricsAddr := cfg.Metrics.Addr
+	if metricsAddr == "" {
+		metricsAddr = metrics.DefaultMetricsAddr("api")
+	}
+	if cfg.Metrics.Enabled {
+		collector := metrics.NewCollector()
+		apiMetrics = metrics.NewAPIMetrics(collector.Registry)
+		apiStatsHandler = metrics.NewStatsHandler(collector.Registry)
+		go func() {
+			if err := collector.StartMetrics(ctx, metricsAddr); err != nil {
+				logger.Error("metrics: start", "addr", metricsAddr, "err", err)
+			}
+		}()
+		logger.Info("cdrom api metrics starting", "addr", metricsAddr)
+	}
+
 	dbConn, err := grpcutil.Dial(ctx, cfg.DBAddress, cfg.TLS)
 	if err != nil {
 		logger.Error("dial database", "addr", cfg.DBAddress, "err", err)
@@ -149,6 +174,9 @@ func main() {
 	// user storage) lives in the IdP. The IdP's base URL is the configured
 	// auth issuer, falling back to the default IdP address.
 	apiServer := api.New(clients, hub, secretStore)
+	// Attach the API's Prometheus metric set (F-20) so the UI HTTP surface
+	// keeps the live WebSocket client gauge (cdrom_api_ws_clients) current.
+	apiServer.SetMetrics(apiMetrics)
 
 	// Role-based access control (F-14). When authentication is enabled the API
 	// enforces RBAC: a request is allowed only if the authenticated
@@ -236,7 +264,19 @@ func main() {
 	if cfg.Auth.UserPassEnabled {
 		exempt = []string{"/api/login", "/api/register"}
 	}
-	apiHandler := authBundle.MiddlewareExempt(apiServer.Handler(), exempt...)
+	// The UI HTTP surface's metrics (F-20): the request/duration middleware
+	// wraps the inner mux (inside auth, so it observes authenticated requests
+	// and counts a 403 as a "forbidden" auth failure), and the auth-failure
+	// middleware wraps the auth middleware (outside it, so it counts the 401
+	// the auth middleware returns for a missing or invalid token).
+	inner := apiServer.Handler()
+	if apiMetrics != nil {
+		inner = apiMetrics.Middleware(inner)
+	}
+	apiHandler := authBundle.MiddlewareExempt(inner, exempt...)
+	if apiMetrics != nil {
+		apiHandler = apiMetrics.AuthFailureMiddleware(apiHandler)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiHandler)
 	mux.HandleFunc("GET /api/auth/oidc", authBundle.ServeDiscovery)
@@ -275,7 +315,11 @@ func main() {
 		logger.Error("listen", "addr", grpcAddr, "err", err)
 		os.Exit(1)
 	}
-	grpcSrv := grpc.NewServer(grpc.Creds(creds))
+	grpcSrvOpts := []grpc.ServerOption{grpc.Creds(creds)}
+	if apiStatsHandler != nil {
+		grpcSrvOpts = append(grpcSrvOpts, grpc.StatsHandler(apiStatsHandler))
+	}
+	grpcSrv := grpc.NewServer(grpcSrvOpts...)
 	grpcServer := api.NewGRPCServer(clients.Database, clients.Artifacts, hub, jobAuth, secretStore, logger)
 	// Share the authorization engine (F-14) with the gRPC server's event-log
 	// tail loop so a role_change event invalidates this replica's cache (the
@@ -283,6 +327,10 @@ func main() {
 	if authzEngine != nil {
 		grpcServer.SetAuthz(authzEngine)
 	}
+	// Attach the API's Prometheus metric set (F-20) so the gRPC surface
+	// records job status, log bytes, token minting, secret decryption,
+	// notifications, artifact bytes, the worker hub, and the event-log lag.
+	grpcServer.SetMetrics(apiMetrics)
 
 	// Notifications (F-18): the API is the only component that sends an email
 	// (SMTP) or performs a webhook's HTTP request. The email step handler on an

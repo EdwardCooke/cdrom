@@ -22,6 +22,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/metrics"
 	"cdrom/internal/models"
 )
 
@@ -31,6 +32,12 @@ import (
 type Server struct {
 	dbpb.UnimplementedDatabaseServer
 	db *gorm.DB
+	// metrics records the Database service's Prometheus metrics (F-20): the
+	// point-in-time gauges of the global state the database owns (the shared
+	// event log's size, the pending queue's depth per group, and the durable
+	// concurrency slots held per resource). It is nil when metrics are
+	// disabled, in which case the refresh loop is not started.
+	metrics *metrics.DatabaseMetrics
 	// limitsMu guards limitsCache and limitsAt (F-16). The concurrency limit
 	// rules are loaded from the database and cached briefly so the scheduler's
 	// dispatch path (which resolves a job's limits on every admission attempt)
@@ -46,6 +53,14 @@ type Server struct {
 // NewServer creates a Database gRPC server over db.
 func NewServer(db *gorm.DB) *Server {
 	return &Server{db: db}
+}
+
+// SetMetrics attaches the Database service's Prometheus metric set (F-20).
+// When set (non-nil), the server starts a background loop that refreshes the
+// global-state gauges (event-log size, queue depth, concurrency slots). When
+// left nil (metrics disabled) the loop is not started.
+func (s *Server) SetMetrics(m *metrics.DatabaseMetrics) {
+	s.metrics = m
 }
 
 // ---------------------------------------------------------------------------
@@ -3866,6 +3881,14 @@ func (s *Server) TailEvents(ctx context.Context, req *dbpb.TailEventsRequest) (*
 	for i := range events {
 		response.Events = append(response.Events, toProtoEvent(&events[i]))
 		response.Cursor = int64(events[i].ID)
+	}
+	// head is the log's high-water mark (the newest event's id), so a consumer
+	// can compute its lag (head - cursor) for the event-log-lag metric (F-20).
+	// A failure to read it leaves head at 0 (the consumer treats that as "no
+	// lag information" and does not update its gauge).
+	var head int64
+	if err := s.db.WithContext(ctx).Model(&models.Event{}).Select("COALESCE(MAX(id), 0)").Scan(&head).Error; err == nil {
+		response.Head = head
 	}
 	return response, nil
 }

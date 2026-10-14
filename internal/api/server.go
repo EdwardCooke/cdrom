@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -25,6 +26,7 @@ import (
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
+	"cdrom/internal/metrics"
 	"cdrom/internal/secrets"
 )
 
@@ -83,6 +85,16 @@ type Server struct {
 	// in tests), in which case no audit events are recorded on the HTTP
 	// surface.
 	audit *audit.Recorder
+	// metrics records the API's Prometheus metrics (F-20) on the UI HTTP
+	// surface. It is used here to keep the live WebSocket client gauge
+	// (cdrom_api_ws_clients) current; the request/duration and auth-failure
+	// metrics are recorded by the middleware the binary wraps the handler
+	// with. It is nil when metrics are disabled.
+	metrics *metrics.APIMetrics
+	// wsClients is the number of live WebSocket UI connections on this pod
+	// (F-20). It is kept in sync by handleWebSocket (incremented on connect,
+	// decremented on close) and mirrored to the cdrom_api_ws_clients gauge.
+	wsClients atomic.Int64
 }
 
 // SetUserPassClient attaches the IdP username/password proxy client, enabling
@@ -115,6 +127,13 @@ func (s *Server) SetServiceAccountClient(c ServiceAccountClient) {
 func (s *Server) SetAuthz(e *authz.Engine, enabled bool) {
 	s.authz = e
 	s.rbacEnabled = enabled
+}
+
+// SetMetrics attaches the API's Prometheus metric set (F-20). The HTTP server
+// uses it to keep the live WebSocket client gauge (cdrom_api_ws_clients)
+// current. When left nil (metrics disabled) the gauge is not updated.
+func (s *Server) SetMetrics(m *metrics.APIMetrics) {
+	s.metrics = m
 }
 
 // New creates an API server over the given gRPC clients. hub is the event
