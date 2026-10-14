@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gorm.io/gorm"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
@@ -22,6 +23,15 @@ import (
 // startServer opens an in-memory SQLite database, migrates it, and serves the
 // Database gRPC service over an in-process bufconn listener.
 func startServer(t *testing.T) dbpb.DatabaseClient {
+	t.Helper()
+	client, _ := startServerDB(t)
+	return client
+}
+
+// startServerDB is startServer, but also returns the underlying *gorm.DB so a
+// test can assert directly on the persisted rows (e.g. the normalized Tag
+// table, F-29).
+func startServerDB(t *testing.T) (dbpb.DatabaseClient, *gorm.DB) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -56,7 +66,7 @@ func startServer(t *testing.T) dbpb.DatabaseClient {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return dbpb.NewDatabaseClient(conn)
+	return dbpb.NewDatabaseClient(conn), db
 }
 
 func TestPipelineAndJobLifecycle(t *testing.T) {

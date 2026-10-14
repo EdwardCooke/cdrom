@@ -61,6 +61,12 @@ const (
 	PermEnvironmentsView   = "environments.can-view"
 	PermEnvironmentsManage = "environments.can-manage"
 	PermRunsProceed        = "runs.can-proceed"
+	// Worker-group management permissions (F-29). Worker groups (named groups
+	// of long-lived workers that carry tags) are platform-wide: can-view reads
+	// a group and its tags, can-manage creates/updates/deletes a group and its
+	// tags.
+	PermWorkerGroupsView   = "worker-groups.can-view"
+	PermWorkerGroupsManage = "worker-groups.can-manage"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -98,6 +104,8 @@ var AllPermissions = []string{
 	PermEnvironmentsView,
 	PermEnvironmentsManage,
 	PermRunsProceed,
+	PermWorkerGroupsView,
+	PermWorkerGroupsManage,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

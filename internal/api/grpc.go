@@ -141,8 +141,11 @@ type liveWorker struct {
 	// that targets an environment is dispatched to the live workers that
 	// registered it.
 	environments []string
-	address      string
-	lastSeen     time.Time
+	// tags are the worker's tags (F-29); a job dispatched to the worker merges
+	// them into the job's execution's tag set.
+	tags     map[string]string
+	address  string
+	lastSeen time.Time
 }
 
 // NewGRPCServer creates the API gRPC service. db is the client for the
@@ -197,6 +200,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		Group:        req.GetGroup(),
 		Address:      req.GetAddress(),
 		Environments: req.GetEnvironments(),
+		Tags:         req.GetTags(),
 	})
 	if err != nil {
 		return nil, err
@@ -214,6 +218,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		name:         registered.GetName(),
 		group:        registered.GetGroup(),
 		environments: registered.GetEnvironments(),
+		tags:         registered.GetTags(),
 		address:      registered.GetAddress(),
 		lastSeen:     time.Now(),
 	}
@@ -234,6 +239,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		Group:        registered.GetGroup(),
 		Address:      registered.GetAddress(),
 		Environments: registered.GetEnvironments(),
+		Tags:         registered.GetTags(),
 		LastSeenAt:   registered.GetLastSeenAt(),
 	}, nil
 }

@@ -124,6 +124,11 @@ const (
 	Database_DeleteEnvironment_FullMethodName              = "/cdrom.db.v1.Database/DeleteEnvironment"
 	Database_ListWorkersByEnvironment_FullMethodName       = "/cdrom.db.v1.Database/ListWorkersByEnvironment"
 	Database_ProceedJob_FullMethodName                     = "/cdrom.db.v1.Database/ProceedJob"
+	Database_CreateWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/CreateWorkerGroup"
+	Database_GetWorkerGroup_FullMethodName                 = "/cdrom.db.v1.Database/GetWorkerGroup"
+	Database_ListWorkerGroups_FullMethodName               = "/cdrom.db.v1.Database/ListWorkerGroups"
+	Database_UpdateWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/UpdateWorkerGroup"
+	Database_DeleteWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/DeleteWorkerGroup"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -604,6 +609,31 @@ type DatabaseClient interface {
 	// job that is no longer awaiting_proceed (it was cancelled, or it was
 	// already proceeded) is left untouched, so a late proceed is a no-op.
 	ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*ProceedJobResponse, error)
+	// Worker groups (F-29). A worker group is a named group of long-lived
+	// workers (a job's target_group names it; a worker's group names it). It is
+	// a first-class, taggable row: its tags are combined onto the runs of the
+	// jobs that target it. The row is metadata-only — it does not change
+	// dispatch (which still keys off the worker's declared group string) — so a
+	// group that has no row simply contributes no tags.
+	//
+	// CreateWorkerGroup adds a worker group. It rejects an empty name and a
+	// name that collides with an existing group (it is idempotent on name: a
+	// create for an existing group is a no-op that returns the existing row).
+	CreateWorkerGroup(ctx context.Context, in *CreateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
+	// GetWorkerGroup returns the named worker group. A missing group returns
+	// NotFound.
+	GetWorkerGroup(ctx context.Context, in *GetWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
+	// ListWorkerGroups returns every worker group, optionally filtered by name
+	// prefix.
+	ListWorkerGroups(ctx context.Context, in *ListWorkerGroupsRequest, opts ...grpc.CallOption) (*ListWorkerGroupsResponse, error)
+	// UpdateWorkerGroup edits a worker group's description and/or tags. A
+	// missing group returns NotFound.
+	UpdateWorkerGroup(ctx context.Context, in *UpdateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
+	// DeleteWorkerGroup removes a worker group. A missing group returns
+	// NotFound. Deleting a group does not affect the workers that belong to it
+	// (they keep their group string) or the jobs that target it (they still
+	// dispatch to the group's workers); it only removes the group's tags.
+	DeleteWorkerGroup(ctx context.Context, in *DeleteWorkerGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type databaseClient struct {
@@ -1654,6 +1684,56 @@ func (c *databaseClient) ProceedJob(ctx context.Context, in *ProceedJobRequest, 
 	return out, nil
 }
 
+func (c *databaseClient) CreateWorkerGroup(ctx context.Context, in *CreateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkerGroup)
+	err := c.cc.Invoke(ctx, Database_CreateWorkerGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetWorkerGroup(ctx context.Context, in *GetWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkerGroup)
+	err := c.cc.Invoke(ctx, Database_GetWorkerGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListWorkerGroups(ctx context.Context, in *ListWorkerGroupsRequest, opts ...grpc.CallOption) (*ListWorkerGroupsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWorkerGroupsResponse)
+	err := c.cc.Invoke(ctx, Database_ListWorkerGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateWorkerGroup(ctx context.Context, in *UpdateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkerGroup)
+	err := c.cc.Invoke(ctx, Database_UpdateWorkerGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteWorkerGroup(ctx context.Context, in *DeleteWorkerGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteWorkerGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -2132,6 +2212,31 @@ type DatabaseServer interface {
 	// job that is no longer awaiting_proceed (it was cancelled, or it was
 	// already proceeded) is left untouched, so a late proceed is a no-op.
 	ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error)
+	// Worker groups (F-29). A worker group is a named group of long-lived
+	// workers (a job's target_group names it; a worker's group names it). It is
+	// a first-class, taggable row: its tags are combined onto the runs of the
+	// jobs that target it. The row is metadata-only — it does not change
+	// dispatch (which still keys off the worker's declared group string) — so a
+	// group that has no row simply contributes no tags.
+	//
+	// CreateWorkerGroup adds a worker group. It rejects an empty name and a
+	// name that collides with an existing group (it is idempotent on name: a
+	// create for an existing group is a no-op that returns the existing row).
+	CreateWorkerGroup(context.Context, *CreateWorkerGroupRequest) (*WorkerGroup, error)
+	// GetWorkerGroup returns the named worker group. A missing group returns
+	// NotFound.
+	GetWorkerGroup(context.Context, *GetWorkerGroupRequest) (*WorkerGroup, error)
+	// ListWorkerGroups returns every worker group, optionally filtered by name
+	// prefix.
+	ListWorkerGroups(context.Context, *ListWorkerGroupsRequest) (*ListWorkerGroupsResponse, error)
+	// UpdateWorkerGroup edits a worker group's description and/or tags. A
+	// missing group returns NotFound.
+	UpdateWorkerGroup(context.Context, *UpdateWorkerGroupRequest) (*WorkerGroup, error)
+	// DeleteWorkerGroup removes a worker group. A missing group returns
+	// NotFound. Deleting a group does not affect the workers that belong to it
+	// (they keep their group string) or the jobs that target it (they still
+	// dispatch to the group's workers); it only removes the group's tags.
+	DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -2453,6 +2558,21 @@ func (UnimplementedDatabaseServer) ListWorkersByEnvironment(context.Context, *Li
 }
 func (UnimplementedDatabaseServer) ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProceedJob not implemented")
+}
+func (UnimplementedDatabaseServer) CreateWorkerGroup(context.Context, *CreateWorkerGroupRequest) (*WorkerGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateWorkerGroup not implemented")
+}
+func (UnimplementedDatabaseServer) GetWorkerGroup(context.Context, *GetWorkerGroupRequest) (*WorkerGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWorkerGroup not implemented")
+}
+func (UnimplementedDatabaseServer) ListWorkerGroups(context.Context, *ListWorkerGroupsRequest) (*ListWorkerGroupsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWorkerGroups not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateWorkerGroup(context.Context, *UpdateWorkerGroupRequest) (*WorkerGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateWorkerGroup not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteWorkerGroup not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -4347,6 +4467,96 @@ func _Database_ProceedJob_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateWorkerGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateWorkerGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateWorkerGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateWorkerGroup(ctx, req.(*CreateWorkerGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWorkerGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetWorkerGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetWorkerGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetWorkerGroup(ctx, req.(*GetWorkerGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListWorkerGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkerGroupsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListWorkerGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListWorkerGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListWorkerGroups(ctx, req.(*ListWorkerGroupsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateWorkerGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateWorkerGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateWorkerGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateWorkerGroup(ctx, req.(*UpdateWorkerGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteWorkerGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteWorkerGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteWorkerGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteWorkerGroup(ctx, req.(*DeleteWorkerGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -4769,6 +4979,26 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ProceedJob",
 			Handler:    _Database_ProceedJob_Handler,
+		},
+		{
+			MethodName: "CreateWorkerGroup",
+			Handler:    _Database_CreateWorkerGroup_Handler,
+		},
+		{
+			MethodName: "GetWorkerGroup",
+			Handler:    _Database_GetWorkerGroup_Handler,
+		},
+		{
+			MethodName: "ListWorkerGroups",
+			Handler:    _Database_ListWorkerGroups_Handler,
+		},
+		{
+			MethodName: "UpdateWorkerGroup",
+			Handler:    _Database_UpdateWorkerGroup_Handler,
+		},
+		{
+			MethodName: "DeleteWorkerGroup",
+			Handler:    _Database_DeleteWorkerGroup_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

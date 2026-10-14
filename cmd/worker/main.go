@@ -42,12 +42,12 @@ func main() {
 	}
 	defer apiConn.Close()
 
-	w := worker.New(cfg.WorkerName, cfg.WorkerGroup, cfg.WorkerEnvironments, worker.Dependencies{
+	w := worker.New(cfg.WorkerName, cfg.WorkerGroup, cfg.WorkerEnvironments, cfg.WorkerTags, worker.Dependencies{
 		API: apipb.NewAPIClient(apiConn),
 	}, logger)
 
 	logger.Info("cdrom worker starting", "name", cfg.WorkerName, "group", cfg.WorkerGroup,
-		"environments", cfg.WorkerEnvironments, "api", cfg.APIAddress)
+		"environments", cfg.WorkerEnvironments, "tags", cfg.WorkerTags, "api", cfg.APIAddress)
 	if err := w.Run(ctx); err != nil {
 		logger.Error("worker: run", "err", err)
 		os.Exit(1)

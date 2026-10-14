@@ -115,6 +115,16 @@ type Pipeline struct {
 	// PostgreSQL), like Params. Empty means the pipeline holds no concurrency
 	// keys.
 	ConcurrencyKeys []string `gorm:"type:text;serializer:json" json:"concurrency_keys,omitempty"`
+	// Tags are the pipeline's tags (F-29): a set of key/value pairs that label
+	// the pipeline. They are metadata (they never gate, route, or serialize
+	// work) and are combined with the tags of a run's other resources (job,
+	// environment, worker group, worker) onto the run's job instances. They
+	// are stored normalized in the Tag table (one row per key/value pair,
+	// owner_type "pipeline"), not as a column on this row, so they can be
+	// searched by key and/or value. The field is in-memory only (gorm:"-"): the
+	// database service populates it from the Tag table on load and writes it
+	// back on save. Empty means the pipeline has no tags.
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
 }
 
 // PipelineVersion is an immutable snapshot of a pipeline's definition at one
@@ -163,6 +173,12 @@ type PipelineVersion struct {
 	// so a run bound to this version is gated by the keys that were active
 	// when it started.
 	ConcurrencyKeys []string `gorm:"type:text;serializer:json" json:"concurrency_keys,omitempty"`
+	// Tags are the pipeline's tags at this version (F-29); see
+	// Pipeline.Tags. They are captured in the snapshot so a run bound to this
+	// version combines the tags that were active when it started. They are
+	// stored normalized in the Tag table (owner_type "pipeline_version",
+	// owner_id the version's id) and are in-memory only on this row (gorm:"-").
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
 }
 
 // JobDefinitionSnapshot is the declarative form of a job definition as captured
@@ -197,6 +213,11 @@ type JobDefinitionSnapshot struct {
 	// spec (JobSpec.ConcurrencyKeys), so a run bound to this version is gated
 	// by the keys that were active when it started.
 	Spec JobSpec `json:"spec,omitempty"`
+	// Tags are the job's tags at this version (F-29): a set of key/value pairs
+	// that label the job. They are combined with the tags of the run's other
+	// resources (pipeline, environment, worker group, worker) onto the run's
+	// job instances. Empty means the job has no tags.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -806,6 +827,19 @@ type Job struct {
 	// required (insert a gate even if the environment does not require one).
 	// Empty means the job defers to the environment's requires_approval flag.
 	Approval ApprovalPolicy `json:"approval,omitempty"`
+	// Tags are the job's combined tags (F-29): the union of the tags of every
+	// resource in the job's context — its pipeline, the job itself, the
+	// environment it targets (if any), and the worker group it targets (if
+	// any) — with the more specific source winning on a key collision. They
+	// are computed when the job instance is created (a run's job instances are
+	// created by createRunAndInstances) and stored as a snapshot: relabeling a
+	// resource later does not change the tags recorded on a past run. A job
+	// that is not part of a run (a standalone job) carries only the tags it is
+	// given directly. They are metadata (they never gate, route, or serialize
+	// work) and are stored normalized in the Tag table (owner_type "job"), not
+	// as a column on this row. The field is in-memory only (gorm:"-"). Empty
+	// means the job has no tags.
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
 }
 
 // ConcurrencyResource is the durable, atomic slot accounting for one
@@ -931,6 +965,16 @@ type JobExecution struct {
 	StepResults []StepResult `gorm:"type:text;serializer:json" json:"step_results,omitempty"`
 	// Outputs are the named values this worker's run produced (F-06).
 	Outputs map[string]string `gorm:"type:text;serializer:json" json:"outputs,omitempty"`
+	// Tags are this worker's execution's combined tags (F-29): the job
+	// instance's base tag set (pipeline + job + environment + worker group)
+	// merged with the tags of the worker that ran this execution (the worker's
+	// tags win on a key collision). They are set when the worker starts the
+	// execution (StartJobExecution), so a fan-out job's each-worker execution
+	// carries that worker's own tags. They are metadata and are stored
+	// normalized in the Tag table (owner_type "job_execution", owner_id the
+	// execution's id), not as a column on this row. The field is in-memory
+	// only (gorm:"-"). Empty means the execution has no tags.
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
 }
 
 // Worker is a long-lived worker process registered on a deployment target.
@@ -954,6 +998,16 @@ type Worker struct {
 	// pre-F-17 behavior). It is stored as a JSON document in a text column
 	// (portable across SQLite and PostgreSQL), like the other list fields.
 	Environments []string `gorm:"type:text;serializer:json" json:"environments,omitempty"`
+	// Tags are the worker's tags (F-29): a set of key/value pairs that label
+	// the worker. A worker declares them at registration (configurable, like
+	// its environments, F-17); re-registration updates them. When a job is
+	// dispatched to the worker, the worker's tags are merged into the job's
+	// execution's tag set (the worker's tags win on a key collision). They
+	// are metadata (they never gate, route, or serialize work) and are stored
+	// normalized in the Tag table (owner_type "worker"), not as a column on
+	// this row. The field is in-memory only (gorm:"-"). Empty means the worker
+	// has no tags.
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
 }
 
 // Environment is a named deployment target that groups execution targets and
@@ -996,6 +1050,17 @@ type Environment struct {
 	// overrides any trigger (cron/webhook/event) and the previous environment,
 	// holding the run until someone proceeds it.
 	Automation Automation `gorm:"not null" json:"automation"`
+	// Tags are the environment's tags (F-29): a set of key/value pairs that
+	// label the environment. They are managed through the API (the
+	// POST/PUT /api/environments[/{name}] body) and stored in the database, so
+	// the UI can label an environment without a redeployment. When a job
+	// targets the environment, the environment's tags are combined with the
+	// tags of the run's other resources onto the run's job instances. They are
+	// metadata (they never gate, route, or serialize work) and are stored
+	// normalized in the Tag table (owner_type "environment"), not as a column
+	// on this row. The field is in-memory only (gorm:"-"). Empty means the
+	// environment has no tags.
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
 }
 
 // IDPSigningKey is a single RSA signing key used by the IdP to sign JWTs.
@@ -1406,6 +1471,82 @@ type AuditEvent struct {
 	Details string `gorm:"type:text" json:"details,omitempty"`
 }
 
+// WorkerGroup is a named group of long-lived workers (F-29). A worker group
+// is the unit a job targets (a job's TargetGroup names it) and the unit a
+// worker belongs to (a worker's Group names it). Before F-29 a group was only
+// an implicit string (a worker's Group value); F-29 makes it a first-class,
+// taggable row so a group can carry tags (F-29) that are combined onto the
+// runs of the jobs that target it. The row is metadata-only: it does not
+// change dispatch (which still keys off the worker's declared Group string),
+// so a group that has no row simply contributes no tags and jobs targeting it
+// still run on its workers.
+type WorkerGroup struct {
+	gorm.Model
+	// Name is the group's unique name (e.g. "build", "prod-fleet"); it is
+	// the value a worker's Group field and a job's TargetGroup reference.
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
+	// Description is a human-readable description of the group.
+	Description string `json:"description"`
+	// Tags are the group's tags (F-29): a set of key/value pairs that label
+	// the group. They are managed through the API (the
+	// PUT /api/worker-groups/{name} body) and stored in the database, so the
+	// UI can label a group without a redeployment. When a job targets the
+	// group, the group's tags are combined with the tags of the run's other
+	// resources onto the run's job instances. They are metadata (they never
+	// gate, route, or serialize work) and are stored normalized in the Tag
+	// table (owner_type "worker_group"), not as a column on this row. The
+	// field is in-memory only (gorm:"-"). Empty means the group has no tags.
+	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
+}
+
+// Tag is a single key/value pair that labels a resource (F-29). Tags are
+// normalized into their own table — one row per key/value pair — rather than
+// stored as a JSON document on the parent row, so a resource can be searched
+// and filtered by tag key and/or value with a plain indexed SQL query (a JSON
+// column cannot be queried that way). A tag belongs to exactly one parent
+// resource, identified by its OwnerType (the resource kind) and OwnerID (the
+// resource's id). The parent's in-memory Tags map (marked gorm:"-" so it is
+// not a column) is populated from this table on load and written to it on
+// save by the database service.
+//
+// The model does not embed gorm.Model (and so has no soft-delete column): a
+// tag row is replaced by deleting its old rows and inserting new ones, and a
+// soft delete would leave the deleted rows in the table and break the unique
+// index on (owner_type, owner_id, key) the next time the same key is set. The
+// timestamps are declared explicitly instead.
+type Tag struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// OwnerType is the kind of resource the tag belongs to (one of the
+	// TagOwner* constants).
+	OwnerType string `gorm:"size:32;not null;uniqueIndex:idx_tag_owner_key,priority:1" json:"owner_type"`
+	// OwnerID is the id of the resource the tag belongs to.
+	OwnerID uint `gorm:"not null;uniqueIndex:idx_tag_owner_key,priority:2" json:"owner_id"`
+	// Key is the tag's key. It is unique within a parent resource (the
+	// composite unique index with OwnerType and OwnerID), so a resource has at
+	// most one value per key.
+	Key string `gorm:"size:255;not null;uniqueIndex:idx_tag_owner_key,priority:3;index:idx_tag_key_value,priority:1" json:"key"`
+	// Value is the tag's value.
+	Value     string    `gorm:"size:255;not null;index:idx_tag_key_value,priority:2" json:"value"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Owner-type constants for the Tag model (F-29): the resource kinds that can
+// carry tags. Each is distinct so a tag row's (owner_type, owner_id) pair
+// identifies exactly one parent resource (a pipeline version and a job
+// execution have their own types rather than reusing "pipeline" / "job", so a
+// version's id can never be mistaken for a pipeline's id, and an execution's
+// id for a job's id).
+const (
+	TagOwnerPipeline        = "pipeline"
+	TagOwnerPipelineVersion = "pipeline_version"
+	TagOwnerJob             = "job"
+	TagOwnerJobExecution    = "job_execution"
+	TagOwnerEnvironment     = "environment"
+	TagOwnerWorker          = "worker"
+	TagOwnerWorkerGroup     = "worker_group"
+)
+
 // All lists every model the database service must migrate. Add new entities
 // here so AutoMigrate always sees the complete set.
 func All() []any {
@@ -1418,6 +1559,7 @@ func All() []any {
 		&StepCompletion{},
 		&StepOnceClaim{},
 		&Worker{},
+		&WorkerGroup{},
 		&IDPSigningKey{},
 		&IDPAuthCode{},
 		&IDPUser{},
@@ -1433,5 +1575,6 @@ func All() []any {
 		&ConcurrencyResource{},
 		&ConcurrencyLimit{},
 		&Environment{},
+		&Tag{},
 	}
 }

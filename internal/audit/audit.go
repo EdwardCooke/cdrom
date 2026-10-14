@@ -179,10 +179,16 @@ const (
 	// ActionRunProceed is a user's explicit proceed call that releases a run
 	// (or job) held by a `manual` environment (F-17).
 	ActionRunProceed = "run.proceed"
-	ActionLogin      = "auth.login"
-	ActionRegister               = "auth.register"
-	ActionWorkerRegister         = "worker.register"
-	ActionWorkerDeregister       = "worker.deregister"
+	// ActionWorkerGroup* are the worker-group management actions (F-29):
+	// creating, updating, or deleting a worker group (a named group of
+	// long-lived workers that carries tags).
+	ActionWorkerGroupCreate = "worker-group.create"
+	ActionWorkerGroupUpdate = "worker-group.update"
+	ActionWorkerGroupDelete = "worker-group.delete"
+	ActionLogin             = "auth.login"
+	ActionRegister          = "auth.register"
+	ActionWorkerRegister    = "worker.register"
+	ActionWorkerDeregister  = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
@@ -212,6 +218,9 @@ const (
 	// TargetEnvironment is the target kind of an environment (F-17): a named
 	// deployment target that carries approval + automation policy.
 	TargetEnvironment = "environment"
+	// TargetWorkerGroup is the target kind of a worker group (F-29): a named
+	// group of long-lived workers that carries tags.
+	TargetWorkerGroup = "worker-group"
 )
 
 // Outcomes (F-15).

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -198,6 +199,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/environments/{name}", s.getEnvironment)
 	mux.HandleFunc("PUT /api/environments/{name}", s.updateEnvironment)
 	mux.HandleFunc("DELETE /api/environments/{name}", s.deleteEnvironment)
+	// Worker groups (F-29): named groups of long-lived workers that carry
+	// tags. They are stored in the database and managed here, so the UI can
+	// label a group at runtime without a redeployment. Viewing requires
+	// worker-groups.can-view; create/update/delete require
+	// worker-groups.can-manage.
+	mux.HandleFunc("GET /api/worker-groups", s.listWorkerGroups)
+	mux.HandleFunc("POST /api/worker-groups", s.createWorkerGroup)
+	mux.HandleFunc("GET /api/worker-groups/{name}", s.getWorkerGroup)
+	mux.HandleFunc("PUT /api/worker-groups/{name}", s.updateWorkerGroup)
+	mux.HandleFunc("DELETE /api/worker-groups/{name}", s.deleteWorkerGroup)
 	// Proceed (F-17): release a run (or a single job) held by a `manual`
 	// environment. It requires runs.can-proceed.
 	mux.HandleFunc("POST /api/runs/{id}/proceed", s.proceedRun)
@@ -317,6 +328,10 @@ type pipelineRequest struct {
 	// present they are validated (unique, non-empty names) before the pipeline
 	// is saved.
 	Secrets []secretRequest `json:"secrets,omitempty"`
+	// Tags are the pipeline's tags (F-29): a set of key/value pairs that label
+	// the pipeline. They are combined with the tags of a run's other resources
+	// (job, environment, worker group, worker) onto the run's job instances.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // parameterRequest is the JSON form of a single pipeline parameter (F-10): a
@@ -369,6 +384,11 @@ type pipelineJobRequest struct {
 	TargetGroup string          `json:"target_group,omitempty"`
 	Needs       []string        `json:"needs,omitempty"`
 	Spec        *jobSpecRequest `json:"spec,omitempty"`
+	// Tags are the job's tags (F-29): a set of key/value pairs that label the
+	// job. They are combined with the tags of the run's other resources
+	// (pipeline, environment, worker group, worker) onto the run's job
+	// instances.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +417,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		Triggers:    triggersToProto(req.Triggers),
 		Params:      pipelineParamsToProto(req.Params),
 		Secrets:     secrets,
+		Tags:        req.Tags,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -449,6 +470,7 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		Triggers:    triggersToProto(req.Triggers),
 		Params:      pipelineParamsToProto(req.Params),
 		Secrets:     secrets,
+		Tags:        req.Tags,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -597,6 +619,7 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 			TargetGroup: job.TargetGroup,
 			Needs:       job.Needs,
 			Spec:        spec,
+			Tags:        job.Tags,
 		})
 	}
 	return defs, nil
@@ -606,7 +629,15 @@ func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
-	response, err := s.clients.Database.ListPipelines(r.Context(), &dbpb.ListPipelinesRequest{})
+	// A tag filter (F-29) is given as repeated tag=key=value query params
+	// (e.g. ?tag=team=backend&tag=cost=1234); a pipeline is returned only when
+	// it carries every one of the given tags.
+	tags, err := tagFilterFromQuery(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid tag filter: %v", err)
+		return
+	}
+	response, err := s.clients.Database.ListPipelines(r.Context(), &dbpb.ListPipelinesRequest{Tags: tags})
 	if err != nil {
 		grpcError(w, err)
 		return
@@ -686,12 +717,40 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{PipelineID: pipelineID}) {
 		return
 	}
-	response, err := s.clients.Database.ListRuns(r.Context(), &dbpb.ListRunsRequest{PipelineId: pipelineID})
+	// A tag filter (F-29) is given as repeated tag=key=value query params
+	// (e.g. ?tag=team=backend); a run is returned only when one of its job
+	// instances carries every one of the given tags.
+	tags, err := tagFilterFromQuery(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "invalid tag filter: %v", err)
+		return
+	}
+	response, err := s.clients.Database.ListRuns(r.Context(), &dbpb.ListRunsRequest{PipelineId: pipelineID, Tags: tags})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, nonNil(response.GetRuns()))
+}
+
+// tagFilterFromQuery parses the repeated tag=key=value query params of a list
+// request (F-29) into a tag map. Each value must be of the form key=value
+// (the first '=' separates the key from the value, so a value may itself
+// contain '='). An empty or absent filter yields a nil map (no filtering).
+func tagFilterFromQuery(r *http.Request) (map[string]string, error) {
+	params := r.URL.Query()["tag"]
+	if len(params) == 0 {
+		return nil, nil
+	}
+	tags := make(map[string]string, len(params))
+	for _, p := range params {
+		key, value, ok := strings.Cut(p, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("%q is not of the form key=value", p)
+		}
+		tags[key] = value
+	}
+	return tags, nil
 }
 
 // getRun fetches a single run (F-07).
@@ -938,12 +997,12 @@ type paramValueRequest struct {
 //     (e.g. shell "pwsh", args ["-NoProfile", "-Command"], command
 //     "Get-ChildItem"). Empty means run command directly (no shell).
 type jobStepRequest struct {
-	Type         string                        `json:"type,omitempty"`
-	Workdir      string                        `json:"workdir,omitempty"`
-	Env          map[string]string             `json:"env,omitempty"`
-	Timeout      string                        `json:"timeout,omitempty"`
-	Condition    string                        `json:"condition,omitempty"`
-	IgnoreFailed bool                          `json:"ignore_failed,omitempty"`
+	Type         string            `json:"type,omitempty"`
+	Workdir      string            `json:"workdir,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	Timeout      string            `json:"timeout,omitempty"`
+	Condition    string            `json:"condition,omitempty"`
+	IgnoreFailed bool              `json:"ignore_failed,omitempty"`
 	// Once (F-01) marks the step to run on at most one target of a job that
 	// fans out to a worker group: the first target to claim the step's slot
 	// runs it, the others skip it.

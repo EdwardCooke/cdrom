@@ -82,6 +82,10 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// serialize a run of this pipeline against runs of any other pipeline
 		// that shares a key.
 		ConcurrencyKeys: req.GetConcurrencyKeys(),
+		// The pipeline's tags (F-29): a set of key/value pairs that label the
+		// pipeline. They are combined with the tags of a run's other resources
+		// onto the run's job instances.
+		Tags: req.GetTags(),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -111,6 +115,11 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		if err := tx.Create(pipeline).Error; err != nil {
 			return err
 		}
+		// The pipeline's tags (F-29) are written to the normalized Tag table
+		// (owner_type "pipeline"); the in-memory field is not a column.
+		if err := replaceTags(tx, models.TagOwnerPipeline, pipeline.ID, req.GetTags()); err != nil {
+			return err
+		}
 		for i := range defs {
 			def := &defs[i]
 			pipelineID := pipeline.ID
@@ -132,6 +141,12 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 			if err := tx.Create(def).Error; err != nil {
 				return err
 			}
+			// The job definition's tags (F-29) are written to the Tag table
+			// (owner_type "job"); a run's instances combine them with the tags
+			// of the run's other resources.
+			if err := replaceTags(tx, models.TagOwnerJob, def.ID, def.Tags); err != nil {
+				return err
+			}
 		}
 		// Pass 2: now that all job ids are known, resolve each definition's
 		// needs (keys) to the ids of the jobs they reference and store the
@@ -151,8 +166,15 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		}
 		// Snapshot the pipeline's definition as version 1 (F-11): the create
 		// is the pipeline's first version, so a run of the pipeline is bound
-		// to a version snapshot that can be re-executed or inspected.
-		if err := tx.Create(snapshotPipelineVersion(pipeline, defs)).Error; err != nil {
+		// to a version snapshot that can be re-executed or inspected. The
+		// snapshot's pipeline-level tags (F-29) are written to the Tag table
+		// (owner_type "pipeline_version"); its job tags are captured in the
+		// snapshot's JSON document.
+		snapshot := snapshotPipelineVersion(pipeline, defs)
+		if err := tx.Create(snapshot).Error; err != nil {
+			return err
+		}
+		if err := replaceTags(tx, models.TagOwnerPipelineVersion, snapshot.ID, snapshot.Tags); err != nil {
 			return err
 		}
 		return nil
@@ -179,6 +201,9 @@ func (s *Server) GetPipeline(ctx context.Context, req *dbpb.GetPipelineRequest) 
 		return nil, grpcErr(err)
 	}
 	pipeline.Jobs = defs
+	// Hydrate the pipeline's and its job definitions' tags (F-29) from the Tag
+	// table (the in-memory Tags fields are not columns).
+	s.hydratePipelineTags(ctx, &pipeline)
 	return toProtoPipeline(&pipeline), nil
 }
 
@@ -188,8 +213,23 @@ func (s *Server) GetPipeline(ctx context.Context, req *dbpb.GetPipelineRequest) 
 // stored as a JSON column, so the type filter is applied in Go (portable
 // across SQLite and PostgreSQL) rather than in a driver-specific JSON query.
 func (s *Server) ListPipelines(ctx context.Context, req *dbpb.ListPipelinesRequest) (*dbpb.ListPipelinesResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.Pipeline{})
+	// When a tag filter is requested (F-29), keep only the pipelines that carry
+	// every one of the given key/value tags: the tags are stored normalized in
+	// the Tag table, so the match is a plain indexed query on the tag rows.
+	if len(req.GetTags()) > 0 {
+		ids, err := ownerIDsMatchingTags(s.db.WithContext(ctx), models.TagOwnerPipeline, req.GetTags())
+		if err != nil {
+			return nil, grpcErr(err)
+		}
+		if len(ids) == 0 {
+			// No pipeline carries the tags; return an empty result.
+			return &dbpb.ListPipelinesResponse{}, nil
+		}
+		query = query.Where("id IN ?", ids)
+	}
 	var pipelines []models.Pipeline
-	if err := s.db.WithContext(ctx).Order("id").Find(&pipelines).Error; err != nil {
+	if err := query.Order("id").Find(&pipelines).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	// When a trigger type is requested, keep only the pipelines that carry at
@@ -212,6 +252,9 @@ func (s *Server) ListPipelines(ctx context.Context, req *dbpb.ListPipelinesReque
 			return nil, grpcErr(err)
 		}
 		pipelines[i].Jobs = defs
+		// Hydrate the pipeline's and its job definitions' tags (F-29) from the
+		// Tag table.
+		s.hydratePipelineTags(ctx, &pipelines[i])
 		response.Pipelines = append(response.Pipelines, toProtoPipeline(&pipelines[i]))
 	}
 	return response, nil
@@ -280,6 +323,11 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 	if req.GetConcurrencyKeys() != nil {
 		pipeline.ConcurrencyKeys = req.GetConcurrencyKeys()
 	}
+	// When tags are supplied (F-29) they replace the pipeline's existing tags.
+	// When none are supplied the pipeline's tags are left unchanged.
+	if req.GetTags() != nil {
+		pipeline.Tags = req.GetTags()
+	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
 	// ones created, and the resulting DAG is validated for cycles and unknown
@@ -301,8 +349,28 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 			if err := tx.Save(&pipeline).Error; err != nil {
 				return err
 			}
+			// When tags are supplied (F-29) they replace the pipeline's
+			// existing tags in the Tag table; when none are supplied the
+			// pipeline's tags are left unchanged.
+			if req.GetTags() != nil {
+				if err := replaceTags(tx, models.TagOwnerPipeline, pipeline.ID, pipeline.Tags); err != nil {
+					return err
+				}
+			}
+			// The old job definitions' tags (F-29) are removed with the
+			// definitions: capture their ids before the delete so their Tag
+			// rows can be cleaned up.
+			var oldJobIDs []uint
+			if err := tx.Model(&models.Job{}).Where("pipeline_id = ?", pipeline.ID).Pluck("id", &oldJobIDs).Error; err != nil {
+				return err
+			}
 			if err := tx.Where("pipeline_id = ?", pipeline.ID).Delete(&models.Job{}).Error; err != nil {
 				return err
+			}
+			if len(oldJobIDs) > 0 {
+				if err := tx.Where("owner_type = ? AND owner_id IN ?", models.TagOwnerJob, oldJobIDs).Delete(&models.Tag{}).Error; err != nil {
+					return err
+				}
 			}
 			for i := range defs {
 				def := &defs[i]
@@ -325,6 +393,11 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 				if err := tx.Create(def).Error; err != nil {
 					return err
 				}
+				// The new job definition's tags (F-29) are written to the Tag
+				// table (owner_type "job").
+				if err := replaceTags(tx, models.TagOwnerJob, def.ID, def.Tags); err != nil {
+					return err
+				}
 			}
 			// Pass 2: resolve each definition's needs (keys) to the ids of the
 			// jobs they reference and store the result in depends_on (F-08).
@@ -342,8 +415,15 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 				}
 			}
 			// Snapshot the new definition as the pipeline's new version
-			// (F-11), atomically with the update.
-			if err := tx.Create(snapshotPipelineVersion(&pipeline, defs)).Error; err != nil {
+			// (F-11), atomically with the update. The snapshot's pipeline-level
+			// tags (F-29) are written to the Tag table (owner_type
+			// "pipeline_version"); its job tags are captured in the snapshot's
+			// JSON document.
+			snapshot := snapshotPipelineVersion(&pipeline, defs)
+			if err := tx.Create(snapshot).Error; err != nil {
+				return err
+			}
+			if err := replaceTags(tx, models.TagOwnerPipelineVersion, snapshot.ID, snapshot.Tags); err != nil {
 				return err
 			}
 			return nil
@@ -363,7 +443,22 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 			if err := tx.Save(&pipeline).Error; err != nil {
 				return err
 			}
-			if err := tx.Create(snapshotPipelineVersion(&pipeline, defs)).Error; err != nil {
+			// When tags are supplied (F-29) they replace the pipeline's
+			// existing tags in the Tag table; when none are supplied the
+			// pipeline's tags are left unchanged.
+			if req.GetTags() != nil {
+				if err := replaceTags(tx, models.TagOwnerPipeline, pipeline.ID, pipeline.Tags); err != nil {
+					return err
+				}
+			}
+			// Snapshot the pipeline's current definition as the new version
+			// (F-11); its pipeline-level tags (F-29) are written to the Tag
+			// table (owner_type "pipeline_version").
+			snapshot := snapshotPipelineVersion(&pipeline, defs)
+			if err := tx.Create(snapshot).Error; err != nil {
+				return err
+			}
+			if err := replaceTags(tx, models.TagOwnerPipelineVersion, snapshot.ID, snapshot.Tags); err != nil {
 				return err
 			}
 			return nil
@@ -372,6 +467,10 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 		}
 		pipeline.Jobs = defs
 	}
+	// Hydrate the pipeline's and its job definitions' tags (F-29) from the Tag
+	// table so the response reflects the stored tags (whether or not this
+	// update supplied them).
+	s.hydratePipelineTags(ctx, &pipeline)
 	return toProtoPipeline(&pipeline), nil
 }
 
@@ -426,6 +525,9 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 	if err := s.db.WithContext(ctx).First(&pipeline, pipelineID).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the pipeline's tags (F-29) from the Tag table: a run against the
+	// current version combines them onto the run's job instances.
+	pipeline.Tags = loadTags(s.db.WithContext(ctx), models.TagOwnerPipeline, pipelineID)
 	// Pre-validate a requested version (F-11) before the transaction so a
 	// missing version surfaces as InvalidArgument rather than being wrapped by
 	// the transaction into an Internal error.
@@ -519,6 +621,11 @@ type runDefinition struct {
 	// keys from its spec) onto every job instance so the scheduler's admission
 	// gate can hold them while the job is admitted.
 	concurrencyKeys []string
+	// pipelineTags are the pipeline's tags (F-29): the pipeline's Tags for the
+	// current version, or the snapshot's Tags for a specific version. They are
+	// combined with each job's own tags and the tags of the job's environment
+	// and worker group onto every job instance (see runBaseTags).
+	pipelineTags map[string]string
 	// needsByIndex[i] carries the needs (keys) of jobs[i] (F-08); non-nil only
 	// for a version snapshot, where the needs are keys that must be resolved to
 	// the run's instance ids. For the current version the needs are already
@@ -644,7 +751,20 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 		job.TriggerName = run.TriggerName
 		job.TriggerType = run.Trigger
 		job.UpstreamClaims = run.UpstreamClaims
+		// The instance's combined tags (F-29) are the union of the tags of the
+		// pipeline, the job, the environment it targets (if any), and the worker
+		// group it targets (if any), with the more specific source winning on a
+		// key collision. They are stored as a snapshot: relabeling a resource
+		// later does not change the tags recorded on this run. The assigned
+		// worker's tags are merged in at dispatch (StartJobExecution) onto the
+		// job's execution.
+		job.Tags = s.runBaseTags(tx, def.pipelineTags, jobDef.Tags, jobDef.Environment, jobDef.TargetGroup)
 		if err := tx.Create(job).Error; err != nil {
+			return nil, nil, err
+		}
+		// The instance's combined tags (F-29) are written to the Tag table
+		// (owner_type "job"); the in-memory field is not a column.
+		if err := replaceTags(tx, models.TagOwnerJob, job.ID, job.Tags); err != nil {
 			return nil, nil, err
 		}
 		if jobDef.ID != 0 {
@@ -697,7 +817,21 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Order("id").Find(&defs).Error; err != nil {
 			return nil, err
 		}
-		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys}, nil
+		// Hydrate the definitions' tags (F-29) from the Tag table: the
+		// in-memory Tags field is not a column, so it is empty after the load.
+		// A run's instances combine each job's own tags with the tags of the
+		// run's other resources.
+		if len(defs) > 0 {
+			ids := make([]uint, len(defs))
+			for i := range defs {
+				ids[i] = defs[i].ID
+			}
+			byOwner := loadTagsByOwner(tx, models.TagOwnerJob, ids)
+			for i := range defs {
+				defs[i].Tags = byOwner[defs[i].ID]
+			}
+		}
+		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineTags: pipeline.Tags}, nil
 	}
 	// A run against a specific version: use that version's snapshot.
 	var version models.PipelineVersion
@@ -708,6 +842,10 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		}
 		return nil, err
 	}
+	// Hydrate the version's pipeline-level tags (F-29) from the Tag table: a
+	// run bound to this version combines the tags that were active when it
+	// started.
+	version.Tags = loadTags(tx, models.TagOwnerPipelineVersion, version.ID)
 	jobs := make([]models.Job, 0, len(version.Jobs))
 	needsByIndex := make([][]string, len(version.Jobs))
 	for i := range version.Jobs {
@@ -717,10 +855,14 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 			Name:        snapshot.Name,
 			TargetGroup: snapshot.TargetGroup,
 			Spec:        snapshot.Spec,
+			// The job's tags (F-29) are captured from the snapshot so a run
+			// bound to this version combines the tags that were active when it
+			// started.
+			Tags: snapshot.Tags,
 		})
 		needsByIndex[i] = snapshot.Needs
 	}
-	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, needsByIndex: needsByIndex}, nil
+	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, pipelineTags: version.Tags, needsByIndex: needsByIndex}, nil
 }
 
 // jobConcurrencyKeys returns a job's effective concurrency keys (F-16): the
@@ -816,6 +958,10 @@ func (s *Server) TriggerRun(ctx context.Context, req *dbpb.TriggerRunRequest) (*
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&pipeline, pipelineID).Error; err != nil {
 			return err
 		}
+		// Hydrate the pipeline's tags (F-29) from the Tag table: a trigger-fired
+		// run (always the current version) combines them onto the run's job
+		// instances.
+		pipeline.Tags = loadTags(tx, models.TagOwnerPipeline, pipelineID)
 		// Deduplicate against a run the same trigger already started for this
 		// fire window.
 		if existing, created, err := s.findDuplicateTriggerRun(tx, pipelineID, req); err != nil {
@@ -941,6 +1087,21 @@ func (s *Server) ListRuns(ctx context.Context, req *dbpb.ListRunsRequest) (*dbpb
 		}
 		query = query.Where("status = ?", modelStatus)
 	}
+	// When a tag filter is requested (F-29), keep only the runs that have at
+	// least one job instance carrying every one of the given key/value tags. A
+	// run's tags are the combined tags stored on its job instances, so the
+	// match is against the job instances' tag rows (the normalized Tag table).
+	if len(req.GetTags()) > 0 {
+		runIDs, err := s.runIDsMatchingTags(ctx, req.GetTags())
+		if err != nil {
+			return nil, grpcErr(err)
+		}
+		if len(runIDs) == 0 {
+			// No run's job instances carry the tags; return an empty result.
+			return &dbpb.ListRunsResponse{}, nil
+		}
+		query = query.Where("id IN ?", runIDs)
+	}
 	if finishedAfter := req.GetFinishedAfter(); finishedAfter != nil {
 		// A run that has not finished (finished_at is null) is excluded.
 		query = query.Where("finished_at IS NOT NULL AND finished_at >= ?", finishedAfter.AsTime())
@@ -1021,6 +1182,8 @@ func (s *Server) ListPipelineVersions(ctx context.Context, req *dbpb.ListPipelin
 		Find(&versions).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate each version's pipeline-level tags (F-29) from the Tag table.
+	s.hydrateVersionTags(ctx, versions)
 	response := &dbpb.ListPipelineVersionsResponse{}
 	for i := range versions {
 		response.Versions = append(response.Versions, toProtoPipelineVersion(&versions[i]))
@@ -1043,6 +1206,8 @@ func (s *Server) GetPipelineVersion(ctx context.Context, req *dbpb.GetPipelineVe
 		First(&version).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the version's pipeline-level tags (F-29) from the Tag table.
+	version.Tags = loadTags(s.db.WithContext(ctx), models.TagOwnerPipelineVersion, version.ID)
 	return toProtoPipelineVersion(&version), nil
 }
 
@@ -1163,6 +1328,8 @@ func (s *Server) GetJob(ctx context.Context, req *dbpb.GetJobRequest) (*dbpb.Job
 	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the job's tags (F-29) from the Tag table.
+	job.Tags = loadTags(s.db.WithContext(ctx), models.TagOwnerJob, job.ID)
 	return toProtoJob(&job), nil
 }
 
@@ -1185,6 +1352,8 @@ func (s *Server) ListJobs(ctx context.Context, req *dbpb.ListJobsRequest) (*dbpb
 	if err := query.Order("id").Find(&jobs).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the jobs' tags (F-29) from the Tag table.
+	s.hydrateJobTags(ctx, jobs)
 	response := &dbpb.ListJobsResponse{}
 	for i := range jobs {
 		response.Jobs = append(response.Jobs, toProtoJob(&jobs[i]))
@@ -1209,6 +1378,8 @@ func (s *Server) ListRetriableJobs(ctx context.Context, req *dbpb.ListRetriableJ
 	if err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the jobs' tags (F-29) from the Tag table.
+	s.hydrateJobTags(ctx, jobs)
 	response := &dbpb.ListJobsResponse{}
 	for i := range jobs {
 		response.Jobs = append(response.Jobs, toProtoJob(&jobs[i]))
@@ -1603,6 +1774,9 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if err := db.First(&job, req.GetJobId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the job's tags (F-29) from the Tag table: the execution's tag
+	// set is the job's base tag set merged with the worker's tags.
+	job.Tags = loadTags(db, models.TagOwnerJob, job.ID)
 	// A job that has reached a terminal state is not started. A job that is
 	// still pending or running is started: for fan-out, several workers in the
 	// group each start their own execution, so the start is allowed even after
@@ -1630,14 +1804,29 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if timestamp := req.GetStartedAt(); timestamp != nil {
 		startedAt = timestamp.AsTime()
 	}
+	// The execution's combined tags (F-29) are the job instance's base tag set
+	// (pipeline + job + environment + worker group) merged with the tags of the
+	// worker that runs this execution (the worker's tags win on a key
+	// collision). A fan-out job's each-worker execution thus carries that
+	// worker's own tags. A worker with no tags contributes nothing.
+	executionTags := job.Tags
+	if workerTags := s.workerTags(ctx, req.GetWorkerName()); len(workerTags) > 0 {
+		executionTags = combineTags(job.Tags, workerTags)
+	}
 	execution := &models.JobExecution{
 		JobID:      uint(req.GetJobId()),
 		WorkerName: req.GetWorkerName(),
 		Attempt:    job.Attempt,
 		Status:     models.JobStatusRunning,
 		StartedAt:  &startedAt,
+		Tags:       executionTags,
 	}
 	if err := db.Create(execution).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// The execution's combined tags (F-29) are written to the Tag table
+	// (owner_type "job_execution"); the in-memory field is not a column.
+	if err := replaceTags(db, models.TagOwnerJobExecution, execution.ID, executionTags); err != nil {
 		return nil, grpcErr(err)
 	}
 	// Mark the job running (best-effort: it is already running if another
@@ -1696,6 +1885,8 @@ func (s *Server) ListJobExecutions(ctx context.Context, req *dbpb.ListJobExecuti
 	if err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the executions' tags (F-29) from the Tag table.
+	s.hydrateExecutionTags(ctx, executions)
 	response := &dbpb.ListJobExecutionsResponse{}
 	for i := range executions {
 		response.Executions = append(response.Executions, toProtoJobExecution(&executions[i]))
@@ -2049,14 +2240,25 @@ func (s *Server) RegisterWorker(ctx context.Context, req *dbpb.RegisterWorkerReq
 	if err := s.db.WithContext(ctx).Save(worker).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// The worker's tags (F-29) are declared at registration (configurable, like
+	// its environments, F-17). Re-registration (e.g. after a restart) updates
+	// them: the worker's declared tags replace its stored set in the Tag table
+	// (owner_type "worker").
+	if err := replaceTags(s.db.WithContext(ctx), models.TagOwnerWorker, worker.ID, req.GetTags()); err != nil {
+		return nil, grpcErr(err)
+	}
+	worker.Tags = req.GetTags()
 	return toProtoWorker(worker), nil
 }
 
 func (s *Server) GetWorker(ctx context.Context, req *dbpb.GetWorkerRequest) (*dbpb.Worker, error) {
+	db := s.db.WithContext(ctx)
 	var worker models.Worker
-	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&worker).Error; err != nil {
+	if err := db.Where("name = ?", req.GetName()).First(&worker).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the worker's tags (F-29) from the Tag table.
+	worker.Tags = loadTags(db, models.TagOwnerWorker, worker.ID)
 	return toProtoWorker(&worker), nil
 }
 
@@ -2070,6 +2272,8 @@ func (s *Server) ListWorkers(ctx context.Context, req *dbpb.ListWorkersRequest) 
 	if err := query.Order("id").Find(&workers).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the workers' tags (F-29) from the Tag table.
+	s.hydrateWorkerTags(ctx, workers)
 	response := &dbpb.ListWorkersResponse{}
 	for i := range workers {
 		response.Workers = append(response.Workers, toProtoWorker(&workers[i]))
@@ -2086,10 +2290,13 @@ func (s *Server) HeartbeatWorker(ctx context.Context, req *dbpb.HeartbeatWorkerR
 	if result.RowsAffected == 0 {
 		return nil, status.Error(codes.NotFound, "worker not found")
 	}
+	db := s.db.WithContext(ctx)
 	var worker models.Worker
-	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&worker).Error; err != nil {
+	if err := db.Where("name = ?", req.GetName()).First(&worker).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the worker's tags (F-29) from the Tag table.
+	worker.Tags = loadTags(db, models.TagOwnerWorker, worker.ID)
 	return toProtoWorker(&worker), nil
 }
 
@@ -2124,16 +2331,25 @@ func (s *Server) CreateEnvironment(ctx context.Context, req *dbpb.CreateEnvironm
 	if err := s.db.WithContext(ctx).Create(env).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// The environment's tags (F-29) are written to the Tag table (owner_type
+	// "environment"); the in-memory field is not a column.
+	if err := replaceTags(s.db.WithContext(ctx), models.TagOwnerEnvironment, env.ID, req.GetTags()); err != nil {
+		return nil, grpcErr(err)
+	}
+	env.Tags = req.GetTags()
 	return toProtoEnvironment(env), nil
 }
 
 // GetEnvironment returns the named environment. A missing environment returns
 // NotFound.
 func (s *Server) GetEnvironment(ctx context.Context, req *dbpb.GetEnvironmentRequest) (*dbpb.Environment, error) {
+	db := s.db.WithContext(ctx)
 	var env models.Environment
-	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&env).Error; err != nil {
+	if err := db.Where("name = ?", req.GetName()).First(&env).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the environment's tags (F-29) from the Tag table.
+	env.Tags = loadTags(db, models.TagOwnerEnvironment, env.ID)
 	return toProtoEnvironment(&env), nil
 }
 
@@ -2148,6 +2364,8 @@ func (s *Server) ListEnvironments(ctx context.Context, req *dbpb.ListEnvironment
 	if err := query.Order("name").Find(&envs).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the environments' tags (F-29) from the Tag table.
+	s.hydrateEnvironmentTags(ctx, envs)
 	response := &dbpb.ListEnvironmentsResponse{}
 	for i := range envs {
 		response.Environments = append(response.Environments, toProtoEnvironment(&envs[i]))
@@ -2162,8 +2380,9 @@ func (s *Server) UpdateEnvironment(ctx context.Context, req *dbpb.UpdateEnvironm
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "environment name is required")
 	}
+	db := s.db.WithContext(ctx)
 	var env models.Environment
-	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&env).Error; err != nil {
+	if err := db.Where("name = ?", req.GetName()).First(&env).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	updates := map[string]any{
@@ -2174,13 +2393,19 @@ func (s *Server) UpdateEnvironment(ctx context.Context, req *dbpb.UpdateEnvironm
 	if req.GetAutomation() != dbpb.Automation_AUTOMATION_UNSPECIFIED {
 		updates["automation"] = automationFromProto(req.GetAutomation())
 	}
-	if err := s.db.WithContext(ctx).Model(&env).Updates(updates).Error; err != nil {
+	if err := db.Model(&env).Updates(updates).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// Reload so the returned environment reflects the update (GORM's Updates
-	// does not populate the in-memory struct with the new values).
-	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).First(&env).Error; err != nil {
-		return nil, grpcErr(err)
+	// When tags are supplied (F-29) they replace the environment's existing
+	// tags in the Tag table (owner_type "environment"); when none are supplied
+	// the environment's tags are left unchanged.
+	if req.GetTags() != nil {
+		if err := replaceTags(db, models.TagOwnerEnvironment, env.ID, req.GetTags()); err != nil {
+			return nil, grpcErr(err)
+		}
+		env.Tags = req.GetTags()
+	} else {
+		env.Tags = loadTags(db, models.TagOwnerEnvironment, env.ID)
 	}
 	return toProtoEnvironment(&env), nil
 }
@@ -2188,12 +2413,20 @@ func (s *Server) UpdateEnvironment(ctx context.Context, req *dbpb.UpdateEnvironm
 // DeleteEnvironment removes an environment. A missing environment returns
 // NotFound.
 func (s *Server) DeleteEnvironment(ctx context.Context, req *dbpb.DeleteEnvironmentRequest) (*emptypb.Empty, error) {
-	result := s.db.WithContext(ctx).Where("name = ?", req.GetName()).Delete(&models.Environment{})
-	if result.Error != nil {
-		return nil, grpcErr(result.Error)
+	db := s.db.WithContext(ctx)
+	var env models.Environment
+	if err := db.Where("name = ?", req.GetName()).First(&env).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "environment not found")
+		}
+		return nil, grpcErr(err)
 	}
-	if result.RowsAffected == 0 {
-		return nil, status.Error(codes.NotFound, "environment not found")
+	// Remove the environment's tags (F-29) along with the environment row.
+	if err := db.Where("owner_type = ? AND owner_id = ?", models.TagOwnerEnvironment, env.ID).Delete(&models.Tag{}).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if err := db.Delete(&env).Error; err != nil {
+		return nil, grpcErr(err)
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -2210,6 +2443,8 @@ func (s *Server) ListWorkersByEnvironment(ctx context.Context, req *dbpb.ListWor
 	if err := s.db.WithContext(ctx).Order("id").Find(&workers).Error; err != nil {
 		return nil, grpcErr(err)
 	}
+	// Hydrate the workers' tags (F-29) from the Tag table.
+	s.hydrateWorkerTags(ctx, workers)
 	response := &dbpb.ListWorkersResponse{}
 	for i := range workers {
 		if workerInEnvironment(&workers[i], req.GetEnvironment()) {
@@ -2263,6 +2498,7 @@ func toProtoEnvironment(env *models.Environment) *dbpb.Environment {
 		Automation:       automationToProto(env.Automation),
 		CreatedAt:        timestamppb.New(env.CreatedAt),
 		UpdatedAt:        timestamppb.New(env.UpdatedAt),
+		Tags:             env.Tags,
 	}
 	return proto
 }
@@ -4135,6 +4371,10 @@ func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
 			Environment: def.GetEnvironment(),
 			Automation:  automationFromProto(def.GetAutomation()),
 			Approval:    approvalPolicyFromProto(def.GetApproval()),
+			// The job's tags (F-29) are captured on the definition so a run's
+			// instances combine them with the tags of the run's other
+			// resources (denormalized in createRunAndInstances).
+			Tags: def.GetTags(),
 		})
 	}
 	return jobs
@@ -4150,6 +4390,12 @@ func (s *Server) loadPipelineJobDefinitions(ctx context.Context, pipelineID uint
 		Order("id").Find(&defs).Error; err != nil {
 		return nil, err
 	}
+	// Hydrate the definitions' tags (F-29) from the Tag table: the in-memory
+	// Tags field is not a column, so it is empty after the load. This is the
+	// single place a pipeline's job definitions are read from the database, so
+	// every caller (GetPipeline, ListPipelines, and UpdatePipeline's no-jobs
+	// branch) gets definitions with their tags populated.
+	s.hydrateJobTags(ctx, defs)
 	return defs, nil
 }
 
@@ -4253,6 +4499,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		Version:         int32(pipeline.Version),
 		Secrets:         secretsToProto(pipeline.Secrets),
 		ConcurrencyKeys: pipeline.ConcurrencyKeys,
+		Tags:            pipeline.Tags,
 	}
 }
 
@@ -4274,6 +4521,7 @@ func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 		CreatedAt:       timestamppb.New(v.CreatedAt),
 		Secrets:         secretsToProto(v.Secrets),
 		ConcurrencyKeys: v.ConcurrencyKeys,
+		Tags:            v.Tags,
 	}
 }
 
@@ -4288,6 +4536,7 @@ func jobDefinitionsToProto(snapshots []models.JobDefinitionSnapshot) []*dbpb.Job
 			TargetGroup: snapshots[i].TargetGroup,
 			Needs:       snapshots[i].Needs,
 			Spec:        specToProto(snapshots[i].Spec),
+			Tags:        snapshots[i].Tags,
 		})
 	}
 	return out
@@ -4309,6 +4558,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 			TargetGroup: defs[i].TargetGroup,
 			Needs:       needsFromDependsOn(defs[i].DependsOn, keyMap),
 			Spec:        defs[i].Spec,
+			Tags:        defs[i].Tags,
 		})
 	}
 	return &models.PipelineVersion{
@@ -4322,6 +4572,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		Params:          pipeline.Params,
 		Secrets:         pipeline.Secrets,
 		ConcurrencyKeys: pipeline.ConcurrencyKeys,
+		Tags:            pipeline.Tags,
 	}
 }
 
@@ -4422,6 +4673,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		Environment:         job.Environment,
 		Automation:          automationToProto(job.Automation),
 		Approval:            approvalPolicyToProto(job.Approval),
+		Tags:                job.Tags,
 	}
 	if job.ConcurrencyAdmittedAt != nil {
 		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)
@@ -4651,7 +4903,7 @@ func paramsToProto(in map[string]*models.ParamValue) map[string]*dbpb.ParamValue
 }
 
 func toProtoWorker(worker *models.Worker) *dbpb.Worker {
-	proto := &dbpb.Worker{Id: int64(worker.ID), Name: worker.Name, Group: worker.Group, Address: worker.Address, Environments: worker.Environments}
+	proto := &dbpb.Worker{Id: int64(worker.ID), Name: worker.Name, Group: worker.Group, Address: worker.Address, Environments: worker.Environments, Tags: worker.Tags}
 	if worker.LastSeenAt != nil {
 		proto.LastSeenAt = timestamppb.New(*worker.LastSeenAt)
 	}
@@ -4721,6 +4973,7 @@ func toProtoJobExecution(execution *models.JobExecution) *dbpb.JobExecution {
 		Status:      jobStatusToProto(execution.Status),
 		StepResults: stepResultsToProto(execution.StepResults),
 		Outputs:     execution.Outputs,
+		Tags:        execution.Tags,
 	}
 	if execution.StartedAt != nil {
 		proto.StartedAt = timestamppb.New(*execution.StartedAt)

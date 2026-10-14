@@ -116,7 +116,17 @@ election, cross-pod live logs, shared artifacts store) is in
 | F-25 | API keys | done | [F-25](features/f-25-api-keys.md) |
 | F-26 | Service accounts | planned | [F-26](features/f-26-service-accounts.md) |
 | F-27 | Approval groups (named approver sets) | planned | [F-27](features/f-27-approval-groups.md) |
-| F-28 | SCIM user provisioning (automatic user management from an external IdP) | planned | [F-28](features/f-28-scim-provisioning.md) |11. **F-14 → F-25 → F-26** — service accounts (non-human role-bound
+| F-28 | SCIM user provisioning (automatic user management from an external IdP) | planned | [F-28](features/f-28-scim-provisioning.md) |
+
+### Phase 7 — Organization & metadata
+
+First-class labeling and organization of the platform's resources.
+
+| ID | Feature | Status | Spec |
+|----|---------|--------|------|
+| F-29 | Tagging (key/value tags on pipelines, jobs, environments, worker groups, and workers; combined onto a job run when it is kicked off) | done | [F-29](features/f-29-tagging.md) |
+
+11. **F-14 → F-25 → F-26** — service accounts (non-human role-bound
     identities, two individually rotatable Database-generated keys,
     granular management permissions, disable/enable, and irreversible
     soft deletion with both key slots cleared). F-15 supplies audit history.
@@ -172,3 +182,4 @@ Tick each feature off as it lands.
 - [x] F-26 Service accounts
 - [ ] F-27 Approval groups (named approver sets)
 - [ ] F-28 SCIM user provisioning (external IdP; soft-delete only)
+- [x] F-29 Tagging (key/value tags on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

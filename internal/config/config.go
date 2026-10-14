@@ -75,6 +75,14 @@ type Config struct {
 	// to the live workers registered for it.
 	WorkerEnvironments []string
 
+	// WorkerTags are the worker's tags (F-29): a set of key/value pairs that
+	// label the worker. A worker declares them at registration (configurable,
+	// like its environments, F-17); a job dispatched to the worker merges them
+	// into the job's execution's tag set. They are set via the config file's
+	// worker_tags or the CDROM_WORKER_TAGS env var (a comma-separated list of
+	// key=value pairs).
+	WorkerTags map[string]string
+
 	// AgentJobID is the job an ephemeral agent was spawned to execute.
 	AgentJobID string
 
@@ -712,6 +720,7 @@ func LoadWithFile(file string) (*Config, error) {
 		WorkerName:         "worker-1",
 		WorkerGroup:        "default",
 		WorkerEnvironments: []string{},
+		WorkerTags:         map[string]string{},
 		AgentName:          defaultAgentName(),
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
@@ -788,19 +797,20 @@ func LoadWithFile(file string) (*Config, error) {
 // distinguish "absent" from "set" so a file only overrides the values it
 // actually contains.
 type fileConfig struct {
-	ListenAddress      *string   `yaml:"listen_address"`
-	DBAddress          *string   `yaml:"db_address"`
-	SchedulerAddress   *string   `yaml:"scheduler_address"`
-	ArtifactsAddress   *string   `yaml:"artifacts_address"`
-	APIAddress         *string   `yaml:"api_address"`
-	APIHTTPAddress     *string   `yaml:"api_http_address"`
-	ArtifactsRoot      *string   `yaml:"artifacts_root"`
-	ArtifactsStore     *string   `yaml:"artifacts_store"`
-	WorkerName         *string   `yaml:"worker_name"`
-	WorkerGroup        *string   `yaml:"worker_group"`
-	WorkerEnvironments *[]string `yaml:"worker_environments"`
-	AgentJobID         *string   `yaml:"agent_job_id"`
-	AgentName          *string   `yaml:"agent_name"`
+	ListenAddress      *string            `yaml:"listen_address"`
+	DBAddress          *string            `yaml:"db_address"`
+	SchedulerAddress   *string            `yaml:"scheduler_address"`
+	ArtifactsAddress   *string            `yaml:"artifacts_address"`
+	APIAddress         *string            `yaml:"api_address"`
+	APIHTTPAddress     *string            `yaml:"api_http_address"`
+	ArtifactsRoot      *string            `yaml:"artifacts_root"`
+	ArtifactsStore     *string            `yaml:"artifacts_store"`
+	WorkerName         *string            `yaml:"worker_name"`
+	WorkerGroup        *string            `yaml:"worker_group"`
+	WorkerEnvironments *[]string          `yaml:"worker_environments"`
+	WorkerTags         *map[string]string `yaml:"worker_tags"`
+	AgentJobID         *string            `yaml:"agent_job_id"`
+	AgentName          *string            `yaml:"agent_name"`
 	DB                 *struct {
 		Backend     *string `yaml:"backend"`
 		SQLitePath  *string `yaml:"sqlite_path"`
@@ -921,6 +931,9 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.WorkerEnvironments != nil {
 		cfg.WorkerEnvironments = *f.WorkerEnvironments
+	}
+	if f.WorkerTags != nil {
+		cfg.WorkerTags = *f.WorkerTags
 	}
 	if f.AgentJobID != nil {
 		cfg.AgentJobID = *f.AgentJobID
@@ -1170,6 +1183,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("CDROM_WORKER_ENVIRONMENTS"); v != "" {
 		cfg.WorkerEnvironments = splitAndTrim(v)
 	}
+	if v := os.Getenv("CDROM_WORKER_TAGS"); v != "" {
+		cfg.WorkerTags = parseTags(v)
+	}
 	cfg.AgentJobID = envOr("CDROM_AGENT_JOB_ID", cfg.AgentJobID)
 	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
 	cfg.DB.Backend = database.Backend(envOr("CDROM_DB_BACKEND", string(cfg.DB.Backend)))
@@ -1355,6 +1371,22 @@ func splitAndTrim(s string) []string {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}
+	}
+	return out
+}
+
+// parseTags parses a comma-separated list of "key=value" pairs (the
+// CDROM_WORKER_TAGS env var) into a key -> value map (F-29). Entries without
+// an "=" are treated as a key with an empty value.
+func parseTags(s string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(pair, "=")
+		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
 	return out
 }
