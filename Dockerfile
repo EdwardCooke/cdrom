@@ -37,7 +37,7 @@ FROM scratch AS artifacts
 COPY --from=build /src/bin/artifacts artifacts
 CMD ["/artifacts"]
 
-FROM scheduler AS scheduler
+FROM scratch AS scheduler
 COPY --from=build /src/bin/scheduler scheduler
 CMD ["/scheduler"]
 

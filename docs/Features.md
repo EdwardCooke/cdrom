@@ -124,7 +124,7 @@ First-class labeling and organization of the platform's resources.
 
 | ID | Feature | Status | Spec |
 |----|---------|--------|------|
-| F-29 | Tagging (key/value tags on pipelines, jobs, environments, worker groups, and workers; combined onto a job run when it is kicked off) | done | [F-29](features/f-29-tagging.md) |
+| F-29 | Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; the `tags` term is renamed to `labels` as part of F-21; combined onto a job run when it is kicked off) | done | [F-29](features/f-29-tagging.md) |
 
 11. **F-14 → F-25 → F-26** — service accounts (non-human role-bound
     identities, two individually rotatable Database-generated keys,
@@ -182,4 +182,4 @@ Tick each feature off as it lands.
 - [x] F-26 Service accounts
 - [ ] F-27 Approval groups (named approver sets)
 - [ ] F-28 SCIM user provisioning (external IdP; soft-delete only)
-- [x] F-29 Tagging (key/value tags on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)
+- [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

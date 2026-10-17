@@ -161,7 +161,7 @@ is the summary index). Summary:
 | F-26 | Roadmap: service accounts (role-assignable non-human identities; exactly two individually rotatable API keys generated and hashed by the Database service, returned once on create/rotate for UI display; disable/enable; permanent soft deletion with both key slots cleared; granular create/edit/rotate/disable/enable/delete/assign-role/remove-role management permissions; not yet implemented) |
 | F-27 | Roadmap: approval groups (named sets of users an `approval` step (F-13) references via an `approvers` param instead of individual users; a decision is accepted only from a member of a referenced group / named individual who also holds the F-14 approve/reject permission; membership resolved at decision time; optional role references and N-of-M quorum; not yet implemented) |
 | F-28 | Roadmap: SCIM 2.0 user provisioning (a service-provider endpoint on the built-in IdP so an external IdP like Azure AD/Entra ID provisions, updates, and deprovisions users and groups into the IdP's user directory; SCIM Groups map to F-14 roles / F-27 approval groups; **users are soft-deleted, never hard-deleted**, so audit (F-15) / approval (F-13) / trigger (F-07/F-09) actor references stay resolvable after deprovisioning; provisioning is mutually exclusive — with SCIM **enabled** the corporate IdP is the sole source of users (no auto-provisioning on login), with SCIM **disabled** the IdP auto-provisions users just-in-time on first OIDC login; not yet implemented) |
-| F-29 | Tagging (free-form **key/value tags** on pipelines, jobs in a pipeline, environments, worker groups, and workers; tags are stored **normalized in a `Tag` table** — one row per key/value pair, keyed by `owner_type` + `owner_id` + `key`, with a `(key, value)` index — so a resource can be searched/filtered by tag key and/or value; when a job is kicked off its run combines the tags of every resource in its context — pipeline + job + environment + worker group at run creation, plus the assigned worker's tags at dispatch — with the more specific source winning on a key collision (`worker > worker group > environment > job > pipeline`), and stores the result as a snapshot on the job run; worker groups become first-class, taggable rows managed via `GET/POST/PUT/DELETE /api/worker-groups[/{name}]` (gated on `worker-groups.can-view`/`can-manage`); environment tags via the existing environment endpoints, pipeline/job tags via the pipeline body, and worker tags declared at registration via `CDROM_WORKER_TAGS`) |
+| F-29 | Labeling (free-form **key/value labels** on pipelines, jobs in a pipeline, environments, worker groups, and workers; the `tags` term is renamed to `labels` as part of F-21. Labels are stored **normalized in a `Label` table** — one row per key/value pair, keyed by `owner_type` + `owner_id` + `key`, with a `(key, value)` index — so a resource can be searched/filtered by label key and/or value; when a job is kicked off its run combines the labels of every resource in its context — pipeline + job + environment + worker group at run creation, plus the assigned worker's labels at dispatch — with the more specific source winning on a key collision (`worker > worker group > environment > job > pipeline`), and stores the result as a snapshot on the job run; worker groups become first-class, labelable rows managed via `GET/POST/PUT/DELETE /api/worker-groups[/{name}]` (gated on `worker-groups.can-view`/`can-manage`); environment labels via the existing environment endpoints, pipeline/job labels via the pipeline body, and worker labels declared at registration via `CDROM_WORKER_LABELS`) |
 
 Cross-cutting execution concepts (full detail in `docs/features/` /
 `docs/Architecture.md`):
@@ -250,23 +250,24 @@ Cross-cutting execution concepts (full detail in `docs/features/` /
   and managed via `GET/POST/PUT/DELETE /api/environments[/{name}]` (gated on
   `environments.can-view`/`can-manage`); a change publishes an `environment` WS
   event.
-- **Tagging (F-29).** Free-form **key/value tags** label pipelines, jobs in a
-  pipeline, environments, worker groups, and workers. They are stored
-  **normalized in a `Tag` table** (one row per key/value pair, keyed by
-  `owner_type` + `owner_id` + `key`, with a `(key, value)` index) — not a JSON
-  column — so a resource can be searched/filtered by tag key and/or value. The
-  parent's in-memory `Tags` map (`gorm:"-"`) is populated from the `Tag` table
-  on load and written back on save by the Database service. When a job is
-  kicked off its run combines the tags of every resource in its context —
-  pipeline + job + environment + worker group at run creation, plus the
-  assigned worker's tags at dispatch — with the more specific source winning on
-  a key collision (`worker > worker group > environment > job > pipeline`), and
-  stores the result as a snapshot on the job run (relabeling a resource later
-  does not change a past run's tags). Worker groups are first-class, taggable
-  rows managed via `GET/POST/PUT/DELETE /api/worker-groups[/{name}]` (gated on
-  `worker-groups.can-view`/`can-manage`); environment tags via the existing
-  environment endpoints, pipeline/job tags via the pipeline body, and worker
-  tags declared at registration via `CDROM_WORKER_TAGS`.
+- **Labeling (F-29).** Free-form **key/value labels** label pipelines, jobs in
+  a pipeline, environments, worker groups, and workers (the `tags` term is
+  renamed to `labels` as part of F-21). They are stored **normalized in a
+  `Label` table** (one row per key/value pair, keyed by `owner_type` +
+  `owner_id` + `key`, with a `(key, value)` index) — not a JSON column — so a
+  resource can be searched/filtered by label key and/or value. The parent's
+  in-memory `Labels` map (`gorm:"-"`) is populated from the `Label` table on
+  load and written back on save by the Database service. When a job is kicked
+  off its run combines the labels of every resource in its context — pipeline +
+  job + environment + worker group at run creation, plus the assigned worker's
+  labels at dispatch — with the more specific source winning on a key collision
+  (`worker > worker group > environment > job > pipeline`), and stores the
+  result as a snapshot on the job run (relabeling a resource later does not
+  change a past run's labels). Worker groups are first-class, labelable rows
+  managed via `GET/POST/PUT/DELETE /api/worker-groups[/{name}]` (gated on
+  `worker-groups.can-view`/`can-manage`); environment labels via the existing
+  environment endpoints, pipeline/job labels via the pipeline body, and worker
+  labels declared at registration via `CDROM_WORKER_LABELS`.
 
 ### Logging
 
