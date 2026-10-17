@@ -44,7 +44,11 @@ variable is **masked** when its value is not a plain string — an `encrypted`
 variable is referenced exactly like any other variable
 (`{{ .params.<name> }}`). A variable set can import a vault's values with
 `import: [{vault: <name>}]`. A job names the environment it targets and the
-worker group it runs on (`workerGroup`, defaulting to `spec.workerGroup`).
+worker group it runs on (`workerGroup`, defaulting to `spec.workerGroup`). A
+pipeline can also declare the packages it consumes in `spec.artifacts` — a list
+of named artifact references (a `name` plus a `package` block with a `tag`,
+`useLatest`, and pre-release options) that the platform resolves to a concrete
+version and fetches into the artifacts store for the run.
 
 **Why.** Teams want pipeline definitions in version control, reviewable via PR.
 A single source of truth (a git repo, an endpoint, or a mounted file) means the
@@ -179,6 +183,13 @@ and source credentials out of the API and scheduler.
 - [ ] Standard deployment options in the file (timeout, retry, failure mode,
       concurrency keys, environment, automation, approval, needs, triggers,
       params, labels) map onto the database schema.
+- [ ] A pipeline can declare `spec.artifacts` — a list of named package
+      references (a `name` plus a `package` block with `name`, `tag`,
+      `preReleaseRegex`, `allowPreRelease`, and `useLatest`); the platform
+      resolves each to a concrete version (latest by date, a pinned `tag`, or
+      the latest pre-release per `allowPreRelease` / `preReleaseRegex`) and
+      fetches the package into the artifacts store for the run, exposing it to
+      the job by the artifact's `name`.
 - [ ] Named, referencable resources are declared in a consistent `spec` section
       and referenced by name — `secretSources` (F-12), and the same pattern for
       variable sets, steps, and jobs.
@@ -233,13 +244,14 @@ A `Pipeline` document's `spec` has these fields (all optional except `jobs`):
 | `concurrencyKeys` | Pipeline-level concurrency keys (F-16, templatable) | — |
 | `params` | Pipeline-level parameters (F-10) | `{{ .params.<name> }}` |
 | `triggers` | Pipeline-level triggers (F-09) | — |
+| `artifacts` | A list of named artifact (package) references the pipeline consumes (see [Artifacts (package references)](#artifacts-package-references)) | a step's params / env (by the artifact's `name`) |
 
 The same "declare a named thing in a section, reference it by name everywhere
 else" shape is used for every kind of reusable resource. `steps` is the
 canonical example; `variableSets`, `secretSources`, and `jobs` follow it.
-Pipeline-level config (`failureMode`, `concurrencyKeys`, `params`, `triggers`)
-lives in the `spec` alongside the jobs, and the pipeline's default worker group
-is a `spec.workerGroup`. Mapping keys are camelCase.
+Pipeline-level config (`failureMode`, `concurrencyKeys`, `params`, `triggers`,
+`artifacts`) lives in the `spec` alongside the jobs, and the pipeline's default
+worker group is a `spec.workerGroup`. Mapping keys are camelCase.
 
 **The source is not in the file.** Where a pipeline is pulled from (a `git` /
 `http` / `filesystem` source, its schedule, and its credential) is a **database**
@@ -249,6 +261,49 @@ YAML. The file is purely the definition; the source is configured through the
 API and stored in the database. This keeps the file portable: the same file can
 be checked into git, served over HTTP, or mounted on the filesystem, and the
 source that fetches it is a deployment concern, not a definition concern.
+
+### Artifacts (package references)
+
+A pipeline can declare the packages it consumes in `spec.artifacts` — a list of
+named artifact references. Each entry gives the artifact a `name` (how the
+pipeline references it, e.g. in a step's params or env) and a `package` block
+describing which package to fetch and how its version is resolved:
+
+```yaml
+spec:
+  artifacts:
+    - name: xyz # the name of the artifact to reference in the pipeline
+      package:
+        name: somecoolapi # the name of the package itself; if not set, use the name of the artifact
+        tag: 6.6.6 # the version part of the package; not used if useLatest is true
+        preReleaseRegex: "" # the regex to apply to the pre-release tag (after the - in the version); not used if allowPreRelease is false
+        allowPreRelease: false # if true, and preReleaseRegex is not set or empty, use the latest pre-release by date
+        useLatest: true # if true, use the latest package version by date
+```
+
+**Version resolution.** How the platform picks the package's version:
+
+- **`useLatest: true`** — use the latest version of the package by date; `tag`
+  is ignored.
+- **`useLatest` false (or unset)** — `tag` names the exact version to use.
+- **Pre-releases.** A version whose tag carries a `-` suffix (e.g.
+  `6.6.6-rc.1`) is a pre-release and is not selected by default. Setting
+  `allowPreRelease: true` opts in to pre-releases: if `preReleaseRegex` is also
+  set, only pre-release tags matching that regex are eligible; if
+  `preReleaseRegex` is empty, the latest pre-release by date is eligible.
+  `preReleaseRegex` has no effect when `allowPreRelease` is false.
+
+**Tie-in with the artifacts service.** The artifacts service (`cmd/artifacts`)
+is a namespaced file store. When a run of a pipeline that declares
+`spec.artifacts` is created, the platform resolves each reference to a concrete
+package version and fetches the package into the artifacts store under the
+run's namespace, so the job can consume it. The resolved version is recorded on
+the run (a per-run snapshot, like the rest of the spec, F-01/F-11), so a run
+always uses the version that was resolved when it started — re-resolving on a
+later run can pick up a newer version without changing what a past run did. A
+step references the artifact by its `name` (in its params or env); the platform
+makes the resolved package available to the job (e.g. as a file in the job's
+workdir, or as a variable pointing at the stored artifact).
 
 ### A complete example
 
@@ -507,6 +562,17 @@ spec:
     - name: nightly
       type: cron
       cron: "0 2 * * *"
+
+  # Named artifact (package) references the pipeline consumes (see "Artifacts
+  # (package references)"). Each names a package to fetch into the artifacts
+  # store for the run; a step references it by `name`.
+  artifacts:
+    - name: somecoolapi
+      package:
+        useLatest: true          # fetch the latest version by date
+    - name: webapp-lib
+      package:
+        tag: 2.3.0               # pin an exact version
 ```
 
 ### The referenced files (variable set, step, job)
@@ -651,6 +717,7 @@ mapping is:
 | `spec.concurrencyKeys` | `Pipeline.ConcurrencyKeys` (F-16, templatable) |
 | `spec.params` | `Pipeline.Params` (F-10) |
 | `spec.triggers` | `Pipeline.Triggers` (F-09) |
+| `spec.artifacts` | a list of named artifact (package) references; the platform resolves each to a concrete version and fetches it into the artifacts store for the run (see "Artifacts (package references)") |
 | `spec.jobs.<name>` | `Job.Key` (the name is the key, F-08) |
 | `spec.jobs.<name>.needs` (optional) | `Job` `needs` → `DependsOn` (F-08); empty means no dependencies |
 | `spec.jobs.<name>.environment` | `Job.Environment` (F-17) |
@@ -1252,7 +1319,9 @@ itself.
   `metadata` / `spec`, with `metadata.labels` and `metadata.annotations`),
   camelCase mapping keys, a `spec.workerGroup` (the default group a job's
   `workerGroup` overrides), a `spec.secretSources` section (renamed from
-  `secretVaults`), masked variables (`{encrypted}` / `{secretSource, key}`
+  `secretVaults`), a `spec.artifacts` list (named package references, resolved
+  to a concrete version and fetched into the artifacts store for a run), masked
+  variables (`{encrypted}` / `{secretSource, key}`
   values, F-12, referenced like any other variable), vault imports in variable
   sets (`import: [{vault}]` / `[{vault, keys}]`), `importFrom` on a step, a
   job's `steps`, or a whole job,
