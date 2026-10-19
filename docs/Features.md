@@ -94,7 +94,21 @@ tool.
 | F-18 | Notifications | done | [F-18](features/f-18-notifications.md) |
 | F-19 | Artifact promotion | planned | [F-19](features/f-19-artifact-promotion.md) |
 | F-20 | Observability & metrics | planned | [F-20](features/f-20-observability.md) |
-| F-21 | Config as code | planned | [F-21](features/f-21-config-as-code.md) |
+| F-21 | Config as code (overview + file-format reference; decomposed into F-21.1…F-21.7) | planned | [F-21](features/f-21-config-as-code.md) |
+| F-21.1 | File format & compiler (overview + file-format reference; decomposed into F-21.1.1…F-21.1.4) | planned | [F-21.1](features/f-21.1-file-format-compiler.md) |
+| F-21.1.1 | Manifest envelope & compiler skeleton (`apiVersion`/`kind`/`metadata`/`spec`, `kind` dispatch, key-order parsing) | planned | [F-21.1.1](features/f-21.1.1-manifest-envelope.md) |
+| F-21.1.2 | Step spec shape & name-based step referencing (handler-type key, `shell` string shorthand, `ref`, name → ordinal) | planned | [F-21.1.2](features/f-21.1.2-step-spec.md) |
+| F-21.1.3 | Variables, masked variables & secret sources (plain/`encrypted`/`secretSource`+`key`, `variableSets`, `secretSources`) | planned | [F-21.1.3](features/f-21.1.3-variables-secrets.md) |
+| F-21.1.4 | Jobs, deployment options & import/export API (`spec.jobs` mapping + import/export round-trip) | planned | [F-21.1.4](features/f-21.1.4-jobs-import-export.md) |
+| F-21.2 | Source-fetcher service (standalone gRPC fetcher: git / HTTP / filesystem) | planned | [F-21.2](features/f-21.2-source-fetcher.md) |
+| F-21.3 | Source credentials (DB-stored, regex-matched, F-12-encrypted) | planned | [F-21.3](features/f-21.3-source-credentials.md) |
+| F-21.4 | Reusable units & cross-file imports (`importFrom` / `import` / `ref`) | planned | [F-21.4](features/f-21.4-reusable-units-imports.md) |
+| F-21.5 | Externally-sourced pipelines (overview + source-model reference; decomposed into F-21.5.1…F-21.5.3) | planned | [F-21.5](features/f-21.5-externally-sourced-pipelines.md) |
+| F-21.5.1 | Source model & storage (`PipelineSource`/`State`, stored YAML+hash, source CRUD, `GET …/source`) | planned | [F-21.5.1](features/f-21.5.1-source-model-storage.md) |
+| F-21.5.2 | The sync routine (fetch → hash → compare → recompile if changed; credential selection; serialization) | planned | [F-21.5.2](features/f-21.5.2-sync-routine.md) |
+| F-21.5.3 | Refresh triggers (scheduled loop, refresh-on-run, manual refresh) | planned | [F-21.5.3](features/f-21.5.3-refresh-triggers.md) |
+| F-21.6 | Artifact package references (`spec.artifacts` version resolution + fetch) | planned | [F-21.6](features/f-21.6-artifact-package-references.md) |
+| F-21.7 | `tags` → `labels` rename (+ `metadata.annotations`) | planned | [F-21.7](features/f-21.7-tags-to-labels-rename.md) |
 | F-22 | Post-deploy verification & rollback | planned | [F-22](features/f-22-verification-rollback.md) |
 
 ### Phase 5 — High availability
@@ -174,7 +188,21 @@ Tick each feature off as it lands.
 - [x] F-18 Notifications
 - [ ] F-19 Artifact promotion
 - [ ] F-20 Observability & metrics
-- [ ] F-21 Config as code
+- [ ] F-21 Config as code (overview; see F-21.1…F-21.7)
+- [ ] F-21.1 File format & compiler (overview; see F-21.1.1…F-21.1.4)
+- [ ] F-21.1.1 Manifest envelope & compiler skeleton
+- [ ] F-21.1.2 Step spec shape & name-based step referencing
+- [ ] F-21.1.3 Variables, masked variables & secret sources
+- [ ] F-21.1.4 Jobs, deployment options & import/export API
+- [ ] F-21.2 Source-fetcher service
+- [ ] F-21.3 Source credentials
+- [ ] F-21.4 Reusable units & cross-file imports
+- [ ] F-21.5 Externally-sourced pipelines (overview; see F-21.5.1…F-21.5.3)
+- [ ] F-21.5.1 Source model & storage
+- [ ] F-21.5.2 The sync routine
+- [ ] F-21.5.3 Refresh triggers
+- [ ] F-21.6 Artifact package references
+- [ ] F-21.7 `tags` → `labels` rename
 - [ ] F-22 Post-deploy verification & rollback
 - [x] F-23 High-availability control plane
 - [x] F-24 Username/password authentication

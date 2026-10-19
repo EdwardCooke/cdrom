@@ -4,6 +4,34 @@
 > Phase 4 — Delivery & observability · [Feature index](../Features.md)
 
 
+## Sub-features
+
+F-21 is large, so it is decomposed into independently-buildable sub-features,
+each with its own spec file. This file is the **overview** and the shared
+file-format reference; the sub-features below hold the detailed scope,
+acceptance criteria, and design decisions for each piece.
+
+| Sub-feature | Spec | Scope | Depends on |
+|-------------|------|-------|------------|
+| **F-21.1** File format & compiler | [f-21.1](f-21.1-file-format-compiler.md) | The Kubernetes-style file format + the `internal/pipelinefile` compiler (name-based referencing, step spec shape, masked variables, deployment options) + import/export API — the single-file core | — |
+| **F-21.2** Source-fetcher service | [f-21.2](f-21.2-source-fetcher.md) | The standalone source-fetcher gRPC service (git / HTTP / filesystem) + protos | — |
+| **F-21.3** Source credentials | [f-21.3](f-21.3-source-credentials.md) | `SourceCredential` model (DB-stored, regex-matched, F-12-encrypted) + API CRUD | F-12 |
+| **F-21.4** Reusable units & imports | [f-21.4](f-21.4-reusable-units-imports.md) | Cross-file imports (`importFrom` / `import` / `ref`), the `Step`/`VariableSet`/`Job` file kinds, step reuse across environments | 21.1, 21.2 |
+| **F-21.5** Externally-sourced pipelines | [f-21.5](f-21.5-externally-sourced-pipelines.md) | `PipelineSource`/`State` models, stored YAML+hash, the sync routine + 3 refresh triggers, source API | 21.1, 21.2, 21.3 |
+| **F-21.6** Artifact package references | [f-21.6](f-21.6-artifact-package-references.md) | `spec.artifacts` version resolution + fetch-into-store for a run (per-run snapshot) | 21.1 |
+| **F-21.7** `tags` → `labels` rename | [f-21.7](f-21.7-tags-to-labels-rename.md) | The `tags`→`labels` rename (F-29 concept) + `metadata.annotations` | — |
+
+**Suggested build order:** F-21.1 → (F-21.2 ∥ F-21.3) → F-21.4 → F-21.5;
+F-21.6 and F-21.7 are independent and can be done in parallel.
+
+Two of the sub-features are themselves large and are further decomposed (see
+their own spec files for the sub-sub-feature index): **F-21.1** into
+F-21.1.1…F-21.1.4 (manifest envelope, step spec, variables/secrets, jobs +
+import/export) and **F-21.5** into F-21.5.1…F-21.5.3 (source model, sync
+routine, refresh triggers).
+
+---
+
 **What.** Define pipelines (jobs, steps, deps, triggers, params) in a
 declarative file format (YAML) that can be imported/exported and checked into
 source control. The UI editor and the file format are two views of the same
