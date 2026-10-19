@@ -2027,14 +2027,14 @@ func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepC
 	completion := &models.StepCompletion{
 		JobID:      uint(req.GetJobId()),
 		WorkerName: req.GetWorkerName(),
-		StepIndex:  int(req.GetStepIndex()),
+		StepName:   req.GetStepName(),
 		Attempt:    job.Attempt,
 	}
 	// Upsert on the composite key: insert the row if it is absent, otherwise
 	// refresh its timestamp (the completion is idempotent).
 	if err := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
-			{Name: "job_id"}, {Name: "worker_name"}, {Name: "step_index"}, {Name: "attempt"},
+			{Name: "job_id"}, {Name: "worker_name"}, {Name: "step_name"}, {Name: "attempt"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{"updated_at"}),
 	}).Create(completion).Error; err != nil {
@@ -2094,8 +2094,8 @@ func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrie
 	// Collect the set of workers that have completed this step for the job's
 	// current attempt.
 	var completions []models.StepCompletion
-	if err := db.Where("job_id = ? AND step_index = ? AND attempt = ?",
-		job.ID, int(req.GetStepIndex()), job.Attempt).Find(&completions).Error; err != nil {
+	if err := db.Where("job_id = ? AND step_name = ? AND attempt = ?",
+		job.ID, req.GetStepName(), job.Attempt).Find(&completions).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	completed := make(map[string]bool, len(completions))
@@ -3656,12 +3656,12 @@ func (s *Server) NextSecretNonce(ctx context.Context, _ *dbpb.NextSecretNonceReq
 
 // ClaimStepOnce atomically claims the "run this step" slot for a step of a job
 // that fans out to a worker group (F-01): the first target to claim
-// (job id + step index + attempt) wins and runs the step; every other target
+// (job id + step name + attempt) wins and runs the step; every other target
 // that reaches the same step in the same attempt sees the slot already claimed
 // and skips the step. A retry (F-04) is a new attempt, so it may claim again.
 //
 // The claim is a single atomic `FirstOrCreate` on the unique (job_id,
-// step_index, attempt) index: at most one concurrent caller can create the row,
+// step_name, attempt) index: at most one concurrent caller can create the row,
 // so the dedup is correct across every API replica and worker process. The
 // created flag (RowsAffected == 1) reports whether this call won the claim.
 func (s *Server) ClaimStepOnce(ctx context.Context, req *dbpb.ClaimStepOnceRequest) (*dbpb.ClaimStepOnceResponse, error) {
@@ -3670,9 +3670,9 @@ func (s *Server) ClaimStepOnce(ctx context.Context, req *dbpb.ClaimStepOnceReque
 	}
 	resp := &dbpb.ClaimStepOnceResponse{}
 	claim := &models.StepOnceClaim{
-		JobID:     uint(req.GetJobId()),
-		StepIndex: int(req.GetStepIndex()),
-		Attempt:   int(req.GetAttempt()),
+		JobID:    uint(req.GetJobId()),
+		StepName: req.GetStepName(),
+		Attempt:  int(req.GetAttempt()),
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// FirstOrCreate is atomic against the unique index: the first caller
@@ -3680,9 +3680,9 @@ func (s *Server) ClaimStepOnce(ctx context.Context, req *dbpb.ClaimStepOnceReque
 		// caller in the same attempt finds it already created (RowsAffected
 		// == 0, it lost and should skip the step).
 		result := tx.Where(&models.StepOnceClaim{
-			JobID:     claim.JobID,
-			StepIndex: claim.StepIndex,
-			Attempt:   claim.Attempt,
+			JobID:    claim.JobID,
+			StepName: claim.StepName,
+			Attempt:  claim.Attempt,
 		}).FirstOrCreate(claim)
 		if result.Error != nil {
 			return result.Error
@@ -3847,11 +3847,11 @@ func (s *Server) PublishLogUpdated(ctx context.Context, req *dbpb.PublishLogUpda
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
 	id, err := s.appendEvent(ctx, "job_log_updated", "", "", map[string]any{
-		"job_id":     req.GetJobId(),
-		"log":        req.GetLog(),
-		"step_index": req.GetStepIndex(),
-		"stream":     req.GetStream(),
-		"size":       req.GetSize(),
+		"job_id":    req.GetJobId(),
+		"log":       req.GetLog(),
+		"step_name": req.GetStepName(),
+		"stream":    req.GetStream(),
+		"size":      req.GetSize(),
 	})
 	if err != nil {
 		return nil, err
@@ -4757,7 +4757,7 @@ func stepResultsFromProto(results []*dbpb.StepResult) []models.StepResult {
 	out := make([]models.StepResult, len(results))
 	for i, r := range results {
 		out[i] = models.StepResult{
-			Index:   int(r.GetIndex()),
+			Name:    r.GetName(),
 			Status:  stepStatusFromProto(r.GetStatus()),
 			Error:   r.GetError(),
 			Outputs: r.GetOutputs(),
@@ -4775,7 +4775,7 @@ func stepResultsToProto(results []models.StepResult) []*dbpb.StepResult {
 	out := make([]*dbpb.StepResult, len(results))
 	for i, r := range results {
 		out[i] = &dbpb.StepResult{
-			Index:   int32(r.Index),
+			Name:    r.Name,
 			Status:  stepStatusToProto(r.Status),
 			Error:   r.Error,
 			Outputs: r.Outputs,

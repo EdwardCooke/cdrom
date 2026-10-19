@@ -657,7 +657,7 @@ snapshot (jobs + workers + runs); afterwards it receives one message per
 event. Event types are `job_status` (job id + status — including `skipped`,
 F-06, and `awaiting_proceed`, F-17 — plus `attempt` / `max_attempts` for
 F-04), `worker` (name/group + action `registered` / `deregistered` /
-`watching`), `job_log` (job id + step index + stream `stdout`/`stderr` + a
+`watching`), `job_log` (job id + step name + stream `stdout`/`stderr` + a
 chunk of output, F-02), `run_status` (run id + status, F-07), and
 `environment` (an environment was created / updated / deleted, F-17). Events
 are published from the gRPC server (worker lifecycle, job status reports,

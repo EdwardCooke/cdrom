@@ -1422,9 +1422,9 @@ func TestUpdateJobStepResultsRoundTrip(t *testing.T) {
 		t.Fatalf("CreateJob: %v", err)
 	}
 	results := []*dbpb.StepResult{
-		{Index: 0, Status: dbpb.StepStatus_STEP_STATUS_SUCCEEDED},
-		{Index: 1, Status: dbpb.StepStatus_STEP_STATUS_SKIPPED},
-		{Index: 2, Status: dbpb.StepStatus_STEP_STATUS_FAILED, Error: "boom"},
+		{Name: "step0", Status: dbpb.StepStatus_STEP_STATUS_SUCCEEDED},
+		{Name: "step1", Status: dbpb.StepStatus_STEP_STATUS_SKIPPED},
+		{Name: "step2", Status: dbpb.StepStatus_STEP_STATUS_FAILED, Error: "boom"},
 	}
 	updated, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{
 		Id:          job.GetId(),
@@ -2229,20 +2229,20 @@ func registerWorker(t *testing.T, client dbpb.DatabaseClient, ctx context.Contex
 }
 
 // reportStepCompletion reports that a worker completed a step of a job.
-func reportStepCompletion(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, worker string, step int32) {
+func reportStepCompletion(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, worker, stepName string) {
 	t.Helper()
-	if _, err := client.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{JobId: jobID, WorkerName: worker, StepIndex: step}); err != nil {
-		t.Fatalf("ReportStepCompletion(%s, step %d): %v", worker, step, err)
+	if _, err := client.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{JobId: jobID, WorkerName: worker, StepName: stepName}); err != nil {
+		t.Fatalf("ReportStepCompletion(%s, step %s): %v", worker, stepName, err)
 	}
 }
 
 // checkStepBarrier checks the barrier for a job's step and returns the
 // response.
-func checkStepBarrier(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, step int32) *dbpb.CheckStepBarrierResponse {
+func checkStepBarrier(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, stepName string) *dbpb.CheckStepBarrierResponse {
 	t.Helper()
-	resp, err := client.CheckStepBarrier(ctx, &dbpb.CheckStepBarrierRequest{JobId: jobID, StepIndex: step})
+	resp, err := client.CheckStepBarrier(ctx, &dbpb.CheckStepBarrierRequest{JobId: jobID, StepName: stepName})
 	if err != nil {
-		t.Fatalf("CheckStepBarrier(step %d): %v", step, err)
+		t.Fatalf("CheckStepBarrier(step %s): %v", stepName, err)
 	}
 	return resp
 }
@@ -2289,20 +2289,20 @@ func TestCheckStepBarrierSatisfied(t *testing.T) {
 	registerWorker(t, client, ctx, "w2", "pool-a")
 
 	// Neither worker has completed the step yet: not satisfied.
-	if resp := checkStepBarrier(t, client, ctx, job.GetId(), 0); resp.GetSatisfied() || resp.GetCancelled() {
+	if resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0"); resp.GetSatisfied() || resp.GetCancelled() {
 		t.Fatalf("before completions: satisfied=%v cancelled=%v, want both false", resp.GetSatisfied(), resp.GetCancelled())
 	}
 
 	// One worker completes: still not satisfied (the other is alive and
 	// outstanding).
-	reportStepCompletion(t, client, ctx, job.GetId(), "w1", 0)
-	if resp := checkStepBarrier(t, client, ctx, job.GetId(), 0); resp.GetSatisfied() {
+	reportStepCompletion(t, client, ctx, job.GetId(), "w1", "step0")
+	if resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0"); resp.GetSatisfied() {
 		t.Fatalf("after one completion: satisfied=true, want false")
 	}
 
 	// Both workers complete: satisfied.
-	reportStepCompletion(t, client, ctx, job.GetId(), "w2", 0)
-	if resp := checkStepBarrier(t, client, ctx, job.GetId(), 0); !resp.GetSatisfied() {
+	reportStepCompletion(t, client, ctx, job.GetId(), "w2", "step0")
+	if resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0"); !resp.GetSatisfied() {
 		t.Fatalf("after both completions: satisfied=false, want true")
 	}
 }
@@ -2319,7 +2319,7 @@ func TestCheckStepBarrierCancelled(t *testing.T) {
 	if _, err := client.CancelJob(ctx, &dbpb.CancelJobRequest{Id: job.GetId()}); err != nil {
 		t.Fatalf("CancelJob: %v", err)
 	}
-	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0")
 	if !resp.GetCancelled() {
 		t.Errorf("cancelled job: cancelled=false, want true")
 	}
@@ -2341,7 +2341,7 @@ func TestCheckStepBarrierAgentJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
-	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0")
 	if !resp.GetSatisfied() {
 		t.Errorf("agent job: satisfied=false, want true (no barrier)")
 	}
@@ -2370,7 +2370,7 @@ func TestCheckStepBarrierDeadWorkerDropped(t *testing.T) {
 	registerWorker(t, client, ctx, "w2", "pool-a")
 
 	// w1 completes the step. w2 does not (it will be made dead below).
-	reportStepCompletion(t, client, ctx, job.GetId(), "w1", 0)
+	reportStepCompletion(t, client, ctx, job.GetId(), "w1", "step0")
 
 	// Let both workers go stale, then refresh only w1: w1 is now alive and w2
 	// is dead.
@@ -2379,7 +2379,7 @@ func TestCheckStepBarrierDeadWorkerDropped(t *testing.T) {
 
 	// The barrier is satisfied: w1 (alive) has completed the step, and w2
 	// (dead) is dropped from the barrier.
-	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0")
 	if !resp.GetSatisfied() {
 		t.Errorf("dead worker dropped: satisfied=false, want true (w2 is dead and dropped)")
 	}
@@ -2400,8 +2400,8 @@ func TestCheckStepBarrierMissingAliveWorkerBlocks(t *testing.T) {
 
 	// Only w1 completes; w2 is alive and outstanding, so the barrier is not
 	// satisfied.
-	reportStepCompletion(t, client, ctx, job.GetId(), "w1", 0)
-	resp := checkStepBarrier(t, client, ctx, job.GetId(), 0)
+	reportStepCompletion(t, client, ctx, job.GetId(), "w1", "step0")
+	resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0")
 	if resp.GetSatisfied() {
 		t.Errorf("alive worker outstanding: satisfied=true, want false")
 	}

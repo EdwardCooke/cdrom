@@ -104,7 +104,7 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 	cmd.Env = mergeEnv(os.Environ(), step.GetEnv())
 
 	sink := executor.LogSinkFromContext(ctx)
-	stepIndex := executor.StepIndexFromContext(ctx)
+	stepName := executor.StepNameFromContext(ctx)
 
 	// When a sink is present, capture the command's output into pipes and tee
 	// it to both the target's local streams and the sink. Otherwise inherit
@@ -120,12 +120,12 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		if err != nil {
 			return fmt.Errorf("%q: stderr pipe: %w", command, err)
 		}
-		sink.WriteStepOutput(stepIndex, "stdout", []byte("command: "+command))
+		sink.WriteStepOutput(stepName, "stdout", []byte("command: "+command))
 		for _, arg := range args {
-			sink.WriteStepOutput(stepIndex, "stdout", []byte("arg: "+arg))
+			sink.WriteStepOutput(stepName, "stdout", []byte("arg: "+arg))
 		}
-		sink.WriteStepOutput(stepIndex, "stdout", []byte("shell: "+paramString(step, ParamShell)))
-		sink.WriteStepOutput(stepIndex, "stdout", []byte("workdir: "+step.GetWorkdir()))
+		sink.WriteStepOutput(stepName, "stdout", []byte("shell: "+paramString(step, ParamShell)))
+		sink.WriteStepOutput(stepName, "stdout", []byte("workdir: "+step.GetWorkdir()))
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -141,11 +141,11 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			sendToLogs(stdout, sink, stepIndex, executor.StreamStdout)
+			sendToLogs(stdout, sink, stepName, executor.StreamStdout)
 		}()
 		go func() {
 			defer wg.Done()
-			sendToLogs(stderr, sink, stepIndex, executor.StreamStderr)
+			sendToLogs(stderr, sink, stepName, executor.StreamStderr)
 		}()
 	}
 
@@ -178,17 +178,17 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 }
 
 // sendToLogs copies from src to both local (the target's own stream) and to
-// sink (attributed to stepIndex/stream). It runs until src is exhausted (the
+// sink (attributed to stepName/stream). It runs until src is exhausted (the
 // command's pipe closes). Writes to the sink are best-effort: the sink drops
 // output it cannot keep up with, so this never blocks the command.
-func sendToLogs(src io.Reader, sink executor.LogSink, stepIndex int, stream string) {
+func sendToLogs(src io.Reader, sink executor.LogSink, stepName string, stream string) {
 	buffer := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buffer)
 		if n > 0 {
 			data := buffer[:n]
 			// Stream to the API (best-effort, non-blocking).
-			sink.WriteStepOutput(stepIndex, stream, data)
+			sink.WriteStepOutput(stepName, stream, data)
 		}
 		if err != nil {
 			return

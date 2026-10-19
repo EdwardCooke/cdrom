@@ -446,7 +446,7 @@ func (x *DeleteArtifactRequest) GetName() string {
 }
 
 // DownloadLogRequest addresses a log file. name is the log file name (e.g.
-// "step-0.log" for a step's output, or "job.log" for the combined output of
+// "<step-name>.log" for a step's output, or "job.log" for the combined output of
 // the whole job).
 type DownloadLogRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`

@@ -120,7 +120,7 @@ type APIClient interface {
 	// StreamJobLogs is a client stream: an execution target (worker or agent)
 	// opens it at the start of a job and sends a JobLogChunk for each chunk of
 	// step output (stdout/stderr). The first chunk of each step carries
-	// metadata (job_id, step_index, stream); subsequent chunks carry data. The
+	// metadata (job_id, step_name, stream); subsequent chunks carry data. The
 	// API persists the output to the artifacts service (one file per step plus
 	// a combined job.log) and fans it out to the UI over the WebSocket event
 	// hub as a job_log event. When job-token auth is enabled the caller must
@@ -171,7 +171,7 @@ type APIClient interface {
 	SendWebhook(ctx context.Context, in *SendWebhookRequest, opts ...grpc.CallOption) (*SendWebhookResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
 	// step of a job that fans out to a worker group: the first target to claim
-	// (job id + step index + attempt) wins and runs the step; every other target
+	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. The API proxies the claim to the Database
 	// service (which holds the durable slot), so the dedup is correct across
@@ -534,7 +534,7 @@ type APIServer interface {
 	// StreamJobLogs is a client stream: an execution target (worker or agent)
 	// opens it at the start of a job and sends a JobLogChunk for each chunk of
 	// step output (stdout/stderr). The first chunk of each step carries
-	// metadata (job_id, step_index, stream); subsequent chunks carry data. The
+	// metadata (job_id, step_name, stream); subsequent chunks carry data. The
 	// API persists the output to the artifacts service (one file per step plus
 	// a combined job.log) and fans it out to the UI over the WebSocket event
 	// hub as a job_log event. When job-token auth is enabled the caller must
@@ -585,7 +585,7 @@ type APIServer interface {
 	SendWebhook(context.Context, *SendWebhookRequest) (*SendWebhookResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
 	// step of a job that fans out to a worker group: the first target to claim
-	// (job id + step index + attempt) wins and runs the step; every other target
+	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. The API proxies the claim to the Database
 	// service (which holds the durable slot), so the dedup is correct across

@@ -83,7 +83,7 @@ func runTokenExchangeStep(ctx context.Context, step *dbpb.JobStep, logger *slog.
 		return fmt.Errorf("exchange token for audience %q: %w", audience, err)
 	}
 	if sink != nil {
-		sink.WriteStepOutput(executor.StepIndexFromContext(ctx), "stdout", []byte("exchanged token for audience: "+audience))
+		sink.WriteStepOutput(executor.StepNameFromContext(ctx), "stdout", []byte("exchanged token for audience: "+audience))
 	}
 
 	logger.Info("executor: exchanged job token", "audience", audience, "expires_in", expiresIn)

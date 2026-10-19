@@ -118,8 +118,12 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 	// condition.
 	upstreamJobs := UpstreamJobsFromContext(ctx)
 	identity := JobIdentityFromContext(ctx)
-	priorSteps := make([]StepConditionInfo, 0, len(spec.GetSteps()))
+	// priorSteps accumulates each prior step's status/outputs, keyed by the
+	// step's name, so a step's condition can reference a prior step by name
+	// (F-06). A step with no name is keyed by its position ("step-<i>").
+	priorSteps := make(map[string]StepConditionInfo, len(spec.GetSteps()))
 	for i, step := range spec.GetSteps() {
+		stepName := stepNameOf(step, i)
 		// A step's condition (F-06) is evaluated before the step runs: when it
 		// renders to false the step is skipped (it does not run and does not
 		// fail the job); when it fails to parse or render, that is a spec
@@ -127,19 +131,19 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		condCtx := conditionContext(step, priorSteps, upstreamJobs, identity, run)
 		skip, condErr := evaluateCondition(step, condCtx)
 		if condErr != nil {
-			err := fmt.Errorf("executor: step %d: condition: %w", i, condErr)
-			reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
+			err := fmt.Errorf("executor: step %q: condition: %w", stepName, condErr)
+			reportStepStatus(ctx, stepName, StepStatusFailed, err.Error(), nil)
 			return err
 		}
 		if skip {
-			logger.Info("executor: step skipped (condition not met)", "step", i)
-			reportStepStatus(ctx, i, StepStatusSkipped, "", nil)
-			priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(StepStatusSkipped)})
+			logger.Info("executor: step skipped (condition not met)", "step", stepName)
+			reportStepStatus(ctx, stepName, StepStatusSkipped, "", nil)
+			priorSteps[stepName] = StepConditionInfo{Name: stepName, Status: string(StepStatusSkipped)}
 			continue
 		}
 		// A step with `once` set (F-01) runs on at most one target of a job
 		// that fans out to a worker group: before running it, this target
-		// claims a durable slot (job id + step index + attempt) through the
+		// claims a durable slot (job id + step name + attempt) through the
 		// OnceClaimer. When another target already claimed it in the same
 		// attempt, this target skips the step (recorded skipped, not failed).
 		// A target with no claimer (an ephemeral agent, or a single-target
@@ -148,16 +152,16 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		if step.GetOnce() {
 			claimer := OnceClaimerFromContext(ctx)
 			if claimer != nil {
-				claimed, err := claimer.Claim(jobCtx, i)
+				claimed, err := claimer.Claim(jobCtx, stepName)
 				if err != nil {
-					err := fmt.Errorf("executor: step %d: claim once: %w", i, err)
-					reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
+					err := fmt.Errorf("executor: step %q: claim once: %w", stepName, err)
+					reportStepStatus(ctx, stepName, StepStatusFailed, err.Error(), nil)
 					return err
 				}
 				if !claimed {
-					logger.Info("executor: step skipped (once: already claimed by another target)", "step", i)
-					reportStepStatus(ctx, i, StepStatusSkipped, "", nil)
-					priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(StepStatusSkipped)})
+					logger.Info("executor: step skipped (once: already claimed by another target)", "step", stepName)
+					reportStepStatus(ctx, stepName, StepStatusSkipped, "", nil)
+					priorSteps[stepName] = StepConditionInfo{Name: stepName, Status: string(StepStatusSkipped)}
 					continue
 				}
 			}
@@ -171,8 +175,8 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		stepToRun := step
 		outDir, err := os.MkdirTemp("", "cdrom-step-outputs-")
 		if err != nil {
-			err := fmt.Errorf("executor: step %d: create output dir: %w", i, err)
-			reportStepStatus(ctx, i, StepStatusFailed, err.Error(), nil)
+			err := fmt.Errorf("executor: step %q: create output dir: %w", stepName, err)
+			reportStepStatus(ctx, stepName, StepStatusFailed, err.Error(), nil)
 			return err
 		}
 		stepToRun = withEnv(step, map[string]string{StepOutputDirEnv: outDir})
@@ -181,9 +185,9 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		// (e.g. an approval message) against the same data a step's condition
 		// uses (secrets, prior steps' outputs, run parameters, upstream jobs).
 		stepCtx := ContextWithConditionContext(jobCtx, condCtx)
-		observeStep(ctx, step, i)
+		observeStep(ctx, step, stepName)
 		stepStart := time.Now()
-		stepErr := runStep(stepCtx, i, stepToRun, logger)
+		stepErr := runStep(stepCtx, stepName, stepToRun, logger)
 		stepStatus := StepStatusSucceeded
 		if stepErr != nil {
 			stepStatus = StepStatusFailed
@@ -203,13 +207,13 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		if stepErr != nil {
 			errMsg = stepErr.Error()
 		}
-		reportStepStatus(ctx, i, stepStatus, errMsg, outputs)
-		priorSteps = append(priorSteps, StepConditionInfo{Index: i, Status: string(stepStatus), Outputs: outputs})
+		reportStepStatus(ctx, stepName, stepStatus, errMsg, outputs)
+		priorSteps[stepName] = StepConditionInfo{Name: stepName, Status: string(stepStatus), Outputs: outputs}
 		if stepErr != nil {
 			// A failed/timed-out step stops the job unless it is ignore_failed
 			// (F-06): the failure is recorded and the job continues.
 			if step.GetIgnoreFailed() {
-				logger.Info("executor: step failed but ignore_failed is set; continuing", "step", i)
+				logger.Info("executor: step failed but ignore_failed is set; continuing", "step", stepName)
 				continue
 			}
 			return stepErr
@@ -222,7 +226,7 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		// bounded by the job's context (the job-level timeout, when set), so a
 		// job stuck at a barrier times out like any other hung job.
 		if barrier := StepBarrierFromContext(ctx); barrier != nil && i+1 < len(spec.GetSteps()) {
-			if err := barrier.SyncStep(jobCtx, i); err != nil {
+			if err := barrier.SyncStep(jobCtx, stepName); err != nil {
 				return err
 			}
 		}
@@ -275,10 +279,10 @@ const TypeWebhook = "webhook"
 // (written by the API) is the source of truth for replay, and the UI
 // resynchronizes from it on reconnect.
 type LogSink interface {
-	// WriteStepOutput records a chunk of a step's output. stepIndex is the
-	// 0-based index of the step in the job's spec; stream is "stdout" or
+	// WriteStepOutput records a chunk of a step's output. stepName is the
+	// step's name (its identity in the job's spec); stream is "stdout" or
 	// "stderr" (see the JobLogStreamStdout/Stderr constants in internal/api).
-	WriteStepOutput(stepIndex int, stream string, data []byte)
+	WriteStepOutput(stepName string, stream string, data []byte)
 }
 
 // Output stream names a LogSink reports for a chunk of step output.
@@ -289,7 +293,7 @@ const (
 
 type logSinkKey struct{}
 
-type stepIndexKey struct{}
+type stepNameKey struct{}
 
 // ContextWithLogSink returns a context that carries sink, so step handlers
 // can stream a step's output to it. A nil sink returns ctx unchanged.
@@ -307,12 +311,12 @@ func LogSinkFromContext(ctx context.Context) LogSink {
 	return sink
 }
 
-// StepIndexFromContext returns the 0-based index of the step being executed,
-// as set by runStep, or -1 when absent. Step handlers use it to attribute
-// streamed output to the right step.
-func StepIndexFromContext(ctx context.Context) int {
-	index, _ := ctx.Value(stepIndexKey{}).(int)
-	return index
+// StepNameFromContext returns the name of the step being executed, as set by
+// runStep, or empty when absent. Step handlers use it to attribute streamed
+// output to the right step.
+func StepNameFromContext(ctx context.Context) string {
+	name, _ := ctx.Value(stepNameKey{}).(string)
+	return name
 }
 
 // StepBarrier synchronizes the workers of a job that fans out to a worker
@@ -334,11 +338,11 @@ func StepIndexFromContext(ctx context.Context) int {
 // waiting, SyncStep returns ErrCancelled (wrapped with the context) so the
 // worker can report the job as cancelled.
 type StepBarrier interface {
-	// SyncStep records that the worker completed stepIndex and blocks until the
+	// SyncStep records that the worker completed stepName and blocks until the
 	// barrier for that step is satisfied (every worker alive at the step's
 	// start has completed it) or the job is cancelled (it returns ErrCancelled)
 	// or ctx is done (it returns ctx.Err()).
-	SyncStep(ctx context.Context, stepIndex int) error
+	SyncStep(ctx context.Context, stepName string) error
 }
 
 type stepBarrierKey struct{}
@@ -547,7 +551,7 @@ func NotifierFromContext(ctx context.Context) Notifier {
 // with `once` set runs on at most one target of a job that fans out to a
 // worker group. The execution target (worker or agent) implements it by
 // calling the API's ClaimStepOnce RPC (which claims a durable slot in the
-// Database service, keyed by job id + step index + attempt), presenting the
+// Database service, keyed by job id + step name + attempt), presenting the
 // job's own token. The executor calls Claim before running a step with `once`
 // set: when it returns false the step was already claimed by another target in
 // the same attempt, so the executor skips the step (recorded skipped, not
@@ -558,11 +562,11 @@ func NotifierFromContext(ctx context.Context) Notifier {
 // step's context (already bounded by the step's per-step timeout, when set)
 // and must return promptly when that context is done.
 type OnceClaimer interface {
-	// Claim claims the "run this step" slot for stepIndex of the job. It
+	// Claim claims the "run this step" slot for stepName of the job. It
 	// returns true when this target won the claim (it should run the step) and
 	// false when another target already claimed it in the same attempt (this
 	// target should skip the step).
-	Claim(ctx context.Context, stepIndex int) (bool, error)
+	Claim(ctx context.Context, stepName string) (bool, error)
 }
 
 type onceClaimerKey struct{}
@@ -619,11 +623,12 @@ func ConditionContextFromContext(ctx context.Context) ConditionContext {
 // ---------------------------------------------------------------------------
 
 // StepConditionInfo is the condition-relevant view of a prior step of the
-// same job: its index, terminal status, and the outputs it produced. A step's
-// condition template can reference the prior steps via the "steps" key.
+// same job: its name, terminal status, and the outputs it produced. A step's
+// condition template can reference the prior steps via the "steps" key (a map
+// keyed by step name).
 type StepConditionInfo struct {
-	// Index is the 0-based index of the step in the job's spec.
-	Index int
+	// Name is the step's name (its identity in the job's spec).
+	Name string
 	// Status is the step's terminal status (succeeded, failed, skipped, or
 	// timed_out).
 	Status string
@@ -631,6 +636,18 @@ type StepConditionInfo struct {
 	// its per-step output directory, keyed by file name); empty when the step
 	// wrote no output files or did not run.
 	Outputs map[string]string
+}
+
+// stepNameOf returns the name a step is referenced by: its declared name
+// (step.Name) when set, or a positional fallback ("step<i>") when it has no
+// name. The fallback keeps an unnamed step addressable in the condition
+// context and in step results (it is a valid template field name, so
+// `{{ .steps.step0.Outputs.x }}` works).
+func stepNameOf(step *dbpb.JobStep, i int) string {
+	if name := step.GetName(); name != "" {
+		return name
+	}
+	return fmt.Sprintf("step%d", i)
 }
 
 // UpstreamJobInfo is the condition-relevant view of an upstream job higher in
@@ -745,7 +762,7 @@ func RunInfoFromContext(ctx context.Context) RunInfo {
 // secrets as plaintext, F-12), and "run" (the run's identity, F-10). The
 // structured keys are set after the env so they win over any same-named env
 // var.
-func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity, run RunInfo) map[string]any {
+func conditionContext(step *dbpb.JobStep, priorSteps map[string]StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity, run RunInfo) map[string]any {
 	data := make(map[string]any, len(step.GetEnv())+6)
 	for k, v := range step.GetEnv() {
 		data[k] = v
@@ -760,15 +777,12 @@ func conditionContext(step *dbpb.JobStep, priorSteps []StepConditionInfo, upstre
 }
 
 // toUpstreamJobInfos converts the proto upstream jobs into their
-// condition-relevant view (string status, so a condition can compare it
-// directly). An empty list yields nil.
-func toUpstreamJobInfos(jobs []*dbpb.UpstreamJob) []UpstreamJobInfo {
-	if len(jobs) == 0 {
-		return nil
-	}
-	out := make([]UpstreamJobInfo, len(jobs))
-	for i, job := range jobs {
-		out[i] = UpstreamJobInfo{
+// condition-relevant view, keyed by the job's name (string status, so a
+// condition can compare it directly). An empty list yields an empty map.
+func toUpstreamJobInfos(jobs []*dbpb.UpstreamJob) map[string]UpstreamJobInfo {
+	out := make(map[string]UpstreamJobInfo, len(jobs))
+	for _, job := range jobs {
+		out[job.GetName()] = UpstreamJobInfo{
 			ID:      job.GetId(),
 			Name:    job.GetName(),
 			Status:  jobStatusName(job.GetStatus()),
@@ -869,7 +883,7 @@ func interpolateSpec(spec *dbpb.JobSpec, run RunInfo) (*dbpb.JobSpec, error) {
 	for i, step := range spec.GetSteps() {
 		rendered, err := interpolateStep(step, data)
 		if err != nil {
-			return nil, fmt.Errorf("executor: step %d: %w", i, err)
+			return nil, fmt.Errorf("executor: step %q: %w", stepNameOf(step, i), err)
 		}
 		steps[i] = rendered
 	}
@@ -1077,7 +1091,7 @@ const (
 // StepResult is one step's terminal outcome, as collected by
 // StepResultCollector.
 type StepResult struct {
-	Index  int
+	Name   string
 	Status StepStatus
 	// Error is a descriptive error message; empty when Status is Succeeded or
 	// Skipped.
@@ -1097,11 +1111,11 @@ type StepResult struct {
 //
 // Implementations must be safe for concurrent use.
 type StepStatusReporter interface {
-	// ReportStepStatus records stepIndex's terminal status. errMsg is a
+	// ReportStepStatus records stepName's terminal status. errMsg is a
 	// descriptive error message, empty when status is StepStatusSucceeded or
 	// StepStatusSkipped; outputs are the named values the step produced
 	// (nil/empty when it wrote no output files or did not run).
-	ReportStepStatus(stepIndex int, status StepStatus, errMsg string, outputs map[string]string)
+	ReportStepStatus(stepName string, status StepStatus, errMsg string, outputs map[string]string)
 }
 
 type stepStatusReporterKey struct{}
@@ -1125,9 +1139,9 @@ func StepStatusReporterFromContext(ctx context.Context) StepStatusReporter {
 
 // reportStepStatus reports a step's terminal status to the context's
 // StepStatusReporter, when one is set.
-func reportStepStatus(ctx context.Context, index int, status StepStatus, errMsg string, outputs map[string]string) {
+func reportStepStatus(ctx context.Context, stepName string, status StepStatus, errMsg string, outputs map[string]string) {
 	if reporter := StepStatusReporterFromContext(ctx); reporter != nil {
-		reporter.ReportStepStatus(index, status, errMsg, outputs)
+		reporter.ReportStepStatus(stepName, status, errMsg, outputs)
 	}
 }
 
@@ -1141,8 +1155,8 @@ func reportStepStatus(ctx context.Context, index int, status StepStatus, errMsg 
 // Implementations must be safe for concurrent use.
 type StepObserver interface {
 	// StepStarted is called just before a step runs, with the step's type
-	// (an empty type is dispatched to DefaultType) and its index in the spec.
-	StepStarted(stepType string, stepIndex int)
+	// (an empty type is dispatched to DefaultType) and its name.
+	StepStarted(stepType string, stepName string)
 	// StepFinished is called when a step reaches a terminal status, with the
 	// step's type, its terminal status, and how long it ran (zero for a step
 	// that was skipped by its condition or by another target's once claim).
@@ -1168,9 +1182,9 @@ func StepObserverFromContext(ctx context.Context) StepObserver {
 }
 
 // observeStep calls observer.StepStarted for step, when an observer is set.
-func observeStep(ctx context.Context, step *dbpb.JobStep, index int) {
+func observeStep(ctx context.Context, step *dbpb.JobStep, stepName string) {
 	if observer := StepObserverFromContext(ctx); observer != nil {
-		observer.StepStarted(stepTypeOf(step), index)
+		observer.StepStarted(stepTypeOf(step), stepName)
 	}
 }
 
@@ -1203,10 +1217,10 @@ type StepResultCollector struct {
 }
 
 // ReportStepStatus implements StepStatusReporter.
-func (c *StepResultCollector) ReportStepStatus(index int, status StepStatus, errMsg string, outputs map[string]string) {
+func (c *StepResultCollector) ReportStepStatus(stepName string, status StepStatus, errMsg string, outputs map[string]string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.Results = append(c.Results, StepResult{Index: index, Status: status, Error: errMsg, Outputs: outputs})
+	c.Results = append(c.Results, StepResult{Name: stepName, Status: status, Error: errMsg, Outputs: outputs})
 	for k, v := range outputs {
 		if c.jobOutputs == nil {
 			c.jobOutputs = make(map[string]string)
@@ -1267,7 +1281,7 @@ func (c *StepResultCollector) ToProto() []*dbpb.StepResult {
 	proto := make([]*dbpb.StepResult, len(results))
 	for i, result := range results {
 		proto[i] = &dbpb.StepResult{
-			Index:   int32(result.Index),
+			Name:    result.Name,
 			Status:  stepStatusToProto(result.Status),
 			Error:   result.Error,
 			Outputs: result.Outputs,
@@ -1303,14 +1317,14 @@ func RegisterStepType(name string, handler StepHandler) {
 // ErrTimeout so the caller can report the job as timed_out. This is checked
 // here (rather than relying on each handler to do it) so that any step
 // handler — not just the shell handler — has its step-level timeout detected.
-func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Logger) error {
+func runStep(ctx context.Context, stepName string, step *dbpb.JobStep, logger *slog.Logger) error {
 	name := step.GetType()
 	if name == "" {
 		name = DefaultType
 	}
 	handler, ok := stepTypes.Load(name)
 	if !ok {
-		return fmt.Errorf("executor: step %d: unknown step type %q (no handler registered on this target)", index, name)
+		return fmt.Errorf("executor: step %q: unknown step type %q (no handler registered on this target)", stepName, name)
 	}
 
 	// A per-step timeout derives a context that expires after the step's
@@ -1322,12 +1336,12 @@ func runStep(ctx context.Context, index int, step *dbpb.JobStep, logger *slog.Lo
 		stepCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	// Propagate the step's index so a step handler that captures output can
+	// Propagate the step's name so a step handler that captures output can
 	// attribute it to the right step (for the LogSink).
-	stepCtx = context.WithValue(stepCtx, stepIndexKey{}, index)
+	stepCtx = context.WithValue(stepCtx, stepNameKey{}, stepName)
 
 	if err := handler.(StepHandler)(stepCtx, step, logger); err != nil {
-		err = fmt.Errorf("executor: step %d (type %q): %w", index, name, err)
+		err = fmt.Errorf("executor: step %q (type %q): %w", stepName, name, err)
 		// A deadline (the step's own timeout, or the job-level timeout
 		// inherited from the parent context) expired while the step ran: mark
 		// it as a timeout so the job is reported as timed_out.

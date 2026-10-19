@@ -154,7 +154,7 @@ func TestReportStatus(t *testing.T) {
 	api := &fakeTargetAPI{}
 	tc := &Context{API: api, WorkerName: "w1", Token: "tok", Logger: testLogger()}
 	collector := &executor.StepResultCollector{}
-	collector.ReportStepStatus(0, executor.StepStatusSucceeded, "", nil)
+	collector.ReportStepStatus("step0", executor.StepStatusSucceeded, "", nil)
 	ReportStatus(context.Background(), tc, 7, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
 	api.mu.Lock()
 	defer api.mu.Unlock()
@@ -167,8 +167,8 @@ func TestReportStatus(t *testing.T) {
 	if api.lastReport.GetWorkerName() != "w1" {
 		t.Errorf("worker name = %q, want w1", api.lastReport.GetWorkerName())
 	}
-	if got := api.lastReport.GetStepResults(); len(got) != 1 || got[0].GetIndex() != 0 {
-		t.Errorf("step results = %v, want one step at index 0", got)
+	if got := api.lastReport.GetStepResults(); len(got) != 1 || got[0].GetName() != "step0" {
+		t.Errorf("step results = %v, want one step named step0", got)
 	}
 }
 

@@ -74,7 +74,7 @@ func runEmailStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 
 	condCtx := executor.ConditionContextFromContext(ctx)
 	sink := executor.LogSinkFromContext(ctx)
-	stepIndex := executor.StepIndexFromContext(ctx)
+	stepName := executor.StepNameFromContext(ctx)
 
 	// Render the recipient fields against the step's condition context (F-18):
 	// the same data a step's condition (F-06) and the run's spec fields (F-10)
@@ -126,8 +126,8 @@ func runEmailStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		return fmt.Errorf("send email: %w", err)
 	}
 	if sink != nil {
-		sink.WriteStepOutput(stepIndex, "stdout", []byte("sent email to "+strings.Join(to, ", ")))
-		sink.WriteStepOutput(stepIndex, "stdout", []byte("email body:\n"+body))
+		sink.WriteStepOutput(stepName, "stdout", []byte("sent email to "+strings.Join(to, ", ")))
+		sink.WriteStepOutput(stepName, "stdout", []byte("email body:\n"+body))
 	}
 	logger.Info("executor: sent email", "to", to, "content_type", contentType)
 	return nil

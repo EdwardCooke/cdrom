@@ -237,7 +237,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs/{id}/artifacts", s.listJobArtifacts)
 
 	// Job logs (via the artifacts service). A job's logs are stored as one
-	// file per step (step-<n>.log) plus a combined job.log.
+	// file per step (<step-name>.log) plus a combined job.log.
 	mux.HandleFunc("GET /api/jobs/{id}/logs", s.listJobLogs)
 	mux.HandleFunc("GET /api/jobs/{id}/logs/{name}", s.getJobLog)
 
@@ -1467,7 +1467,7 @@ func (s *Server) listJobLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // getJobLog streams a job's log file (a step's output or the combined
-// job.log) to the caller. The name is the log file name, e.g. "step-0.log"
+// job.log) to the caller. The name is the log file name, e.g. "<step-name>.log"
 // or "job.log".
 func (s *Server) getJobLog(w http.ResponseWriter, r *http.Request) {
 	jobID, ok := pathID(w, r)

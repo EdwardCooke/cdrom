@@ -99,11 +99,11 @@ type workerPayload struct {
 }
 
 type logUpdatedPayload struct {
-	JobID     int64  `json:"job_id"`
-	Log       string `json:"log"`
-	StepIndex int32  `json:"step_index"`
-	Stream    string `json:"stream"`
-	Size      int64  `json:"size"`
+	JobID    int64  `json:"job_id"`
+	Log      string `json:"log"`
+	StepName string `json:"step_name"`
+	Stream   string `json:"stream"`
+	Size     int64  `json:"size"`
 }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +122,12 @@ type logCoalescer struct {
 }
 
 type logUpdate struct {
-	JobID     int64
-	Log       string
-	StepIndex int32
-	Stream    string
-	Size      int64
-	created   time.Time
+	JobID    int64
+	Log      string
+	StepName string
+	Stream   string
+	Size     int64
+	created  time.Time
 }
 
 func newLogCoalescer(window time.Duration) *logCoalescer {
@@ -140,17 +140,17 @@ func newLogCoalescer(window time.Duration) *logCoalescer {
 // record notes that a log has grown to size. It updates the pending entry
 // (keeping the latest size) but does not flush: the tail loop's periodic
 // flushDue call emits an entry once its window has elapsed.
-func (c *logCoalescer) record(jobID int64, log string, stepIndex int32, stream string, size int64) {
+func (c *logCoalescer) record(jobID int64, log string, stepName string, stream string, size int64) {
 	key := logKey(jobID, log)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.pending[key]
 	if !ok {
-		c.pending[key] = &logUpdate{JobID: jobID, Log: log, StepIndex: stepIndex, Stream: stream, Size: size, created: time.Now()}
+		c.pending[key] = &logUpdate{JobID: jobID, Log: log, StepName: stepName, Stream: stream, Size: size, created: time.Now()}
 		return
 	}
 	entry.Size = size
-	entry.StepIndex = stepIndex
+	entry.StepName = stepName
 	entry.Stream = stream
 }
 
@@ -238,7 +238,7 @@ func (s *GRPCServer) StartEventLogTail(ctx context.Context) {
 
 // flushLogCoalescer publishes a job_log_updated pointer event to the shared
 // event log for each coalesced log update (F-23). The event carries only the
-// job id, log name, step index, stream, and the log's total size — never the
+// job id, log name, step name, stream, and the log's total size — never the
 // log bytes. Other API pods tail the event and range-read the delta from the
 // shared artifacts store.
 func (s *GRPCServer) flushLogCoalescer(ctx context.Context, updates []*logUpdate) {
@@ -246,7 +246,7 @@ func (s *GRPCServer) flushLogCoalescer(ctx context.Context, updates []*logUpdate
 		return
 	}
 	for _, u := range updates {
-		s.publishLogUpdated(ctx, u.JobID, u.Log, u.StepIndex, u.Stream, u.Size)
+		s.publishLogUpdated(ctx, u.JobID, u.Log, u.StepName, u.Stream, u.Size)
 	}
 }
 
@@ -449,11 +449,11 @@ func (s *GRPCServer) handleLogUpdated(ctx context.Context, p *logUpdatedPayload)
 	}
 	s.logAdvance(jobIDStr, p.Log, p.Size)
 	s.publish(Event{
-		Type:      EventJobLog,
-		JobID:     p.JobID,
-		StepIndex: p.StepIndex,
-		Stream:    p.Stream,
-		Data:      string(data),
+		Type:     EventJobLog,
+		JobID:    p.JobID,
+		StepName: p.StepName,
+		Stream:   p.Stream,
+		Data:     string(data),
 	})
 }
 

@@ -51,8 +51,10 @@ the same file can be checked into git, served over HTTP, or mounted on the
 filesystem. The file format is deliberately **not** the database schema: it is
 human-authored and references everything **by name** (step name, job name,
 variable, vault, worker group) rather than by ordinal, and a **compiler** maps
-those names onto the database schema (resolving step names to step indices, job
-names to job ids, and worker names to groups) when it stores the definition. The
+those names onto the database schema (storing step names on the `JobStep`, job
+names as the stable `key`, and worker names as groups) when it stores the
+definition. The executor's condition context is keyed by name, so a step's
+outputs are referenced by that step's name with no rewrite. The
 file follows the **Kubernetes manifest convention**: an `apiVersion` (currently
 `cdrom/alphav1`), a `kind` (`Pipeline`, `VariableSet`, `Step`, or `Job` — so the
 compiler knows what a document is), a `metadata` block (`name`, `description`,
@@ -96,8 +98,8 @@ and source credentials out of the API and scheduler.
   explicit fields (`importFrom` / `import`).
 - A **compiler** (`internal/pipelinefile`) that validates a definition, splices
   the import fields (`importFrom` / `import` / `ref`), and maps the result
-  onto the database schema (names → ordinals/ids), shared with F-08 (DAG) and
-  F-10 (params) validation.
+  onto the database schema (storing step names on the `JobStep`, job names as
+  the stable `key`), shared with F-08 (DAG) and F-10 (params) validation.
 - `internal/models` — a `PipelineSource` (where a pipeline is pulled from: a
   `kind` of `git` / `http` / `filesystem`, plus the kind's URL / branch / path,
   a refresh `schedule`, and a credential reference), a `PipelineSourceState`
@@ -163,9 +165,9 @@ and source credentials out of the API and scheduler.
       rest: the API decrypts the source's credential and passes the plaintext to
       the fetcher for a single fetch, which is never persisted or logged.
 - [ ] A step's outputs are referenced in the file by a **user-definable step
-      name** (not an ordinal); the compiler maps each step name to its step
-      index (by declaration order) when storing the `JobSpec`, so the stored
-      spec uses ordinals while the file uses names.
+      name** (not an ordinal); the compiler stores each step's name on the
+      `JobStep` (`name` field) and the executor's condition context is keyed by
+      step name, so the stored spec and the file both use names (no rewrite).
 - [ ] A pipeline can pull in sets of variables, steps, or entire jobs from other
       files with explicit fields (`importFrom` on a step or job, `import` on a
       variable set); an imported unit is spliced in place and validated as if it
@@ -437,7 +439,7 @@ spec:
         subject: 'Deployed {{ .params.image_tag }} to {{ .params.environment }}'
         body: |
           Deployed `{{ .params.image_tag }}` to `{{ .params.environment }}`
-          (build `{{ index .steps "build" .Outputs.version }}`).
+          (build `{{ .steps.build.Outputs.version }}`).
         content_type: markdown
         from: cdrom@example.com
         reply_to: oncall@example.com
@@ -687,21 +689,22 @@ the imported file's.
 
 ### Name-based referencing (not ordinals)
 
-The file references everything by name; the compiler resolves names to the
-database's ordinals/ids when it stores the definition. This is what keeps the
+The file references everything by name; the compiler stores those names on the
+stored definition (step names on the `JobStep`, job names as the stable `key`),
+and the executor's condition context is keyed by name. This is what keeps the
 file stable under reordering and what makes it reviewable:
 
 - **Steps** are named: a job's `steps` is a name → step-spec map, and a step's
   name (the map key) is its id. A step that wants another step's output
   references it **by that step's name**, not by its position:
-  `{{ index .steps "build" .Outputs.version }}`. A job's steps run in the order
-  their names appear in the file (the compiler parses the YAML preserving key
-  order, so a map still yields a deterministic ordered step list); the compiler
-  maps each step name to its 0-based index in that order and rewrites the
-  reference to the ordinal form the executor's condition context uses
-  (`{{ index .steps 0 }}`). A reference to a step name that is not a *prior*
-  step in the order is a validation error (a step cannot read a later step's
-  output).
+  `{{ .steps.build.Outputs.version }}`. A job's steps run in the order their
+  names appear in the file (the compiler parses the YAML preserving key order,
+  so a map still yields a deterministic ordered step list); the compiler stores
+  each step's name on the `JobStep` (`name` field) and the executor's condition
+  context is keyed by step name, so the name flows through unchanged from the
+  file to the stored `JobSpec` to the executor. A reference to a step name that
+  is not a *prior* step in the order is a validation error (a step cannot read
+  a later step's output).
 - **Jobs** are named: the `jobs` map's keys are the jobs' names (their stable
   `key`, F-08). A job's `needs` lists the names of the jobs it depends on; it
   is optional — a job with no `needs` has no dependencies. The compiler
@@ -725,8 +728,8 @@ file stable under reordering and what makes it reviewable:
 The mapping is one-directional and total: every name in the file must resolve to
 exactly one target, and the compiler fails the import with an actionable error
 naming the unresolvable reference. Once compiled, the stored `JobSpec` is
-canonical (ordinal-based) and is what the executor runs — the file's names never
-reach the execution target.
+canonical (name-based) and is what the executor runs — the file's names reach
+the execution target unchanged.
 
 ### Standard deployment options
 
@@ -1236,17 +1239,19 @@ itself.
   uses.
 - **The file is not the schema; the compiler is the bridge.** The YAML is a
   human-authored, name-based format. A dedicated compiler (`internal/pipelinefile`)
-  validates a definition and maps it onto the database schema — resolving step
-  ids to step indices, job keys to job ids, worker/group names to groups, and
-  named sources/variables to their stored forms — producing the canonical
-  `JobSpec` / `JobDefinitionSnapshot` the executor runs. The file's names never
-  reach an execution target; the stored spec is ordinal-based. Validation is
+  validates a definition and maps it onto the database schema — storing step
+  names on the `JobStep`, job keys as the stable `key`, worker/group names as
+  groups, and named sources/variables to their stored forms — producing the
+  canonical `JobSpec` / `JobDefinitionSnapshot` the executor runs. The executor's
+  condition context is keyed by name, so the file's names reach the execution
+  target unchanged; the stored spec is name-based. Validation is
   shared with F-08 (the job DAG: unique keys, known `needs`, no cycle) and F-10
   (parameters: declared, unique, and resolvable).
 - **Everything is referenced by name, never by ordinal.** Steps by their id,
   jobs by their key, workers by group/host name, environments by name, and
-  variables (masked or not) by name. The compiler is the single place a name
-  becomes an ordinal or id. This is what makes the file stable under reordering
+  variables (masked or not) by name. The compiler stores those names on the
+  stored definition, and the executor's condition context is keyed by name, so
+  a name never becomes an ordinal or id. This is what makes the file stable under reordering
   and reviewable in a PR, and it is the rule every named-resource section
   follows.
 - **Named resources use one consistent shape.** A `spec` section that is a map

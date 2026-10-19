@@ -105,18 +105,21 @@ func TestStreamJobLogsPersistsAndPublishes(t *testing.T) {
 	}
 	// Step 0 stdout: the first chunk carries metadata.
 	if err := stream.Send(&apipb.JobLogChunk{
-		Metadata: &apipb.JobLogMetadata{JobId: 42, StepIndex: 0, Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT},
+		Metadata: &apipb.JobLogMetadata{JobId: 42, StepName: "step0", Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT},
 		Data:     []byte("hello "),
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	// Step 0 stdout continued (no metadata).
-	if err := stream.Send(&apipb.JobLogChunk{Data: []byte("world")}); err != nil {
+	// Step 0 stdout continued (the sink carries metadata on every chunk).
+	if err := stream.Send(&apipb.JobLogChunk{
+		Metadata: &apipb.JobLogMetadata{JobId: 42, StepName: "step0", Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT},
+		Data:     []byte("world"),
+	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	// Step 1 stderr.
 	if err := stream.Send(&apipb.JobLogChunk{
-		Metadata: &apipb.JobLogMetadata{JobId: 42, StepIndex: 1, Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDERR},
+		Metadata: &apipb.JobLogMetadata{JobId: 42, StepName: "step1", Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDERR},
 		Data:     []byte("boom"),
 	}); err != nil {
 		t.Fatalf("send: %v", err)
@@ -130,11 +133,11 @@ func TestStreamJobLogsPersistsAndPublishes(t *testing.T) {
 	}
 
 	// The API persisted one file per step plus the combined job.log.
-	if got := readLog(t, artifacts, "42", "step-0.log"); got != "hello world" {
-		t.Errorf("step-0.log = %q, want %q", got, "hello world")
+	if got := readLog(t, artifacts, "42", "step0.log"); got != "hello world" {
+		t.Errorf("step0.log = %q, want %q", got, "hello world")
 	}
-	if got := readLog(t, artifacts, "42", "step-1.log"); got != "boom" {
-		t.Errorf("step-1.log = %q, want %q", got, "boom")
+	if got := readLog(t, artifacts, "42", "step1.log"); got != "boom" {
+		t.Errorf("step1.log = %q, want %q", got, "boom")
 	}
 	if got := readLog(t, artifacts, "42", jobLogName); got != "hello worldboom" {
 		t.Errorf("job.log = %q, want %q", got, "hello worldboom")
@@ -147,18 +150,18 @@ func TestStreamJobLogsPersistsAndPublishes(t *testing.T) {
 		if ev.Type != EventJobLog || ev.JobID != 42 {
 			t.Fatalf("event = %+v, want a job_log event for job 42", ev)
 		}
-		if ev.StepIndex == 0 && ev.Stream == JobLogStreamStdout {
+		if ev.StepName == "step0" && ev.Stream == JobLogStreamStdout {
 			sawStep0 = true
 		}
-		if ev.StepIndex == 1 && ev.Stream == JobLogStreamStderr {
+		if ev.StepName == "step1" && ev.Stream == JobLogStreamStderr {
 			sawStep1 = true
 		}
 	}
 	if !sawStep0 {
-		t.Error("did not see a step-0 stdout job_log event")
+		t.Error("did not see a step0 stdout job_log event")
 	}
 	if !sawStep1 {
-		t.Error("did not see a step-1 stderr job_log event")
+		t.Error("did not see a step1 stderr job_log event")
 	}
 }
 
@@ -370,7 +373,7 @@ func TestHandleLogChunkRidesOutArtifactsOutage(t *testing.T) {
 
 	var received int64
 	// A chunk that persists fine (artifacts is up).
-	if err := srv.handleLogChunk(ctx, 50, &apipb.JobLogMetadata{JobId: 50, StepIndex: 0, Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT}, []byte("ok\n"), &received, nil); err != nil {
+	if err := srv.handleLogChunk(ctx, 50, &apipb.JobLogMetadata{JobId: 50, StepName: "step0", Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT}, []byte("ok\n"), &received, nil); err != nil {
 		t.Fatalf("handleLogChunk (ok): %v", err)
 	}
 	// Simulate the artifacts service going down.
@@ -383,13 +386,13 @@ func TestHandleLogChunkRidesOutArtifactsOutage(t *testing.T) {
 	// The artifacts service recovers.
 	fake.setFailAppend(false)
 	// A chunk sent after recovery is persisted.
-	if err := srv.handleLogChunk(ctx, 50, nil, []byte("back\n"), &received, nil); err != nil {
+	if err := srv.handleLogChunk(ctx, 50, &apipb.JobLogMetadata{JobId: 50, StepName: "step0", Stream: apipb.JobLogStream_JOB_LOG_STREAM_STDOUT}, []byte("back\n"), &received, nil); err != nil {
 		t.Fatalf("handleLogChunk (back): %v", err)
 	}
 
 	// The dropped chunk is absent; the pre- and post-outage chunks are present.
-	if got := readLog(t, real, "50", "step-0.log"); got != "ok\nback\n" {
-		t.Errorf("step-0.log = %q, want %q", got, "ok\nback\n")
+	if got := readLog(t, real, "50", "step0.log"); got != "ok\nback\n" {
+		t.Errorf("step0.log = %q, want %q", got, "ok\nback\n")
 	}
 	// Every chunk is counted as received, even the dropped one.
 	if want := int64(len("ok\n") + len("lost\n") + len("back\n")); received != want {

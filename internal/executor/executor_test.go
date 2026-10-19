@@ -253,9 +253,9 @@ func TestExecuteConditionEmptyNeverSkips(t *testing.T) {
 // attach collected step results to a ReportJobStatusRequest (F-06).
 func TestStepResultCollectorToProto(t *testing.T) {
 	collector := &StepResultCollector{}
-	collector.ReportStepStatus(0, StepStatusSucceeded, "", nil)
-	collector.ReportStepStatus(1, StepStatusSkipped, "", nil)
-	collector.ReportStepStatus(2, StepStatusFailed, "boom", nil)
+	collector.ReportStepStatus("step0", StepStatusSucceeded, "", nil)
+	collector.ReportStepStatus("step1", StepStatusSkipped, "", nil)
+	collector.ReportStepStatus("step2", StepStatusFailed, "boom", nil)
 
 	proto := collector.ToProto()
 	if len(proto) != 3 {
@@ -405,7 +405,7 @@ func TestExecuteConditionReferencesPriorStep(t *testing.T) {
 	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
 		{Type: "emit"},
 		// Runs only if the prior step succeeded and produced ready == "true".
-		{Type: "gated", Condition: `{{ if and (eq (index .steps 0).Status "succeeded") (eq (index .steps 0).Outputs.ready "true") }}true{{ else }}false{{ end }}`},
+		{Type: "gated", Condition: `{{ if and (eq .steps.step0.Status "succeeded") (eq .steps.step0.Outputs.ready "true") }}true{{ else }}false{{ end }}`},
 	}}
 	if err := Execute(ctx, spec, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -433,7 +433,7 @@ func TestExecuteConditionReferencesUpstreamJob(t *testing.T) {
 	ctx = ContextWithUpstreamJobs(ctx, upstream)
 	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
 		// Runs only if the upstream "build" job succeeded.
-		{Type: "gated2", Condition: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else }}false{{ end }}`},
+		{Type: "gated2", Condition: `{{ if eq .jobs.build.Status "succeeded" }}true{{ else }}false{{ end }}`},
 	}}
 	if err := Execute(ctx, spec, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -459,7 +459,7 @@ func TestExecuteConditionUpstreamJobFailedSkips(t *testing.T) {
 	ctx := ContextWithStepStatusReporter(context.Background(), collector)
 	ctx = ContextWithUpstreamJobs(ctx, upstream)
 	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
-		{Type: "gated3", Condition: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else }}false{{ end }}`},
+		{Type: "gated3", Condition: `{{ if eq .jobs.build.Status "succeeded" }}true{{ else }}false{{ end }}`},
 	}}
 	if err := Execute(ctx, spec, testLogger()); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -473,16 +473,16 @@ func TestExecuteConditionUpstreamJobFailedSkips(t *testing.T) {
 	}
 }
 
-// fakeStepBarrier is a StepBarrier for tests: it records the step indices it
+// fakeStepBarrier is a StepBarrier for tests: it records the step names it
 // is asked to synchronize on and returns a configurable error (to simulate a
 // cancellation or failure while waiting at the barrier).
 type fakeStepBarrier struct {
-	synced []int
+	synced []string
 	err    error
 }
 
-func (b *fakeStepBarrier) SyncStep(ctx context.Context, stepIndex int) error {
-	b.synced = append(b.synced, stepIndex)
+func (b *fakeStepBarrier) SyncStep(ctx context.Context, stepName string) error {
+	b.synced = append(b.synced, stepName)
 	return b.err
 }
 
@@ -506,8 +506,8 @@ func TestExecuteStepBarrierSyncsBetweenSteps(t *testing.T) {
 	}
 	// SyncStep is called after steps 0 and 1 (each is followed by another
 	// step), but not after step 2 (the last step).
-	if len(barrier.synced) != 2 || barrier.synced[0] != 0 || barrier.synced[1] != 1 {
-		t.Errorf("barrier.synced = %v, want [0 1]", barrier.synced)
+	if len(barrier.synced) != 2 || barrier.synced[0] != "step0" || barrier.synced[1] != "step1" {
+		t.Errorf("barrier.synced = %v, want [step0 step1]", barrier.synced)
 	}
 }
 

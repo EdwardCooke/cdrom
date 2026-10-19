@@ -441,7 +441,7 @@ type DatabaseClient interface {
 	NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
 	// step of a job that fans out to a worker group: the first target to claim
-	// (job id + step index + attempt) wins and runs the step; every other target
+	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. A retry (F-04) is a new attempt, so it may
 	// claim again. The claim is durable and shared by every API replica, so the
@@ -2044,7 +2044,7 @@ type DatabaseServer interface {
 	NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
 	// step of a job that fans out to a worker group: the first target to claim
-	// (job id + step index + attempt) wins and runs the step; every other target
+	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. A retry (F-04) is a new attempt, so it may
 	// claim again. The claim is durable and shared by every API replica, so the

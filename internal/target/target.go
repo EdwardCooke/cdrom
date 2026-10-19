@@ -111,7 +111,7 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	// presenting the job's own token.
 	ctx = executor.ContextWithNotifier(ctx, notify.NewNotifier(tc.API, job.GetId(), tc.Token))
 	// A step's "once" field (F-01) runs the step on at most one target of a
-	// fan-out job: the target claims a durable slot (job id + step index +
+	// fan-out job: the target claims a durable slot (job id + step name +
 	// attempt) through the API before running it, and a target that does not
 	// claim it skips the step. A retry (a new attempt) may run it again.
 	ctx = executor.ContextWithOnceClaimer(ctx, notify.NewClaimer(tc.API, job.GetId(), tc.Token, job.GetAttempt()))
@@ -218,7 +218,7 @@ type stepObserver struct {
 }
 
 // StepStarted implements executor.StepObserver.
-func (a *stepObserver) StepStarted(stepType string, stepIndex int) {}
+func (a *stepObserver) StepStarted(stepType string, stepName string) {}
 
 // StepFinished implements executor.StepObserver.
 func (a *stepObserver) StepFinished(stepType string, status executor.StepStatus, d time.Duration) {
@@ -272,9 +272,9 @@ type countingSink struct {
 }
 
 // WriteStepOutput implements executor.LogSink.
-func (s *countingSink) WriteStepOutput(stepIndex int, stream string, data []byte) {
+func (s *countingSink) WriteStepOutput(stepName string, stream string, data []byte) {
 	if s.sink != nil {
-		s.sink.WriteStepOutput(stepIndex, stream, data)
+		s.sink.WriteStepOutput(stepName, stream, data)
 	}
 	if s.m != nil {
 		s.m.AddLogBytes(int64(len(data)))

@@ -95,15 +95,16 @@ condition context is what lets a step say "only run if the build step produced
 - **The condition context is richer than the step's own env.** A step's
   condition is rendered against a map that carries, in addition to the step's
   env vars (top-level, so `{{ .NAME }}` still works), three keys: `steps`
-  (a slice of prior steps, each exposing `.Index`, `.Status`, and `.Outputs`),
-  `jobs` (a slice of the job's upstream dependencies, each exposing `.ID`,
-  `.Name`, `.Status`, and `.Outputs`), and `job` (the job's own identity:
+  (a map of the prior steps keyed by step name, each value exposing `.Name`,
+  `.Status`, and `.Outputs`), `jobs` (a map of the job's upstream dependencies
+  keyed by job name, each value exposing `.ID`, `.Name`, `.Status`, and
+  `.Outputs`), and `job` (the job's own identity:
   `.ID`, `.Name`, `.Status`). The upstream jobs and the job identity are
   supplied by the execution target via the executor's context
   (`executor.ContextWithUpstreamJobs` / `executor.ContextWithJobIdentity`);
   the API populates a job's `upstream_jobs` (fetched best-effort from the
   database for each `depends_on` id) before handing the job to the target.
-  Example: `{{ if eq (index .jobs 0).Status "succeeded" }}true{{ else
+  Example: `{{ if eq .jobs.build.Status "succeeded" }}true{{ else
   }}false{{ end }}`.
 - **`ignore_failed` is a per-step and per-job flag.** A step with
   `ignore_failed` that fails or times out is recorded (in `step_results`) but

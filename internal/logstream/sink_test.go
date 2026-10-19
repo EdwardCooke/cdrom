@@ -133,13 +133,13 @@ func TestSinkStreamsToAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSink: %v", err)
 	}
-	sink.WriteStepOutput(0, "stdout", []byte("step0 out\n"))
-	sink.WriteStepOutput(0, "stderr", []byte("step0 err\n"))
-	sink.WriteStepOutput(1, "stdout", []byte("step1 out\n"))
+	sink.WriteStepOutput("step0", "stdout", []byte("step0 out\n"))
+	sink.WriteStepOutput("step0", "stderr", []byte("step0 err\n"))
+	sink.WriteStepOutput("step1", "stdout", []byte("step1 out\n"))
 	sink.Close()
 
-	waitForLog(t, artifacts, "7", "step-0.log", "step0 out\nstep0 err\n")
-	waitForLog(t, artifacts, "7", "step-1.log", "step1 out\n")
+	waitForLog(t, artifacts, "7", "step0.log", "step0 out\nstep0 err\n")
+	waitForLog(t, artifacts, "7", "step1.log", "step1 out\n")
 	waitForLog(t, artifacts, "7", "job.log", "step0 out\nstep0 err\nstep1 out\n")
 }
 
@@ -154,7 +154,7 @@ func TestSinkNilAPI(t *testing.T) {
 		t.Fatalf("NewSink(nil) = %v, want nil", sink)
 	}
 	// A nil sink must be safe to use.
-	sink.WriteStepOutput(0, "stdout", []byte("x"))
+	sink.WriteStepOutput("step0", "stdout", []byte("x"))
 	sink.Close()
 }
 
@@ -300,7 +300,7 @@ func TestSinkReconnectsAfterAPIRestart(t *testing.T) {
 	}
 
 	// API up: "before" is delivered on the first stream.
-	sink.WriteStepOutput(0, "stdout", []byte("before\n"))
+	sink.WriteStepOutput("step0", "stdout", []byte("before\n"))
 	deadline := time.Now().Add(5 * time.Second)
 	for api.streamIDFor("before\n") == 0 {
 		if time.Now().After(deadline) {
@@ -315,7 +315,7 @@ func TestSinkReconnectsAfterAPIRestart(t *testing.T) {
 
 	// Output while the API is down. The sink's stream breaks on the next send
 	// and it waits for the API to come back.
-	sink.WriteStepOutput(0, "stdout", []byte("during\n"))
+	sink.WriteStepOutput("step0", "stdout", []byte("during\n"))
 	// Give the drain a moment to consume "during" and hit the broken stream.
 	time.Sleep(100 * time.Millisecond)
 
@@ -323,7 +323,7 @@ func TestSinkReconnectsAfterAPIRestart(t *testing.T) {
 	api.setDown(false)
 
 	// Output after the restart is delivered once the sink reconnects.
-	sink.WriteStepOutput(0, "stdout", []byte("after\n"))
+	sink.WriteStepOutput("step0", "stdout", []byte("after\n"))
 
 	// Wait for the sink to reconnect and deliver "after" on a NEW stream
 	// (proof it reopened the stream after the API came back).

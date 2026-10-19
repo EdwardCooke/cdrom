@@ -97,7 +97,7 @@ tool.
 | F-21 | Config as code (overview + file-format reference; decomposed into F-21.1…F-21.7) | planned | [F-21](features/f-21-config-as-code.md) |
 | F-21.1 | File format & compiler (overview + file-format reference; decomposed into F-21.1.1…F-21.1.4) | planned | [F-21.1](features/f-21.1-file-format-compiler.md) |
 | F-21.1.1 | Manifest envelope & compiler skeleton (`apiVersion`/`kind`/`metadata`/`spec`, `kind` dispatch, key-order parsing) | planned | [F-21.1.1](features/f-21.1.1-manifest-envelope.md) |
-| F-21.1.2 | Step spec shape & name-based step referencing (handler-type key, `shell` string shorthand, `ref`, name → ordinal) | planned | [F-21.1.2](features/f-21.1.2-step-spec.md) |
+| F-21.1.2 | Step spec shape & name-based step referencing (handler-type key, `shell` string shorthand, `ref`, name-based step referencing) | planned | [F-21.1.2](features/f-21.1.2-step-spec.md) |
 | F-21.1.3 | Variables, masked variables & secret sources (plain/`encrypted`/`secretSource`+`key`, `variableSets`, `secretSources`) | planned | [F-21.1.3](features/f-21.1.3-variables-secrets.md) |
 | F-21.1.4 | Jobs, deployment options & import/export API (`spec.jobs` mapping + import/export round-trip) | planned | [F-21.1.4](features/f-21.1.4-jobs-import-export.md) |
 | F-21.2 | Source-fetcher service (standalone gRPC fetcher: git / HTTP / filesystem) | planned | [F-21.2](features/f-21.2-source-fetcher.md) |

@@ -54,17 +54,17 @@ func newStepBarrier(api apipb.APIClient, worker string, jobID int64, token strin
 }
 
 // SyncStep implements executor.StepBarrier. It records that this worker
-// completed stepIndex and then blocks until the barrier for that step is
+// completed stepName and then blocks until the barrier for that step is
 // satisfied (every worker alive at the step's start has completed it), the job
 // is cancelled (it returns executor.ErrCancelled, wrapped with the context),
 // or ctx is done (it returns ctx.Err()).
-func (b *stepBarrier) SyncStep(ctx context.Context, stepIndex int) error {
+func (b *stepBarrier) SyncStep(ctx context.Context, stepName string) error {
 	// Report this worker's completion of the step. A transient failure to
 	// report is not fatal: the barrier is still satisfied by the other
 	// workers' completions, and this worker's own completion is re-checked on
 	// the next poll (the API's CheckStepBarrier reads the recorded rows).
-	if err := b.reportCompletion(ctx, stepIndex); err != nil {
-		b.logger.Warn("worker: report step completion", "job", b.jobID, "step", stepIndex, "err", err)
+	if err := b.reportCompletion(ctx, stepName); err != nil {
+		b.logger.Warn("worker: report step completion", "job", b.jobID, "step", stepName, "err", err)
 	}
 	// Poll the barrier until it is satisfied, the job is cancelled, or the
 	// job's context is done.
@@ -76,18 +76,18 @@ func (b *stepBarrier) SyncStep(ctx context.Context, stepIndex int) error {
 			return ctx.Err()
 		case <-ticker.C:
 		}
-		resp, err := b.checkBarrier(ctx, stepIndex)
+		resp, err := b.checkBarrier(ctx, stepName)
 		if err != nil {
 			// A transient API failure does not wedge the job: keep polling so
 			// the barrier is re-checked once the API recovers.
-			b.logger.Warn("worker: check step barrier", "job", b.jobID, "step", stepIndex, "err", err)
+			b.logger.Warn("worker: check step barrier", "job", b.jobID, "step", stepName, "err", err)
 			continue
 		}
 		if resp.GetCancelled() {
 			// The job was cancelled while this worker waited at the barrier:
 			// surface it as a cancellation so the worker reports the job
 			// cancelled (distinct from a failure).
-			return fmt.Errorf("%w: job %d cancelled while waiting at step %d barrier", executor.ErrCancelled, b.jobID, stepIndex)
+			return fmt.Errorf("%w: job %d cancelled while waiting at step %q barrier", executor.ErrCancelled, b.jobID, stepName)
 		}
 		if resp.GetSatisfied() {
 			return nil
@@ -95,22 +95,22 @@ func (b *stepBarrier) SyncStep(ctx context.Context, stepIndex int) error {
 	}
 }
 
-// reportCompletion tells the API that this worker completed stepIndex of the
+// reportCompletion tells the API that this worker completed stepName of the
 // job, presenting the job token.
-func (b *stepBarrier) reportCompletion(ctx context.Context, stepIndex int) error {
+func (b *stepBarrier) reportCompletion(ctx context.Context, stepName string) error {
 	_, err := b.api.ReportStepCompletion(grpcutil.WithBearerToken(ctx, b.token), &apipb.ReportStepCompletionRequest{
 		JobId:      b.jobID,
 		WorkerName: b.worker,
-		StepIndex:  int32(stepIndex),
+		StepName:   stepName,
 	})
 	return err
 }
 
-// checkBarrier asks the API whether the barrier for stepIndex is satisfied or
+// checkBarrier asks the API whether the barrier for stepName is satisfied or
 // the job has been cancelled, presenting the job token.
-func (b *stepBarrier) checkBarrier(ctx context.Context, stepIndex int) (*apipb.CheckStepBarrierResponse, error) {
+func (b *stepBarrier) checkBarrier(ctx context.Context, stepName string) (*apipb.CheckStepBarrierResponse, error) {
 	return b.api.CheckStepBarrier(grpcutil.WithBearerToken(ctx, b.token), &apipb.CheckStepBarrierRequest{
-		JobId:     b.jobID,
-		StepIndex: int32(stepIndex),
+		JobId:    b.jobID,
+		StepName: stepName,
 	})
 }

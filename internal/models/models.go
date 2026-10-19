@@ -496,8 +496,8 @@ const (
 // StepResult is the terminal outcome of one step of a job's execution spec,
 // recorded alongside the job's own final status (F-06).
 type StepResult struct {
-	// Index is the 0-based index of the step in the job's spec.
-	Index  int        `json:"index"`
+	// Name is the step's name (its identity in the job's spec).
+	Name   string     `json:"name"`
 	Status StepStatus `json:"status"`
 	// Error is a descriptive error message; empty when Status is Succeeded or
 	// Skipped.
@@ -904,8 +904,8 @@ type StepCompletion struct {
 	JobID uint `gorm:"uniqueIndex:idx_step_completion_unique,priority:1;not null" json:"job_id"`
 	// WorkerName is the worker that completed the step.
 	WorkerName string `gorm:"uniqueIndex:idx_step_completion_unique,priority:2;not null" json:"worker_name"`
-	// StepIndex is the 0-based index of the step that was completed.
-	StepIndex int `gorm:"uniqueIndex:idx_step_completion_unique,priority:3" json:"step_index"`
+	// StepName is the step's name (the step that was completed).
+	StepName string `gorm:"size:255;uniqueIndex:idx_step_completion_unique,priority:3;not null" json:"step_name"`
 	// Attempt is the job attempt this completion belongs to (F-04); a retry
 	// starts a fresh set of completions.
 	Attempt int `gorm:"uniqueIndex:idx_step_completion_unique,priority:4" json:"attempt"`
@@ -913,19 +913,19 @@ type StepCompletion struct {
 
 // StepOnceClaim is the durable "run this step" slot for a step of a job that
 // fans out to a worker group (F-01). A step with `once` set runs on at most
-// one target: the first target to claim (job id + step index + attempt) creates
+// one target: the first target to claim (job id + step name + attempt) creates
 // this row and runs the step; every other target that reaches the same step in
 // the same attempt finds the row already claimed and skips the step. A retry
 // (F-04) is a new attempt, so it claims a fresh slot. The unique index on
-// (job_id, step_index, attempt) is what makes the claim atomic: at most one
+// (job_id, step_name, attempt) is what makes the claim atomic: at most one
 // concurrent caller can create the row, so the dedup is correct across every
 // API replica and worker process.
 type StepOnceClaim struct {
 	gorm.Model
 	// JobID is the job the step belongs to.
 	JobID uint `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:1;not null" json:"job_id"`
-	// StepIndex is the 0-based index of the step in the job's spec.
-	StepIndex int `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:2" json:"step_index"`
+	// StepName is the step's name (its identity in the job's spec).
+	StepName string `gorm:"size:255;uniqueIndex:idx_step_once_claim_unique,priority:2;not null" json:"step_name"`
 	// Attempt is the job attempt this claim belongs to (F-04); a retry claims
 	// a fresh slot.
 	Attempt int `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:3" json:"attempt"`

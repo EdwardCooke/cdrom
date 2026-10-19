@@ -177,7 +177,7 @@ Cross-cutting execution concepts (full detail in `docs/features/` /
   worker) via `ReportStepCompletion` / `CheckStepBarrier`; a dead worker is dropped.
 - **`once` step field (F-01).** A step may set `once` to run on at most one
   target of a fan-out job: the executor runs it on a single worker of the group
-  (the first to claim a durable slot, job id + step index + attempt, in the
+  (the first to claim a durable slot, job id + step name + attempt, in the
   Database service) and the other workers skip it (recorded `skipped`, not
   failed); a retry (a new attempt) may run it again. This is what keeps a
   notification step (F-18) from sending once per worker, and lets any step type

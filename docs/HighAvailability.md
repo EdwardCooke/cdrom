@@ -131,7 +131,7 @@ CREATE TABLE events_2026100300 PARTITION OF events
 | `job_status` | `""` | `{"job_id": 42, "status": "succeeded", "attempt": 1, "max_attempts": 3}` |
 | `run_status` | `""` | `{"run_id": 7, "status": "failed"}` |
 | `worker` | group | `{"name": "w-1", "action": "registered"}` |
-| `job_log_updated` | `""` | `{"job_id": 42, "log": "job.log", "step_index": 1, "stream": "stdout", "size": 183422}` |
+| `job_log_updated` | `""` | `{"job_id": 42, "log": "job.log", "step_name": "build", "stream": "stdout", "size": 183422}` |
 
 The table is **lean**: no log data, no job specs, no tokens. The payload is
 small JSON — enough to *handle* the event (look up the job, range-read the

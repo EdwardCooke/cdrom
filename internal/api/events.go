@@ -18,8 +18,8 @@ type Event struct {
 	Worker string `json:"worker,omitempty"`
 	Group  string `json:"group,omitempty"`
 	Action string `json:"action,omitempty"`
-	// StepIndex is the 0-based index of the step a job_log event belongs to.
-	StepIndex int32 `json:"step_index,omitempty"`
+	// StepName is the step's name a job_log event belongs to.
+	StepName string `json:"step_name,omitempty"`
 	// Stream is the output stream a job_log event came from ("stdout" or
 	// "stderr").
 	Stream string `json:"stream,omitempty"`

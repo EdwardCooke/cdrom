@@ -584,7 +584,7 @@ spec:
         subject: 'Deployed {{ .params.image_tag }} to {{ .params.environment }}'
         body: |
           Deployed ` + "`{{ .params.image_tag }}`" + ` to ` + "`{{ .params.environment }}`" + `
-          (build ` + "`{{ index .steps \"build\" .Outputs.version }}`" + `).
+          (build ` + "`{{ .steps.build.Outputs.version }}`" + `).
         content_type: markdown
         from: cdrom@example.com
         reply_to: oncall@example.com

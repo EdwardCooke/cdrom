@@ -44,7 +44,7 @@ local to the worker/agent and there is no central view.
 - **Transport:** a new `StreamJobLogs` client-stream RPC on the API
   (`proto/cdrom/api/v1/api.proto`). The target opens one stream per job and
   sends a `JobLogChunk` per output chunk; the first chunk of a step's output
-  carries `JobLogMetadata` (job_id, step_index, stream) and the rest carry
+  carries `JobLogMetadata` (job_id, step_name, stream) and the rest carry
   data. The API verifies the caller's job token once, up front.
 - **Storage:** logs are stored in the **artifacts service** (not the DB), as
   files under `<root>/<namespace>/logs/` where the namespace is the job's id —
@@ -57,7 +57,7 @@ local to the worker/agent and there is no central view.
   `CDROM_ARTIFACTS_STORE`, default `filesystem`) so S3 / Azure Blob can be
   added later without touching the server.
 - **Capture:** the executor takes an optional `executor.LogSink`
-  (`WriteStepOutput(stepIndex, stream, data)`) via the context. The built-in
+  (`WriteStepOutput(stepName, stream, data)`) via the context. The built-in
   shell handler tees each step's stdout/stderr to the target's local streams
   *and* to the sink when one is present (via `StdoutPipe`/`StderrPipe`); with
   no sink it inherits `os.Stdout`/`os.Stderr` as before, so local logging is
@@ -81,7 +81,7 @@ local to the worker/agent and there is no central view.
   outage never tears down a target's log stream. The gRPC connections
   themselves (API↔artifacts, target↔API) are long-lived `*grpc.ClientConn`s
   that reconnect transparently.
-- **Fan-out:** the API publishes a `job_log` event (job id, step index,
+- **Fan-out:** the API publishes a `job_log` event (job id, step name,
   stream, data) on the `EventHub` for each chunk, so the UI can tail a
   running job's logs over the existing `/api/ws` WebSocket.
 - **Retrieval:** `GET /api/jobs/{id}/logs` lists a job's log files and

@@ -52,13 +52,13 @@ func (f *fakeWatchStream) Recv() (*apipb.WatchMessage, error) {
 // (the cross-worker step barrier).
 type stepCompletion struct {
 	jobID int64
-	step  int32
+	step  string
 }
 
 // barrierKey identifies a (job, step) pair for a configured barrier outcome.
 type barrierKey struct {
 	jobID int64
-	step  int32
+	step  string
 }
 
 // barrierOutcome is the configured CheckStepBarrier response for a (job, step).
@@ -129,7 +129,7 @@ func (f *fakeAPIClient) ListPendingJobs(ctx context.Context, in *apipb.ListPendi
 // can assert the worker reported its steps.
 func (f *fakeAPIClient) ReportStepCompletion(ctx context.Context, in *apipb.ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	f.mu.Lock()
-	f.stepCompletions = append(f.stepCompletions, stepCompletion{jobID: in.GetJobId(), step: in.GetStepIndex()})
+	f.stepCompletions = append(f.stepCompletions, stepCompletion{jobID: in.GetJobId(), step: in.GetStepName()})
 	f.mu.Unlock()
 	return &emptypb.Empty{}, nil
 }
@@ -140,7 +140,7 @@ func (f *fakeAPIClient) ReportStepCompletion(ctx context.Context, in *apipb.Repo
 // satisfied (the barrier is a no-op in tests that do not exercise it).
 func (f *fakeAPIClient) CheckStepBarrier(ctx context.Context, in *apipb.CheckStepBarrierRequest, opts ...grpc.CallOption) (*apipb.CheckStepBarrierResponse, error) {
 	f.mu.Lock()
-	outcome, ok := f.barrierOutcomes[barrierKey{jobID: in.GetJobId(), step: in.GetStepIndex()}]
+	outcome, ok := f.barrierOutcomes[barrierKey{jobID: in.GetJobId(), step: in.GetStepName()}]
 	f.mu.Unlock()
 	if !ok {
 		return &apipb.CheckStepBarrierResponse{Satisfied: true}, nil
@@ -343,7 +343,7 @@ func TestWorkerStepBarrierSyncs(t *testing.T) {
 	completions := api.stepCompletionsSnapshot()
 	foundStep0 := false
 	for _, c := range completions {
-		if c.jobID == 77 && c.step == 0 {
+		if c.jobID == 77 && c.step == "step0" {
 			foundStep0 = true
 		}
 	}
@@ -384,7 +384,7 @@ func TestWorkerStepBarrierCancelled(t *testing.T) {
 		// The barrier for step 0 reports the job was cancelled: the worker
 		// stops and reports the job cancelled.
 		barrierOutcomes: map[barrierKey]barrierOutcome{
-			{jobID: 78, step: 0}: {cancelled: true},
+			{jobID: 78, step: "step0"}: {cancelled: true},
 		},
 	}
 	w := New("w1", "pool-a", nil, nil, Dependencies{API: api}, testLogger())

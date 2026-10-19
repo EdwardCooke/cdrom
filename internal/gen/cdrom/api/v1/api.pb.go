@@ -1533,8 +1533,8 @@ type ReportStepCompletionRequest struct {
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	// worker_name is the worker that completed the step.
 	WorkerName string `protobuf:"bytes,2,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
-	// step_index is the 0-based index of the step the worker completed.
-	StepIndex     int32 `protobuf:"varint,3,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step's name (the step the worker completed).
+	StepName      string `protobuf:"bytes,3,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1583,11 +1583,11 @@ func (x *ReportStepCompletionRequest) GetWorkerName() string {
 	return ""
 }
 
-func (x *ReportStepCompletionRequest) GetStepIndex() int32 {
+func (x *ReportStepCompletionRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 // CheckStepBarrierRequest asks whether the barrier for a job's step is
@@ -1596,8 +1596,8 @@ type CheckStepBarrierRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job to check.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// step_index is the 0-based index of the step whose barrier is checked.
-	StepIndex     int32 `protobuf:"varint,2,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step whose barrier is checked.
+	StepName      string `protobuf:"bytes,2,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1639,11 +1639,11 @@ func (x *CheckStepBarrierRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *CheckStepBarrierRequest) GetStepIndex() int32 {
+func (x *CheckStepBarrierRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
@@ -1825,8 +1825,8 @@ type JobLogMetadata struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the log belongs to.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// step_index is the 0-based index of the step in the job's spec.
-	StepIndex int32 `protobuf:"varint,2,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step's name (its identity in the job's spec).
+	StepName string `protobuf:"bytes,2,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	// stream is which output (stdout or stderr) the data came from.
 	Stream        JobLogStream `protobuf:"varint,3,opt,name=stream,proto3,enum=cdrom.api.v1.JobLogStream" json:"stream,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1870,11 +1870,11 @@ func (x *JobLogMetadata) GetJobId() int64 {
 	return 0
 }
 
-func (x *JobLogMetadata) GetStepIndex() int32 {
+func (x *JobLogMetadata) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 func (x *JobLogMetadata) GetStream() JobLogStream {
@@ -2647,8 +2647,8 @@ type ClaimStepOnceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the step belongs to.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// step_index is the 0-based index of the step in the job's spec.
-	StepIndex int32 `protobuf:"varint,2,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step's name (its identity in the job's spec).
+	StepName string `protobuf:"bytes,2,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	// attempt is the 1-based attempt number of the job (F-04); a retry claims a
 	// fresh slot.
 	Attempt       int32 `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"`
@@ -2693,11 +2693,11 @@ func (x *ClaimStepOnceRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *ClaimStepOnceRequest) GetStepIndex() int32 {
+func (x *ClaimStepOnceRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 func (x *ClaimStepOnceRequest) GetAttempt() int32 {
@@ -2887,17 +2887,15 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x10approval_message\x18\b \x01(\tR\x0fapprovalMessage\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"t\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
 	"\x1bReportStepCompletionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
 	"\vworker_name\x18\x02 \x01(\tR\n" +
-	"workerName\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x03 \x01(\x05R\tstepIndex\"O\n" +
+	"workerName\x12\x1b\n" +
+	"\tstep_name\x18\x03 \x01(\tR\bstepName\"M\n" +
 	"\x17CheckStepBarrierRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x02 \x01(\x05R\tstepIndex\"V\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
+	"\tstep_name\x18\x02 \x01(\tR\bstepName\"V\n" +
 	"\x18CheckStepBarrierResponse\x12\x1c\n" +
 	"\tsatisfied\x18\x01 \x01(\bR\tsatisfied\x12\x1c\n" +
 	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"-\n" +
@@ -2906,11 +2904,10 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x15CheckApprovalResponse\x12\x1a\n" +
 	"\bresolved\x18\x01 \x01(\bR\bresolved\x12\x1a\n" +
 	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x1c\n" +
-	"\tcancelled\x18\x03 \x01(\bR\tcancelled\"z\n" +
+	"\tcancelled\x18\x03 \x01(\bR\tcancelled\"x\n" +
 	"\x0eJobLogMetadata\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x02 \x01(\x05R\tstepIndex\x122\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
+	"\tstep_name\x18\x02 \x01(\tR\bstepName\x122\n" +
 	"\x06stream\x18\x03 \x01(\x0e2\x1a.cdrom.api.v1.JobLogStreamR\x06stream\"[\n" +
 	"\vJobLogChunk\x128\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x1c.cdrom.api.v1.JobLogMetadataR\bmetadata\x12\x12\n" +
@@ -2959,11 +2956,10 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\atimeout\x18\a \x01(\v2\x19.google.protobuf.DurationR\atimeout\"6\n" +
 	"\x13SendWebhookResponse\x12\x1f\n" +
 	"\vstatus_code\x18\x01 \x01(\x05R\n" +
-	"statusCode\"f\n" +
+	"statusCode\"d\n" +
 	"\x14ClaimStepOnceRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x02 \x01(\x05R\tstepIndex\x12\x18\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
+	"\tstep_name\x18\x02 \x01(\tR\bstepName\x12\x18\n" +
 	"\aattempt\x18\x03 \x01(\x05R\aattempt\"1\n" +
 	"\x15ClaimStepOnceResponse\x12\x18\n" +
 	"\aclaimed\x18\x01 \x01(\bR\aclaimed*d\n" +

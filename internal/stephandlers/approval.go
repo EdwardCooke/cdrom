@@ -89,9 +89,9 @@ func runApprovalStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logge
 	}
 	sink := executor.LogSinkFromContext(ctx)
 	if sink != nil {
-		sink.WriteStepOutput(executor.StepIndexFromContext(ctx), "stdout", []byte("awaiting approval"))
+		sink.WriteStepOutput(executor.StepNameFromContext(ctx), "stdout", []byte("awaiting approval"))
 		if message != "" {
-			sink.WriteStepOutput(executor.StepIndexFromContext(ctx), "stdout", []byte("message: "+message))
+			sink.WriteStepOutput(executor.StepNameFromContext(ctx), "stdout", []byte("message: "+message))
 		}
 	}
 
@@ -117,12 +117,12 @@ func runApprovalStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logge
 		if result.Resolved {
 			if result.Decision == "approved" {
 				if sink != nil {
-					sink.WriteStepOutput(executor.StepIndexFromContext(ctx), "stdout", []byte("approval granted"))
+					sink.WriteStepOutput(executor.StepNameFromContext(ctx), "stdout", []byte("approval granted"))
 				}
 				return nil
 			}
 			if sink != nil {
-				sink.WriteStepOutput(executor.StepIndexFromContext(ctx), "stdout", []byte("approval rejected"))
+				sink.WriteStepOutput(executor.StepNameFromContext(ctx), "stdout", []byte("approval rejected"))
 			}
 			return fmt.Errorf("approval rejected")
 		}

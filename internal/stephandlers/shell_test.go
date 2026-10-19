@@ -316,10 +316,10 @@ type recordingSink struct {
 	stderr []string
 }
 
-func (s *recordingSink) WriteStepOutput(stepIndex int, stream string, data []byte) {
+func (s *recordingSink) WriteStepOutput(stepName string, stream string, data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if stepIndex != 0 {
+	if stepName != "step0" {
 		return
 	}
 	switch stream {

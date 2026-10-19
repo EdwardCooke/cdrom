@@ -29,10 +29,10 @@ import (
 	"cdrom/internal/authz"
 	"cdrom/internal/config"
 	"cdrom/internal/executor"
-	"cdrom/internal/metrics"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/metrics"
 	"cdrom/internal/secrets"
 )
 
@@ -595,7 +595,7 @@ func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.Report
 	if _, err := s.db.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{
 		JobId:      req.GetJobId(),
 		WorkerName: req.GetWorkerName(),
-		StepIndex:  req.GetStepIndex(),
+		StepName:   req.GetStepName(),
 	}); err != nil {
 		return nil, err
 	}
@@ -619,8 +619,8 @@ func (s *GRPCServer) CheckStepBarrier(ctx context.Context, req *apipb.CheckStepB
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
 	resp, err := s.db.CheckStepBarrier(ctx, &dbpb.CheckStepBarrierRequest{
-		JobId:     req.GetJobId(),
-		StepIndex: req.GetStepIndex(),
+		JobId:    req.GetJobId(),
+		StepName: req.GetStepName(),
 	})
 	if err != nil {
 		return nil, err
@@ -664,7 +664,7 @@ func (s *GRPCServer) CheckApproval(ctx context.Context, req *apipb.CheckApproval
 // StreamJobLogs is a client stream: an execution target (worker or agent)
 // opens it at the start of a job and sends a JobLogChunk for each chunk of
 // step output (stdout/stderr). The first chunk of each step's output carries
-// metadata (job_id, step_index, stream); subsequent chunks carry data. The
+// metadata (job_id, step_name, stream); subsequent chunks carry data. The
 // API persists the output to the artifacts service — one file per step
 // (step-<n>.log) plus a combined job.log — and fans it out to the UI over the
 // event hub as a job_log event. When job-token auth is enabled the caller
@@ -742,10 +742,12 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 	if len(data) == 0 {
 		return nil
 	}
-	stepIndex := int32(0)
+	stepName := "step-0"
 	streamName := JobLogStreamStdout
 	if metadata != nil {
-		stepIndex = metadata.GetStepIndex()
+		if name := metadata.GetStepName(); name != "" {
+			stepName = name
+		}
 		streamName = jobLogStreamName(metadata.GetStream())
 	}
 	jobIDStr := strconv.FormatInt(jobID, 10)
@@ -756,15 +758,15 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 	// rather than failing the stream, so an artifacts outage never tears down
 	// a target's log stream.
 	if s.artifacts != nil {
-		stepName := fmt.Sprintf("step-%d.log", stepIndex)
+		stepLogName := stepName + ".log"
 		// Persist the per-step log first. If it cannot be persisted (the
 		// artifacts service is down and the retry budget is exhausted) the
 		// chunk is dropped and the combined job log is skipped too — both
 		// files live in the same (unreachable) store, so retrying the second
 		// would only double the time spent blocked on a down service.
-		if _, err := s.appendLogWithRetry(ctx, jobIDStr, stepName, data); err != nil {
+		if _, err := s.appendLogWithRetry(ctx, jobIDStr, stepLogName, data); err != nil {
 			s.logger.Warn("api: dropping log chunk (artifacts unreachable)",
-				"job", jobID, "step", stepIndex, "err", err)
+				"job", jobID, "step", stepName, "err", err)
 		} else if size, err := s.appendLogWithRetry(ctx, jobIDStr, jobLogName, data); err != nil {
 			s.logger.Warn("api: dropping job log chunk (artifacts unreachable)",
 				"job", jobID, "log", jobLogName, "err", err)
@@ -773,7 +775,7 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 			// at most one job_log_updated event per (job, job.log) per window
 			// is published by the tail loop, carrying the latest size, so other
 			// API pods can range-read the delta from the shared artifacts store.
-			s.coalescer.record(jobID, jobLogName, stepIndex, streamName, size)
+			s.coalescer.record(jobID, jobLogName, stepName, streamName, size)
 		}
 	}
 	*received += int64(len(data))
@@ -781,11 +783,11 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 		s.metrics.AddLogStreamBytes(int64(len(data)))
 	}
 	s.publish(Event{
-		Type:      EventJobLog,
-		JobID:     jobID,
-		StepIndex: stepIndex,
-		Stream:    streamName,
-		Data:      string(data),
+		Type:     EventJobLog,
+		JobID:    jobID,
+		StepName: stepName,
+		Stream:   streamName,
+		Data:     string(data),
 	})
 	return nil
 }
@@ -1183,7 +1185,7 @@ func (s *GRPCServer) SendWebhook(ctx context.Context, req *apipb.SendWebhookRequ
 // `once` field set: when it returns true this target won the claim (it should
 // run the step) and when it returns false another target already claimed it in
 // the same attempt (this target should skip the step). The claim is durable in
-// the Database service (keyed by job id + step index + attempt), so a retry
+// the Database service (keyed by job id + step name + attempt), so a retry
 // (a new attempt) may run the step again. When job-token auth is enabled the
 // caller must present a job token scoped to the job.
 func (s *GRPCServer) ClaimStepOnce(ctx context.Context, req *apipb.ClaimStepOnceRequest) (*apipb.ClaimStepOnceResponse, error) {
@@ -1197,9 +1199,9 @@ func (s *GRPCServer) ClaimStepOnce(ctx context.Context, req *apipb.ClaimStepOnce
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
 	resp, err := s.db.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{
-		JobId:     req.GetJobId(),
-		StepIndex: req.GetStepIndex(),
-		Attempt:   req.GetAttempt(),
+		JobId:    req.GetJobId(),
+		StepName: req.GetStepName(),
+		Attempt:  req.GetAttempt(),
 	})
 	if err != nil {
 		return nil, err
@@ -1419,20 +1421,20 @@ func (s *GRPCServer) publishWorkerEvent(ctx context.Context, name, group, action
 }
 
 // publishLogUpdated appends a "job_log_updated" pointer event to the shared
-// event log (F-23): it carries only the job id, log name, step index, stream,
+// event log (F-23): it carries only the job id, log name, step name, stream,
 // and the current byte size — never the log bytes. Every API pod tails the
 // log and, when it has UI clients watching the job, range-reads the new bytes
 // from the shared artifacts store and fans them out.
-func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log string, stepIndex int32, stream string, size int64) {
+func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log string, stepName string, stream string, size int64) {
 	if s.db == nil {
 		return
 	}
 	resp, err := s.db.PublishLogUpdated(ctx, &dbpb.PublishLogUpdatedRequest{
-		JobId:     jobID,
-		Log:       log,
-		StepIndex: stepIndex,
-		Stream:    stream,
-		Size:      size,
+		JobId:    jobID,
+		Log:      log,
+		StepName: stepName,
+		Stream:   stream,
+		Size:     size,
 	})
 	if err != nil {
 		s.logger.Warn("failed to publish job_log_updated event", "job_id", jobID, "error", err)

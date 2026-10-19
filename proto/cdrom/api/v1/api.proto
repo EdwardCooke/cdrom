@@ -82,7 +82,7 @@ service API {
   // StreamJobLogs is a client stream: an execution target (worker or agent)
   // opens it at the start of a job and sends a JobLogChunk for each chunk of
   // step output (stdout/stderr). The first chunk of each step carries
-  // metadata (job_id, step_index, stream); subsequent chunks carry data. The
+  // metadata (job_id, step_name, stream); subsequent chunks carry data. The
   // API persists the output to the artifacts service (one file per step plus
   // a combined job.log) and fans it out to the UI over the WebSocket event
   // hub as a job_log event. When job-token auth is enabled the caller must
@@ -144,7 +144,7 @@ service API {
   rpc SendWebhook(SendWebhookRequest) returns (SendWebhookResponse);
   // ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
   // step of a job that fans out to a worker group: the first target to claim
-  // (job id + step index + attempt) wins and runs the step; every other target
+  // (job id + step name + attempt) wins and runs the step; every other target
   // that reaches the same step in the same attempt sees the slot already
   // claimed and skips the step. The API proxies the claim to the Database
   // service (which holds the durable slot), so the dedup is correct across
@@ -451,8 +451,8 @@ message ReportStepCompletionRequest {
   int64 job_id = 1;
   // worker_name is the worker that completed the step.
   string worker_name = 2;
-  // step_index is the 0-based index of the step the worker completed.
-  int32 step_index = 3;
+  // step_name is the step's name (the step the worker completed).
+  string step_name = 3;
 }
 
 // CheckStepBarrierRequest asks whether the barrier for a job's step is
@@ -460,8 +460,8 @@ message ReportStepCompletionRequest {
 message CheckStepBarrierRequest {
   // job_id is the job to check.
   int64 job_id = 1;
-  // step_index is the 0-based index of the step whose barrier is checked.
-  int32 step_index = 2;
+  // step_name is the step whose barrier is checked.
+  string step_name = 2;
 }
 
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
@@ -510,8 +510,8 @@ enum JobLogStream {
 message JobLogMetadata {
   // job_id is the job the log belongs to.
   int64 job_id = 1;
-  // step_index is the 0-based index of the step in the job's spec.
-  int32 step_index = 2;
+  // step_name is the step's name (its identity in the job's spec).
+  string step_name = 2;
   // stream is which output (stdout or stderr) the data came from.
   JobLogStream stream = 3;
 }
@@ -661,8 +661,8 @@ message SendWebhookResponse {
 message ClaimStepOnceRequest {
   // job_id is the job the step belongs to.
   int64 job_id = 1;
-  // step_index is the 0-based index of the step in the job's spec.
-  int32 step_index = 2;
+  // step_name is the step's name (its identity in the job's spec).
+  string step_name = 2;
   // attempt is the 1-based attempt number of the job (F-04); a retry claims a
   // fresh slot.
   int32 attempt = 3;

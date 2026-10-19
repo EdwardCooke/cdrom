@@ -82,7 +82,7 @@ func runWebhookStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger
 
 	condCtx := executor.ConditionContextFromContext(ctx)
 	sink := executor.LogSinkFromContext(ctx)
-	stepIndex := executor.StepIndexFromContext(ctx)
+	stepName := executor.StepNameFromContext(ctx)
 
 	// Render the url against the step's condition context (F-18): the same
 	// data a step's condition (F-06) and the run's spec fields (F-10) use.
@@ -145,7 +145,7 @@ func runWebhookStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger
 		return fmt.Errorf("send webhook: %w", err)
 	}
 	if sink != nil {
-		sink.WriteStepOutput(stepIndex, "stdout", []byte("sent webhook to "+url))
+		sink.WriteStepOutput(stepName, "stdout", []byte("sent webhook to "+url))
 	}
 	logger.Info("executor: sent webhook", "url", url, "method", method, "content_type", contentType)
 	return nil

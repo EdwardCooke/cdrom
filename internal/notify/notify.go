@@ -14,7 +14,7 @@ package notify
 // The OnceClaimer enforces a step's `once` field (F-01): a step with `once`
 // set runs on at most one target of a job that fans out to a worker group. The
 // target calls the API's ClaimStepOnce RPC (which claims a durable slot in the
-// Database service, keyed by job id + step index + attempt); when it returns
+// Database service, keyed by job id + step name + attempt); when it returns
 // false the step was already claimed by another target in the same attempt, so
 // the executor skips the step.
 //
@@ -92,7 +92,7 @@ func (n *Notifier) SendWebhook(ctx context.Context, webhook *executor.WebhookReq
 
 // Claimer is the API-backed implementation of executor.OnceClaimer. It calls
 // the API's ClaimStepOnce RPC (which claims a durable slot in the Database
-// service, keyed by job id + step index + attempt), presenting the job's own
+// service, keyed by job id + step name + attempt), presenting the job's own
 // token. When it returns false the step was already claimed by another target
 // in the same attempt, so the executor skips the step.
 type Claimer struct {
@@ -109,15 +109,15 @@ func NewClaimer(api apipb.APIClient, jobID int64, token string, attempt int32) *
 }
 
 // Claim implements executor.OnceClaimer: it asks the API to claim the "run
-// this step" slot for stepIndex of the job (F-01), presenting the job's own
+// this step" slot for stepName of the job (F-01), presenting the job's own
 // token. It returns true when this target won the claim (it should run the
 // step) and false when another target already claimed it in the same attempt
 // (this target should skip the step).
-func (c *Claimer) Claim(ctx context.Context, stepIndex int) (bool, error) {
+func (c *Claimer) Claim(ctx context.Context, stepName string) (bool, error) {
 	resp, err := c.api.ClaimStepOnce(grpcutil.WithBearerToken(ctx, c.token), &apipb.ClaimStepOnceRequest{
-		JobId:     c.jobID,
-		StepIndex: int32(stepIndex),
-		Attempt:   c.attempt,
+		JobId:    c.jobID,
+		StepName: stepName,
+		Attempt:  c.attempt,
 	})
 	if err != nil {
 		return false, err

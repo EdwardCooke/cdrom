@@ -2447,8 +2447,8 @@ func (x *GetPipelineVersionRequest) GetVersion() int32 {
 // (F-06).
 type StepResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// index is the 0-based index of the step in the job's spec.
-	Index  int32      `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	// name is the step's name (its identity in the job's spec).
+	Name   string     `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Status StepStatus `protobuf:"varint,2,opt,name=status,proto3,enum=cdrom.db.v1.StepStatus" json:"status,omitempty"`
 	// error is a descriptive error message; empty when status is SUCCEEDED or
 	// SKIPPED.
@@ -2492,11 +2492,11 @@ func (*StepResult) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{23}
 }
 
-func (x *StepResult) GetIndex() int32 {
+func (x *StepResult) GetName() string {
 	if x != nil {
-		return x.Index
+		return x.Name
 	}
-	return 0
+	return ""
 }
 
 func (x *StepResult) GetStatus() StepStatus {
@@ -2697,6 +2697,10 @@ type JobStep struct {
 	// built-in "shell" handler. A target that has not registered the named
 	// handler rejects the step.
 	Type string `protobuf:"bytes,7,opt,name=type,proto3" json:"type,omitempty"`
+	// name is the step's name: its identity in the job's spec, used to
+	// reference the step's status and outputs from a condition or another
+	// step. It must be unique within the job.
+	Name string `protobuf:"bytes,13,opt,name=name,proto3" json:"name,omitempty"`
 	// workdir is the directory the step runs in; empty means the target's
 	// current working directory.
 	Workdir string `protobuf:"bytes,3,opt,name=workdir,proto3" json:"workdir,omitempty"`
@@ -2721,7 +2725,7 @@ type JobStep struct {
 	IgnoreFailed bool `protobuf:"varint,10,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
 	// once, when true, means the step runs on at most one target of a job that
 	// fans out to a worker group (F-01): the first target to reach the step
-	// claims a durable slot (job id + step index + attempt) and runs it; every
+	// claims a durable slot (job id + step name + attempt) and runs it; every
 	// other target that reaches the same step in the same attempt sees the slot
 	// already claimed and skips the step (recorded skipped, not failed). A
 	// retry (F-04) is a new attempt, so it may run the step again. A job on a
@@ -2765,6 +2769,13 @@ func (*JobStep) Descriptor() ([]byte, []int) {
 func (x *JobStep) GetType() string {
 	if x != nil {
 		return x.Type
+	}
+	return ""
+}
+
+func (x *JobStep) GetName() string {
+	if x != nil {
+		return x.Name
 	}
 	return ""
 }
@@ -5057,8 +5068,8 @@ type StepCompletion struct {
 	JobId int64 `protobuf:"varint,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	// worker_name is the worker that completed the step.
 	WorkerName string `protobuf:"bytes,3,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
-	// step_index is the 0-based index of the step in the job's spec.
-	StepIndex int32 `protobuf:"varint,4,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step's name (its identity in the job's spec).
+	StepName string `protobuf:"bytes,4,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	// attempt is the job attempt this completion belongs to (F-04); a retry
 	// creates a fresh set of completions.
 	Attempt       int32                  `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`
@@ -5119,11 +5130,11 @@ func (x *StepCompletion) GetWorkerName() string {
 	return ""
 }
 
-func (x *StepCompletion) GetStepIndex() int32 {
+func (x *StepCompletion) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 func (x *StepCompletion) GetAttempt() int32 {
@@ -5155,8 +5166,8 @@ type ReportStepCompletionRequest struct {
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	// worker_name is the worker that completed the step.
 	WorkerName string `protobuf:"bytes,2,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
-	// step_index is the 0-based index of the step the worker completed.
-	StepIndex     int32 `protobuf:"varint,3,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step's name (the step the worker completed).
+	StepName      string `protobuf:"bytes,3,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5205,11 +5216,11 @@ func (x *ReportStepCompletionRequest) GetWorkerName() string {
 	return ""
 }
 
-func (x *ReportStepCompletionRequest) GetStepIndex() int32 {
+func (x *ReportStepCompletionRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 // CheckStepBarrierRequest asks whether the barrier for a job's step is
@@ -5219,8 +5230,8 @@ type CheckStepBarrierRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job to check.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// step_index is the 0-based index of the step whose barrier is checked.
-	StepIndex     int32 `protobuf:"varint,2,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step whose barrier is checked.
+	StepName      string `protobuf:"bytes,2,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5262,11 +5273,11 @@ func (x *CheckStepBarrierRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *CheckStepBarrierRequest) GetStepIndex() int32 {
+func (x *CheckStepBarrierRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
@@ -5850,9 +5861,10 @@ func (x *PublishWorkerEventRequest) GetAction() string {
 type PublishLogUpdatedRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	JobId int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// log is the log file name (e.g. "job.log" or "step-0.log").
-	Log       string `protobuf:"bytes,2,opt,name=log,proto3" json:"log,omitempty"`
-	StepIndex int32  `protobuf:"varint,3,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// log is the log file name (e.g. "job.log" or "<step-name>.log").
+	Log string `protobuf:"bytes,2,opt,name=log,proto3" json:"log,omitempty"`
+	// step_name is the step the log belongs to.
+	StepName string `protobuf:"bytes,3,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	// stream is the output stream: "stdout" or "stderr".
 	Stream string `protobuf:"bytes,4,opt,name=stream,proto3" json:"stream,omitempty"`
 	// size is the log's total size (in bytes) after the append; the consumer
@@ -5906,11 +5918,11 @@ func (x *PublishLogUpdatedRequest) GetLog() string {
 	return ""
 }
 
-func (x *PublishLogUpdatedRequest) GetStepIndex() int32 {
+func (x *PublishLogUpdatedRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 func (x *PublishLogUpdatedRequest) GetStream() string {
@@ -10567,7 +10579,7 @@ func (x *NextSecretNonceResponse) GetNonce() int64 {
 
 // ClaimStepOnceRequest asks the database to claim the "run this step" slot for
 // a step of a job that fans out to a worker group (F-01): the first target to
-// claim (job id + step index + attempt) wins and runs the step; every other
+// claim (job id + step name + attempt) wins and runs the step; every other
 // target that reaches the same step in the same attempt sees the slot already
 // claimed and skips the step. A retry (F-04) is a new attempt, so it may claim
 // again.
@@ -10575,8 +10587,8 @@ type ClaimStepOnceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the step belongs to.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// step_index is the 0-based index of the step in the job's spec.
-	StepIndex int32 `protobuf:"varint,2,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	// step_name is the step's name (its identity in the job's spec).
+	StepName string `protobuf:"bytes,2,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	// attempt is the 1-based attempt number of the job (F-04); a retry claims a
 	// fresh slot.
 	Attempt       int32 `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"`
@@ -10621,11 +10633,11 @@ func (x *ClaimStepOnceRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *ClaimStepOnceRequest) GetStepIndex() int32 {
+func (x *ClaimStepOnceRequest) GetStepName() string {
 	if x != nil {
-		return x.StepIndex
+		return x.StepName
 	}
-	return 0
+	return ""
 }
 
 func (x *ClaimStepOnceRequest) GetAttempt() int32 {
@@ -13308,10 +13320,10 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x19GetPipelineVersionRequest\x12\x1f\n" +
 	"\vpipeline_id\x18\x01 \x01(\x03R\n" +
 	"pipelineId\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\x05R\aversion\"\xe5\x01\n" +
+	"\aversion\x18\x02 \x01(\x05R\aversion\"\xe3\x01\n" +
 	"\n" +
-	"StepResult\x12\x14\n" +
-	"\x05index\x18\x01 \x01(\x05R\x05index\x12/\n" +
+	"StepResult\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12/\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x17.cdrom.db.v1.StepStatusR\x06status\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12>\n" +
 	"\aoutputs\x18\x04 \x03(\v2$.cdrom.db.v1.StepResult.OutputsEntryR\aoutputs\x1a:\n" +
@@ -13329,9 +13341,10 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\n" +
 	"ParamValue\x12\x16\n" +
 	"\x06string\x18\x01 \x01(\tR\x06string\x12\x18\n" +
-	"\astrings\x18\x02 \x03(\tR\astrings\"\xd2\x03\n" +
+	"\astrings\x18\x02 \x03(\tR\astrings\"\xe6\x03\n" +
 	"\aJobStep\x12\x12\n" +
-	"\x04type\x18\a \x01(\tR\x04type\x12\x18\n" +
+	"\x04type\x18\a \x01(\tR\x04type\x12\x12\n" +
+	"\x04name\x18\r \x01(\tR\x04name\x12\x18\n" +
 	"\aworkdir\x18\x03 \x01(\tR\aworkdir\x12/\n" +
 	"\x03env\x18\x04 \x03(\v2\x1d.cdrom.db.v1.JobStep.EnvEntryR\x03env\x123\n" +
 	"\atimeout\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x128\n" +
@@ -13549,29 +13562,26 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"A\n" +
 	"\x1eAbandonWorkerExecutionsRequest\x12\x1f\n" +
 	"\vworker_name\x18\x01 \x01(\tR\n" +
-	"workerName\"\x87\x02\n" +
+	"workerName\"\x85\x02\n" +
 	"\x0eStepCompletion\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1f\n" +
 	"\vworker_name\x18\x03 \x01(\tR\n" +
-	"workerName\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x04 \x01(\x05R\tstepIndex\x12\x18\n" +
+	"workerName\x12\x1b\n" +
+	"\tstep_name\x18\x04 \x01(\tR\bstepName\x12\x18\n" +
 	"\aattempt\x18\x05 \x01(\x05R\aattempt\x129\n" +
 	"\n" +
 	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"t\n" +
+	"updated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"r\n" +
 	"\x1bReportStepCompletionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
 	"\vworker_name\x18\x02 \x01(\tR\n" +
-	"workerName\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x03 \x01(\x05R\tstepIndex\"O\n" +
+	"workerName\x12\x1b\n" +
+	"\tstep_name\x18\x03 \x01(\tR\bstepName\"M\n" +
 	"\x17CheckStepBarrierRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x02 \x01(\x05R\tstepIndex\"V\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
+	"\tstep_name\x18\x02 \x01(\tR\bstepName\"V\n" +
 	"\x18CheckStepBarrierResponse\x12\x1c\n" +
 	"\tsatisfied\x18\x01 \x01(\bR\tsatisfied\x12\x1c\n" +
 	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\xb4\x01\n" +
@@ -13609,12 +13619,11 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x19PublishWorkerEventRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x16\n" +
-	"\x06action\x18\x03 \x01(\tR\x06action\"\x8e\x01\n" +
+	"\x06action\x18\x03 \x01(\tR\x06action\"\x8c\x01\n" +
 	"\x18PublishLogUpdatedRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x10\n" +
-	"\x03log\x18\x02 \x01(\tR\x03log\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x03 \x01(\x05R\tstepIndex\x12\x16\n" +
+	"\x03log\x18\x02 \x01(\tR\x03log\x12\x1b\n" +
+	"\tstep_name\x18\x03 \x01(\tR\bstepName\x12\x16\n" +
 	"\x06stream\x18\x04 \x01(\tR\x06stream\x12\x12\n" +
 	"\x04size\x18\x05 \x01(\x03R\x04size\"&\n" +
 	"\x14PublishEventResponse\x12\x0e\n" +
@@ -13955,11 +13964,10 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\x18\n" +
 	"\x16NextSecretNonceRequest\"/\n" +
 	"\x17NextSecretNonceResponse\x12\x14\n" +
-	"\x05nonce\x18\x01 \x01(\x03R\x05nonce\"f\n" +
+	"\x05nonce\x18\x01 \x01(\x03R\x05nonce\"d\n" +
 	"\x14ClaimStepOnceRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
-	"\n" +
-	"step_index\x18\x02 \x01(\x05R\tstepIndex\x12\x18\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
+	"\tstep_name\x18\x02 \x01(\tR\bstepName\x12\x18\n" +
 	"\aattempt\x18\x03 \x01(\x05R\aattempt\"1\n" +
 	"\x15ClaimStepOnceResponse\x12\x18\n" +
 	"\aclaimed\x18\x01 \x01(\bR\aclaimed\"\x9b\x02\n" +

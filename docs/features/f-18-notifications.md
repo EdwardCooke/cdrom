@@ -174,7 +174,7 @@ without the target needing SMTP credentials or outbound egress.
   attempt. A job that targets a worker group runs on every worker, so without
   it a person would be emailed once per worker; with `once` set, the executor
   runs the step on a single worker of the group (the first to claim the
-  durable slot, job id + step index + attempt) and the other workers skip it,
+  durable slot, job id + step name + attempt) and the other workers skip it,
   so the notification goes out exactly once. A retry (F-04) is a new attempt,
   so it may send again. When `once` is not set (the default), every worker
   that runs the step sends its own notification.

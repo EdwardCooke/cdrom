@@ -53,7 +53,7 @@ BODY=$(cat <<EOF
       {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step3: pwd=\$(pwd)"]}}, "workdir": "$WORKDIR"},
       {"type": "shell", "params": {"shell": {"string": "sh"}, "args": {"strings": ["-c"]}, "command": {"string": "echo step4: shell override"}}},
       {"type": "token_exchange", "params": {"audience": {"string": "outside-svc"}}},
-      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step6: token exchange flowed to a later step"]}}, "condition": "{{ if (index .steps 4).Outputs.token }}true{{ else }}false{{ end }}"}
+      {"params": {"command": {"string": "sh"}, "args": {"strings": ["-c", "echo step6: token exchange flowed to a later step"]}}, "condition": "{{ if .steps.step4.Outputs.token }}true{{ else }}false{{ end }}"}
     ]
   }
 }
@@ -112,26 +112,26 @@ grep -q 'audience=outside-svc' "$WORK/idp.log" \
 log ">> verifying job logs (F-02)"
 
 # Poll the log listing until the step logs plus job.log are present. The
-# token_exchange step (the 5th step, index 4) produces no output, so it has no
-# step-4.log; the other steps each have one (step-0..3 and step-5).
+# token_exchange step (the 5th step, step4) produces no output, so it has no
+# step4.log; the other steps each have one (step0..3 and step5).
 LOG_LISTING=""
 for i in $(seq 1 100); do
   LOG_LISTING=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs")
-  if printf '%s' "$LOG_LISTING" | grep -q 'step-0.log' \
-    && printf '%s' "$LOG_LISTING" | grep -q 'step-1.log' \
-    && printf '%s' "$LOG_LISTING" | grep -q 'step-2.log' \
-    && printf '%s' "$LOG_LISTING" | grep -q 'step-3.log' \
-    && printf '%s' "$LOG_LISTING" | grep -q 'step-5.log' \
+  if printf '%s' "$LOG_LISTING" | grep -q 'step0.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step1.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step2.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step3.log' \
+    && printf '%s' "$LOG_LISTING" | grep -q 'step5.log' \
     && printf '%s' "$LOG_LISTING" | grep -q 'job.log'; then
     break
   fi
   sleep 0.2
 done
 log "   log listing: $LOG_LISTING"
-printf '%s' "$LOG_LISTING" | grep -q 'step-0.log' \
-  || { echo ">> step-0.log missing from log listing" >&2; exit 1; }
-printf '%s' "$LOG_LISTING" | grep -q 'step-5.log' \
-  || { echo ">> step-5.log missing from log listing" >&2; exit 1; }
+printf '%s' "$LOG_LISTING" | grep -q 'step0.log' \
+  || { echo ">> step0.log missing from log listing" >&2; exit 1; }
+printf '%s' "$LOG_LISTING" | grep -q 'step5.log' \
+  || { echo ">> step5.log missing from log listing" >&2; exit 1; }
 printf '%s' "$LOG_LISTING" | grep -q 'job.log' \
   || { echo ">> job.log missing from log listing" >&2; exit 1; }
 
@@ -162,11 +162,11 @@ printf '%s' "$JOB_LOG" | grep -q 'step6: token exchange flowed to a later step' 
   || { echo ">> step6 output missing from job.log" >&2; exit 1; }
 
 # Verify a per-step log is retrievable and contains only that step's output.
-STEP0_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs/step-0.log")
-log "   step-0.log: $STEP0_LOG"
+STEP0_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$JOB_ID/logs/step0.log")
+log "   step0.log: $STEP0_LOG"
 printf '%s' "$STEP0_LOG" | grep -q 'step1: plain command' \
-  || { echo ">> step1 output missing from step-0.log" >&2; exit 1; }
+  || { echo ">> step1 output missing from step0.log" >&2; exit 1; }
 printf '%s' "$STEP0_LOG" | grep -q 'step2' \
-  && { echo ">> step-0.log contains step2 output (step attribution broken)" >&2; exit 1; }
+  && { echo ">> step0.log contains step2 output (step attribution broken)" >&2; exit 1; }
 
 log ">> 01-shell-job PASSED"

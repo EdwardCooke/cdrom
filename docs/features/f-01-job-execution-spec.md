@@ -113,7 +113,7 @@ missing piece.
   `once` (a boolean field on `JobStep`, alongside `condition` and
   `ignore_failed`). When set, the executor runs the step on at most one target
   of a job that fans out to a worker group: before running it, the target
-  claims a durable slot (job id + step index + attempt) in the Database service
+  claims a durable slot (job id + step name + attempt) in the Database service
   (a guarded atomic claim, like F-16's slot accounting); the first target to
   claim it runs the step, and every other target that reaches the same step in
   the same attempt sees the slot already claimed and **skips** the step

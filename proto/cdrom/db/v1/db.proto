@@ -328,7 +328,7 @@ service Database {
 
   // ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
   // step of a job that fans out to a worker group: the first target to claim
-  // (job id + step index + attempt) wins and runs the step; every other target
+  // (job id + step name + attempt) wins and runs the step; every other target
   // that reaches the same step in the same attempt sees the slot already
   // claimed and skips the step. A retry (F-04) is a new attempt, so it may
   // claim again. The claim is durable and shared by every API replica, so the
@@ -1109,8 +1109,8 @@ enum StepStatus {
 // reported by the execution target alongside the job's own final status
 // (F-06).
 message StepResult {
-  // index is the 0-based index of the step in the job's spec.
-  int32 index = 1;
+  // name is the step's name (its identity in the job's spec).
+  string name = 1;
   StepStatus status = 2;
   // error is a descriptive error message; empty when status is SUCCEEDED or
   // SKIPPED.
@@ -1197,6 +1197,10 @@ message JobStep {
   // built-in "shell" handler. A target that has not registered the named
   // handler rejects the step.
   string type = 7;
+  // name is the step's name: its identity in the job's spec, used to
+  // reference the step's status and outputs from a condition or another
+  // step. It must be unique within the job.
+  string name = 13;
   // workdir is the directory the step runs in; empty means the target's
   // current working directory.
   string workdir = 3;
@@ -1221,7 +1225,7 @@ message JobStep {
   bool ignore_failed = 10;
   // once, when true, means the step runs on at most one target of a job that
   // fans out to a worker group (F-01): the first target to reach the step
-  // claims a durable slot (job id + step index + attempt) and runs it; every
+  // claims a durable slot (job id + step name + attempt) and runs it; every
   // other target that reaches the same step in the same attempt sees the slot
   // already claimed and skips the step (recorded skipped, not failed). A
   // retry (F-04) is a new attempt, so it may run the step again. A job on a
@@ -1776,8 +1780,8 @@ message StepCompletion {
   int64 job_id = 2;
   // worker_name is the worker that completed the step.
   string worker_name = 3;
-  // step_index is the 0-based index of the step in the job's spec.
-  int32 step_index = 4;
+  // step_name is the step's name (its identity in the job's spec).
+  string step_name = 4;
   // attempt is the job attempt this completion belongs to (F-04); a retry
   // creates a fresh set of completions.
   int32 attempt = 5;
@@ -1792,8 +1796,8 @@ message ReportStepCompletionRequest {
   int64 job_id = 1;
   // worker_name is the worker that completed the step.
   string worker_name = 2;
-  // step_index is the 0-based index of the step the worker completed.
-  int32 step_index = 3;
+  // step_name is the step's name (the step the worker completed).
+  string step_name = 3;
 }
 
 // CheckStepBarrierRequest asks whether the barrier for a job's step is
@@ -1802,8 +1806,8 @@ message ReportStepCompletionRequest {
 message CheckStepBarrierRequest {
   // job_id is the job to check.
   int64 job_id = 1;
-  // step_index is the 0-based index of the step whose barrier is checked.
-  int32 step_index = 2;
+  // step_name is the step whose barrier is checked.
+  string step_name = 2;
 }
 
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
@@ -1904,9 +1908,10 @@ message PublishWorkerEventRequest {
 
 message PublishLogUpdatedRequest {
   int64 job_id = 1;
-  // log is the log file name (e.g. "job.log" or "step-0.log").
+  // log is the log file name (e.g. "job.log" or "<step-name>.log").
   string log = 2;
-  int32 step_index = 3;
+  // step_name is the step the log belongs to.
+  string step_name = 3;
   // stream is the output stream: "stdout" or "stderr".
   string stream = 4;
   // size is the log's total size (in bytes) after the append; the consumer
@@ -2700,15 +2705,15 @@ message NextSecretNonceResponse {
 
 // ClaimStepOnceRequest asks the database to claim the "run this step" slot for
 // a step of a job that fans out to a worker group (F-01): the first target to
-// claim (job id + step index + attempt) wins and runs the step; every other
+// claim (job id + step name + attempt) wins and runs the step; every other
 // target that reaches the same step in the same attempt sees the slot already
 // claimed and skips the step. A retry (F-04) is a new attempt, so it may claim
 // again.
 message ClaimStepOnceRequest {
   // job_id is the job the step belongs to.
   int64 job_id = 1;
-  // step_index is the 0-based index of the step in the job's spec.
-  int32 step_index = 2;
+  // step_name is the step's name (its identity in the job's spec).
+  string step_name = 2;
   // attempt is the 1-based attempt number of the job (F-04); a retry claims a
   // fresh slot.
   int32 attempt = 3;

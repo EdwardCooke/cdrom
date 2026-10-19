@@ -90,15 +90,15 @@ func NewSink(api apipb.APIClient, ctx context.Context, jobID int64, token string
 // down and the queue has filled). It is a no-op once the sink is closed. It
 // never returns an error: streaming is best-effort and must never fail or
 // block the job.
-func (s *Sink) WriteStepOutput(stepIndex int, stream string, data []byte) {
+func (s *Sink) WriteStepOutput(stepName string, stream string, data []byte) {
 	if s == nil || len(data) == 0 {
 		return
 	}
 	chunk := &apipb.JobLogChunk{
 		Metadata: &apipb.JobLogMetadata{
-			JobId:     s.jobID,
-			StepIndex: int32(stepIndex),
-			Stream:    streamToEnum(stream),
+			JobId:    s.jobID,
+			StepName: stepName,
+			Stream:   streamToEnum(stream),
 		},
 		Data: data,
 	}
