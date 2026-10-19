@@ -187,7 +187,7 @@ Tick each feature off as it lands.
 - [x] F-17 Environments & deployment targets
 - [x] F-18 Notifications
 - [ ] F-19 Artifact promotion
-- [ ] F-20 Observability & metrics
+- [x] F-20 Observability & metrics
 - [ ] F-21 Config as code (overview; see F-21.1…F-21.7)
 - [ ] F-21.1 File format & compiler (overview; see F-21.1.1…F-21.1.4)
 - [ ] F-21.1.1 Manifest envelope & compiler skeleton

@@ -129,19 +129,19 @@ and source credentials out of the API and scheduler.
 **Acceptance criteria.**
 - [ ] A pipeline defined in YAML can be imported (via the API or from an
       external source) and becomes runnable.
-- [ ] A pipeline definition is a Kubernetes-style manifest with an `apiVersion`
+- [x] A pipeline definition is a Kubernetes-style manifest with an `apiVersion`
       (currently `cdrom/alphav1`), a `kind` (`Pipeline` / `VariableSet` / `Step`
       / `Job`), a `metadata` block, and a `spec`; the compiler dispatches on
       `kind` to know how to interpret a document (and an imported file's `kind`
       tells it how to splice the file in).
-- [ ] `metadata` carries `name`, `description`, `labels` (the F-29 key/value
+- [x] `metadata` carries `name`, `description`, `labels` (the F-29 key/value
       pairs, renamed from `tags` as part of F-21), and `annotations` (free-form
       key/value pairs used only for UI searchability — they never affect
       behavior); everything else is under `spec`.
 - [ ] Exporting a pipeline reproduces a file that re-imports equivalently
       (round-trip): the exported file, re-imported, yields the same compiled
       definition.
-- [ ] Invalid definitions are rejected with actionable errors (a clear message
+- [x] Invalid definitions are rejected with actionable errors (a clear message
       naming the offending file, key, and reason — e.g. an unknown step
       reference, a cycle, or a parameter with no value).
 - [ ] A pipeline can be sourced from a **git** repository, an **HTTP/HTTPS
@@ -203,7 +203,7 @@ and source credentials out of the API and scheduler.
 - [ ] Variable sets are either inline `variables` maps or `import` from
       external files or vaults; a job references sets by name in its
       `variableSets` list.
-- [ ] Mapping keys in the file are camelCase (`concurrencyKeys`, `variableSets`,
+- [x] Mapping keys in the file are camelCase (`concurrencyKeys`, `variableSets`,
       `importFrom`, `secretSources`, …).
 - [ ] The pipeline's source (git / http / filesystem) is **not** in the file —
       it is a `PipelineSource` stored in the database and configured through the
