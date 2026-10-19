@@ -106,16 +106,21 @@ blank-import `internal/stephandlers` so built-ins register before any job runs �
 this is the seam for the later plugin architecture.
 
 **Shell contract.** The `shell` handler reads `command` (string), `args` (list),
-and `shell` (string) from `params`. The command is executed **directly by the
-target OS — no implicit shell** (no `&&`, pipes, globbing, or `$VAR` expansion),
-which is what makes a spec portable across Windows and Linux. A step that needs
-shell behavior must invoke a shell explicitly (`sh -c …` on Linux, `cmd /c …` on
-Windows) — either by naming the shell as `command` or by setting the `shell`
-param (e.g. `shell: "pwsh"`, `args: ["-NoProfile","-Command"]`). Step
-stdout/stderr go to the target's local logs and, when a log sink is set, are
-streamed to the API in near-real-time (F-02, `internal/logstream`); the API
-persists them to the artifacts service and fans them out to the UI as `job_log`
-events.
+and `shell` (string) from `params`. When a step sets **no `shell` param and no
+`args`**, its `command` is a one-line shell command and is run through the
+target OS's **default shell** (`bash -c …` on Linux when bash is on the PATH,
+else `sh -c …`, and on Windows `pwsh -Command …` when PowerShell Core is on the
+PATH, else `powershell -Command …`) — this is what makes the file format's
+`shell: <string>` shorthand (F-21.1.2) portable.
+When a step sets `args` (it is constructing the invocation explicitly) the
+command is executed **directly by the target OS — no implicit shell** (no `&&`,
+pipes, globbing, or `$VAR` expansion), which is what makes such a spec portable
+across Windows and Linux. A step that needs shell behavior with a *specific*
+shell sets the `shell` param (e.g. `shell: "pwsh"`, `args: ["-NoProfile",
+"-Command"]`), and the target runs `<shell> <args> <command>`. Step stdout/stderr
+go to the target's local logs and, when a log sink is set, are streamed to the
+API in near-real-time (F-02, `internal/logstream`); the API persists them to the
+artifacts service and fans them out to the UI as `job_log` events.
 
 **Secrets (F-12).** Pipelines declare named secrets (like `params`); values are
 encrypted with a single AES-256-GCM key held in the API's config and stored
@@ -324,9 +329,12 @@ not Prometheus-fed. Full spec: `docs/features/f-20-observability.md`.
 - Use portable Go (`filepath`, `os` env handling); no hard-coded path separators,
   Unix-only syscalls, or shell assumptions without a Windows equivalent. Windows
   path/line-ending handling is a known failure mode.
-- Job steps are type-agnostic and the `shell` handler runs a command directly
-  (no implicit shell) — never rely on shell features in `command`/`args`; invoke
-  a shell explicitly when needed. New step types must also be portable.
+- Job steps are type-agnostic and the `shell` handler runs a command: a step
+  with no `shell` param and no `args` runs its one-line command through the
+  target OS's default shell, while a step that sets `args` runs the command
+  directly (no implicit shell) — so never rely on shell features in a step's
+  `command`/`args` unless the step is meant to run through a shell. New step
+  types must also be portable.
 
 ## Repository Layout
 

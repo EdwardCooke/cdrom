@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -35,23 +36,28 @@ import (
 //   - "shell" (string) — when set, the command is run through this shell
 //     instead of directly.
 //
-// Portability contract: a step's command is resolved and executed directly by
-// the target's OS — no shell is involved. This means the same spec executes
-// identically on Windows and Linux: there are no shell-specific assumptions
-// (no `&&`, no pipes, no globbing, no `$VAR` expansion). A step that needs
-// shell behavior must invoke a shell explicitly (e.g. command "bash" with
-// args ["-c", "..."], or "pwsh" with args ["-NoProfile", "-Command", "..."]).
-// A step's workdir is interpreted with the target's native path separator; a
-// relative workdir is resolved against the target's current working directory.
+// Portability contract: a step's command is resolved and executed by the
+// target's OS. When a step sets no "shell" param and no "args", its command is
+// a one-line shell command and is run through the target OS's default shell
+// (`bash -c <command>` on Linux when bash is on the PATH, else `sh -c
+// <command>`, and on Windows `pwsh -Command <command>` when PowerShell Core is
+// on the PATH, else `powershell -Command <command>`) — this is what makes the
+// file format's `shell: <string>` shorthand (a plain-string command) portable.
+// When a step sets "args" (it is constructing the invocation
+// explicitly) the command is run directly with those args and no shell is
+// involved, so the same spec executes identically on Windows and Linux with no
+// shell-specific assumptions (no `&&`, no pipes, no globbing, no `$VAR`
+// expansion). A step's workdir is interpreted with the target's native path
+// separator; a relative workdir is resolved against the target's current
+// working directory.
 //
 // Shell override: a step may set the "shell" param to run through a
-// user-chosen shell instead of executing the command directly. When it is set
-// the target executes `<shell> <args> <command>` — the command is passed as
-// the final argument to the shell (e.g. shell "pwsh", args
+// user-chosen shell instead of the platform default. When it is set the target
+// executes `<shell> <args> <command>` — the command is passed as the final
+// argument to the shell (e.g. shell "pwsh", args
 // ["-NoProfile", "-Command"], command "Get-ChildItem"). This is the portable
-// way to opt a step into shell behavior with a specific shell rather than a
-// platform default. When shell is empty the step runs the command directly,
-// preserving the no-implicit-shell contract.
+// way to opt a step into shell behavior with a specific shell rather than the
+// platform default.
 const TypeShell = executor.DefaultType
 
 // Param keys the shell handler reads from a step's Params map.
@@ -84,17 +90,23 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		return fmt.Errorf("command is required")
 	}
 
-	// Resolve the executable and its arguments. By default the step runs
-	// `command` directly with `args` (no shell). When the step sets a shell,
-	// it instead runs `<shell> <args> <command>`: the shell is the executable,
-	// `args` are the shell's own flags, and `command` is passed as the final
-	// argument. This lets a step opt into shell behavior with a user-chosen
-	// shell (e.g. "pwsh" on Windows) instead of a platform default.
+	// Resolve the executable and its arguments. When the step sets a shell, it
+	// runs `<shell> <args> <command>`: the shell is the executable, `args` are
+	// the shell's own flags, and `command` is passed as the final argument
+	// (this lets a step opt into shell behavior with a user-chosen shell, e.g.
+	// "pwsh" on Windows, instead of the platform default). When the step sets
+	// no shell and no args, its command is a one-line shell command and is run
+	// through the target OS's default shell (bash -c on Linux when bash is on
+	// the PATH, else sh -c, and on Windows pwsh -Command when PowerShell Core
+	// is on the PATH, else powershell -Command). When the step sets args (no
+	// shell), the command is run directly with those args (no shell).
 	executable := command
 	args := paramStrings(step, ParamArgs)
 	if shell := paramString(step, ParamShell); shell != "" {
 		executable = shell
 		args = append(append([]string{}, args...), command)
+	} else if len(args) == 0 {
+		executable, args = defaultShellInvocation(command)
 	}
 
 	cmd := exec.CommandContext(ctx, executable, args...)
@@ -194,6 +206,48 @@ func sendToLogs(src io.Reader, sink executor.LogSink, stepName string, stream st
 			return
 		}
 	}
+}
+
+// defaultShellInvocation returns the executable and arguments that run
+// command through the target OS's default shell: `bash -c <command>` on Linux
+// (and other Unixes) when bash is on the PATH, falling back to
+// `sh -c <command>` when it is not, and, on Windows, `pwsh -Command
+// <command>` when PowerShell Core (pwsh) is on the PATH, falling back to
+// `powershell -Command <command>` (Windows PowerShell) when it is not. It is
+// used for a shell step that sets no "shell" param and no "args" — a one-line
+// shell command (the file format's `shell: <string>` shorthand) — so the
+// command is parsed by a shell rather than executed as a single executable
+// name.
+func defaultShellInvocation(command string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return windowsDefaultShellInvocation(command, exec.LookPath)
+	}
+	return unixDefaultShellInvocation(command, exec.LookPath)
+}
+
+// unixDefaultShellInvocation returns the executable and arguments that run
+// command through the Unix default shell: `bash -c <command>` when bash is on
+// the PATH, falling back to `sh -c <command>` when it is not. The lookup
+// function is a parameter so the bash/sh selection can be tested on any
+// platform.
+func unixDefaultShellInvocation(command string, lookPath func(string) (string, error)) (string, []string) {
+	if _, err := lookPath("bash"); err == nil {
+		return "bash", []string{"-c", command}
+	}
+	return "sh", []string{"-c", command}
+}
+
+// windowsDefaultShellInvocation returns the executable and arguments that run
+// command through the Windows default shell: `pwsh -Command <command>` when
+// PowerShell Core (pwsh) is on the PATH, falling back to
+// `powershell -Command <command>` (Windows PowerShell) when it is not. The
+// lookup function is a parameter so the pwsh/powershell selection can be
+// tested on any platform.
+func windowsDefaultShellInvocation(command string, lookPath func(string) (string, error)) (string, []string) {
+	if _, err := lookPath("pwsh"); err == nil {
+		return "pwsh", []string{"-Command", command}
+	}
+	return "powershell", []string{"-Command", command}
 }
 
 // paramString returns the string value of a step param, or "" if the param is

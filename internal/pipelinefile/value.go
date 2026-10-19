@@ -2,6 +2,7 @@ package pipelinefile
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -132,6 +133,57 @@ func (v Value) StringMap(key string) (map[string]string, bool) {
 	}
 	out := make(map[string]string, len(val.Entries))
 	for _, e := range val.Entries {
+		if e.Value.Type != Scalar {
+			return nil, false
+		}
+		out[e.Key] = e.Value.String
+	}
+	return out, true
+}
+
+// AsString returns the Value's string when it is a scalar, or the empty string
+// otherwise. It is a convenience for the compiler's descent into a scalar
+// field (a step's workdir, timeout, or an empty entry).
+func (v Value) AsString() string {
+	if v.Type != Scalar {
+		return ""
+	}
+	return v.String
+}
+
+// IsNull reports whether the Value is an empty entry: a scalar with an empty
+// string. yaml.v3 decodes a key with no value (e.g. `step1:`) as a null
+// scalar, which is how the file format's empty step entry (shorthand for
+// `ref: <same name>`) is represented. A non-scalar, or a scalar with a
+// non-empty string, is not null.
+func (v Value) IsNull() bool {
+	return v.Type == Scalar && v.String == ""
+}
+
+// AsBool parses the Value's string as a boolean (strconv.ParseBool) when it is
+// a scalar, reporting whether it parsed. A non-scalar Value reports false. It
+// is how a step's boolean common fields (ignoreFailed, once) are lifted.
+func (v Value) AsBool() (bool, bool) {
+	if v.Type != Scalar {
+		return false, false
+	}
+	b, err := strconv.ParseBool(v.String)
+	if err != nil {
+		return false, false
+	}
+	return b, true
+}
+
+// AsStringMap returns the Value's entries as a key → string map when it is a
+// map of scalar values (in file order), reporting whether it is. A non-map, or
+// a map with a non-scalar value, reports false. It is how a step's env map is
+// lifted onto the JobStep.
+func (v Value) AsStringMap() (map[string]string, bool) {
+	if v.Type != Map {
+		return nil, false
+	}
+	out := make(map[string]string, len(v.Entries))
+	for _, e := range v.Entries {
 		if e.Value.Type != Scalar {
 			return nil, false
 		}

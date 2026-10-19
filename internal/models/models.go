@@ -531,20 +531,24 @@ type ParamValue struct {
 // a new step type can be added without changing the spec schema. The built-in
 // shell handler reads its command, args, and shell from Params.
 //
-// Portability contract (shell handler): the command is resolved and executed
-// directly by the execution target's OS (no shell is involved), so the same
-// spec executes identically on Windows and Linux. Workdir is interpreted with
-// the target's native path separator; a relative workdir is resolved against
-// the target's current working directory.
+// Portability contract (shell handler): when a step sets no shell param and
+// no args, its command is a one-line shell command and is run through the
+// execution target OS's default shell (bash -c <command> on Linux when bash is
+// on the PATH, else sh -c <command>, and on Windows pwsh -Command <command>
+// when PowerShell Core is on the PATH, else powershell -Command <command>).
+// When a step sets args (it is constructing the invocation explicitly) the
+// command is executed directly by the target's OS (no shell is involved), so
+// the same spec executes identically on Windows and Linux. Workdir is
+// interpreted with the target's native path separator; a relative workdir is
+// resolved against the target's current working directory.
 //
 // Shell override (shell handler): when the shell param is set, the step is
-// run through that shell instead of executing the command directly — the
-// target invokes `<shell> <args> <command>`, so the command is passed as the
-// final argument (e.g. shell "pwsh", args ["-NoProfile", "-Command"],
-// command "Get-ChildItem"). This lets a step opt into shell behavior (pipes,
-// globbing, $VAR expansion) with an explicit, user-chosen shell rather than a
-// platform default. When shell is empty the step runs the command directly,
-// preserving the no-implicit-shell contract.
+// run through that shell instead of the platform default — the target invokes
+// `<shell> <args> <command>`, so the command is passed as the final argument
+// (e.g. shell "pwsh", args ["-NoProfile", "-Command"], command
+// "Get-ChildItem"). This lets a step opt into shell behavior (pipes, globbing,
+// $VAR expansion) with an explicit, user-chosen shell rather than the platform
+// default.
 //
 // Extensibility: Type names a step handler registered on the execution
 // target (the built-in "shell" handler is always available; a target may

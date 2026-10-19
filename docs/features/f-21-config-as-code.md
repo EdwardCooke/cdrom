@@ -790,7 +790,7 @@ The `shell` handler's value may also be a **plain string**: `shell: <string>`
 is shorthand for `shell: {command: <string>}` — only the `command` param is
 set, nothing else (no `args`, no `shell`). A shell step that sets no `shell`
 param (as the string shorthand never does) runs its command through the target
-OS's **default shell** (e.g. `sh` on Linux, `cmd` on Windows), so the string
+OS's **default shell** (e.g. `bash` on Linux, `pwsh` on Windows), so the string
 form is the portable way to write a one-line shell command (as `step1` in the
 complete example does).
 

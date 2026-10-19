@@ -83,9 +83,10 @@ missing piece.
 - **Shell contract:** the shell handler reads its `command` (string param),
   `args` (list param), and `shell` (string param) from the step's `params`.
   The command is executed directly by the target OS — no implicit shell. Steps
-  needing shell behavior invoke a shell explicitly (`sh -c ...` / `cmd /c ...`).
-  Step stdout/stderr are inherited from the target (local logging) and, when a
-  log sink is present, also streamed to the API (F-02).
+  needing shell behavior invoke a shell explicitly (`bash -c ...` on Linux,
+  `pwsh -Command ...` on Windows). Step stdout/stderr are inherited from the
+  target (local logging) and, when a log sink is present, also streamed to the
+  API (F-02).
 - **Shell override:** a step may set the `shell` param to run through a
   user-chosen interpreter; the target executes `<shell> <args> <command>`
   (e.g. `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,

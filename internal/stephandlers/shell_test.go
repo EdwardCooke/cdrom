@@ -34,11 +34,12 @@ func stringsParam(s []string) *dbpb.ParamValue {
 	return &dbpb.ParamValue{Strings: s}
 }
 
-// shellStep builds a step that runs script in the platform's shell. The
-// shell handler's portability contract is that a command is executed directly
-// (no implicit shell); a step that needs shell behavior invokes a shell
-// explicitly, which is exactly what this helper does. The command and args
-// are carried in the step's Params map, as the shell handler reads them.
+// shellStep builds a step that runs script in the platform's shell. It invokes
+// a shell explicitly (command "sh"/"cmd" with args ["-c"/"/c", script]), which
+// is the portable way to run a one-line shell command: a step that sets args
+// runs the command directly with those args (no implicit shell), so the same
+// spec executes identically on Windows and Linux. The command and args are
+// carried in the step's Params map, as the shell handler reads them.
 func shellStep(t *testing.T, script string) *dbpb.JobStep {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -266,6 +267,100 @@ func TestExecuteShellOverride(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(data)); got != "via-shell" {
 		t.Errorf("shell output = %q, want %q (shell override not honored)", got, "via-shell")
+	}
+}
+
+// TestExecuteDefaultShell verifies that a shell step that sets no "shell" param
+// and no "args" runs its command through the target OS's default shell
+// (F-21.1.2): the command is a one-line shell command, so the `>` redirection
+// in it is interpreted by the shell and the output file is created. If the
+// command were executed directly (no shell), the redirection would be passed
+// literally to the binary and no file would be created. On Windows the default
+// shell is pwsh (PowerShell Core) when it is on the PATH, else powershell
+// (Windows PowerShell); the command and assertion are written to work in both
+// sh and PowerShell.
+func TestExecuteDefaultShell(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+
+	// A one-line shell command with no args and no shell param: the `>`
+	// redirection only works when a shell parses the command.
+	step := &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+		ParamCommand: stringParam(`printf 'via-default-shell' > ` + shellQuote(out)),
+	}}
+	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read default-shell output: %v (the command was not run through a shell)", err)
+	}
+	// Strip a UTF-8 BOM (pwsh may write one) before comparing, so the
+	// assertion holds whether the default shell is bash, sh, or PowerShell.
+	got := strings.TrimSpace(strings.TrimPrefix(string(data), "\ufeff"))
+	if got != "via-default-shell" {
+		t.Errorf("default-shell output = %q, want %q", got, "via-default-shell")
+	}
+}
+
+// TestWindowsDefaultShellInvocation verifies the Windows default-shell
+// selection: pwsh (PowerShell Core) is used when it is on the PATH, and
+// powershell (Windows PowerShell) is the fallback when it is not. The lookup
+// is injected so the test runs on any platform.
+func TestWindowsDefaultShellInvocation(t *testing.T) {
+	// pwsh is on the PATH: use it.
+	found := func(string) (string, error) { return "/usr/bin/pwsh", nil }
+	if exe, args := windowsDefaultShellInvocation("echo hi", found); exe != "pwsh" || len(args) != 2 || args[0] != "-Command" || args[1] != "echo hi" {
+		t.Errorf("with pwsh on PATH: got (%q, %v), want (pwsh, [-Command echo hi])", exe, args)
+	}
+	// pwsh is not on the PATH: fall back to powershell.
+	notFound := func(string) (string, error) { return "", errors.New("not found") }
+	if exe, args := windowsDefaultShellInvocation("echo hi", notFound); exe != "powershell" || len(args) != 2 || args[0] != "-Command" || args[1] != "echo hi" {
+		t.Errorf("without pwsh on PATH: got (%q, %v), want (powershell, [-Command echo hi])", exe, args)
+	}
+}
+
+// TestUnixDefaultShellInvocation verifies the Unix default-shell selection:
+// bash is used when it is on the PATH, and sh is the fallback when it is not.
+// The lookup is injected so the test runs on any platform.
+func TestUnixDefaultShellInvocation(t *testing.T) {
+	// bash is on the PATH: use it.
+	found := func(string) (string, error) { return "/bin/bash", nil }
+	if exe, args := unixDefaultShellInvocation("echo hi", found); exe != "bash" || len(args) != 2 || args[0] != "-c" || args[1] != "echo hi" {
+		t.Errorf("with bash on PATH: got (%q, %v), want (bash, [-c echo hi])", exe, args)
+	}
+	// bash is not on the PATH: fall back to sh.
+	notFound := func(string) (string, error) { return "", errors.New("not found") }
+	if exe, args := unixDefaultShellInvocation("echo hi", notFound); exe != "sh" || len(args) != 2 || args[0] != "-c" || args[1] != "echo hi" {
+		t.Errorf("without bash on PATH: got (%q, %v), want (sh, [-c echo hi])", exe, args)
+	}
+}
+
+// TestExecuteDefaultShellWithArgsRunsDirectly verifies that a shell step that
+// sets "args" (no shell) still runs the command directly with those args (no
+// shell): the `>` redirection in the args is passed to the binary literally,
+// so no output file is created. This is the explicit-invocation path that
+// keeps the no-implicit-shell contract for a step that constructs its own
+// invocation.
+//
+// Linux-only: the redirection semantics are unambiguous with /bin/echo, and
+// Windows has no standalone `echo` binary (it is a cmd builtin).
+func TestExecuteDefaultShellWithArgsRunsDirectly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no standalone echo binary on Windows")
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+
+	step := &dbpb.JobStep{Params: map[string]*dbpb.ParamValue{
+		ParamCommand: stringParam("echo"),
+		ParamArgs:    stringsParam([]string{"hi", ">", out}),
+	}}
+	if err := executor.Execute(context.Background(), &dbpb.JobSpec{Steps: []*dbpb.JobStep{step}}, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("expected no output file (command ran directly with args, no shell), but %s exists (err=%v)", out, err)
 	}
 }
 

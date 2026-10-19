@@ -328,9 +328,10 @@ reference it rather than redefining it.
   from the step's `params`. The command is executed **directly by the target
   OS — no implicit shell**. This is what makes a spec portable across Windows
   and Linux (no `&&`, pipes, globbing, or `$VAR` expansion). A step that needs
-  shell behavior invokes a shell explicitly (`sh -c ...` on Linux, `cmd /c ...`
-  on Windows). Step stdout/stderr are inherited from the target's own
-  stdout/stderr (local logging) and, when the target has a log sink, also
+  shell behavior invokes a shell explicitly (`bash -c ...` on Linux,
+  `pwsh -Command ...` on Windows). Step stdout/stderr are inherited from the
+  target's own stdout/stderr (local logging) and, when the target has a log
+  sink, also
   streamed to the API in near-real-time (F-02, `internal/logstream`); the API
   persists the output to the artifacts service and fans it out to the UI as
   `job_log` events.

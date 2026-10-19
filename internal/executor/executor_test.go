@@ -415,6 +415,54 @@ func TestExecuteConditionReferencesPriorStep(t *testing.T) {
 	}
 }
 
+// TestExecuteConditionReferencesPriorStepByName verifies that a step's outputs
+// are referenced in the condition context by a user-definable step name (not an
+// ordinal): the executor keys the condition context by the step's declared
+// name, so a step's condition can reference a prior step as
+// `{{ .steps.build.Outputs.version }}` (F-21.1.2). The name flows through
+// unchanged from the stored JobSpec to the executor — there is no name →
+// ordinal rewrite.
+func TestExecuteConditionReferencesPriorStepByName(t *testing.T) {
+	RegisterStepType("build", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		dir := step.GetEnv()[StepOutputDirEnv]
+		if dir == "" {
+			return errors.New("StepOutputDirEnv not set")
+		}
+		return os.WriteFile(filepath.Join(dir, "version"), []byte("1.2.3"), 0o644)
+	})
+	var gatedRan bool
+	RegisterStepType("deploy", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+		gatedRan = true
+		return nil
+	})
+
+	collector := &StepResultCollector{}
+	ctx := ContextWithStepStatusReporter(context.Background(), collector)
+	spec := &dbpb.JobSpec{Steps: []*dbpb.JobStep{
+		{Name: "build", Type: "build"},
+		// Runs only if the prior step (referenced by its user-defined name,
+		// not an ordinal) succeeded and produced version == "1.2.3".
+		{Name: "deploy", Type: "deploy", Condition: `{{ if and (eq .steps.build.Status "succeeded") (eq .steps.build.Outputs.version "1.2.3") }}true{{ else }}false{{ end }}`},
+	}}
+	if err := Execute(ctx, spec, testLogger()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !gatedRan {
+		t.Error("deploy step did not run although the prior step (referenced by name) succeeded with version=1.2.3")
+	}
+	// The step results are keyed by the user-defined names, in order.
+	results := collector.All()
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	if results[0].Name != "build" {
+		t.Errorf("results[0].Name = %q, want build (the user-defined name)", results[0].Name)
+	}
+	if results[1].Name != "deploy" {
+		t.Errorf("results[1].Name = %q, want deploy (the user-defined name)", results[1].Name)
+	}
+}
+
 // TestExecuteConditionReferencesUpstreamJob verifies that a step's condition
 // can reference the status and outputs of an upstream job higher in the
 // pipeline chain (F-06).
