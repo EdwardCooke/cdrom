@@ -21,25 +21,28 @@ RUN make build
 
 RUN make test
 
-FROM scratch AS api
+FROM scratch AS base
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+FROM base AS api
 COPY --from=build /src/bin/api api
 CMD ["/api"]
 
-FROM scratch AS idp
+FROM base AS idp
 COPY --from=build /src/bin/idp idp
 CMD ["/idp"]
 
-FROM scratch AS db
+FROM base AS db
 COPY --from=build /src/bin/db db
 CMD ["/db"]
 
-FROM scratch AS artifacts
+FROM base AS artifacts
 COPY --from=build /src/bin/artifacts artifacts
 CMD ["/artifacts"]
 
-FROM scratch AS scheduler
+FROM base AS scheduler
 COPY --from=build /src/bin/scheduler scheduler
 CMD ["/scheduler"]
 
-FROM scratch AS all
+FROM base AS all
 COPY --from=build /src/bin/* /

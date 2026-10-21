@@ -83,13 +83,21 @@ type Variable struct {
 }
 
 // VariableSet is a named variable set (F-21.1.3): an inline `variables` map
-// declared under `spec.variableSets`. A job references a set by name in its
-// `variableSets` list. (External-file / vault imports are F-21.4.)
+// declared under `spec.variableSets`, plus its own `secretSources` section
+// (shaped like the pipeline's `spec.secretSources`, F-21.1.3) that the set
+// owns and that back its masked variables (F-21.4). A job references a set by
+// name in its `variableSets` list. (External-file / vault imports are F-21.4.)
 type VariableSet struct {
 	// Name is the set's name (its key under spec.variableSets).
 	Name string
 	// Variables are the set's variables, in file order.
 	Variables []Variable
+	// SecretSources are the set's own secret sources (keyed by name), which
+	// the set owns and which back its masked variables (F-21.4). At compile
+	// time they are merged into the pipeline's secretSources namespace (the
+	// pipeline's own win on a name collision), so a set that declares its own
+	// sources is self-contained.
+	SecretSources map[string]*SecretSource
 }
 
 // SecretSource is a named secret source (F-21.1.3 / F-12): a `kind` (a
@@ -231,10 +239,12 @@ func CompileVariableSets(file string, value Value) (map[string]*VariableSet, Err
 }
 
 // compileVariableSet compiles a single variable set (a name → set-spec map
-// entry) into a VariableSet. A set is a mapping whose only recognized key is
-// `variables` (an inline variables map; external-file / vault imports are
-// F-21.4); a set with no `variables` key is an empty set. A set that is not a
-// mapping, or that carries an unrecognized key, is a validation error.
+// entry) into a VariableSet. A set is a mapping whose recognized keys are
+// `variables` (an inline variables map) and `secretSources` (the set's own
+// secret sources, shaped like the pipeline's spec.secretSources, F-21.4);
+// external-file / vault imports are F-21.4. A set with no `variables` key is
+// an empty set. A set that is not a mapping, or that carries an unrecognized
+// key, is a validation error.
 func compileVariableSet(file string, base Path, name string, value Value) (*VariableSet, Errors) {
 	if value.Type != Map {
 		return nil, Errors{Error{File: file, Key: base.String(),
@@ -242,21 +252,55 @@ func compileVariableSet(file string, base Path, name string, value Value) (*Vari
 	}
 	var errs Errors
 	var vars []Variable
+	srcs := make(map[string]*SecretSource)
 	for _, e := range value.Entries {
 		switch e.Key {
 		case "variables":
 			v, vErrs := CompileVariables(file, base.Extend("variables"), e.Value)
 			errs = append(errs, vErrs...)
 			vars = v
+		case "secretSources":
+			s, sErrs := compileSetSecretSources(file, base.Extend("secretSources"), e.Value)
+			errs = append(errs, sErrs...)
+			for k, src := range s {
+				srcs[k] = src
+			}
 		default:
 			errs = append(errs, Error{File: file, Key: base.Extend(e.Key).String(),
-				Reason: fmt.Sprintf("a variable set has only a variables key (external-file / vault imports are F-21.4); %q is not recognized", e.Key)})
+				Reason: fmt.Sprintf("a variable set has only variables and secretSources keys (external-file / vault imports are F-21.4); %q is not recognized", e.Key)})
 		}
 	}
 	if len(errs) > 0 {
 		return nil, errs
 	}
-	return &VariableSet{Name: name, Variables: vars}, nil
+	return &VariableSet{Name: name, Variables: vars, SecretSources: srcs}, nil
+}
+
+// compileSetSecretSources compiles a variable set's own `secretSources` map
+// (a name → source map, in file order) into a name → SecretSource map. It is
+// the set-scoped counterpart of CompileSecretSources: the sources are shaped
+// exactly like the pipeline's spec.secretSources entries (F-21.1.3) but live
+// under the set's spec (F-21.4), so the set owns the sources its masked
+// variables reference. A nil or non-map value yields an empty map (the set
+// declares no sources). file is the name of the offending file (carried into
+// any validation errors), and base is the dotted path of the set's
+// secretSources map (e.g. "spec.variableSets.dev.secretSources"), so a
+// validation error names the offending key.
+func compileSetSecretSources(file string, base Path, value Value) (map[string]*SecretSource, Errors) {
+	out := make(map[string]*SecretSource)
+	if value.Type != Map {
+		return out, nil
+	}
+	var errs Errors
+	for _, e := range value.Entries {
+		src, srcErrs := compileSecretSource(file, base.Extend(e.Key), e.Key, e.Value)
+		if len(srcErrs) > 0 {
+			errs = append(errs, srcErrs...)
+			continue
+		}
+		out[e.Key] = src
+	}
+	return out, errs
 }
 
 // CompileSecretSources compiles the pipeline's `spec.secretSources` map (a

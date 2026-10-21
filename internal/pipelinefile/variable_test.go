@@ -275,6 +275,53 @@ spec:
 	}
 }
 
+// TestCompileVariableSetsSecretSources verifies a variable set's own
+// secretSources section (shaped like the pipeline's spec.secretSources,
+// F-21.4) compiles into the set's SecretSources, so the set owns the sources
+// its masked variables reference.
+func TestCompileVariableSetsSecretSources(t *testing.T) {
+	doc := parseDoc(t, `
+apiVersion: cdrom/alphav1
+kind: Pipeline
+metadata:
+  name: p
+spec:
+  variableSets:
+    dev:
+      variables:
+        deploy_token:
+          secretSource: prod-secrets
+          key: deploy_token
+      secretSources:
+        prod-secrets:
+          kind: Vault
+          path: cdrom/dev
+          audience: cdrom`)
+	setsVal, _ := doc.Spec.Get("variableSets")
+	sets, errs := CompileVariableSets("doc.yaml", setsVal)
+	if len(errs) > 0 {
+		t.Fatalf("CompileVariableSets returned errors: %v", errs)
+	}
+	dev := sets["dev"]
+	if dev == nil {
+		t.Fatal("sets has no dev")
+	}
+	if len(dev.SecretSources) != 1 {
+		t.Fatalf("dev.SecretSources = %d, want 1", len(dev.SecretSources))
+	}
+	src := dev.SecretSources["prod-secrets"]
+	if src == nil {
+		t.Fatal("dev.SecretSources has no prod-secrets")
+	}
+	if src.Kind != "Vault" || src.Path != "cdrom/dev" || src.Audience != "cdrom" {
+		t.Errorf("dev.SecretSources.prod-secrets = %+v, want Vault/cdrom-dev/cdrom", src)
+	}
+	// The set's masked variable references the set's own source.
+	if len(dev.Variables) != 1 || dev.Variables[0].Value.SecretSource != "prod-secrets" {
+		t.Errorf("dev.Variables = %+v, want one variable sourced from prod-secrets", dev.Variables)
+	}
+}
+
 // TestCompileVariableSetsEmpty verifies a variable set with no variables key is
 // an empty set (not an error).
 func TestCompileVariableSetsEmpty(t *testing.T) {

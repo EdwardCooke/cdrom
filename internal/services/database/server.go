@@ -101,6 +101,17 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// pipeline. They are combined with the tags of a run's other resources
 		// onto the run's job instances.
 		Tags: req.GetTags(),
+		// The pipeline's named variable sets (F-21.1.3): each is an inline
+		// variables map. A job references a set by name in its variable_set_refs
+		// list; at run creation the database service merges the referenced
+		// sets' variables with the job's inline variables and denormalizes the
+		// result onto each job instance.
+		VariableSets: variableSetsFromProto(req.GetVariableSets()),
+		// The pipeline's named secret sources (F-21.1.3 / F-12): each has a
+		// kind, a path, and an audience. A variable references a source by name
+		// (with a key); the API resolves the named source to a concrete value at
+		// dispatch.
+		SecretSources: secretSourcesFromProto(req.GetSecretSources()),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -109,6 +120,12 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if err := validateSecrets(req.GetSecrets()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateVariableSets(req.GetVariableSets()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateSecretSources(req.GetSecretSources()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	// The pipeline's job definitions (F-08) are validated as a DAG before
@@ -342,6 +359,26 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 	// When none are supplied the pipeline's tags are left unchanged.
 	if req.GetTags() != nil {
 		pipeline.Tags = req.GetTags()
+	}
+	// When variable sets are supplied (F-21.1.3) they replace the pipeline's
+	// existing variable sets: they are validated (unique, non-empty names)
+	// before anything is persisted. When none are supplied the pipeline's
+	// variable sets are left unchanged.
+	if req.GetVariableSets() != nil {
+		if err := validateVariableSets(req.GetVariableSets()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		pipeline.VariableSets = variableSetsFromProto(req.GetVariableSets())
+	}
+	// When secret sources are supplied (F-21.1.3 / F-12) they replace the
+	// pipeline's existing secret sources: they are validated (unique,
+	// non-empty names) before anything is persisted. When none are supplied
+	// the pipeline's secret sources are left unchanged.
+	if req.GetSecretSources() != nil {
+		if err := validateSecretSources(req.GetSecretSources()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		pipeline.SecretSources = secretSourcesFromProto(req.GetSecretSources())
 	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
@@ -641,6 +678,17 @@ type runDefinition struct {
 	// combined with each job's own tags and the tags of the job's environment
 	// and worker group onto every job instance (see runBaseTags).
 	pipelineTags map[string]string
+	// variableSets are the pipeline's named variable sets (F-21.1.3): the
+	// pipeline's VariableSets for the current version, or the snapshot's for a
+	// specific version. A job references a set by name in its VariableSetRefs;
+	// at run creation the referenced sets' variables are merged with the job's
+	// inline variables and denormalized onto the job instance.
+	variableSets []models.VariableSet
+	// secretSources are the pipeline's named secret sources (F-21.1.3 / F-12):
+	// the pipeline's SecretSources for the current version, or the snapshot's
+	// for a specific version. A job's sourced variables reference a source by
+	// name; the API resolves the named source to a concrete value at dispatch.
+	secretSources []models.SecretSource
 	// needsByIndex[i] carries the needs (keys) of jobs[i] (F-08); non-nil only
 	// for a version snapshot, where the needs are keys that must be resolved to
 	// the run's instance ids. For the current version the needs are already
@@ -731,6 +779,10 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			// ciphertext) onto the instance so the API can decrypt them and
 			// hand the plaintext to the execution target.
 			Secrets: def.secrets,
+			// The job's effective variables (F-21.1.3) are denormalized onto
+			// the instance so the API can resolve each to a concrete value at
+			// dispatch and hand the plaintext to the execution target.
+			Variables: jobDef.Variables,
 		}
 		if jobDef.Spec.Retry != nil {
 			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
@@ -846,7 +898,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 				defs[i].Tags = byOwner[defs[i].ID]
 			}
 		}
-		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineTags: pipeline.Tags}, nil
+		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineTags: pipeline.Tags, variableSets: pipeline.VariableSets, secretSources: pipeline.SecretSources}, nil
 	}
 	// A run against a specific version: use that version's snapshot.
 	var version models.PipelineVersion
@@ -877,7 +929,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		})
 		needsByIndex[i] = snapshot.Needs
 	}
-	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, pipelineTags: version.Tags, needsByIndex: needsByIndex}, nil
+	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, pipelineTags: version.Tags, variableSets: version.VariableSets, secretSources: version.SecretSources, needsByIndex: needsByIndex}, nil
 }
 
 // jobConcurrencyKeys returns a job's effective concurrency keys (F-16): the
@@ -4371,6 +4423,219 @@ func secretsToProto(secrets []models.Secret) []*dbpb.Secret {
 	return out
 }
 
+// variableShapeFromProto converts a proto variable shape into the model's
+// shape (F-21.1.3).
+func variableShapeFromProto(shape dbpb.VariableShape) models.VariableShape {
+	switch shape {
+	case dbpb.VariableShape_VARIABLE_ENCRYPTED:
+		return models.VariableEncrypted
+	case dbpb.VariableShape_VARIABLE_SECRET_SOURCE:
+		return models.VariableSecretSource
+	default:
+		return models.VariablePlain
+	}
+}
+
+// variableShapeToProto converts the model's variable shape into its proto form
+// (F-21.1.3).
+func variableShapeToProto(shape models.VariableShape) dbpb.VariableShape {
+	switch shape {
+	case models.VariableEncrypted:
+		return dbpb.VariableShape_VARIABLE_ENCRYPTED
+	case models.VariableSecretSource:
+		return dbpb.VariableShape_VARIABLE_SECRET_SOURCE
+	default:
+		return dbpb.VariableShape_VARIABLE_PLAIN
+	}
+}
+
+// variableFromProto converts a proto variable into the model's variable
+// (F-21.1.3).
+func variableFromProto(v *dbpb.Variable) models.Variable {
+	return models.Variable{
+		Name:         v.GetName(),
+		Shape:        variableShapeFromProto(v.GetShape()),
+		Plain:        v.GetPlain(),
+		Encrypted:    v.GetEncrypted(),
+		SecretSource: v.GetSecretSource(),
+		Key:          v.GetKey(),
+	}
+}
+
+// variableToProto converts the model's variable into its proto form
+// (F-21.1.3).
+func variableToProto(v models.Variable) *dbpb.Variable {
+	return &dbpb.Variable{
+		Name:         v.Name,
+		Shape:        variableShapeToProto(v.Shape),
+		Plain:        v.Plain,
+		Encrypted:    v.Encrypted,
+		SecretSource: v.SecretSource,
+		Key:          v.Key,
+	}
+}
+
+// variablesFromProto converts a list of proto variables into the model's
+// variables (F-21.1.3). An empty list yields nil.
+func variablesFromProto(vars []*dbpb.Variable) []models.Variable {
+	if len(vars) == 0 {
+		return nil
+	}
+	out := make([]models.Variable, 0, len(vars))
+	for _, v := range vars {
+		out = append(out, variableFromProto(v))
+	}
+	return out
+}
+
+// variablesToProto converts the model's variables into a list of proto
+// variables (F-21.1.3). An empty slice yields nil.
+func variablesToProto(vars []models.Variable) []*dbpb.Variable {
+	if len(vars) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.Variable, 0, len(vars))
+	for i := range vars {
+		out = append(out, variableToProto(vars[i]))
+	}
+	return out
+}
+
+// variableSetFromProto converts a proto variable set into the model's variable
+// set (F-21.1.3).
+func variableSetFromProto(s *dbpb.VariableSet) models.VariableSet {
+	return models.VariableSet{
+		Name:      s.GetName(),
+		Variables: variablesFromProto(s.GetVariables()),
+	}
+}
+
+// variableSetToProto converts the model's variable set into its proto form
+// (F-21.1.3).
+func variableSetToProto(s models.VariableSet) *dbpb.VariableSet {
+	return &dbpb.VariableSet{
+		Name:      s.Name,
+		Variables: variablesToProto(s.Variables),
+	}
+}
+
+// variableSetsFromProto converts a list of proto variable sets into the
+// model's variable sets (F-21.1.3). An empty list yields nil.
+func variableSetsFromProto(sets []*dbpb.VariableSet) []models.VariableSet {
+	if len(sets) == 0 {
+		return nil
+	}
+	out := make([]models.VariableSet, 0, len(sets))
+	for _, s := range sets {
+		out = append(out, variableSetFromProto(s))
+	}
+	return out
+}
+
+// variableSetsToProto converts the model's variable sets into a list of proto
+// variable sets (F-21.1.3). An empty slice yields nil.
+func variableSetsToProto(sets []models.VariableSet) []*dbpb.VariableSet {
+	if len(sets) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.VariableSet, 0, len(sets))
+	for i := range sets {
+		out = append(out, variableSetToProto(sets[i]))
+	}
+	return out
+}
+
+// secretSourceFromProto converts a proto secret source into the model's secret
+// source (F-21.1.3 / F-12).
+func secretSourceFromProto(s *dbpb.SecretSource) models.SecretSource {
+	return models.SecretSource{
+		Name:     s.GetName(),
+		Kind:     s.GetKind(),
+		Path:     s.GetPath(),
+		Audience: s.GetAudience(),
+	}
+}
+
+// secretSourceToProto converts the model's secret source into its proto form
+// (F-21.1.3 / F-12).
+func secretSourceToProto(s models.SecretSource) *dbpb.SecretSource {
+	return &dbpb.SecretSource{
+		Name:     s.Name,
+		Kind:     s.Kind,
+		Path:     s.Path,
+		Audience: s.Audience,
+	}
+}
+
+// secretSourcesFromProto converts a list of proto secret sources into the
+// model's secret sources (F-21.1.3 / F-12). An empty list yields nil.
+func secretSourcesFromProto(srcs []*dbpb.SecretSource) []models.SecretSource {
+	if len(srcs) == 0 {
+		return nil
+	}
+	out := make([]models.SecretSource, 0, len(srcs))
+	for _, s := range srcs {
+		out = append(out, secretSourceFromProto(s))
+	}
+	return out
+}
+
+// secretSourcesToProto converts the model's secret sources into a list of
+// proto secret sources (F-21.1.3 / F-12). An empty slice yields nil.
+func secretSourcesToProto(srcs []models.SecretSource) []*dbpb.SecretSource {
+	if len(srcs) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.SecretSource, 0, len(srcs))
+	for i := range srcs {
+		out = append(out, secretSourceToProto(srcs[i]))
+	}
+	return out
+}
+
+// validateVariableSets validates a list of variable sets (F-21.1.3): each set
+// has a non-empty, unique name, and each variable in a set has a non-empty
+// name (unique within the set).
+func validateVariableSets(sets []*dbpb.VariableSet) error {
+	seen := make(map[string]bool, len(sets))
+	for _, s := range sets {
+		if s.GetName() == "" {
+			return fmt.Errorf("a variable set has an empty name")
+		}
+		if seen[s.GetName()] {
+			return fmt.Errorf("duplicate variable set name %q", s.GetName())
+		}
+		seen[s.GetName()] = true
+		varSeen := make(map[string]bool, len(s.GetVariables()))
+		for _, v := range s.GetVariables() {
+			if v.GetName() == "" {
+				return fmt.Errorf("variable set %q has a variable with an empty name", s.GetName())
+			}
+			if varSeen[v.GetName()] {
+				return fmt.Errorf("variable set %q has duplicate variable %q", s.GetName(), v.GetName())
+			}
+			varSeen[v.GetName()] = true
+		}
+	}
+	return nil
+}
+
+// validateSecretSources validates a list of secret sources (F-21.1.3 / F-12):
+// each source has a non-empty, unique name.
+func validateSecretSources(srcs []*dbpb.SecretSource) error {
+	seen := make(map[string]bool, len(srcs))
+	for _, s := range srcs {
+		if s.GetName() == "" {
+			return fmt.Errorf("a secret source has an empty name")
+		}
+		if seen[s.GetName()] {
+			return fmt.Errorf("duplicate secret source name %q", s.GetName())
+		}
+		seen[s.GetName()] = true
+	}
+	return nil
+}
+
 // jobDefinitionsFromProto converts a list of proto job definitions into the
 // model's job definitions (F-08). A definition's name defaults to its key when
 // empty, and its failure mode defaults to FailureModeAll. The definition's
@@ -4398,6 +4663,11 @@ func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
 			// instances combine them with the tags of the run's other
 			// resources (denormalized in createRunAndInstances).
 			Tags: def.GetTags(),
+			// The job's effective variables (F-21.1.3): the union of the job's
+			// inline variables and the variables of the variable sets it
+			// references (merged at import time by the API). They are
+			// denormalized onto each job instance at run creation.
+			Variables: variablesFromProto(def.GetVariables()),
 		})
 	}
 	return jobs
@@ -4503,6 +4773,7 @@ func toProtoPipelineJobDefinitions(jobs []models.Job, keyMap map[uint]string) []
 			TargetGroup: jobs[i].TargetGroup,
 			Spec:        specToProto(jobs[i].Spec),
 			Needs:       needsFromDependsOn(jobs[i].DependsOn, keyMap),
+			Variables:   variablesToProto(jobs[i].Variables),
 		})
 	}
 	return defs
@@ -4523,6 +4794,8 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		Secrets:         secretsToProto(pipeline.Secrets),
 		ConcurrencyKeys: pipeline.ConcurrencyKeys,
 		Tags:            pipeline.Tags,
+		VariableSets:    variableSetsToProto(pipeline.VariableSets),
+		SecretSources:   secretSourcesToProto(pipeline.SecretSources),
 	}
 }
 
@@ -4545,6 +4818,8 @@ func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 		Secrets:         secretsToProto(v.Secrets),
 		ConcurrencyKeys: v.ConcurrencyKeys,
 		Tags:            v.Tags,
+		VariableSets:    variableSetsToProto(v.VariableSets),
+		SecretSources:   secretSourcesToProto(v.SecretSources),
 	}
 }
 
@@ -4560,6 +4835,7 @@ func jobDefinitionsToProto(snapshots []models.JobDefinitionSnapshot) []*dbpb.Job
 			Needs:       snapshots[i].Needs,
 			Spec:        specToProto(snapshots[i].Spec),
 			Tags:        snapshots[i].Tags,
+			Variables:   variablesToProto(snapshots[i].Variables),
 		})
 	}
 	return out
@@ -4582,6 +4858,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 			Needs:       needsFromDependsOn(defs[i].DependsOn, keyMap),
 			Spec:        defs[i].Spec,
 			Tags:        defs[i].Tags,
+			Variables:   defs[i].Variables,
 		})
 	}
 	return &models.PipelineVersion{
@@ -4596,14 +4873,15 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		Secrets:         pipeline.Secrets,
 		ConcurrencyKeys: pipeline.ConcurrencyKeys,
 		Tags:            pipeline.Tags,
+		VariableSets:    pipeline.VariableSets,
+		SecretSources:   pipeline.SecretSources,
 	}
 }
 
 // upstreamClaimsToStruct converts a run's or job's upstream claims (a JSON
-// object of arbitrary values, e.g. GitLab's nested "user_identities" list or
-// "job_config" object) into a protobuf Struct so it can cross the gRPC
-// boundary without flattening complex values to strings. A nil or empty map
-// yields a nil Struct (the proto's "absent" representation).
+// object of arbitrary values, e.g. a time.Time) into a protobuf Struct so it
+// can cross the gRPC boundary without flattening complex values to strings. A
+// nil or empty map yields a nil Struct (the proto's "absent" representation).
 func upstreamClaimsToStruct(claims map[string]any) *structpb.Struct {
 	if len(claims) == 0 {
 		return nil
@@ -4697,6 +4975,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		Automation:          automationToProto(job.Automation),
 		Approval:            approvalPolicyToProto(job.Approval),
 		Tags:                job.Tags,
+		Variables:           variablesToProto(job.Variables),
 	}
 	if job.ConcurrencyAdmittedAt != nil {
 		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)

@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gopkg.in/yaml.v3"
 
 	"cdrom/internal/audit"
 	"cdrom/internal/auth"
@@ -171,6 +172,11 @@ func (s *Server) Handler() http.Handler {
 	// Versions are listed and fetched via the database service.
 	mux.HandleFunc("GET /api/pipelines/{id}/versions", s.listPipelineVersions)
 	mux.HandleFunc("GET /api/pipelines/{id}/versions/{version}", s.getPipelineVersion)
+
+	// Export (F-21.1.4): renders the pipeline's current compiled definition
+	// back into the file format (YAML); the exported file re-imports
+	// equivalently (round-trip).
+	mux.HandleFunc("GET /api/pipelines/{id}/export", s.exportPipeline)
 
 	// Webhook trigger (F-09): an external POST (authenticated with the
 	// pipeline's webhook trigger secret) starts a run, passing the request's
@@ -347,10 +353,73 @@ type pipelineRequest struct {
 	// present they are validated (unique, non-empty names) before the pipeline
 	// is saved.
 	Secrets []secretRequest `json:"secrets,omitempty"`
+	// FailureMode is the pipeline's default failure mode (F-01): "all" (default),
+	// "best_effort", or "any"; a job that sets its own failure mode overrides
+	// this, and a job that sets none inherits it.
+	FailureMode string `json:"failureMode,omitempty"`
+	// ConcurrencyKeys are the pipeline's concurrency keys (F-16): named, global
+	// locks that serialize a run of this pipeline against runs of any other
+	// pipeline that shares a key. A job's effective key set is the union of the
+	// pipeline's keys and the job's own keys.
+	ConcurrencyKeys []string `json:"concurrencyKeys,omitempty"`
 	// Tags are the pipeline's tags (F-29): a set of key/value pairs that label
 	// the pipeline. They are combined with the tags of a run's other resources
 	// (job, environment, worker group, worker) onto the run's job instances.
 	Tags map[string]string `json:"tags,omitempty"`
+	// VariableSets are the pipeline's named variable sets (F-21.1.3). They are
+	// populated only by the file-format import path (decodePipelineRequest); a
+	// JSON body carries no variable sets.
+	VariableSets []*dbpb.VariableSet `json:"-"`
+	// SecretSources are the pipeline's named secret sources (F-21.1.3 / F-12).
+	// They are populated only by the file-format import path (decodePipelineRequest);
+	// a JSON body carries no secret sources.
+	SecretSources []*dbpb.SecretSource `json:"-"`
+}
+
+// decodePipelineRequest reads a pipeline request body, which is either a
+// definition in the file format (F-21.1: a YAML or JSON document with an
+// apiVersion, kind, metadata, and spec) or the JSON schema form. A body that
+// parses as a file-format document is run through the compiler (validate + map
+// to the schema); otherwise it is decoded as the JSON schema form. This is what
+// makes a YAML definition runnable via the API (F-21.1.4 import).
+func decodePipelineRequest(r *http.Request) (*pipelineRequest, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty body")
+	}
+	// The file format is detected by a top-level "apiVersion" key (the JSON
+	// schema form has no such key). A body that is not valid YAML/JSON at all
+	// is reported as an invalid body.
+	if isPipelineFileFormat(body) {
+		req, variableSets, secretSources, err := pipelineFileToRequest("", body)
+		if err != nil {
+			return nil, err
+		}
+		req.VariableSets = variableSets
+		req.SecretSources = secretSources
+		return req, nil
+	}
+	var req pipelineRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, fmt.Errorf("invalid body: %w", err)
+	}
+	return &req, nil
+}
+
+// isPipelineFileFormat reports whether body is a definition in the file format
+// (F-21.1): a mapping that carries a top-level "apiVersion" key. The JSON
+// schema form (a pipelineRequest) has no such key, so its presence is the
+// discriminator between the two body forms.
+func isPipelineFileFormat(body []byte) bool {
+	var root map[string]yaml.Node
+	if err := yaml.Unmarshal(body, &root); err != nil {
+		return false
+	}
+	_, ok := root["apiVersion"]
+	return ok
 }
 
 // parameterRequest is the JSON form of a single pipeline parameter (F-10): a
@@ -403,6 +472,27 @@ type pipelineJobRequest struct {
 	TargetGroup string          `json:"target_group,omitempty"`
 	Needs       []string        `json:"needs,omitempty"`
 	Spec        *jobSpecRequest `json:"spec,omitempty"`
+	// WorkerGroup is the worker group the job runs on (F-17); empty means the
+	// job runs on an ephemeral Kubernetes agent (or, for a file-imported job,
+	// the pipeline's spec.workerGroup). It is carried to the database service
+	// as the job's target group.
+	WorkerGroup string `json:"workerGroup,omitempty"`
+	// Environment is the environment the job targets (F-17); empty means the
+	// job targets its raw worker group.
+	Environment string `json:"environment,omitempty"`
+	// Automation is the job's own automation setting (F-17): "automatic" or
+	// "manual"; empty means the job defers to its environment's policy.
+	Automation string `json:"automation,omitempty"`
+	// Approval is the job's override of its environment's approval policy
+	// (F-17): "none" or "required"; empty means the job defers to the
+	// environment's flag.
+	Approval string `json:"approval,omitempty"`
+	// Variables are the job's effective variables (F-21.1.3): the union of the
+	// job's inline variables and the variables of the variable sets it
+	// references (merged at import time, the job's inline variables winning on
+	// a key collision). They are denormalized onto each job instance at run
+	// creation.
+	Variables []*dbpb.Variable `json:"variables,omitempty"`
 	// Tags are the job's tags (F-29): a set of key/value pairs that label the
 	// job. They are combined with the tags of the run's other resources
 	// (pipeline, environment, worker group, worker) onto the run's job
@@ -414,8 +504,8 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesCreate, authz.Resource{}) {
 		return
 	}
-	var req pipelineRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, err := decodePipelineRequest(r)
+	if err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
@@ -430,13 +520,17 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pipeline, err := s.clients.Database.CreatePipeline(r.Context(), &dbpb.CreatePipelineRequest{
-		Name:        req.Name,
-		Description: req.Description,
-		Jobs:        jobs,
-		Triggers:    triggersToProto(req.Triggers),
-		Params:      pipelineParamsToProto(req.Params),
-		Secrets:     secrets,
-		Tags:        req.Tags,
+		Name:            req.Name,
+		Description:     req.Description,
+		FailureMode:     failureModeFromName(req.FailureMode),
+		Jobs:            jobs,
+		Triggers:        triggersToProto(req.Triggers),
+		Params:          pipelineParamsToProto(req.Params),
+		Secrets:         secrets,
+		ConcurrencyKeys: req.ConcurrencyKeys,
+		Tags:            req.Tags,
+		VariableSets:    req.VariableSets,
+		SecretSources:   req.SecretSources,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -462,8 +556,8 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesEdit, authz.Resource{PipelineID: pipelineID}) {
 		return
 	}
-	var req pipelineRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, err := decodePipelineRequest(r)
+	if err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
@@ -482,14 +576,18 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 	// pipeline was deleted concurrently) does not block the update.
 	oldPipeline, _ := s.clients.Database.GetPipeline(r.Context(), &dbpb.GetPipelineRequest{Id: pipelineID})
 	pipeline, err := s.clients.Database.UpdatePipeline(r.Context(), &dbpb.UpdatePipelineRequest{
-		Id:          pipelineID,
-		Name:        req.Name,
-		Description: req.Description,
-		Jobs:        jobs,
-		Triggers:    triggersToProto(req.Triggers),
-		Params:      pipelineParamsToProto(req.Params),
-		Secrets:     secrets,
-		Tags:        req.Tags,
+		Id:              pipelineID,
+		Name:            req.Name,
+		Description:     req.Description,
+		FailureMode:     failureModeFromName(req.FailureMode),
+		Jobs:            jobs,
+		Triggers:        triggersToProto(req.Triggers),
+		Params:          pipelineParamsToProto(req.Params),
+		Secrets:         secrets,
+		ConcurrencyKeys: req.ConcurrencyKeys,
+		Tags:            req.Tags,
+		VariableSets:    req.VariableSets,
+		SecretSources:   req.SecretSources,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -632,16 +730,57 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 		if err != nil {
 			return nil, fmt.Errorf("job %q: %w", job.Key, err)
 		}
+		// The job's worker group (F-17): the file's workerGroup (defaulting to
+		// the pipeline's spec.workerGroup) takes precedence over the JSON
+		// target_group; a job with neither runs on an ephemeral agent.
+		targetGroup := job.TargetGroup
+		if job.WorkerGroup != "" {
+			targetGroup = job.WorkerGroup
+		}
 		defs = append(defs, &dbpb.JobDefinition{
 			Key:         job.Key,
 			Name:        job.Name,
-			TargetGroup: job.TargetGroup,
+			TargetGroup: targetGroup,
 			Needs:       job.Needs,
 			Spec:        spec,
 			Tags:        job.Tags,
+			Environment: job.Environment,
+			Automation:  automationFromName(job.Automation),
+			Approval:    approvalPolicyFromName(job.Approval),
+			Variables:   job.Variables,
 		})
 	}
 	return defs, nil
+}
+
+// failureModeFromName maps a failure-mode name ("all", "best_effort", "any", or
+// "") onto the proto enum. An unrecognized or empty name maps to
+// FAILURE_MODE_UNSPECIFIED (inherit the pipeline's default).
+func failureModeFromName(name string) dbpb.FailureMode {
+	switch name {
+	case "all":
+		return dbpb.FailureMode_FAILURE_MODE_ALL
+	case "best_effort":
+		return dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT
+	case "any":
+		return dbpb.FailureMode_FAILURE_MODE_ANY
+	default:
+		return dbpb.FailureMode_FAILURE_MODE_UNSPECIFIED
+	}
+}
+
+// approvalPolicyFromName maps an approval-policy name ("none", "required", or
+// "") onto the proto enum. An unrecognized or empty name maps to
+// APPROVAL_POLICY_UNSPECIFIED (defer to the environment's flag).
+func approvalPolicyFromName(name string) dbpb.ApprovalPolicy {
+	switch name {
+	case "none":
+		return dbpb.ApprovalPolicy_APPROVAL_POLICY_NONE
+	case "required":
+		return dbpb.ApprovalPolicy_APPROVAL_POLICY_REQUIRED
+	default:
+		return dbpb.ApprovalPolicy_APPROVAL_POLICY_UNSPECIFIED
+	}
 }
 
 func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
@@ -1016,6 +1155,10 @@ type paramValueRequest struct {
 //     (e.g. shell "pwsh", args ["-NoProfile", "-Command"], command
 //     "Get-ChildItem"). Empty means run command directly (no shell).
 type jobStepRequest struct {
+	// Name is the step's user-definable name (F-21.1.2): the executor keys its
+	// condition context by it, and a file-imported step's name is its key in the
+	// job's steps map. It is preserved through the round-trip (export → import).
+	Name         string            `json:"name,omitempty"`
 	Type         string            `json:"type,omitempty"`
 	Workdir      string            `json:"workdir,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
@@ -1055,11 +1198,19 @@ type jobRequest struct {
 // the job's concurrency keys (F-16): named, global locks that serialize this
 // job against other jobs (in any pipeline or run) that share a key.
 type jobSpecRequest struct {
-	Steps           []jobStepRequest    `json:"steps,omitempty"`
-	Timeout         string              `json:"timeout,omitempty"`
-	Retry           *retryPolicyRequest `json:"retry,omitempty"`
-	IgnoreFailed    bool                `json:"ignore_failed,omitempty"`
-	ConcurrencyKeys []string            `json:"concurrency_keys,omitempty"`
+	Steps        []jobStepRequest    `json:"steps,omitempty"`
+	Timeout      string              `json:"timeout,omitempty"`
+	Retry        *retryPolicyRequest `json:"retry,omitempty"`
+	IgnoreFailed bool                `json:"ignore_failed,omitempty"`
+	// FailureMode is the job's failure mode (F-01): "all" (default),
+	// "best_effort", or "any"; empty means the job inherits the pipeline's.
+	FailureMode string `json:"failure_mode,omitempty"`
+	// StepBarrier, when true, makes a job that fans out to a worker group
+	// synchronize its workers at each step boundary (F-01).
+	StepBarrier bool `json:"step_barrier,omitempty"`
+	// ConcurrencyKeys are the job's concurrency keys (F-16): named, global
+	// locks that serialize this job against other jobs that share a key.
+	ConcurrencyKeys []string `json:"concurrency_keys,omitempty"`
 }
 
 // retryPolicyRequest is the JSON form of a job's retry policy (F-04).
@@ -1075,11 +1226,13 @@ type retryPolicyRequest struct {
 // scheduler. It returns nil when the spec is absent and has no steps, no job
 // level timeout, no retry policy, and no concurrency keys.
 func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
-	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil && len(r.ConcurrencyKeys) == 0) {
+	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil && len(r.ConcurrencyKeys) == 0 && r.FailureMode == "" && !r.StepBarrier) {
 		return nil, nil
 	}
 	spec := &dbpb.JobSpec{}
 	spec.ConcurrencyKeys = r.ConcurrencyKeys
+	spec.FailureMode = failureModeFromName(r.FailureMode)
+	spec.StepBarrier = r.StepBarrier
 	if r.Timeout != "" {
 		duration, err := time.ParseDuration(r.Timeout)
 		if err != nil {
@@ -1107,6 +1260,7 @@ func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
 			return nil, fmt.Errorf("spec: step %d: command is required", i)
 		}
 		protoStep := &dbpb.JobStep{
+			Name:         step.Name,
 			Type:         step.Type,
 			Workdir:      step.Workdir,
 			Env:          step.Env,

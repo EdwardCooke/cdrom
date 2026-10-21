@@ -363,6 +363,9 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 	// Hand the agent the pipeline's secrets as plaintext (F-12), decrypted from
 	// the job's stored ciphertexts, so a step's spec can reference them.
 	s.resolveSecrets(ctx, apiJob, job)
+	// Resolve the job's variables (F-21.1.3) into the run's parameters, so a
+	// step's spec can reference them as `{{ .params.name }}`.
+	s.resolveVariables(ctx, apiJob, job)
 	// Insert an F-13 approval step when the job's environment requires approval
 	// (F-17), so the target pauses at the gate before it runs.
 	s.applyEnvironmentApprovalGate(ctx, apiJob)
@@ -417,6 +420,9 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	// Hand the worker the pipeline's secrets as plaintext (F-12), decrypted
 	// from the job's stored ciphertexts, so a step's spec can reference them.
 	s.resolveSecrets(ctx, apiJob, job)
+	// Resolve the job's variables (F-21.1.3) into the run's parameters, so a
+	// step's spec can reference them as `{{ .params.name }}`.
+	s.resolveVariables(ctx, apiJob, job)
 	// Insert an F-13 approval step when the job's environment requires approval
 	// (F-17), so the target pauses at the gate before it runs.
 	s.applyEnvironmentApprovalGate(ctx, apiJob)
@@ -1892,6 +1898,175 @@ func (s *GRPCServer) resolveSecrets(ctx context.Context, apiJob *apipb.Job, dbJo
 	}
 }
 
+// pipelineSecretSources fetches the pipeline's named secret sources (F-21.1.3)
+// as a name -> source map, for resolving a sourced variable. It is best-effort:
+// a pipeline that cannot be read (it was deleted, or the Database client is
+// unavailable) yields an empty map, so a sourced variable simply resolves to
+// nothing rather than failing the dispatch.
+func (s *GRPCServer) pipelineSecretSources(ctx context.Context, pipelineID int64) map[string]*dbpb.SecretSource {
+	if s.db == nil {
+		return nil
+	}
+	pipeline, err := s.db.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipelineID})
+	if err != nil {
+		s.logger.Warn("api: fetch pipeline for variable sources", "pipeline", pipelineID, "err", err)
+		return nil
+	}
+	sources := make(map[string]*dbpb.SecretSource, len(pipeline.GetSecretSources()))
+	for _, src := range pipeline.GetSecretSources() {
+		sources[src.GetName()] = src
+	}
+	return sources
+}
+
+// resolveVariableValue resolves a single variable (F-21.1.3) to its concrete
+// value. A plain variable is its value as-is; an encrypted variable is
+// decrypted (with the configured key); a sourced variable is resolved through
+// the pipeline's named secret source (the built-in AES store decrypts the
+// source's path; an external store such as Vault / OpenBao is not yet
+// implemented and yields an empty value). The second return reports whether the
+// variable is masked (its value is not a plain string), so the caller can
+// redact the resolved plaintext from the job's logs. A variable that cannot be
+// resolved (no secret store, a missing source, a failed decrypt) yields an
+// empty value and is not masked.
+func (s *GRPCServer) resolveVariableValue(ctx context.Context, dbJob *dbpb.Job, v *dbpb.Variable, sources map[string]*dbpb.SecretSource) (string, bool) {
+	switch v.GetShape() {
+	case dbpb.VariableShape_VARIABLE_PLAIN:
+		return v.GetPlain(), false
+	case dbpb.VariableShape_VARIABLE_ENCRYPTED:
+		if s.secretStore == nil {
+			return "", false
+		}
+		decrypted, err := s.secretStore.Decrypt(ctx, v.GetEncrypted())
+		if err != nil {
+			s.logger.Warn("api: decrypt variable for job", "job", dbJob.GetId(), "variable", v.GetName(), "err", err)
+			return "", false
+		}
+		return decrypted, true
+	case dbpb.VariableShape_VARIABLE_SECRET_SOURCE:
+		return s.resolveSecretSourceValue(ctx, dbJob, v, sources)
+	default:
+		return "", false
+	}
+}
+
+// resolveSecretSourceValue resolves a sourced variable (F-21.1.3) to a
+// concrete value through the pipeline's named secret source. The source's kind
+// selects the backend: the built-in AES store (the default) decrypts the
+// source's path as a ciphertext; an external store (Vault / OpenBao) is not
+// yet implemented and yields an empty value (logged). A missing or
+// unresolvable source yields an empty value (logged), so the variable is
+// simply absent from the run params rather than failing the dispatch.
+func (s *GRPCServer) resolveSecretSourceValue(ctx context.Context, dbJob *dbpb.Job, v *dbpb.Variable, sources map[string]*dbpb.SecretSource) (string, bool) {
+	source, ok := sources[v.GetSecretSource()]
+	if !ok {
+		s.logger.Warn("api: unknown secret source for variable", "job", dbJob.GetId(), "variable", v.GetName(), "source", v.GetSecretSource())
+		return "", false
+	}
+	kind := source.GetKind()
+	if kind == "" {
+		kind = string(secrets.StoreKindAES)
+	}
+	switch secrets.StoreKind(kind) {
+	case secrets.StoreKindAES, "":
+		if s.secretStore == nil {
+			return "", false
+		}
+		decrypted, err := s.secretStore.Decrypt(ctx, source.GetPath())
+		if err != nil {
+			s.logger.Warn("api: resolve secret source for variable", "job", dbJob.GetId(), "variable", v.GetName(), "source", source.GetName(), "err", err)
+			return "", false
+		}
+		return decrypted, true
+	case secrets.StoreKindVault, secrets.StoreKindOpenBao:
+		s.logger.Warn("api: secret source kind not implemented", "job", dbJob.GetId(), "variable", v.GetName(), "source", source.GetName(), "kind", kind)
+		return "", false
+	default:
+		s.logger.Warn("api: unknown secret source kind", "job", dbJob.GetId(), "variable", v.GetName(), "source", source.GetName(), "kind", kind)
+		return "", false
+	}
+}
+
+// resolveVariables resolves the job's effective variables (F-21.1.3) into the
+// run's parameters so a step's spec can reference them as `{{ .params.name }}`.
+// Each variable is resolved to its concrete value (plain as-is, encrypted
+// decrypted, sourced through the pipeline's named secret source) and merged
+// into the job's run params (a variable's value wins over a run parameter of
+// the same name, since a variable is a more specific value for this job). The
+// function returns the plaintexts of the masked variables (encrypted or
+// sourced) so the caller can redact them from the job's logs. A job with no
+// variables is left unchanged.
+func (s *GRPCServer) resolveVariables(ctx context.Context, apiJob *apipb.Job, dbJob *dbpb.Job) []string {
+	variables := dbJob.GetVariables()
+	if len(variables) == 0 {
+		return nil
+	}
+	// The pipeline's named secret sources, needed to resolve a sourced
+	// variable. Fetched once, best-effort (a job with no sourced variables
+	// does not need it).
+	var sources map[string]*dbpb.SecretSource
+	for _, v := range variables {
+		if v.GetShape() == dbpb.VariableShape_VARIABLE_SECRET_SOURCE {
+			sources = s.pipelineSecretSources(ctx, dbJob.GetPipelineId())
+			break
+		}
+	}
+
+	params := apiJob.GetRunParams()
+	merged := make(map[string]string, len(params)+len(variables))
+	for k, v := range params {
+		merged[k] = v
+	}
+	var masked []string
+	for _, v := range variables {
+		name := v.GetName()
+		if name == "" {
+			continue
+		}
+		value, isMasked := s.resolveVariableValue(ctx, dbJob, v, sources)
+		if value == "" && !isMasked {
+			// A variable that could not be resolved (no store, a missing
+			// source, a failed decrypt) is left out of the run params.
+			continue
+		}
+		merged[name] = value
+		if isMasked && value != "" {
+			masked = append(masked, value)
+		}
+	}
+	if len(merged) > 0 {
+		apiJob.RunParams = merged
+	}
+	return masked
+}
+
+// maskedVariableValues resolves the job's masked variables (F-21.1.3) to their
+// plaintexts, for log redaction. It mirrors resolveVariables' resolution but
+// returns only the masked plaintexts (the values to redact from the job's
+// logs). A job with no variables, or no masked variables that resolve, yields
+// nil.
+func (s *GRPCServer) maskedVariableValues(ctx context.Context, dbJob *dbpb.Job) []string {
+	variables := dbJob.GetVariables()
+	if len(variables) == 0 {
+		return nil
+	}
+	var sources map[string]*dbpb.SecretSource
+	for _, v := range variables {
+		if v.GetShape() == dbpb.VariableShape_VARIABLE_SECRET_SOURCE {
+			sources = s.pipelineSecretSources(ctx, dbJob.GetPipelineId())
+			break
+		}
+	}
+	var masked []string
+	for _, v := range variables {
+		value, isMasked := s.resolveVariableValue(ctx, dbJob, v, sources)
+		if isMasked && value != "" {
+			masked = append(masked, value)
+		}
+	}
+	return masked
+}
+
 // secretRedactor replaces a job's secret plaintext values in log output so the
 // plaintext is never persisted to the artifacts store or fanned out to the UI
 // (F-12). The API is the only component that holds the key, so it is the only
@@ -1934,9 +2109,6 @@ func (s *GRPCServer) secretRedactorFor(ctx context.Context, jobID int64) *secret
 		s.logger.Warn("api: fetch job for log redaction", "job", jobID, "err", err)
 		return nil
 	}
-	if len(job.GetSecrets()) == 0 {
-		return nil
-	}
 	values := make([]string, 0, len(job.GetSecrets()))
 	for _, secret := range job.GetSecrets() {
 		value, err := s.secretStore.Decrypt(ctx, secret.GetEncrypted())
@@ -1948,6 +2120,10 @@ func (s *GRPCServer) secretRedactorFor(ctx context.Context, jobID int64) *secret
 			values = append(values, value)
 		}
 	}
+	// The job's masked variables (F-21.1.3) are redacted too: their plaintexts
+	// are resolved the same way as secrets (decrypted, or resolved through the
+	// pipeline's named secret source) and must not leak into the job's logs.
+	values = append(values, s.maskedVariableValues(ctx, job)...)
 	if len(values) == 0 {
 		return nil
 	}

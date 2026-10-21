@@ -3763,6 +3763,122 @@ func TestRunAgainstSpecificVersionReproducesSecrets(t *testing.T) {
 	}
 }
 
+// TestCreateRunDenormalizesVariables verifies that a job's effective variables
+// (F-21.1.3) are denormalized onto each of its run's job instances, so the API
+// can resolve them at dispatch without re-reading the pipeline. The job's
+// variables are the union of its inline variables and the variables of the
+// variable sets it references (merged at import time, the job's inline
+// variables winning on a key collision); the pipeline's named variable sets and
+// secret sources are stored alongside the pipeline.
+func TestCreateRunDenormalizesVariables(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		VariableSets: []*dbpb.VariableSet{
+			{
+				Name: "common",
+				Variables: []*dbpb.Variable{
+					{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "us-east-1"},
+					{Name: "db_password", Shape: dbpb.VariableShape_VARIABLE_ENCRYPTED, Encrypted: "enc-1"},
+				},
+			},
+		},
+		SecretSources: []*dbpb.SecretSource{
+			{Name: "vault", Kind: "vault", Path: "secret/data/app", Audience: "cdrom"},
+		},
+		Jobs: []*dbpb.JobDefinition{{
+			Key:  "build",
+			Name: "build",
+			Variables: []*dbpb.Variable{
+				{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "eu-west-1"},
+				{Name: "api_token", Shape: dbpb.VariableShape_VARIABLE_SECRET_SOURCE, SecretSource: "vault", Key: "token"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	// The pipeline's named variable sets and secret sources are stored.
+	if got := len(pipeline.GetVariableSets()); got != 1 {
+		t.Fatalf("pipeline variable sets = %d, want 1", got)
+	}
+	if got := len(pipeline.GetSecretSources()); got != 1 {
+		t.Fatalf("pipeline secret sources = %d, want 1", got)
+	}
+
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := len(resp.GetJobs()); got != 1 {
+		t.Fatalf("run created %d job instances, want 1", got)
+	}
+	variables := resp.GetJobs()[0].GetVariables()
+	if got := len(variables); got != 2 {
+		t.Fatalf("instance variables = %d, want 2", got)
+	}
+	byName := map[string]*dbpb.Variable{}
+	for _, v := range variables {
+		byName[v.GetName()] = v
+	}
+	// The job's inline variable wins over the set's on a key collision.
+	if v := byName["region"]; v == nil || v.GetPlain() != "eu-west-1" {
+		t.Errorf("instance region = %+v, want inline eu-west-1 (inline wins over the set)", v)
+	}
+	// The sourced variable is carried through to the instance.
+	if v := byName["api_token"]; v == nil || v.GetSecretSource() != "vault" || v.GetKey() != "token" {
+		t.Errorf("instance api_token = %+v, want sourced from vault/token", v)
+	}
+}
+
+// TestUpdatePipelineReplacesVariableSets verifies that a pipeline's named
+// variable sets and secret sources (F-21.1.3) are replaced on update, and that
+// a run against the new version carries the new job variables.
+func TestUpdatePipelineReplacesVariableSets(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: "deploy",
+		VariableSets: []*dbpb.VariableSet{
+			{Name: "common", Variables: []*dbpb.Variable{{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "us-east-1"}}},
+		},
+		Jobs: []*dbpb.JobDefinition{{
+			Key:       "build",
+			Name:      "build",
+			Variables: []*dbpb.Variable{{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "us-east-1"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline: %v", err)
+	}
+	if _, err := client.UpdatePipeline(ctx, &dbpb.UpdatePipelineRequest{
+		Id: pipeline.GetId(),
+		VariableSets: []*dbpb.VariableSet{
+			{Name: "common", Variables: []*dbpb.Variable{{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "eu-west-1"}}},
+		},
+		Jobs: []*dbpb.JobDefinition{{
+			Key:       "build",
+			Name:      "build",
+			Variables: []*dbpb.Variable{{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "eu-west-1"}},
+		}},
+	}); err != nil {
+		t.Fatalf("UpdatePipeline: %v", err)
+	}
+	resp, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if got := len(resp.GetJobs()[0].GetVariables()); got != 1 {
+		t.Fatalf("instance variables = %d, want 1", got)
+	}
+	if got := resp.GetJobs()[0].GetVariables()[0].GetPlain(); got != "eu-west-1" {
+		t.Errorf("instance region = %q, want eu-west-1 (the updated set)", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Audit log (F-15)
 // ---------------------------------------------------------------------------

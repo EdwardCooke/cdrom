@@ -68,6 +68,97 @@ type SecretNonce struct {
 	Value int64 `gorm:"not null;default:0" json:"value"`
 }
 
+// VariableShape is the shape of a variable's value (F-21.1.3): a plain value,
+// an encrypted (builtin F-12 ciphertext) value, or a sourced (a value from a
+// named secret source) value. A variable is masked when its shape is not
+// VariablePlain - that is, when its value is not a plain string.
+type VariableShape int
+
+// The shapes a variable's value can be.
+const (
+	// VariablePlain is a plain value (a scalar string); it is not masked.
+	VariablePlain VariableShape = iota
+	// VariableEncrypted is a builtin F-12 ciphertext (an {encrypted:
+	// <ciphertext>} value); it is masked.
+	VariableEncrypted
+	// VariableSecretSource is a value from a named secret source (a
+	// {secretSource: <name>, key: <key>} value); it is masked.
+	VariableSecretSource
+)
+
+// Variable is a single variable in a variables map (F-21.1.3): a name and a
+// value. There is no separate concept of a secret: every value is a variable,
+// and a variable is masked when its value is not a plain string. Exactly one
+// of the shape-specific fields is set, selected by Shape:
+//
+//	VariablePlain:        Plain (the value);
+//	VariableEncrypted:    Encrypted (the builtin F-12 ciphertext);
+//	VariableSecretSource: SecretSource (the named source) + Key (the value's
+//	                       key within the source).
+type Variable struct {
+	// Name is the variable's name (its key in the variables map).
+	Name string `json:"name"`
+	// Shape is the value's shape.
+	Shape VariableShape `json:"shape"`
+	// Plain is the value when Shape is VariablePlain.
+	Plain string `json:"plain,omitempty"`
+	// Encrypted is the builtin F-12 ciphertext when Shape is
+	// VariableEncrypted. It is self-describing (it carries the nonce) and safe
+	// to store opaquely; the API decrypts it at dispatch and hands the
+	// plaintext to the execution target. The plaintext is never persisted.
+	Encrypted string `json:"encrypted,omitempty"`
+	// SecretSource is the name of the secret source the value is sourced from
+	// when Shape is VariableSecretSource.
+	SecretSource string `json:"secret_source,omitempty"`
+	// Key is the value's key within the named source when Shape is
+	// VariableSecretSource.
+	Key string `json:"key,omitempty"`
+}
+
+// VariableSet is a named variable set (F-21.1.3): an inline variables map
+// declared under a pipeline's spec.variableSets. A job references a set by
+// name in its variableSets list (JobDefinitionSnapshot.VariableSetRefs).
+type VariableSet struct {
+	// Name is the set's name (its key under spec.variableSets).
+	Name string `json:"name"`
+	// Variables are the set's variables, in file order.
+	Variables []Variable `json:"variables,omitempty"`
+}
+
+// SecretSource is a named secret source (F-21.1.3 / F-12): a Kind (a
+// secret-store kind - Vault / OpenBao are reserved kinds; the built-in AES
+// store is the default when no source is named), a Path (the source path),
+// and an Audience (the token audience used to fetch from the source). The
+// source's settings are stored opaquely on the pipeline (like a secret
+// declaration, F-12); the API resolves the named source to a concrete value
+// at dispatch and hands it to the execution target.
+type SecretSource struct {
+	// Name is the source's name (its key under spec.secretSources).
+	Name string `json:"name"`
+	// Kind is the secret-store kind (e.g. Vault, OpenBao); empty means the
+	// built-in AES store (the default when no source is named).
+	Kind string `json:"kind,omitempty"`
+	// Path is the source path.
+	Path string `json:"path,omitempty"`
+	// Audience is the token audience used to fetch from the source.
+	Audience string `json:"audience,omitempty"`
+}
+
+// SecretSourceRef is a job instance's reference to a named secret source
+// (F-21.1.3 / F-12): the source's name and the value's key within the source.
+// It is denormalized onto the job instance at run creation (like the job's
+// secrets) so the API can resolve the named source to a concrete value at
+// dispatch and hand the plaintext to the execution target, where a step
+// references it as `{{ .params.<name> }}`.
+type SecretSourceRef struct {
+	// Name is the variable's name (the name a step references it as).
+	Name string `json:"name"`
+	// Source is the name of the secret source the value is sourced from.
+	Source string `json:"source"`
+	// Key is the value's key within the named source.
+	Key string `json:"key"`
+}
+
 // Pipeline is a named, ordered definition of work to be executed.
 type Pipeline struct {
 	gorm.Model
@@ -125,6 +216,27 @@ type Pipeline struct {
 	// database service populates it from the Tag table on load and writes it
 	// back on save. Empty means the pipeline has no tags.
 	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
+	// VariableSets are the pipeline's named variable sets (F-21.1.3): each is
+	// an inline variables map (a name -> value map; a value is a plain string,
+	// an encrypted builtin F-12 ciphertext, or a reference to a named
+	// SecretSource). A job references a set by name in its variableSets list
+	// (JobDefinitionSnapshot.VariableSetRefs); at run creation the database
+	// service merges the referenced sets' variables with the job's inline
+	// variables (the job's inline variables win on a key collision) and
+	// denormalizes the result onto each job instance. They are stored as a
+	// JSON document in a text column (portable across SQLite and PostgreSQL),
+	// like Params. Empty means the pipeline declares no variable sets.
+	VariableSets []VariableSet `gorm:"type:text;serializer:json" json:"variable_sets,omitempty"`
+	// SecretSources are the pipeline's named secret sources (F-21.1.3 / F-12):
+	// each has a Kind (a secret-store kind - Vault / OpenBao are reserved
+	// kinds; the built-in AES store is the default when no source is named), a
+	// Path, and an Audience. A variable references a source by name (with a
+	// Key selecting the value within the source); the source's settings are
+	// stored opaquely on the pipeline (like a secret declaration, F-12) and
+	// the API resolves the named source to a concrete value at dispatch. They
+	// are stored as a JSON document in a text column, like Params. Empty means
+	// the pipeline declares no secret sources.
+	SecretSources []SecretSource `gorm:"type:text;serializer:json" json:"secret_sources,omitempty"`
 }
 
 // PipelineVersion is an immutable snapshot of a pipeline's definition at one
@@ -179,6 +291,16 @@ type PipelineVersion struct {
 	// stored normalized in the Tag table (owner_type "pipeline_version",
 	// owner_id the version's id) and are in-memory only on this row (gorm:"-").
 	Tags map[string]string `gorm:"-" json:"tags,omitempty"`
+	// VariableSets are the pipeline's named variable sets at this version
+	// (F-21.1.3); see Pipeline.VariableSets. They are captured in the snapshot
+	// so a run bound to this version merges the sets that were active when it
+	// started.
+	VariableSets []VariableSet `gorm:"type:text;serializer:json" json:"variable_sets,omitempty"`
+	// SecretSources are the pipeline's named secret sources at this version
+	// (F-21.1.3 / F-12); see Pipeline.SecretSources. They are captured in the
+	// snapshot so a run bound to this version resolves the sources that were
+	// active when it started.
+	SecretSources []SecretSource `gorm:"type:text;serializer:json" json:"secret_sources,omitempty"`
 }
 
 // JobDefinitionSnapshot is the declarative form of a job definition as captured
@@ -218,6 +340,14 @@ type JobDefinitionSnapshot struct {
 	// resources (pipeline, environment, worker group, worker) onto the run's
 	// job instances. Empty means the job has no tags.
 	Tags map[string]string `json:"tags,omitempty"`
+	// Variables are the job's effective variables (F-21.1.3): the union of the
+	// job's inline variables and the variables of the variable sets it
+	// references (declared under the pipeline's spec.variableSets), with the
+	// job's inline variables winning on a key collision. They are computed at
+	// import time (the API merges the job's inline variables with the
+	// referenced sets' variables) and denormalized onto each job instance at
+	// run creation (Job.Variables). Empty means the job has no variables.
+	Variables []Variable `json:"variables,omitempty"`
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -789,6 +919,21 @@ type Job struct {
 	// terminal state, e.g. a target that died without reporting) and release
 	// it, freeing the resource for other jobs.
 	ConcurrencyAdmittedAt *time.Time `json:"concurrency_admitted_at,omitempty"`
+	// Variables are the job's effective variables (F-21.1.3): the union of the
+	// job's inline variables and the variables of the variable sets it
+	// references, with the job's inline variables winning on a key collision.
+	// They are computed at import time (the API merges the job's inline
+	// variables with the referenced sets' variables) and denormalized onto the
+	// job instance at run creation, so they are stored as a snapshot:
+	// relabeling a set later does not change the variables recorded on a past
+	// run. A variable's value is a plain string, an encrypted builtin F-12
+	// ciphertext, or a reference to a named secret source; the API resolves
+	// each to a concrete value at dispatch and hands the plaintext to the
+	// execution target, where a step references it as `{{ .params.<name> }}`.
+	// They are stored as a JSON document in a text column (portable across
+	// SQLite and PostgreSQL), like RunParams. Empty means the job has no
+	// variables.
+	Variables []Variable `gorm:"type:text;serializer:json" json:"variables,omitempty"`
 	// ApprovalMessage is the (rendered) message an approval gate (F-13) shows
 	// to the user while the job is awaiting approval. It is set by the
 	// execution target when it reports the job awaiting_approval and is

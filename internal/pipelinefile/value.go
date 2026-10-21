@@ -174,6 +174,18 @@ func (v Value) AsBool() (bool, bool) {
 	return b, true
 }
 
+// AsBoolField returns the entry's value as a boolean (strconv.ParseBool) when
+// the entry is present and is a scalar that parses as a boolean; it reports
+// false otherwise. It is how a job's boolean deployment options (stepBarrier,
+// ignoreFailed) are lifted from the file (F-21.1.4).
+func (v Value) AsBoolField(key string) (bool, bool) {
+	val, ok := v.Get(key)
+	if !ok {
+		return false, false
+	}
+	return val.AsBool()
+}
+
 // AsStringMap returns the Value's entries as a key → string map when it is a
 // map of scalar values (in file order), reporting whether it is. A non-map, or
 // a map with a non-scalar value, reports false. It is how a step's env map is
@@ -230,6 +242,40 @@ func decodeValue(node *yaml.Node) (Value, error) {
 		return Value{Type: Map, Entries: entries}, nil
 	default:
 		return Value{}, fmt.Errorf("unsupported YAML node kind %s", kindName(node.Kind))
+	}
+}
+
+// MarshalYAML renders the Value as a yaml.v3 node (the inverse of decodeValue):
+// a scalar is a scalar node, a list is a sequence node, and a map is a mapping
+// node (its entries in order). It is what lets the export endpoint (F-21.1.4)
+// marshal a compiled definition back into the file format with yaml.Marshal.
+func (v Value) MarshalYAML() (interface{}, error) {
+	switch v.Type {
+	case Scalar:
+		return &yaml.Node{Kind: yaml.ScalarNode, Value: v.String}, nil
+	case List:
+		node := &yaml.Node{Kind: yaml.SequenceNode}
+		for _, item := range v.Items {
+			child, err := item.MarshalYAML()
+			if err != nil {
+				return nil, err
+			}
+			node.Content = append(node.Content, child.(*yaml.Node))
+		}
+		return node, nil
+	case Map:
+		node := &yaml.Node{Kind: yaml.MappingNode}
+		for _, e := range v.Entries {
+			key := &yaml.Node{Kind: yaml.ScalarNode, Value: e.Key}
+			val, err := e.Value.MarshalYAML()
+			if err != nil {
+				return nil, err
+			}
+			node.Content = append(node.Content, key, val.(*yaml.Node))
+		}
+		return node, nil
+	default:
+		return nil, fmt.Errorf("cannot marshal value of type %s", v.Type)
 	}
 }
 

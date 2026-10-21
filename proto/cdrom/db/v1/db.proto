@@ -564,6 +564,94 @@ message Secret {
   string encrypted = 2;
 }
 
+// VariableShape is the shape of a variable's value (F-21.1.3): a plain value,
+// an encrypted (builtin F-12 ciphertext) value, or a sourced (a value from a
+// named secret source) value. A variable is masked when its shape is not
+// VARIABLE_PLAIN - that is, when its value is not a plain string.
+enum VariableShape {
+  VARIABLE_SHAPE_UNSPECIFIED = 0;
+  // VARIABLE_PLAIN is a plain value (a scalar string); it is not masked.
+  VARIABLE_PLAIN = 1;
+  // VARIABLE_ENCRYPTED is a builtin F-12 ciphertext (an {encrypted:
+  // <ciphertext>} value); it is masked.
+  VARIABLE_ENCRYPTED = 2;
+  // VARIABLE_SECRET_SOURCE is a value from a named secret source (a
+  // {secretSource: <name>, key: <key>} value); it is masked.
+  VARIABLE_SECRET_SOURCE = 3;
+}
+
+// Variable is a single variable in a variables map (F-21.1.3): a name and a
+// value. There is no separate concept of a secret: every value is a variable,
+// and a variable is masked when its value is not a plain string. Exactly one
+// of the shape-specific fields is set, selected by shape:
+//   - VARIABLE_PLAIN: plain (the value);
+//   - VARIABLE_ENCRYPTED: encrypted (the builtin F-12 ciphertext);
+//   - VARIABLE_SECRET_SOURCE: secret_source (the named source) + key (the
+//     value's key within the source).
+message Variable {
+  // name is the variable's name (its key in the variables map).
+  string name = 1;
+  // shape is the value's shape.
+  VariableShape shape = 2;
+  // plain is the value when shape is VARIABLE_PLAIN.
+  string plain = 3;
+  // encrypted is the builtin F-12 ciphertext when shape is
+  // VARIABLE_ENCRYPTED. It is self-describing (it carries the nonce) and safe
+  // to store opaquely; the API decrypts it at dispatch and hands the plaintext
+  // to the execution target. The plaintext is never persisted.
+  string encrypted = 4;
+  // secret_source is the name of the secret source the value is sourced from
+  // when shape is VARIABLE_SECRET_SOURCE.
+  string secret_source = 5;
+  // key is the value's key within the named source when shape is
+  // VARIABLE_SECRET_SOURCE.
+  string key = 6;
+}
+
+// VariableSet is a named variable set (F-21.1.3): an inline variables map
+// declared under a pipeline's spec.variableSets. A job references a set by
+// name in its variable_sets list (JobDefinition.variable_set_refs).
+message VariableSet {
+  // name is the set's name (its key under spec.variableSets).
+  string name = 1;
+  // variables are the set's variables, in file order.
+  repeated Variable variables = 2;
+}
+
+// SecretSource is a named secret source (F-21.1.3 / F-12): a kind (a
+// secret-store kind - Vault / OpenBao are reserved kinds; the built-in AES
+// store is the default when no source is named), a path (the source path),
+// and an audience (the token audience used to fetch from the source). The
+// source's settings are stored opaquely on the pipeline (like a secret
+// declaration, F-12); the API resolves the named source to a concrete value
+// at dispatch and hands it to the execution target.
+message SecretSource {
+  // name is the source's name (its key under spec.secretSources).
+  string name = 1;
+  // kind is the secret-store kind (e.g. Vault, OpenBao); empty means the
+  // built-in AES store (the default when no source is named).
+  string kind = 2;
+  // path is the source path.
+  string path = 3;
+  // audience is the token audience used to fetch from the source.
+  string audience = 4;
+}
+
+// SecretSourceRef is a job instance's reference to a named secret source
+// (F-21.1.3 / F-12): the source's name and the value's key within the source.
+// It is denormalized onto the job instance at run creation (like the job's
+// secrets) so the API can resolve the named source to a concrete value at
+// dispatch and hand the plaintext to the execution target, where a step
+// references it as `{{ .params.<name> }}`.
+message SecretSourceRef {
+  // name is the variable's name (the name a step references it as).
+  string name = 1;
+  // source is the name of the secret source the value is sourced from.
+  string source = 2;
+  // key is the value's key within the named source.
+  string key = 3;
+}
+
 message Pipeline {
   int64 id = 1;
   string name = 2;
@@ -615,6 +703,27 @@ message Pipeline {
   // environment, worker group, worker) onto the run's job instances. Empty
   // means the pipeline has no tags.
   map<string, string> tags = 13;
+  // variable_sets are the pipeline's named variable sets (F-21.1.3): each is
+  // an inline variables map (a name -> value map; a value is a plain string,
+  // an encrypted builtin F-12 ciphertext, or a reference to a named
+  // secret_source). A job references a set by name in its variable_sets list
+  // (JobDefinition.variables); at run creation the database service merges the
+  // referenced sets' variables with the job's inline variables (the job's
+  // inline variables win on a key collision) and denormalizes the result onto
+  // each job instance. They are stored as a JSON document in a text column
+  // (portable across SQLite and PostgreSQL), like params. Empty means the
+  // pipeline declares no variable sets.
+  repeated VariableSet variable_sets = 14;
+  // secret_sources are the pipeline's named secret sources (F-21.1.3 / F-12):
+  // each has a kind (a secret-store kind - Vault / OpenBao are reserved kinds;
+  // the built-in AES store is the default when no source is named), a path,
+  // and an audience. A variable references a source by name (with a key
+  // selecting the value within the source); the source's settings are stored
+  // opaquely on the pipeline (like a secret declaration, F-12) and the API
+  // resolves the named source to a concrete value at dispatch. They are
+  // stored as a JSON document in a text column, like params. Empty means the
+  // pipeline declares no secret sources.
+  repeated SecretSource secret_sources = 15;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -713,6 +822,12 @@ message CreatePipelineRequest {
   // tags are the pipeline's tags (F-29); see Pipeline.tags. They are persisted
   // alongside the pipeline.
   map<string, string> tags = 9;
+  // variable_sets are the pipeline's named variable sets (F-21.1.3); see
+  // Pipeline.variable_sets. They are persisted alongside the pipeline.
+  repeated VariableSet variable_sets = 10;
+  // secret_sources are the pipeline's named secret sources (F-21.1.3 / F-12);
+  // see Pipeline.secret_sources. They are persisted alongside the pipeline.
+  repeated SecretSource secret_sources = 11;
 }
 
 message GetPipelineRequest {
@@ -773,6 +888,13 @@ message UpdatePipelineRequest {
   // tags, when present, replaces the pipeline's tags (F-29). When absent the
   // pipeline's tags are left unchanged.
   map<string, string> tags = 10;
+  // variable_sets, when present, replaces the pipeline's named variable sets
+  // (F-21.1.3). When absent the pipeline's variable sets are left unchanged.
+  repeated VariableSet variable_sets = 11;
+  // secret_sources, when present, replaces the pipeline's named secret
+  // sources (F-21.1.3 / F-12). When absent the pipeline's secret sources are
+  // left unchanged.
+  repeated SecretSource secret_sources = 12;
 }
 
 message DeletePipelineRequest {
@@ -1002,6 +1124,16 @@ message PipelineVersion {
   // Pipeline.tags. They are captured in the snapshot so a run bound to this
   // version combines the tags that were active when it started.
   map<string, string> tags = 13;
+  // variable_sets are the pipeline's named variable sets at this version
+  // (F-21.1.3); see Pipeline.variable_sets. They are captured in the snapshot
+  // so a run bound to this version merges the sets that were active when it
+  // started.
+  repeated VariableSet variable_sets = 14;
+  // secret_sources are the pipeline's named secret sources at this version
+  // (F-21.1.3 / F-12); see Pipeline.secret_sources. They are captured in the
+  // snapshot so a run bound to this version resolves the sources that were
+  // active when it started.
+  repeated SecretSource secret_sources = 15;
 }
 
 message ListPipelineVersionsRequest {
@@ -1488,6 +1620,20 @@ message Job {
   // run. They are metadata (they never gate, route, or serialize work). Empty
   // means the job has no tags.
   map<string, string> tags = 39;
+  // variables are the job's effective variables (F-21.1.3): the union of the
+  // job's inline variables and the variables of the variable sets it
+  // references, with the job's inline variables winning on a key collision.
+  // They are computed at import time (the API merges the job's inline
+  // variables with the referenced sets' variables) and denormalized onto the
+  // job instance at run creation, so they are stored as a snapshot: relabeling
+  // a set later does not change the variables recorded on a past run. A
+  // variable's value is a plain string, an encrypted builtin F-12 ciphertext,
+  // or a reference to a named secret source; the API resolves each to a
+  // concrete value at dispatch and hands the plaintext to the execution
+  // target, where a step references it as `{{ .params.<name> }}`. They are
+  // stored as a JSON document in a text column (portable across SQLite and
+  // PostgreSQL), like run_params. Empty means the job has no variables.
+  repeated Variable variables = 40;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -1537,6 +1683,14 @@ message JobDefinition {
   // (pipeline, environment, worker group, worker) onto the run's job
   // instances. Empty means the job has no tags.
   map<string, string> tags = 10;
+  // variables are the job's effective variables (F-21.1.3): the union of the
+  // job's inline variables and the variables of the variable sets it
+  // references (declared under the pipeline's spec.variableSets), with the
+  // job's inline variables winning on a key collision. They are computed at
+  // import time (the API merges the job's inline variables with the referenced
+  // sets' variables) and denormalized onto each job instance at run creation
+  // (Job.variables). Empty means the job has no variables.
+  repeated Variable variables = 11;
 }
 
 message CreateJobRequest {

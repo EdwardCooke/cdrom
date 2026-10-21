@@ -638,6 +638,196 @@ func TestCreatePipelineWithJobs(t *testing.T) {
 	}
 }
 
+// TestCreatePipelineFromFileFormat verifies that POST /api/pipelines accepts a
+// definition in the file format (F-21.1.4 import): a YAML document with an
+// apiVersion, kind, metadata, and spec is run through the compiler and mapped
+// onto the schema the API hands to the database service. The pipeline's named
+// variable sets and secret sources are carried to the database service, and
+// each job's effective variables (its inline variables merged with the
+// variables of the variable sets it references, the inline variables winning
+// on a key collision) are computed at import time and carried on the job
+// definition.
+func TestCreatePipelineFromFileFormat(t *testing.T) {
+	fake := &fakeDatabase{}
+	srv := New(Clients{Database: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	body := `
+apiVersion: cdrom/alphav1
+kind: Pipeline
+metadata:
+  name: deploy
+  description: a file-defined pipeline
+spec:
+  workerGroup: linux-pool
+  failureMode: best_effort
+  variableSets:
+    common:
+      variables:
+        region: us-east-1
+        db_password:
+          encrypted: enc-1
+  secretSources:
+    vault:
+      kind: vault
+      path: secret/data/app
+      audience: cdrom
+  jobs:
+    build:
+      steps:
+        compile:
+          shell: go build ./...
+      variables:
+        region: eu-west-1
+        api_token:
+          secretSource: vault
+          key: token
+      variableSets:
+        - common
+`
+	resp, err := http.Post(ts.URL+"/api/pipelines", "application/yaml", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 201 (body %s)", resp.StatusCode, data)
+	}
+	if fake.createdPipeline == nil {
+		t.Fatal("database.CreatePipeline was not called")
+	}
+	req := fake.createdPipeline
+	// The file's metadata and pipeline-level deployment options are mapped.
+	if req.GetName() != "deploy" {
+		t.Errorf("name = %q, want deploy", req.GetName())
+	}
+	if req.GetFailureMode() != dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT {
+		t.Errorf("failure mode = %v, want BEST_EFFORT", req.GetFailureMode())
+	}
+	// The pipeline's named variable sets and secret sources are carried to the
+	// database service.
+	if got := len(req.GetVariableSets()); got != 1 {
+		t.Fatalf("variable sets = %d, want 1", got)
+	}
+	if got := len(req.GetSecretSources()); got != 1 {
+		t.Fatalf("secret sources = %d, want 1", got)
+	}
+	if src := req.GetSecretSources()[0]; src.GetName() != "vault" || src.GetKind() != "vault" || src.GetPath() != "secret/data/app" {
+		t.Errorf("secret source = %+v, want vault/vault/secret/data/app", src)
+	}
+	// The single job: its worker group defaults to the pipeline's
+	// spec.workerGroup, and its effective variables are the inline variables
+	// merged with the referenced set's variables (inline wins on a collision).
+	if got := len(req.GetJobs()); got != 1 {
+		t.Fatalf("jobs = %d, want 1", got)
+	}
+	job := req.GetJobs()[0]
+	if job.GetKey() != "build" {
+		t.Errorf("job key = %q, want build", job.GetKey())
+	}
+	if job.GetTargetGroup() != "linux-pool" {
+		t.Errorf("job target group = %q, want linux-pool (the pipeline's workerGroup)", job.GetTargetGroup())
+	}
+	if job.GetSpec() == nil || len(job.GetSpec().GetSteps()) != 1 {
+		t.Errorf("job spec = %+v, want one step", job.GetSpec())
+	}
+	vars := map[string]*dbpb.Variable{}
+	for _, v := range job.GetVariables() {
+		vars[v.GetName()] = v
+	}
+	if got := len(vars); got != 3 {
+		t.Fatalf("job variables = %d, want 3 (region, db_password, api_token)", got)
+	}
+	// region: the job's inline value wins over the set's.
+	if v := vars["region"]; v == nil || v.GetShape() != dbpb.VariableShape_VARIABLE_PLAIN || v.GetPlain() != "eu-west-1" {
+		t.Errorf("region = %+v, want plain eu-west-1 (inline wins)", v)
+	}
+	// db_password: from the set (encrypted).
+	if v := vars["db_password"]; v == nil || v.GetShape() != dbpb.VariableShape_VARIABLE_ENCRYPTED || v.GetEncrypted() != "enc-1" {
+		t.Errorf("db_password = %+v, want encrypted enc-1 (from the set)", v)
+	}
+	// api_token: sourced from the named secret source.
+	if v := vars["api_token"]; v == nil || v.GetShape() != dbpb.VariableShape_VARIABLE_SECRET_SOURCE || v.GetSecretSource() != "vault" || v.GetKey() != "token" {
+		t.Errorf("api_token = %+v, want sourced from vault/token", v)
+	}
+}
+
+// TestExportPipelineEndpoint verifies that GET /api/pipelines/{id}/export
+// (F-21.1.4) renders the pipeline's compiled definition back into the file
+// format (YAML): the response is a valid file-format document (apiVersion,
+// kind, metadata, spec) that re-imports to the same compiled definition
+// (round-trip).
+func TestExportPipelineEndpoint(t *testing.T) {
+	fake := &fakeDatabase{
+		pipeline: &dbpb.Pipeline{
+			Id:          7,
+			Name:        "deploy",
+			Description: "an exported pipeline",
+			FailureMode: dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT,
+			VariableSets: []*dbpb.VariableSet{
+				{Name: "common", Variables: []*dbpb.Variable{{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "us-east-1"}}},
+			},
+			SecretSources: []*dbpb.SecretSource{{Name: "vault", Kind: "vault", Path: "secret/data/app"}},
+			Jobs: []*dbpb.JobDefinition{{
+				Key:         "build",
+				Name:        "build",
+				TargetGroup: "linux-pool",
+				Variables:   []*dbpb.Variable{{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "eu-west-1"}},
+				Spec:        &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Name: "compile", Type: "shell", Params: map[string]*dbpb.ParamValue{"command": {String_: "go build ./..."}}}}},
+			}},
+		},
+	}
+	srv := New(Clients{Database: fake}, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/pipelines/7/export")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (body %s)", resp.StatusCode, data)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/yaml" {
+		t.Errorf("content-type = %q, want application/yaml", ct)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	// The export is a valid file-format document that re-imports.
+	req, variableSets, secretSources, err := pipelineFileToRequest("", data)
+	if err != nil {
+		t.Fatalf("re-import export: %v (export was: %s)", err, data)
+	}
+	if req.Name != "deploy" {
+		t.Errorf("re-imported name = %q, want deploy", req.Name)
+	}
+	if got := len(variableSets); got != 1 {
+		t.Errorf("re-imported variable sets = %d, want 1", got)
+	}
+	if got := len(secretSources); got != 1 {
+		t.Errorf("re-imported secret sources = %d, want 1", got)
+	}
+	if got := len(req.Jobs); got != 1 {
+		t.Fatalf("re-imported jobs = %d, want 1", got)
+	}
+	job := req.Jobs[0]
+	if job.Key != "build" || job.WorkerGroup != "linux-pool" {
+		t.Errorf("re-imported job = key %q group %q, want build/linux-pool", job.Key, job.WorkerGroup)
+	}
+	if job.Spec == nil || len(job.Spec.Steps) != 1 || job.Spec.Steps[0].Name != "compile" {
+		t.Errorf("re-imported steps = %+v, want one step named compile", job.Spec)
+	}
+	if got := len(job.Variables); got != 1 || job.Variables[0].GetName() != "region" || job.Variables[0].GetPlain() != "eu-west-1" {
+		t.Errorf("re-imported variables = %+v, want region=eu-west-1", job.Variables)
+	}
+}
+
 // TestSubmitPipelineJobGoesToDatabase verifies that a job submitted with a
 // pipeline_id (F-08) is persisted as a job definition via the database service
 // (not dispatched by the scheduler), carrying its key and needs.
