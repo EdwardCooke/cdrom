@@ -14,7 +14,7 @@ acceptance criteria, and design decisions for each piece.
 | Sub-feature | Spec | Scope | Depends on |
 |-------------|------|-------|------------|
 | **F-21.1** File format & compiler | [f-21.1](f-21.1-file-format-compiler.md) | The Kubernetes-style file format + the `internal/pipelinefile` compiler (name-based referencing, step spec shape, masked variables, deployment options) + import/export API — the single-file core | — |
-| **F-21.2** Source-fetcher service | [f-21.2](f-21.2-source-fetcher.md) | The standalone source-fetcher gRPC service (git / HTTP / file, a `<type>:<spec>` reference) + the git repository cache + protos | — |
+| **F-21.2** Source-fetcher service | [f-21.2](f-21.2-source-fetcher.md) | The standalone source-fetcher gRPC service (git / HTTP / file, a `<type>:<spec>` reference) + the git repository cache + protos — overview; decomposed into F-21.2.1…F-21.2.4 | — |
 | **F-21.3** Source credentials | [f-21.3](f-21.3-source-credentials.md) | `SourceCredential` model (DB-stored, regex-matched, F-12-encrypted) + API CRUD | F-12 |
 | **F-21.4** Reusable units & imports | [f-21.4](f-21.4-reusable-units-imports.md) | Cross-file imports (`importFrom` / `import` / `ref`), the `Step`/`VariableSet`/`Job` file kinds, step reuse across environments | 21.1, 21.2 |
 | **F-21.5** Externally-sourced pipelines | [f-21.5](f-21.5-externally-sourced-pipelines.md) | `PipelineSource`/`State` models, stored YAML+hash, the sync routine + 3 refresh triggers, source API | 21.1, 21.2, 21.3 |
@@ -24,11 +24,16 @@ acceptance criteria, and design decisions for each piece.
 **Suggested build order:** F-21.1 → (F-21.2 ∥ F-21.3) → F-21.4 → F-21.5;
 F-21.6 and F-21.7 are independent and can be done in parallel.
 
-Two of the sub-features are themselves large and are further decomposed (see
+Three of the sub-features are themselves large and are further decomposed (see
 their own spec files for the sub-sub-feature index): **F-21.1** into
 F-21.1.1…F-21.1.4 (manifest envelope, step spec, variables/secrets, jobs +
-import/export) and **F-21.5** into F-21.5.1…F-21.5.3 (source model, sync
-routine, refresh triggers).
+import/export), **F-21.2** into F-21.2.1…F-21.2.4 (service + gRPC contract,
+reference format & parsing, git repository cache, fetch clients) — with
+**F-21.2.3** (the git repository cache) itself decomposed into
+F-21.2.3.1…F-21.2.3.4 (cache structure & index, fetch lifecycle, cross-replica
+locking, cleanup thread) and **F-21.2.4** (the fetch clients) into
+F-21.2.4.1…F-21.2.4.3 (one per fetcher: git, http, file) — and **F-21.5** into
+F-21.5.1…F-21.5.3 (source model, sync routine, refresh triggers).
 
 ---
 

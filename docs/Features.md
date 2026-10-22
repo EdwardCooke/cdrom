@@ -100,7 +100,18 @@ tool.
 | F-21.1.2 | Step spec shape & name-based step referencing (handler-type key, `shell` string shorthand, `ref`, name-based step referencing) | planned | [F-21.1.2](features/f-21.1.2-step-spec.md) |
 | F-21.1.3 | Variables, masked variables & secret sources (plain/`encrypted`/`secretSource`+`key`, `variableSets`, `secretSources`) | planned | [F-21.1.3](features/f-21.1.3-variables-secrets.md) |
 | F-21.1.4 | Jobs, deployment options & import/export API (`spec.jobs` mapping + import/export round-trip) | planned | [F-21.1.4](features/f-21.1.4-jobs-import-export.md) |
-| F-21.2 | Source-fetcher service (standalone gRPC fetcher: `git` / `http` / `file` references, git repository cache) | planned | [F-21.2](features/f-21.2-source-fetcher.md) |
+| F-21.2 | Source-fetcher service (overview; decomposed into F-21.2.1…F-21.2.4) | planned | [F-21.2](features/f-21.2-source-fetcher.md) |
+| F-21.2.1 | Service & gRPC contract (standalone `cmd/pipelinesource` gRPC server, `FetchSource` RPC + `SourceCredential`, protos, listen/metrics config) | planned | [F-21.2.1](features/f-21.2.1-service-contract.md) |
+| F-21.2.2 | Reference format & parsing (the `<type>:<spec>` `git` / `http` / `file` reference, backslash escaping, left-to-right parser) | planned | [F-21.2.2](features/f-21.2.2-reference-format.md) |
+| F-21.2.3 | Git repository cache (overview; decomposed into F-21.2.3.1…F-21.2.3.4) | planned | [F-21.2.3](features/f-21.2.3-git-repository-cache.md) |
+| F-21.2.3.1 | Cache structure & index (on-disk cache root, portable per-repo directory naming, atomic text index file) | planned | [F-21.2.3.1](features/f-21.2.3.1-cache-structure-index.md) |
+| F-21.2.3.2 | Fetch lifecycle (rolling-24h window, refetch-on-request, fetch debounce, resync-on-failure) | planned | [F-21.2.3.2](features/f-21.2.3.2-fetch-lifecycle.md) |
+| F-21.2.3.3 | Cross-replica locking (per-repo OS file lock with stale-lock timeout, shared cache across replicas) | planned | [F-21.2.3.3](features/f-21.2.3.3-cross-replica-locking.md) |
+| F-21.2.3.4 | Cleanup thread (prune repositories inactive >24h, sweep orphaned directories, skip locked repos) | planned | [F-21.2.3.4](features/f-21.2.3.4-cleanup-thread.md) |
+| F-21.2.4 | Fetch clients (overview; decomposed into F-21.2.4.1…F-21.2.4.3, one per fetcher) | planned | [F-21.2.4](features/f-21.2.4-fetch-clients.md) |
+| F-21.2.4.1 | Git fetch client (read a file at a branch ref from the cache, `git-ssh`/`git-https` credential, commit-hash version) | planned | [F-21.2.4.1](features/f-21.2.4.1-git-fetch-client.md) |
+| F-21.2.4.2 | HTTP fetch client (GET of the endpoint, headers from the `http` credential — optional, `ETag`/`Last-Modified` version) | planned | [F-21.2.4.2](features/f-21.2.4.2-http-fetch-client.md) |
+| F-21.2.4.3 | File fetch client (read `<root><path>` rooted in `CDROM_PIPELINE_SOURCE_FILE_ROOT`, mtime version; disabled when no root) | planned | [F-21.2.4.3](features/f-21.2.4.3-file-fetch-client.md) |
 | F-21.3 | Source credentials (DB-stored, regex-matched, F-12-encrypted) | planned | [F-21.3](features/f-21.3-source-credentials.md) |
 | F-21.4 | Reusable units & cross-file imports (`importFrom` / `import` / `ref`) | planned | [F-21.4](features/f-21.4-reusable-units-imports.md) |
 | F-21.5 | Externally-sourced pipelines (overview + source-model reference; decomposed into F-21.5.1…F-21.5.3) | planned | [F-21.5](features/f-21.5-externally-sourced-pipelines.md) |
@@ -194,7 +205,18 @@ Tick each feature off as it lands.
 - [ ] F-21.1.2 Step spec shape & name-based step referencing
 - [ ] F-21.1.3 Variables, masked variables & secret sources
 - [ ] F-21.1.4 Jobs, deployment options & import/export API
-- [ ] F-21.2 Source-fetcher service
+- [ ] F-21.2 Source-fetcher service (overview; see F-21.2.1…F-21.2.4)
+- [ ] F-21.2.1 Service & gRPC contract
+- [ ] F-21.2.2 Reference format & parsing
+- [ ] F-21.2.3 Git repository cache (overview; see F-21.2.3.1…F-21.2.3.4)
+- [ ] F-21.2.3.1 Cache structure & index
+- [ ] F-21.2.3.2 Fetch lifecycle (refetch, debounce, resync)
+- [ ] F-21.2.3.3 Cross-replica locking
+- [ ] F-21.2.3.4 Cleanup thread
+- [ ] F-21.2.4 Fetch clients (overview; see F-21.2.4.1…F-21.2.4.3)
+- [ ] F-21.2.4.1 Git fetch client
+- [ ] F-21.2.4.2 HTTP fetch client
+- [ ] F-21.2.4.3 File fetch client
 - [ ] F-21.3 Source credentials
 - [ ] F-21.4 Reusable units & cross-file imports
 - [ ] F-21.5 Externally-sourced pipelines (overview; see F-21.5.1…F-21.5.3)
