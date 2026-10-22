@@ -14,7 +14,7 @@ acceptance criteria, and design decisions for each piece.
 | Sub-feature | Spec | Scope | Depends on |
 |-------------|------|-------|------------|
 | **F-21.1** File format & compiler | [f-21.1](f-21.1-file-format-compiler.md) | The Kubernetes-style file format + the `internal/pipelinefile` compiler (name-based referencing, step spec shape, masked variables, deployment options) + import/export API — the single-file core | — |
-| **F-21.2** Source-fetcher service | [f-21.2](f-21.2-source-fetcher.md) | The standalone source-fetcher gRPC service (git / HTTP / filesystem) + protos | — |
+| **F-21.2** Source-fetcher service | [f-21.2](f-21.2-source-fetcher.md) | The standalone source-fetcher gRPC service (git / HTTP / file, a `<type>:<spec>` reference) + the git repository cache + protos | — |
 | **F-21.3** Source credentials | [f-21.3](f-21.3-source-credentials.md) | `SourceCredential` model (DB-stored, regex-matched, F-12-encrypted) + API CRUD | F-12 |
 | **F-21.4** Reusable units & imports | [f-21.4](f-21.4-reusable-units-imports.md) | Cross-file imports (`importFrom` / `import` / `ref`), the `Step`/`VariableSet`/`Job` file kinds, step reuse across environments | 21.1, 21.2 |
 | **F-21.5** Externally-sourced pipelines | [f-21.5](f-21.5-externally-sourced-pipelines.md) | `PipelineSource`/`State` models, stored YAML+hash, the sync routine + 3 refresh triggers, source API | 21.1, 21.2, 21.3 |
@@ -37,10 +37,12 @@ declarative file format (YAML) that can be imported/exported and checked into
 source control. The UI editor and the file format are two views of the same
 model. A pipeline's definition can be authored in the UI **or** live in an
 external source: a **git** repository, an **HTTP/HTTPS endpoint**, or a file on
-the **local filesystem**. An **externally-sourced** pipeline is pulled from its
-source on a schedule, refreshed again when a run is kicked off, and can be
-refreshed manually. The actual fetching (git clone/fetch, HTTP GET, or a local
-file read) is done by a dedicated **source-fetcher** service — a separate
+the **local filesystem** (rooted in a configured directory). An
+**externally-sourced** pipeline is pulled from its source on a schedule,
+refreshed again when a run is kicked off, and can be
+refreshed manually. The actual fetching (a git clone/fetch served from the
+fetcher's on-disk repository cache, an HTTP GET, or a rooted local file read)
+is done by a dedicated **source-fetcher** service — a separate
 process that the API dials over gRPC (mutual TLS, like the other services) — so
 the API and scheduler never need git, network egress, or the source's
 filesystem. The raw YAML is stored in the database alongside a content hash so
@@ -101,17 +103,20 @@ and source credentials out of the API and scheduler.
   onto the database schema (storing step names on the `JobStep`, job names as
   the stable `key`), shared with F-08 (DAG) and F-10 (params) validation.
 - `internal/models` — a `PipelineSource` (where a pipeline is pulled from: a
-  `kind` of `git` / `http` / `filesystem`, plus the kind's URL / branch / path,
-  a refresh `schedule`, and a credential reference), a `PipelineSourceState`
-  (last sync time, last source version, last file hash, last error), and a
-  `SourceCredential` (a regex-matched credential for git over SSH/HTTPS or an
-  HTTP/HTTPS endpoint); the raw YAML + content hash on the `Pipeline` row.
+  `kind` of `git` / `http` / `file` and a `reference` — the `<type>:<spec>`
+  locator string, F-21.2 — a refresh `schedule`, and a credential reference), a
+  `PipelineSourceState` (last sync time, last source version, last file hash,
+  last error), and a `SourceCredential` (a regex-matched credential for git
+  over SSH/HTTPS or an HTTP/HTTPS endpoint); the raw YAML + content hash on the
+  `Pipeline` row.
 - `cmd/pipelinesource` + `internal/services/pipelinesource` — the **source
   fetcher**: a standalone gRPC service (a new process, like `db` / `scheduler` /
-  `artifacts` / `idp`) that performs the actual fetch — git clone/fetch, HTTP
-  GET, or a local file read — and returns the file's content, version, and
-  hash. It is stateless (no definitions, no credentials, no key at rest) and is
-  dialed **only by the API** over gRPC (mutual TLS when a CA is configured).
+  `artifacts` / `idp`) that performs the actual fetch — a git clone/fetch from
+  its on-disk repository cache, an HTTP GET, or a rooted local file read — and
+  returns the file's content, version, and hash. It holds no definitions, no
+  credentials, and no key at rest (its only on-disk state is the transient git
+  repository cache) and is dialed **only by the API** over gRPC (mutual TLS
+  when a CA is configured).
 - `proto/cdrom/pipelinesource/v1/` — the fetcher's gRPC API (`FetchSource`);
   generated code in `internal/gen/` (`make proto`).
 - `internal/services/database` — source/credential CRUD, the stored YAML +
@@ -148,7 +153,8 @@ and source credentials out of the API and scheduler.
       reference, a cycle, or a parameter with no value).
 - [ ] A pipeline can be sourced from a **git** repository, an **HTTP/HTTPS
       endpoint**, or a file on the **local filesystem** (a `PipelineSource`
-      `kind`), and each kind is fetched by the source-fetcher service.
+      `kind` of `git` / `http` / `file`), and each kind is fetched by the
+      source-fetcher service from the source's `reference`.
 - [ ] An externally-sourced pipeline is refreshed on its schedule (cron) and
       again when a run of it is kicked off; the raw YAML and its content hash
       are stored in the database and retrievable via the API.
@@ -157,13 +163,14 @@ and source credentials out of the API and scheduler.
       version bump, no re-dispatch).
 - [ ] A pipeline can be refreshed manually via the API (an explicit re-pull that
       applies the latest file regardless of schedule).
-- [ ] The actual fetch (git / HTTP / filesystem) is performed by the separate
+- [ ] The actual fetch (git / HTTP / file) is performed by the separate
       source-fetcher process, which the API dials over gRPC; with a TLS CA
       configured the connection uses mutual TLS, and without one it falls back
       to plaintext (local dev) — the same convention as the other services.
 - [ ] The source-fetcher holds no definitions, credentials, or encryption key at
-      rest: the API decrypts the source's credential and passes the plaintext to
-      the fetcher for a single fetch, which is never persisted or logged.
+      rest (its only on-disk state is the transient git repository cache): the
+      API decrypts the source's credential and passes the plaintext to the
+      fetcher for a single fetch, which is never persisted or logged.
 - [ ] A step's outputs are referenced in the file by a **user-definable step
       name** (not an ordinal); the compiler stores each step's name on the
       `JobStep` (`name` field) and the executor's condition context is keyed by
@@ -207,7 +214,7 @@ and source credentials out of the API and scheduler.
       `variableSets` list.
 - [x] Mapping keys in the file are camelCase (`concurrencyKeys`, `variableSets`,
       `importFrom`, `secretSources`, …).
-- [ ] The pipeline's source (git / http / filesystem) is **not** in the file —
+- [ ] The pipeline's source (git / http / file) is **not** in the file —
       it is a `PipelineSource` stored in the database and configured through the
       API, so the same file is portable across source kinds.
 - [ ] Standard deployment options in the file (timeout, retry, failure mode,
@@ -284,7 +291,7 @@ Pipeline-level config (`failureMode`, `concurrencyKeys`, `params`, `triggers`,
 worker group is a `spec.workerGroup`. Mapping keys are camelCase.
 
 **The source is not in the file.** Where a pipeline is pulled from (a `git` /
-`http` / `filesystem` source, its schedule, and its credential) is a **database**
+`http` / `file` source, its schedule, and its credential) is a **database**
 concept — a `PipelineSource` row associated with the pipeline (see
 [Externally-sourced pipelines](#externally-sourced-pipelines)) — not part of the
 YAML. The file is purely the definition; the source is configured through the
@@ -376,7 +383,7 @@ spec:
         GOFLAGS: -mod=vendor
     # Pull a step in from another file (see "Imports and references").
     unit-test:
-      importFrom: git://github.com/blah/blah/steps/unit-test.yaml
+      importFrom: git:https://github.com/blah/blah.git@main[/steps/unit-test.yaml]
 
     # --- Steps that set every option of each built-in handler -------------
     # Each step below sets all of its handler's params plus the common step
@@ -489,11 +496,11 @@ spec:
           key: deploy_token
     dev:
       import:
-        - from: git://github.com/blah/blah/variablesets/dev.yaml
+        - from: git:https://github.com/blah/blah.git@main[/variablesets/dev.yaml]
         - vault: prod-secrets            # import every value in the vault (masked)
     prod:
       import:
-        - from: git://github.com/blah/blah/variablesets/prod.yaml
+        - from: git:https://github.com/blah/blah.git@main[/variablesets/prod.yaml]
         - vault: prod-secrets            # import a subset of the vault's keys (masked)
           keys:
             - deploy_token
@@ -551,7 +558,7 @@ spec:
       # The whole job is pulled from another file (see "Imports and
       # references"); any fields set here override the imported job's. The
       # local `steps` below override the imported job's steps by name.
-      importFrom: git://github.com/blah/blah/jobs/deploy-dev.yaml
+      importFrom: git:https://github.com/blah/blah.git@main[/jobs/deploy-dev.yaml]
       steps:
         # Overrides the `step2` defined in the imported job file.
         step2:
@@ -575,7 +582,7 @@ spec:
       environment: prod
       # The whole job is pulled from another file; the local fields above
       # (needs, environment, workerGroup) override the imported job's.
-      importFrom: git://github.com/blah/blah/somesuperjob.yaml
+      importFrom: git:https://github.com/blah/blah.git@main[/somesuperjob.yaml]
 
   # Pipeline-level config lives in the spec alongside the jobs.
   failureMode: all
@@ -898,7 +905,7 @@ in the file):
   fields set on the local job override the imported job's, including its
   `steps` (a local `steps` map overrides the imported job's steps by name).
   Example:
-  `unit-test: {importFrom: git://github.com/blah/blah/steps/unit-test.yaml}`.
+  `unit-test: {importFrom: git:https://github.com/blah/blah.git@main[/steps/unit-test.yaml]}`.
 - **`ref: <name>`** (on a step) — reference a step already defined in
   `spec.steps` (or pulled in by another step's `importFrom`) by name. When the
   step's own name matches the referenced step's, the `ref` can be omitted: an
@@ -910,18 +917,20 @@ in the file):
   imports every value in the named `secretSources` entry (as masked variables),
   and a `{vault, keys}` entry imports a subset of its keys. The set's
   variables are the union of its inline `variables` and the imported variables.
-  Example: `dev: {import: [{from: git://…/dev.yaml}, {vault: prod-secrets}]}`.
+  Example: `dev: {import: [{from: git:https://github.com/blah/blah.git@main[/variablesets/dev.yaml]}, {vault: prod-secrets}]}`.
 - **`variableSets: [<name>, …]`** (on a job) — reference named variable sets
   (declared under `spec.variableSets`) to merge into the job's variables.
   Example: `variableSets: [global, dev]`.
 - The same pattern extends to the other named resources: a secret source can be
   pulled in from another file with `importFrom`.
 
-A locator is resolved against the pipeline's source, exactly like the main file:
-for a `git` source, relative to the file's path in the repo (the fetcher fetches
-the referenced file from the same repo/branch); for an `http` source, relative
-to the file's URL (the fetcher resolves it against the source's base URL); for a
-`filesystem` source, relative to the file's directory on the fetcher's host. The
+A locator is either a full **reference** (the `<type>:<spec>` string, F-21.2) or
+a path relative to the current file, resolved against the pipeline's source,
+exactly like the main file: for a `git` source, relative to the file's path in
+the repo (the fetcher fetches the referenced file from the same repo/branch);
+for an `http` source, relative to the file's URL (the fetcher resolves it
+against the source's base URL); for a `file` source, relative to the file's
+directory under the fetcher's configured local-filesystem root. The
 source-fetcher fetches each referenced file and the compiler splices the fetched
 unit in place (or merges a variable set's variables into the job's `variables`).
 The rules:
@@ -995,27 +1004,32 @@ named unit, or an `importFrom` / `import` pull from another file.
 A pipeline's definition can live in an external source instead of (or alongside)
 the UI. An **externally-sourced** pipeline is one whose `PipelineSource` points
 at a source of one of three kinds: a **git** repository, an **HTTP/HTTPS**
-endpoint, or a file on the **local filesystem**. All three are fetched by the
-source-fetcher service (below) and flow through the same sync routine.
+endpoint, or a file on the **local filesystem** (rooted in a configured
+directory). All three are fetched by the source-fetcher service (below) and flow
+through the same sync routine.
 
 ### The source model
 
 - **`PipelineSource`** — where a pipeline is pulled from. It has a `kind`
-  (`git` / `http` / `filesystem`) plus the kind's locator, a `schedule` (a cron
+  (`git` / `http` / `file`) and a `reference` (the `<type>:<spec>` locator
+  string, F-21.2, that names the file to fetch), a `schedule` (a cron
   expression for the scheduled refresh; empty means no scheduled refresh), and a
   `credential` (the name of the `SourceCredential` used to authenticate; empty
   means the source is public / needs no credential):
-  - `git` — `url` (the git remote), `branch` (the ref to track; default
-    `main`), and `path` (the path of the definition file within the repo).
-  - `http` — `url` (the endpoint that serves the definition file, e.g. an
-    object-store URL or a raw-file endpoint). The fetcher does a GET and uses
-    the response body as the file. An optional `headers` map (e.g. an
-    `Authorization` header) can be set on the source for endpoints that need it
-    in-band; a named `credential` is the preferred way to supply a token.
-  - `filesystem` — `path` (an absolute path to the definition file on the
-    source-fetcher's host). The file is read directly; no network is involved.
-    This is the kind for a definition that is mounted into the fetcher's pod
-    (e.g. a ConfigMap or a volume) and is "pulled" by re-reading the file.
+  - `git` — the reference is `<repo>@<branch>[<path>]` (the git remote, the
+    branch ref, and the file path in the repo, with `\@` / `\[` / `\]` / `\\`
+    escaping). The fetcher serves the repository from its on-disk cache and
+    reads the file at the path.
+  - `http` — the reference is the endpoint that serves the definition file
+    (e.g. an object-store URL or a raw-file endpoint). The fetcher does a GET
+    and uses the response body as the file. Request headers come from the
+    source's `http` credential (F-21.3); a credential is optional.
+  - `file` — the reference is a path resolved against the fetcher's configured
+    local-filesystem root (`CDROM_PIPELINE_SOURCE_FILE_ROOT`): the file is read
+    directly from `<root><path>`; no network is involved. This is the kind for
+    a definition that is mounted into the fetcher's pod (e.g. a ConfigMap or a
+    volume) and is "pulled" by re-reading the file. When no root is configured
+    the kind is disabled.
 - **`PipelineSourceState`** — the last sync's bookkeeping: `last_synced_at`,
   `last_version` (the source's version identifier — the git commit hash, an
   HTTP `ETag`/`Last-Modified`, or the file's mtime — so a no-change can be
@@ -1029,11 +1043,12 @@ process (`cmd/pipelinesource`, logic in `internal/services/pipelinesource`), in
 the same shape as the other services (`db`, `scheduler`, `artifacts`, `idp`):
 
 - **A standalone gRPC server.** It exposes one RPC, `FetchSource`, which takes a
-  source locator (kind + url/branch/path + optional headers) and a credential
-  (the plaintext secret material, when one is needed) and returns the file's
-  content, its version identifier, and its content hash. The fetcher is
-  **stateless**: it holds no pipeline definitions, no credentials, and no
-  encryption key at rest. It only ever performs a single fetch per call.
+  **reference** (a `<type>:<spec>` string — `git` / `http` / `file`) and an
+  optional credential (the plaintext secret material, when one is needed) and
+  returns the file's content, its version identifier, and its content hash. The
+  fetcher holds no pipeline definitions, no credentials, and no encryption key
+  at rest; its only on-disk state is the transient git repository cache (F-21.2).
+  It performs a single fetch per call.
 - **Dialed only by the API, over gRPC.** The API is the only caller (the same
   topology rule as the other services: the API talks to everything else). The
   connection uses **mutual TLS** when a TLS CA is configured (`TLSConfig` in
@@ -1047,10 +1062,12 @@ the same shape as the other services (`db`, `scheduler`, `artifacts`, `idp`):
   filesystem. The fetcher can be run with a network policy that allows only the
   repos/endpoints it must reach, and it can be scaled or replaced independently
   of the control plane. It also keeps the API's process free of long-running
-  git operations.
+  git operations — repeated fetches of the same repository are served from the
+  fetcher's local cache (refetched from upstream on a debounce) instead of
+  re-cloning.
 - **Protos.** `proto/cdrom/pipelinesource/v1/` defines `FetchSource` (and the
-  `SourceLocator` / `SourceCredential` / `FetchedFile` messages); generated code
-  is committed under `internal/gen/` (`make proto`). The service impl lives in
+  `SourceCredential` message); generated code is committed under
+  `internal/gen/` (`make proto`). The service impl lives in
   `internal/services/pipelinesource/server.go` and implements the generated
   `*Server` interface (embedding `Unimplemented*Server`), per the gRPC
   conventions.
@@ -1058,8 +1075,8 @@ the same shape as the other services (`db`, `scheduler`, `artifacts`, `idp`):
 ### The stored YAML and its hash
 
 When an externally-sourced pipeline is synced, the API asks the source-fetcher
-to fetch the definition file at the source's locator and stores, on the
-`Pipeline` row:
+to fetch the definition file named by the source's `reference` and stores, on
+the `Pipeline` row:
 
 - **`source_file`** — the raw YAML text, verbatim (so it is retrievable through
   the API and is the exact input the compiler ran).
@@ -1112,7 +1129,7 @@ racing cannot double-apply a change.
 
 The stored source is readable through the API:
 
-- `GET /api/pipelines/{id}/source` — the `PipelineSource` (kind, url/branch/path,
+- `GET /api/pipelines/{id}/source` — the `PipelineSource` (kind, reference,
   schedule, credential name) plus the `PipelineSourceState` (last sync time,
   last version, file hash, last error) and the stored `source_file` (the raw
   YAML). This is how a user sees "what definition is currently loaded and where
@@ -1190,13 +1207,14 @@ replaced.
 When a source is synced:
 
 1. If the source names a `credential`, that credential is used.
-2. Otherwise the source's `url` is matched against every credential's `pattern`;
-   the longest matching pattern's credential is used.
+2. Otherwise the source's `reference` is matched against every credential's
+   `pattern`; the longest matching pattern's credential is used.
 3. If neither applies, the fetch runs unauthenticated (a public source).
 
 The chosen credential's secret material is decrypted by the API for that single
 fetch and handed to the source-fetcher (over the gRPC call); it is not persisted
-anywhere else (the fetcher is stateless) and is not logged. A credential that
+anywhere else (the fetcher holds no credentials at rest) and is not logged. A
+credential that
 fails to authenticate (a rotated token, a revoked key) surfaces as a sync
 failure on the source state (`last_error`) and is visible in the UI, so a stale
 credential is diagnosable without a repo checkout.
@@ -1263,20 +1281,22 @@ itself.
 - **The raw YAML + hash are stored in the database.** An externally-sourced
   pipeline stores `source_file` (the verbatim YAML) and `source_hash` (its
   SHA-256) on the `Pipeline` row, plus a `PipelineSource` (where it came from:
-  a `kind` of `git` / `http` / `filesystem` and its locator) and a
+  a `kind` of `git` / `http` / `file` and its `reference`) and a
   `PipelineSourceState` (last sync / version / error). The hash is the change
   detector: a sync that yields the same hash is a no-op (no recompile, no
   version bump); a changed hash re-imports and bumps the version (F-11). The
   stored file is retrievable through the API (`GET /api/pipelines/{id}/source`).
-- **The fetch is a separate process.** The actual fetch (git clone/fetch, HTTP
-  GET, or a local file read) is performed by a dedicated **source-fetcher**
-  service (`cmd/pipelinesource` / `internal/services/pipelinesource`) — a
-  standalone gRPC server in the same shape as the other services. It is
-  **stateless** (no definitions, credentials, or key at rest) and is dialed
-  **only by the API** over gRPC: mutual TLS when a CA is configured, plaintext
-  otherwise (the convention in `internal/grpcutil`). This keeps git, network
-  egress, and the source's filesystem out of the API and scheduler, and lets the
-  fetcher be network-policy'd to only the sources it must reach.
+- **The fetch is a separate process.** The actual fetch (a git clone/fetch from
+  the fetcher's on-disk cache, an HTTP GET, or a rooted local file read) is
+  performed by a dedicated **source-fetcher** service
+  (`cmd/pipelinesource` / `internal/services/pipelinesource`) — a standalone
+  gRPC server in the same shape as the other services. It holds no definitions,
+  credentials, or key at rest (its only on-disk state is the transient git
+  repository cache) and is dialed **only by the API** over gRPC: mutual TLS
+  when a CA is configured, plaintext otherwise (the convention in
+  `internal/grpcutil`). This keeps git, network egress, and the source's
+  filesystem out of the API and scheduler, and lets the fetcher be
+  network-policy'd to only the sources it must reach.
 - **Refresh is one routine, three triggers.** A single sync routine (fetch via
   the source-fetcher → hash → compare → recompile if changed) is driven by (1)
   the API's leader-gated source-refresh loop (a named lease on the Database
@@ -1325,9 +1345,9 @@ itself.
   database default, so a minimal file is valid.
 - **Source credentials are DB-stored, regex-matched, and API-managed.** A
   `SourceCredential` (kind `git-ssh` / `git-https` / `http`, a `pattern` regex
-  over the source URL, and encrypted secret material) is stored in the database
-  (secret material encrypted with the F-12 store, opaque to the database
-  service) and managed through the API (CRUD, gated on
+  over the source's `reference`, and encrypted secret material) is stored in the
+  database (secret material encrypted with the F-12 store, opaque to the
+  database service) and managed through the API (CRUD, gated on
   `source-credentials.can-view` / `can-manage`). A source is matched to a
   credential by the longest matching `pattern` (or an explicit `credential` name
   override); the credential's secret is decrypted by the API for a single fetch
@@ -1346,8 +1366,11 @@ itself.
   `GET /api/pipelines/{id}/export`, and `GET/POST/PUT/DELETE
   /api/source-credentials[/{name}]` (api); a `source-refresh` background loop
   (a named lease on the Database service) and a refresh-on-run hook (api); the
-  fetcher's git / HTTP / filesystem clients (a single file at a ref / URL / path,
-  authenticated by a `SourceCredential`). File-format fields that are new to the
+  fetcher's git / HTTP / filesystem clients (a single file named by a
+  `reference`, authenticated by a `SourceCredential` when one is needed) and the
+  fetcher's git repository cache (cache root + text index + per-repository lock
+  + fetch debounce + cleanup thread).
+  File-format fields that are new to the
   schema: the Kubernetes-style manifest envelope (`apiVersion` / `kind` /
   `metadata` / `spec`, with `metadata.labels` and `metadata.annotations`),
   camelCase mapping keys, a `spec.workerGroup` (the default group a job's

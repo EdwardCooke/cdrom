@@ -100,7 +100,7 @@ tool.
 | F-21.1.2 | Step spec shape & name-based step referencing (handler-type key, `shell` string shorthand, `ref`, name-based step referencing) | planned | [F-21.1.2](features/f-21.1.2-step-spec.md) |
 | F-21.1.3 | Variables, masked variables & secret sources (plain/`encrypted`/`secretSource`+`key`, `variableSets`, `secretSources`) | planned | [F-21.1.3](features/f-21.1.3-variables-secrets.md) |
 | F-21.1.4 | Jobs, deployment options & import/export API (`spec.jobs` mapping + import/export round-trip) | planned | [F-21.1.4](features/f-21.1.4-jobs-import-export.md) |
-| F-21.2 | Source-fetcher service (standalone gRPC fetcher: git / HTTP / filesystem) | planned | [F-21.2](features/f-21.2-source-fetcher.md) |
+| F-21.2 | Source-fetcher service (standalone gRPC fetcher: `git` / `http` / `file` references, git repository cache) | planned | [F-21.2](features/f-21.2-source-fetcher.md) |
 | F-21.3 | Source credentials (DB-stored, regex-matched, F-12-encrypted) | planned | [F-21.3](features/f-21.3-source-credentials.md) |
 | F-21.4 | Reusable units & cross-file imports (`importFrom` / `import` / `ref`) | planned | [F-21.4](features/f-21.4-reusable-units-imports.md) |
 | F-21.5 | Externally-sourced pipelines (overview + source-model reference; decomposed into F-21.5.1…F-21.5.3) | planned | [F-21.5](features/f-21.5-externally-sourced-pipelines.md) |
