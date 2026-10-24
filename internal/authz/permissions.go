@@ -72,6 +72,12 @@ const (
 	// key are platform-wide: can-view reads them, can-manage adds/removes them.
 	PermSSHKnownHostsView   = "ssh-known-hosts.can-view"
 	PermSSHKnownHostsManage = "ssh-known-hosts.can-manage"
+	// Source-credential management permissions (F-21.3). The named,
+	// database-stored credentials that authenticate a fetch of a private
+	// source are platform-wide: can-view reads them (secret material redacted),
+	// can-manage creates/updates/deletes them.
+	PermSourceCredentialsView   = "source-credentials.can-view"
+	PermSourceCredentialsManage = "source-credentials.can-manage"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -113,6 +119,8 @@ var AllPermissions = []string{
 	PermWorkerGroupsManage,
 	PermSSHKnownHostsView,
 	PermSSHKnownHostsManage,
+	PermSourceCredentialsView,
+	PermSourceCredentialsManage,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

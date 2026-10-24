@@ -483,6 +483,61 @@ service Database {
   // NotFound.
   rpc DeleteSSHKnownHost(DeleteSSHKnownHostRequest) returns (google.protobuf.Empty);
 
+  // Source credentials (F-21.3). Named, database-stored credentials that
+  // authenticate a fetch of a private source (a private git repository, or an
+  // HTTP/HTTPS endpoint that requires a token). They are matched to a source
+  // by the longest matching prefix (or an explicit credential name on the
+  // source), and their secret material is encrypted at rest (F-12) when marked
+  // sensitive. The Database service stores the secret material opaquely
+  // (ciphertext or plaintext) and never sees the key; the API is the only
+  // component that can decrypt it.
+  //
+  // ListSourceCredentials returns every stored credential (secret material
+  // returned as stored — the API redacts it on read).
+  rpc ListSourceCredentials(ListSourceCredentialsRequest) returns (ListSourceCredentialsResponse);
+  // CreateSourceCredential adds a credential. It rejects an empty name, an
+  // unknown kind, and a duplicate name.
+  rpc CreateSourceCredential(CreateSourceCredentialRequest) returns (SourceCredential);
+  // GetSourceCredential returns the named credential. A missing credential
+  // returns NotFound.
+  rpc GetSourceCredential(GetSourceCredentialRequest) returns (SourceCredential);
+  // UpdateSourceCredential edits a credential's prefix, description, and
+  // secret material. A missing credential returns NotFound.
+  rpc UpdateSourceCredential(UpdateSourceCredentialRequest) returns (SourceCredential);
+  // DeleteSourceCredential removes a credential by name. A missing credential
+  // returns NotFound.
+  rpc DeleteSourceCredential(DeleteSourceCredentialRequest) returns (google.protobuf.Empty);
+
+  // Pipeline sources (F-21.5.1). Where a pipeline is pulled from: a kind
+  // (git / http / file), a reference (the <type>:<spec> locator, F-21.2), a
+  // refresh schedule, and a credential name. The source is a database concept
+  // configured through the API (it is not in the file). The minimal slice
+  // implemented here supports the source-credential guards (F-21.3): attaching
+  // a source, reading it back, counting the sources that reference a
+  // credential (so a credential in use cannot be deleted), and recording the
+  // last sync's bookkeeping (including last_error, so a credential that fails
+  // to authenticate is diagnosable).
+  //
+  // AttachPipelineSource attaches (or replaces) a source on a pipeline. It
+  // rejects an unknown kind and a missing pipeline.
+  rpc AttachPipelineSource(AttachPipelineSourceRequest) returns (PipelineSource);
+  // GetPipelineSource returns a pipeline's source. A pipeline with no source
+  // returns NotFound.
+  rpc GetPipelineSource(GetPipelineSourceRequest) returns (PipelineSource);
+  // CountSourcesByCredential counts the sources that reference the named
+  // credential (F-21.3.3's delete guard).
+  rpc CountSourcesByCredential(CountSourcesByCredentialRequest) returns (CountSourcesByCredentialResponse);
+  // SetPipelineSourceState records the last sync's bookkeeping for a
+  // pipeline's source (F-21.5.1 / F-21.5.2): last_synced_at, last_version,
+  // file_hash, and last_error (set on a sync failure, cleared on success).
+  rpc SetPipelineSourceState(SetPipelineSourceStateRequest) returns (PipelineSourceState);
+  // GetPipelineSourceState returns a pipeline's source state. A pipeline with
+  // no recorded state returns NotFound.
+  rpc GetPipelineSourceState(GetPipelineSourceStateRequest) returns (PipelineSourceState);
+  // DetachPipelineSource removes a pipeline's source (and its state). A
+  // pipeline with no source returns NotFound.
+  rpc DetachPipelineSource(DetachPipelineSourceRequest) returns (google.protobuf.Empty);
+
   // Environments (F-17). Environments are named deployment targets that group
   // execution targets and carry the deployment policy that governs how work
   // reaches them: an approval policy (requires_approval, an F-13 gate) and an
@@ -3414,4 +3469,251 @@ message CreateSSHKnownHostRequest {
 message DeleteSSHKnownHostRequest {
   // id is the key to delete.
   int64 id = 1;
+}
+
+// HTTPHeader is one header an http source credential sends on its fetch
+// (F-21.3): a name and a value, plus a per-header sensitive flag. A header
+// marked sensitive carries secret material (stored as F-12 ciphertext, or
+// plaintext when not marked sensitive); the Database service stores it
+// opaquely and never sees the key.
+message HTTPHeader {
+  // name is the header name (e.g. "Authorization"). It is not secret material.
+  string name = 1;
+  // value is the header value (e.g. "Bearer <token>"). It is secret material
+  // (F-12 ciphertext) only when sensitive is true; otherwise it is stored in
+  // plaintext.
+  string value = 2;
+  // sensitive marks the header value as secret material (encrypted at rest,
+  // masked on read). It defaults to false.
+  bool sensitive = 3;
+}
+
+// SourceCredential is a named, database-stored credential that authenticates a
+// fetch of a private source (F-21.3): a private git repository (git-ssh /
+// git-https) or an HTTP/HTTPS endpoint that requires a token (http). The
+// secret material (token, private_key, host_key, and — for http — each header
+// value marked sensitive) is stored as F-12 ciphertext (or plaintext when not
+// marked sensitive); the Database service stores it opaquely and never sees
+// the key. The API is the only component that can decrypt it.
+message SourceCredential {
+  // id is the credential's id.
+  int64 id = 1;
+  // name is the unique credential name (the value a PipelineSource.credential
+  // references).
+  string name = 2;
+  // kind is the credential kind: "git-ssh", "git-https", or "http".
+  string kind = 3;
+  // prefix is a string prefix matched against a source's reference (the
+  // repository URL for a git source, the endpoint URL for an http source).
+  // The longest matching prefix wins.
+  string prefix = 4;
+  // description is an optional human-readable note.
+  string description = 5;
+  // username is the git-https credential's username (may be empty for
+  // token-only auth). It is not secret material.
+  string username = 6;
+  // token is the git-https / http credential's token (a personal access token,
+  // bot password, or API key). It is secret material (F-12 ciphertext).
+  string token = 7;
+  // private_key is the git-ssh credential's PEM-encoded private key. It is
+  // secret material (F-12 ciphertext).
+  string private_key = 8;
+  // host_key is the git-ssh credential's expected host public key (for
+  // host-key verification). It is secret material (F-12 ciphertext).
+  string host_key = 9;
+  // headers is the http credential's list of headers (name + value + a
+  // per-header sensitive flag). Each header's value is secret material (F-12
+  // ciphertext) only when its own sensitive flag is true; otherwise it is
+  // stored in plaintext.
+  repeated HTTPHeader headers = 10;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp updated_at = 14;
+}
+
+// ListSourceCredentialsRequest lists the stored source credentials.
+message ListSourceCredentialsRequest {
+}
+
+// ListSourceCredentialsResponse is the result of a ListSourceCredentials call.
+message ListSourceCredentialsResponse {
+  // credentials are the stored source credentials (ordered by name).
+  repeated SourceCredential credentials = 1;
+}
+
+// CreateSourceCredentialRequest is the request to add a source credential. The
+// secret material fields carry the API-encrypted ciphertext (or plaintext when
+// not marked sensitive); the Database service stores them opaquely.
+message CreateSourceCredentialRequest {
+  // name is the unique credential name. It must be non-empty.
+  string name = 1;
+  // kind is the credential kind: "git-ssh", "git-https", or "http". It must
+  // be one of the three.
+  string kind = 2;
+  // prefix is the string prefix matched against a source's reference.
+  string prefix = 3;
+  // description is an optional human-readable note.
+  string description = 4;
+  // username is the git-https credential's username (may be empty).
+  string username = 5;
+  // token is the git-https / http credential's token (secret material).
+  string token = 6;
+  // private_key is the git-ssh credential's PEM-encoded private key (secret
+  // material).
+  string private_key = 7;
+  // host_key is the git-ssh credential's expected host public key (secret
+  // material).
+  string host_key = 8;
+  // headers is the http credential's list of headers (name + value + a
+  // per-header sensitive flag). Each header's value carries the API-encrypted
+  // ciphertext (or plaintext when not marked sensitive).
+  repeated HTTPHeader headers = 9;
+}
+
+// GetSourceCredentialRequest is the request to fetch a source credential by
+// name.
+message GetSourceCredentialRequest {
+  // name is the credential to fetch.
+  string name = 1;
+}
+
+// UpdateSourceCredentialRequest is the request to edit a source credential.
+message UpdateSourceCredentialRequest {
+  // name is the credential to edit.
+  string name = 1;
+  // prefix is the new string prefix (replaces the existing one).
+  string prefix = 2;
+  // description is the new description (replaces the existing one).
+  string description = 3;
+  // username is the new git-https username (replaces the existing one).
+  string username = 4;
+  // token is the new git-https / http token (secret material; replaces the
+  // existing one).
+  string token = 5;
+  // private_key is the new git-ssh private key (secret material; replaces the
+  // existing one).
+  string private_key = 6;
+  // host_key is the new git-ssh host key (secret material; replaces the
+  // existing one).
+  string host_key = 7;
+  // headers is the new http header list (name + value + a per-header sensitive
+  // flag; replaces the existing one). Each header's value carries the
+  // API-encrypted ciphertext (or plaintext when not marked sensitive).
+  repeated HTTPHeader headers = 8;
+}
+
+// DeleteSourceCredentialRequest is the request to remove a source credential
+// by name.
+message DeleteSourceCredentialRequest {
+  // name is the credential to delete.
+  string name = 1;
+}
+
+// PipelineSource is where a pipeline is pulled from (F-21.5.1): a kind
+// (git / http / file), a reference (the <type>:<spec> locator, F-21.2), a
+// refresh schedule, and a credential name. The source is a database concept
+// configured through the API (it is not in the file).
+message PipelineSource {
+  // id is the source's id.
+  int64 id = 1;
+  // pipeline_id is the pipeline this source belongs to.
+  int64 pipeline_id = 2;
+  // kind is the source kind: "git", "http", or "file".
+  string kind = 3;
+  // reference is the <type>:<spec> locator string (F-21.2) that names the
+  // file to fetch.
+  string reference = 4;
+  // schedule is a cron expression for the scheduled refresh; empty means no
+  // scheduled refresh.
+  string schedule = 5;
+  // credential is the name of the SourceCredential used to authenticate the
+  // fetch; empty means the source is public / needs no credential.
+  string credential = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// PipelineSourceState is the last sync's bookkeeping for a pipeline's source
+// (F-21.5.1).
+message PipelineSourceState {
+  // pipeline_id is the pipeline whose source this state belongs to.
+  int64 pipeline_id = 1;
+  // last_synced_at is when the source last synced.
+  google.protobuf.Timestamp last_synced_at = 2;
+  // last_version is the source's version identifier at the last successful
+  // sync.
+  string last_version = 3;
+  // file_hash is the content hash (SHA-256, hex) of the file at the last
+  // successful sync.
+  string file_hash = 4;
+  // last_error is the last sync's error (set when a sync fails, cleared on
+  // the next success).
+  string last_error = 5;
+}
+
+// AttachPipelineSourceRequest is the request to attach (or replace) a source
+// on a pipeline.
+message AttachPipelineSourceRequest {
+  // pipeline_id is the pipeline to attach the source to.
+  int64 pipeline_id = 1;
+  // kind is the source kind: "git", "http", or "file".
+  string kind = 2;
+  // reference is the <type>:<spec> locator string (F-21.2).
+  string reference = 3;
+  // schedule is a cron expression for the scheduled refresh; empty means no
+  // scheduled refresh.
+  string schedule = 4;
+  // credential is the name of the SourceCredential used to authenticate;
+  // empty means the source is public / needs no credential.
+  string credential = 5;
+}
+
+// GetPipelineSourceRequest is the request to fetch a pipeline's source.
+message GetPipelineSourceRequest {
+  // pipeline_id is the pipeline whose source to fetch.
+  int64 pipeline_id = 1;
+}
+
+// CountSourcesByCredentialRequest is the request to count the sources that
+// reference a credential (F-21.3.3's delete guard).
+message CountSourcesByCredentialRequest {
+  // credential is the credential name to count references for.
+  string credential = 1;
+}
+
+// CountSourcesByCredentialResponse is the result of a
+// CountSourcesByCredential call.
+message CountSourcesByCredentialResponse {
+  // count is the number of sources that reference the credential.
+  int64 count = 1;
+}
+
+// GetPipelineSourceStateRequest is the request to fetch a pipeline's source
+// state.
+message GetPipelineSourceStateRequest {
+  // pipeline_id is the pipeline whose source state to fetch.
+  int64 pipeline_id = 1;
+}
+
+// DetachPipelineSourceRequest is the request to remove a pipeline's source.
+message DetachPipelineSourceRequest {
+  // pipeline_id is the pipeline whose source to remove.
+  int64 pipeline_id = 1;
+}
+
+// SetPipelineSourceStateRequest is the request to record the last sync's
+// bookkeeping for a pipeline's source.
+message SetPipelineSourceStateRequest {
+  // pipeline_id is the pipeline whose source state to update.
+  int64 pipeline_id = 1;
+  // last_synced_at is when the source last synced.
+  google.protobuf.Timestamp last_synced_at = 2;
+  // last_version is the source's version identifier at the last successful
+  // sync (set on success).
+  string last_version = 3;
+  // file_hash is the content hash of the file at the last successful sync
+  // (set on success).
+  string file_hash = 4;
+  // last_error is the last sync's error (set on a sync failure; empty clears
+  // it on a success).
+  string last_error = 5;
 }

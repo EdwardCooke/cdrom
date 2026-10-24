@@ -45,7 +45,13 @@ type Event struct {
 	// environment is created, updated, or deleted), so the UI's environments
 	// view stays in sync across replicas.
 	Environments []*dbpb.Environment `json:"environments,omitempty"`
-	At           int64               `json:"at"`
+	// SourceCredentials is the set of source credentials a source_credential
+	// event carries (F-21.3). It is set only on source_credential events
+	// (published when a credential is created, updated, or deleted), so the
+	// UI's credentials view stays in sync across replicas. The secret material
+	// is redacted before the event is published.
+	SourceCredentials []*dbpb.SourceCredential `json:"source_credentials,omitempty"`
+	At                int64                    `json:"at"`
 }
 
 // Event type constants.
@@ -71,6 +77,11 @@ const (
 	// created, updated, or deleted, so the UI's environments view stays in
 	// sync across replicas.
 	EventEnvironment = "environment"
+	// EventSourceCredential is a source-credential change (F-21.3); the event
+	// carries the current set of source credentials (secret material redacted).
+	// It is published when a credential is created, updated, or deleted, so
+	// the UI's credentials view stays in sync across replicas.
+	EventSourceCredential = "source_credential"
 )
 
 // Job log stream names (the Event.Stream values for job_log events).

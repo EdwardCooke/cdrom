@@ -15,7 +15,7 @@ acceptance criteria, and design decisions for each piece.
 |-------------|------|-------|------------|
 | **F-21.1** File format & compiler | [f-21.1](f-21.1-file-format-compiler.md) | The Kubernetes-style file format + the `internal/pipelinefile` compiler (name-based referencing, step spec shape, masked variables, deployment options) + import/export API — the single-file core | — |
 | **F-21.2** Source-fetcher service | [f-21.2](f-21.2-source-fetcher.md) | The standalone source-fetcher gRPC service (git / HTTP / file, a `<type>:<spec>` reference) + the git repository cache + protos — overview; decomposed into F-21.2.1…F-21.2.4 | — |
-| **F-21.3** Source credentials | [f-21.3](f-21.3-source-credentials.md) | `SourceCredential` model (DB-stored, regex-matched, F-12-encrypted) + API CRUD | F-12 |
+| **F-21.3** Source credentials | [f-21.3](f-21.3-source-credentials.md) | `SourceCredential` model (DB-stored, prefix-matched, F-12-encrypted) + credential matching + API CRUD — overview; decomposed into F-21.3.1…F-21.3.3 | F-12 |
 | **F-21.4** Reusable units & imports | [f-21.4](f-21.4-reusable-units-imports.md) | Cross-file imports (`importFrom` / `import` / `ref`), the `Step`/`VariableSet`/`Job` file kinds, step reuse across environments | 21.1, 21.2 |
 | **F-21.5** Externally-sourced pipelines | [f-21.5](f-21.5-externally-sourced-pipelines.md) | `PipelineSource`/`State` models, stored YAML+hash, the sync routine + 3 refresh triggers, source API | 21.1, 21.2, 21.3 |
 | **F-21.6** Artifact package references | [f-21.6](f-21.6-artifact-package-references.md) | `spec.artifacts` version resolution + fetch-into-store for a run (per-run snapshot) | 21.1 |
@@ -24,7 +24,7 @@ acceptance criteria, and design decisions for each piece.
 **Suggested build order:** F-21.1 → (F-21.2 ∥ F-21.3) → F-21.4 → F-21.5;
 F-21.6 and F-21.7 are independent and can be done in parallel.
 
-Three of the sub-features are themselves large and are further decomposed (see
+Four of the sub-features are themselves large and are further decomposed (see
 their own spec files for the sub-sub-feature index): **F-21.1** into
 F-21.1.1…F-21.1.4 (manifest envelope, step spec, variables/secrets, jobs +
 import/export), **F-21.2** into F-21.2.1…F-21.2.4 (service + gRPC contract,
@@ -32,8 +32,10 @@ reference format & parsing, git repository cache, fetch clients) — with
 **F-21.2.3** (the git repository cache) itself decomposed into
 F-21.2.3.1…F-21.2.3.4 (cache structure & index, fetch lifecycle, cross-replica
 locking, cleanup thread) and **F-21.2.4** (the fetch clients) into
-F-21.2.4.1…F-21.2.4.3 (one per fetcher: git, http, file) — and **F-21.5** into
-F-21.5.1…F-21.5.3 (source model, sync routine, refresh triggers).
+F-21.2.4.1…F-21.2.4.3 (one per fetcher: git, http, file) — **F-21.3** into
+F-21.3.1…F-21.3.3 (SourceCredential model, credential matching & use,
+source-credential API), and **F-21.5** into F-21.5.1…F-21.5.3 (source model,
+sync routine, refresh triggers).
 
 ---
 
@@ -111,7 +113,7 @@ and source credentials out of the API and scheduler.
   `kind` of `git` / `http` / `file` and a `reference` — the `<type>:<spec>`
   locator string, F-21.2 — a refresh `schedule`, and a credential reference), a
   `PipelineSourceState` (last sync time, last source version, last file hash,
-  last error), and a `SourceCredential` (a regex-matched credential for git
+  last error), and a `SourceCredential` (a prefix-matched credential for git
   over SSH/HTTPS or an HTTP/HTTPS endpoint); the raw YAML + content hash on the
   `Pipeline` row.
 - `cmd/pipelinesource` + `internal/services/pipelinesource` — the **source
@@ -1176,13 +1178,14 @@ fetcher for a single fetch.
 - **`SourceCredential`** — a named credential:
   - `name` (unique; the value a `PipelineSource.credential` references).
   - `kind` — `git-ssh`, `git-https`, or `http`.
-  - `pattern` — a regular expression matched against a source's `url`. When a
-    fetch needs a credential, the API matches the source's `url` against every
-    credential's `pattern`; the **most specific (longest) matching pattern**
-    wins (the same resolution rule as F-16's concurrency-limit rules). A source
-    whose `url` matches no credential uses no credential (a public source). A
-    source that names a `credential` by name uses that specific credential (the
-    name is an explicit override of the regex match).
+  - `prefix` — a string prefix matched against a source's `reference` (the
+    repository URL for a `git` source, the endpoint URL for an `http` source).
+    When a fetch needs a credential, the API matches the source's `reference`
+    against every credential's `prefix`; the **most specific (longest) matching
+    prefix** wins. A source whose `reference` matches no credential uses no
+    credential (a public source). A source that names a `credential` by name
+    uses that specific credential (the name is an explicit override of the
+    prefix match).
   - The **secret material**, by kind:
     - `git-https` — `username` (may be empty for token-only auth) and `token`
       (a personal access token or bot password). The fetcher authenticates the
@@ -1192,9 +1195,13 @@ fetcher for a single fetch.
       expected host public key, for host-key verification so a fetch is not
       vulnerable to a MITM). The fetcher uses the key for the SSH handshake and
       verifies the server's host key against `hostKey`.
-    - `http` — `token` (a bearer token or API key) and optional `header` (the
-      header the token is sent in; default `Authorization: Bearer <token>`). The
-      fetcher sends the header on its GET of the endpoint.
+    - `http` — a **list of headers** (each a header name and value; the value
+      carries the secret, e.g. `Authorization: Bearer <token>`), each with its
+      own `sensitive` flag (default `false`). When a header's `sensitive` flag
+      is `true`, the **entire header value** is secret material — the fetcher
+      sends it on its GET of the endpoint, but it is encrypted at rest,
+      redacted in logs, and never returned to the UI. When it is `false` (the
+      default), that header's value is stored in plaintext and returned as-is.
   - `description` (optional, human-readable).
 
 The secret material (`token` for `git-https` / `http`, `privateKey` and
@@ -1348,18 +1355,22 @@ itself.
   automation, approval, needs, triggers, params, labels) map one-to-one onto the
   existing database fields (F-01…F-17, F-29); an unset field falls back to the
   database default, so a minimal file is valid.
-- **Source credentials are DB-stored, regex-matched, and API-managed.** A
-  `SourceCredential` (kind `git-ssh` / `git-https` / `http`, a `pattern` regex
+- **Source credentials are DB-stored, prefix-matched, and API-managed.** A
+  `SourceCredential` (kind `git-ssh` / `git-https` / `http`, a `prefix`
   over the source's `reference`, and encrypted secret material) is stored in the
   database (secret material encrypted with the F-12 store, opaque to the
   database service) and managed through the API (CRUD, gated on
   `source-credentials.can-view` / `can-manage`). A source is matched to a
-  credential by the longest matching `pattern` (or an explicit `credential` name
+  credential by the longest matching `prefix` (or an explicit `credential` name
   override); the credential's secret is decrypted by the API for a single fetch
   and handed to the source-fetcher (which stores nothing) — it is never logged
   or returned to the UI. `git-ssh` credentials carry a private key + host key
-  (host-key verified); `git-https` and `http` credentials carry a token (and, for
-  `git-https`, an optional username).
+  (host-key verified); `git-https` credentials carry a token (and an optional
+  username); an `http` credential carries a **list of headers** (each name +
+  value, the value carrying the secret), each of which can be marked sensitive
+  via its own `sensitive` flag (default `false`) — when sensitive its entire
+  value is encrypted at rest and masked on read, when not it is stored in
+  plaintext and returned as-is.
 - **New fields / RPCs / endpoints.** `PipelineSource`, `PipelineSourceState`,
   and `SourceCredential` models (registered in `models.All()`); `source_file` /
   `source_hash` / `source` on `Pipeline` (db); source + credential CRUD and

@@ -105,9 +105,10 @@ type SourceCredential struct {
 	// host_key is the git-ssh expected host public key (for host-key
 	// verification).
 	HostKey string `protobuf:"bytes,5,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"`
-	// header is the http header the token is sent in (default
-	// "Authorization: Bearer <token>").
-	Header        string `protobuf:"bytes,6,opt,name=header,proto3" json:"header,omitempty"`
+	// headers is the http credential's list of headers (name + value). The API
+	// decrypts each value (when marked sensitive) before handing it to the
+	// fetcher; the fetcher sends every header on its GET of the endpoint.
+	Headers       []*HTTPHeader `protobuf:"bytes,6,rep,name=headers,proto3" json:"headers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -177,9 +178,66 @@ func (x *SourceCredential) GetHostKey() string {
 	return ""
 }
 
-func (x *SourceCredential) GetHeader() string {
+func (x *SourceCredential) GetHeaders() []*HTTPHeader {
 	if x != nil {
-		return x.Header
+		return x.Headers
+	}
+	return nil
+}
+
+// HTTPHeader is one header an http credential sends on its fetch (F-21.3): a
+// name and a value (the plaintext, already decrypted by the API when it was
+// marked sensitive).
+type HTTPHeader struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the header name (e.g. "Authorization").
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// value is the header value (e.g. "Bearer <token>").
+	Value         string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HTTPHeader) Reset() {
+	*x = HTTPHeader{}
+	mi := &file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HTTPHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HTTPHeader) ProtoMessage() {}
+
+func (x *HTTPHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HTTPHeader.ProtoReflect.Descriptor instead.
+func (*HTTPHeader) Descriptor() ([]byte, []int) {
+	return file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *HTTPHeader) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *HTTPHeader) GetValue() string {
+	if x != nil {
+		return x.Value
 	}
 	return ""
 }
@@ -199,7 +257,7 @@ type FetchSourceResponse struct {
 
 func (x *FetchSourceResponse) Reset() {
 	*x = FetchSourceResponse{}
-	mi := &file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes[2]
+	mi := &file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -211,7 +269,7 @@ func (x *FetchSourceResponse) String() string {
 func (*FetchSourceResponse) ProtoMessage() {}
 
 func (x *FetchSourceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes[2]
+	mi := &file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -224,7 +282,7 @@ func (x *FetchSourceResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchSourceResponse.ProtoReflect.Descriptor instead.
 func (*FetchSourceResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDescGZIP(), []int{2}
+	return file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *FetchSourceResponse) GetContent() []byte {
@@ -259,15 +317,19 @@ const file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDesc = "" +
 	"credential\x18\x02 \x01(\v2).cdrom.pipelinesource.v1.SourceCredentialR\n" +
 	"credential\x12\x1f\n" +
 	"\vknown_hosts\x18\x03 \x03(\tR\n" +
-	"knownHosts\"\xac\x01\n" +
+	"knownHosts\"\xd3\x01\n" +
 	"\x10SourceCredential\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1a\n" +
 	"\busername\x18\x02 \x01(\tR\busername\x12\x14\n" +
 	"\x05token\x18\x03 \x01(\tR\x05token\x12\x1f\n" +
 	"\vprivate_key\x18\x04 \x01(\tR\n" +
 	"privateKey\x12\x19\n" +
-	"\bhost_key\x18\x05 \x01(\tR\ahostKey\x12\x16\n" +
-	"\x06header\x18\x06 \x01(\tR\x06header\"]\n" +
+	"\bhost_key\x18\x05 \x01(\tR\ahostKey\x12=\n" +
+	"\aheaders\x18\x06 \x03(\v2#.cdrom.pipelinesource.v1.HTTPHeaderR\aheaders\"6\n" +
+	"\n" +
+	"HTTPHeader\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"]\n" +
 	"\x13FetchSourceResponse\x12\x18\n" +
 	"\acontent\x18\x01 \x01(\fR\acontent\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x12\n" +
@@ -287,21 +349,23 @@ func file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDescGZIP() []byte {
 	return file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDescData
 }
 
-var file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_cdrom_pipelinesource_v1_pipelinesource_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_cdrom_pipelinesource_v1_pipelinesource_proto_goTypes = []any{
 	(*FetchSourceRequest)(nil),  // 0: cdrom.pipelinesource.v1.FetchSourceRequest
 	(*SourceCredential)(nil),    // 1: cdrom.pipelinesource.v1.SourceCredential
-	(*FetchSourceResponse)(nil), // 2: cdrom.pipelinesource.v1.FetchSourceResponse
+	(*HTTPHeader)(nil),          // 2: cdrom.pipelinesource.v1.HTTPHeader
+	(*FetchSourceResponse)(nil), // 3: cdrom.pipelinesource.v1.FetchSourceResponse
 }
 var file_cdrom_pipelinesource_v1_pipelinesource_proto_depIdxs = []int32{
 	1, // 0: cdrom.pipelinesource.v1.FetchSourceRequest.credential:type_name -> cdrom.pipelinesource.v1.SourceCredential
-	0, // 1: cdrom.pipelinesource.v1.PipelineSource.FetchSource:input_type -> cdrom.pipelinesource.v1.FetchSourceRequest
-	2, // 2: cdrom.pipelinesource.v1.PipelineSource.FetchSource:output_type -> cdrom.pipelinesource.v1.FetchSourceResponse
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	2, // 1: cdrom.pipelinesource.v1.SourceCredential.headers:type_name -> cdrom.pipelinesource.v1.HTTPHeader
+	0, // 2: cdrom.pipelinesource.v1.PipelineSource.FetchSource:input_type -> cdrom.pipelinesource.v1.FetchSourceRequest
+	3, // 3: cdrom.pipelinesource.v1.PipelineSource.FetchSource:output_type -> cdrom.pipelinesource.v1.FetchSourceResponse
+	3, // [3:4] is the sub-list for method output_type
+	2, // [2:3] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_pipelinesource_v1_pipelinesource_proto_init() }
@@ -315,7 +379,7 @@ func file_cdrom_pipelinesource_v1_pipelinesource_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDesc), len(file_cdrom_pipelinesource_v1_pipelinesource_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

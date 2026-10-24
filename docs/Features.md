@@ -112,7 +112,10 @@ tool.
 | F-21.2.4.1 | Git fetch client (read a file at a branch ref from the cache, `git-ssh`/`git-https` credential, commit-hash version) | planned | [F-21.2.4.1](features/f-21.2.4.1-git-fetch-client.md) |
 | F-21.2.4.2 | HTTP fetch client (GET of the endpoint, headers from the `http` credential — optional, `ETag`/`Last-Modified` version) | planned | [F-21.2.4.2](features/f-21.2.4.2-http-fetch-client.md) |
 | F-21.2.4.3 | File fetch client (read `<root><path>` rooted in `CDROM_PIPELINE_SOURCE_FILE_ROOT`, mtime version; disabled when no root) | planned | [F-21.2.4.3](features/f-21.2.4.3-file-fetch-client.md) |
-| F-21.3 | Source credentials (DB-stored, regex-matched, F-12-encrypted) | planned | [F-21.3](features/f-21.3-source-credentials.md) |
+| F-21.3 | Source credentials (DB-stored, prefix-matched, F-12-encrypted) — overview; decomposed into F-21.3.1…F-21.3.3 | planned | [F-21.3](features/f-21.3-source-credentials.md) |
+| F-21.3.1 | SourceCredential model (a `name`, a `kind` of `git-ssh` / `git-https` / `http`, a `prefix`, a `description`, and the kind's secret material — F-12-encrypted when marked sensitive) + database storage | planned | [F-21.3.1](features/f-21.3.1-source-credential-model.md) |
+| F-21.3.2 | Credential matching & use (explicit `credential` name, else longest matching `prefix`; the API decrypts the chosen credential for a single fetch and hands the plaintext to the fetcher) | planned | [F-21.3.2](features/f-21.3.2-credential-matching.md) |
+| F-21.3.3 | Source-credential API (CRUD & redaction) (`GET/POST /api/source-credentials` + `GET/PUT/DELETE /api/source-credentials/{name}`, encrypt-on-write / redact-on-read, `source-credentials.can-view` / `can-manage`, `source_credential` WS event) | planned | [F-21.3.3](features/f-21.3.3-source-credential-api.md) |
 | F-21.4 | Reusable units & cross-file imports (`importFrom` / `import` / `ref`) | planned | [F-21.4](features/f-21.4-reusable-units-imports.md) |
 | F-21.5 | Externally-sourced pipelines (overview + source-model reference; decomposed into F-21.5.1…F-21.5.3) | planned | [F-21.5](features/f-21.5-externally-sourced-pipelines.md) |
 | F-21.5.1 | Source model & storage (`PipelineSource`/`State`, stored YAML+hash, source CRUD, `GET …/source`) | planned | [F-21.5.1](features/f-21.5.1-source-model-storage.md) |
@@ -200,24 +203,27 @@ Tick each feature off as it lands.
 - [ ] F-19 Artifact promotion
 - [x] F-20 Observability & metrics
 - [ ] F-21 Config as code (overview; see F-21.1…F-21.7)
-- [ ] F-21.1 File format & compiler (overview; see F-21.1.1…F-21.1.4)
-- [ ] F-21.1.1 Manifest envelope & compiler skeleton
-- [ ] F-21.1.2 Step spec shape & name-based step referencing
-- [ ] F-21.1.3 Variables, masked variables & secret sources
-- [ ] F-21.1.4 Jobs, deployment options & import/export API
-- [ ] F-21.2 Source-fetcher service (overview; see F-21.2.1…F-21.2.4)
-- [ ] F-21.2.1 Service & gRPC contract
-- [ ] F-21.2.2 Reference format & parsing
-- [ ] F-21.2.3 Git repository cache (overview; see F-21.2.3.1…F-21.2.3.4)
-- [ ] F-21.2.3.1 Cache structure & index
-- [ ] F-21.2.3.2 Fetch lifecycle (fetch-on-request, resync)
-- [ ] F-21.2.3.3 Cross-replica locking
-- [ ] F-21.2.3.4 Cleanup thread
-- [ ] F-21.2.4 Fetch clients (overview; see F-21.2.4.1…F-21.2.4.3)
-- [ ] F-21.2.4.1 Git fetch client
-- [ ] F-21.2.4.2 HTTP fetch client
-- [ ] F-21.2.4.3 File fetch client
-- [ ] F-21.3 Source credentials
+- [x] F-21.1 File format & compiler (overview; see F-21.1.1…F-21.1.4)
+- [x] F-21.1.1 Manifest envelope & compiler skeleton
+- [x] F-21.1.2 Step spec shape & name-based step referencing
+- [x] F-21.1.3 Variables, masked variables & secret sources
+- [x] F-21.1.4 Jobs, deployment options & import/export API
+- [x] F-21.2 Source-fetcher service (overview; see F-21.2.1…F-21.2.4)
+- [x] F-21.2.1 Service & gRPC contract
+- [x] F-21.2.2 Reference format & parsing
+- [x] F-21.2.3 Git repository cache (overview; see F-21.2.3.1…F-21.2.3.4)
+- [x] F-21.2.3.1 Cache structure & index
+- [x] F-21.2.3.2 Fetch lifecycle (fetch-on-request, resync)
+- [x] F-21.2.3.3 Cross-replica locking
+- [x] F-21.2.3.4 Cleanup thread
+- [x] F-21.2.4 Fetch clients (overview; see F-21.2.4.1…F-21.2.4.3)
+- [x] F-21.2.4.1 Git fetch client
+- [x] F-21.2.4.2 HTTP fetch client
+- [x] F-21.2.4.3 File fetch client
+- [x] F-21.3 Source credentials (overview; see F-21.3.1…F-21.3.3)
+- [x] F-21.3.1 SourceCredential model
+- [x] F-21.3.2 Credential matching & use (selection + decrypt/hand-off + sync-failure surfacing via the minimal F-21.5.1/F-21.5.2 slice)
+- [x] F-21.3.3 Source-credential API (CRUD & redaction + the delete-rejection guard via the minimal F-21.5.1 slice)
 - [ ] F-21.4 Reusable units & cross-file imports
 - [ ] F-21.5 Externally-sourced pipelines (overview; see F-21.5.1…F-21.5.3)
 - [ ] F-21.5.1 Source model & storage

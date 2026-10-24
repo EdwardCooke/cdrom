@@ -48,9 +48,20 @@ message SourceCredential {
   // host_key is the git-ssh expected host public key (for host-key
   // verification).
   string host_key = 5;
-  // header is the http header the token is sent in (default
-  // "Authorization: Bearer <token>").
-  string header = 6;
+  // headers is the http credential's list of headers (name + value). The API
+  // decrypts each value (when marked sensitive) before handing it to the
+  // fetcher; the fetcher sends every header on its GET of the endpoint.
+  repeated HTTPHeader headers = 6;
+}
+
+// HTTPHeader is one header an http credential sends on its fetch (F-21.3): a
+// name and a value (the plaintext, already decrypted by the API when it was
+// marked sensitive).
+message HTTPHeader {
+  // name is the header name (e.g. "Authorization").
+  string name = 1;
+  // value is the header value (e.g. "Bearer <token>").
+  string value = 2;
 }
 
 message FetchSourceResponse {

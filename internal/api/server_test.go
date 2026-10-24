@@ -13,13 +13,34 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	pipelinesourcepb "cdrom/internal/gen/cdrom/pipelinesource/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/secrets"
 )
+
+// fakePipelineSource is a stub source-fetcher client (F-21.2) for the
+// /api/pipelines/{id}/source/refresh handler tests. It returns a canned
+// response or a canned error.
+type fakePipelineSource struct {
+	response *pipelinesourcepb.FetchSourceResponse
+	err      error
+}
+
+func (f *fakePipelineSource) FetchSource(ctx context.Context, in *pipelinesourcepb.FetchSourceRequest, opts ...grpc.CallOption) (*pipelinesourcepb.FetchSourceResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.response != nil {
+		return f.response, nil
+	}
+	return &pipelinesourcepb.FetchSourceResponse{Content: []byte("x"), Version: "v1", Hash: "abc"}, nil
+}
 
 // fakeScheduler is a stub SchedulerClient that records the last SubmitJob,
 // RerunJob, CreateRun, and TriggerRun requests and returns a canned job / run.
@@ -548,6 +569,19 @@ type fakeDatabase struct {
 	sshKnownHosts       *dbpb.ListSSHKnownHostsResponse
 	createdSSHKnownHost *dbpb.SSHKnownHost
 	deletedSSHKnownHost int64
+	// Source credentials (F-21.3) canned responses for the
+	// /api/source-credentials handler tests.
+	sourceCredentials *dbpb.ListSourceCredentialsResponse
+	createdSourceCred *dbpb.CreateSourceCredentialRequest
+	updatedSourceCred *dbpb.UpdateSourceCredentialRequest
+	deletedSourceCred string
+	getSourceCred     *dbpb.SourceCredential
+	getSourceCredErr  error
+	// Pipeline sources (F-21.5.1, minimal slice for F-21.3) canned responses
+	// for the /api/pipelines/{id}/source handler tests.
+	pipelineSource      *dbpb.PipelineSource
+	pipelineSourceState *dbpb.PipelineSourceState
+	sourceRefCount      int64
 }
 
 // GetQueueStatus returns the canned queue status (F-16) for the /api/queue
@@ -585,6 +619,124 @@ func (f *fakeDatabase) CreateSSHKnownHost(ctx context.Context, in *dbpb.CreateSS
 // /api/ssh-known-hosts handler tests.
 func (f *fakeDatabase) DeleteSSHKnownHost(ctx context.Context, in *dbpb.DeleteSSHKnownHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	f.deletedSSHKnownHost = in.GetId()
+	return &emptypb.Empty{}, nil
+}
+
+// ListSourceCredentials returns the canned source credentials (F-21.3) for the
+// /api/source-credentials handler tests.
+func (f *fakeDatabase) ListSourceCredentials(ctx context.Context, in *dbpb.ListSourceCredentialsRequest, opts ...grpc.CallOption) (*dbpb.ListSourceCredentialsResponse, error) {
+	if f.sourceCredentials != nil {
+		return f.sourceCredentials, nil
+	}
+	return &dbpb.ListSourceCredentialsResponse{}, nil
+}
+
+// GetSourceCredential returns the canned credential (F-21.3) for the
+// /api/source-credentials handler tests.
+func (f *fakeDatabase) GetSourceCredential(ctx context.Context, in *dbpb.GetSourceCredentialRequest, opts ...grpc.CallOption) (*dbpb.SourceCredential, error) {
+	if f.getSourceCredErr != nil {
+		return nil, f.getSourceCredErr
+	}
+	if f.getSourceCred != nil {
+		return f.getSourceCred, nil
+	}
+	return &dbpb.SourceCredential{Name: in.GetName()}, nil
+}
+
+// CreateSourceCredential records the create request and returns a canned
+// credential (F-21.3) for the /api/source-credentials handler tests.
+func (f *fakeDatabase) CreateSourceCredential(ctx context.Context, in *dbpb.CreateSourceCredentialRequest, opts ...grpc.CallOption) (*dbpb.SourceCredential, error) {
+	f.createdSourceCred = in
+	return &dbpb.SourceCredential{
+		Id:          1,
+		Name:        in.GetName(),
+		Kind:        in.GetKind(),
+		Prefix:      in.GetPrefix(),
+		Description: in.GetDescription(),
+		Username:    in.GetUsername(),
+		Token:       in.GetToken(),
+		PrivateKey:  in.GetPrivateKey(),
+		HostKey:     in.GetHostKey(),
+		Headers:     in.GetHeaders(),
+	}, nil
+}
+
+// UpdateSourceCredential records the update request and returns a canned
+// credential (F-21.3) for the /api/source-credentials handler tests.
+func (f *fakeDatabase) UpdateSourceCredential(ctx context.Context, in *dbpb.UpdateSourceCredentialRequest, opts ...grpc.CallOption) (*dbpb.SourceCredential, error) {
+	f.updatedSourceCred = in
+	return &dbpb.SourceCredential{
+		Id:          1,
+		Name:        in.GetName(),
+		Kind:        "git-https",
+		Prefix:      in.GetPrefix(),
+		Description: in.GetDescription(),
+		Username:    in.GetUsername(),
+		Token:       in.GetToken(),
+		Headers:     in.GetHeaders(),
+	}, nil
+}
+
+// DeleteSourceCredential records the deleted name (F-21.3) for the
+// /api/source-credentials handler tests.
+func (f *fakeDatabase) DeleteSourceCredential(ctx context.Context, in *dbpb.DeleteSourceCredentialRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	f.deletedSourceCred = in.GetName()
+	return &emptypb.Empty{}, nil
+}
+
+// AttachPipelineSource returns the canned source (F-21.5.1) for the
+// /api/pipelines/{id}/source handler tests.
+func (f *fakeDatabase) AttachPipelineSource(ctx context.Context, in *dbpb.AttachPipelineSourceRequest, opts ...grpc.CallOption) (*dbpb.PipelineSource, error) {
+	return &dbpb.PipelineSource{
+		Id:         1,
+		PipelineId: in.GetPipelineId(),
+		Kind:       in.GetKind(),
+		Reference:  in.GetReference(),
+		Schedule:   in.GetSchedule(),
+		Credential: in.GetCredential(),
+	}, nil
+}
+
+// GetPipelineSource returns the canned source (F-21.5.1) for the
+// /api/pipelines/{id}/source handler tests.
+func (f *fakeDatabase) GetPipelineSource(ctx context.Context, in *dbpb.GetPipelineSourceRequest, opts ...grpc.CallOption) (*dbpb.PipelineSource, error) {
+	if f.pipelineSource != nil {
+		return f.pipelineSource, nil
+	}
+	return &dbpb.PipelineSource{PipelineId: in.GetPipelineId(), Kind: "http", Reference: "http://example.com/file.yaml"}, nil
+}
+
+// CountSourcesByCredential returns the canned reference count (F-21.3.3's
+// delete guard) for the /api/source-credentials handler tests.
+func (f *fakeDatabase) CountSourcesByCredential(ctx context.Context, in *dbpb.CountSourcesByCredentialRequest, opts ...grpc.CallOption) (*dbpb.CountSourcesByCredentialResponse, error) {
+	return &dbpb.CountSourcesByCredentialResponse{Count: f.sourceRefCount}, nil
+}
+
+// SetPipelineSourceState records the state (F-21.5.1) for the
+// /api/pipelines/{id}/source/refresh handler tests.
+func (f *fakeDatabase) SetPipelineSourceState(ctx context.Context, in *dbpb.SetPipelineSourceStateRequest, opts ...grpc.CallOption) (*dbpb.PipelineSourceState, error) {
+	f.pipelineSourceState = &dbpb.PipelineSourceState{
+		PipelineId:   in.GetPipelineId(),
+		LastSyncedAt: in.GetLastSyncedAt(),
+		LastVersion:  in.GetLastVersion(),
+		FileHash:     in.GetFileHash(),
+		LastError:    in.GetLastError(),
+	}
+	return f.pipelineSourceState, nil
+}
+
+// GetPipelineSourceState returns the canned state (F-21.5.1) for the
+// /api/pipelines/{id}/source handler tests.
+func (f *fakeDatabase) GetPipelineSourceState(ctx context.Context, in *dbpb.GetPipelineSourceStateRequest, opts ...grpc.CallOption) (*dbpb.PipelineSourceState, error) {
+	if f.pipelineSourceState != nil {
+		return f.pipelineSourceState, nil
+	}
+	return nil, status.Error(codes.NotFound, "no source state")
+}
+
+// DetachPipelineSource is a no-op (F-21.5.1) for the /api/pipelines/{id}/source
+// handler tests.
+func (f *fakeDatabase) DetachPipelineSource(ctx context.Context, in *dbpb.DetachPipelineSourceRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, nil
 }
 

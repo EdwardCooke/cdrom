@@ -78,6 +78,9 @@ func TestFetchSourceHTTP(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tok123" {
 			t.Errorf("Authorization = %q, want %q", got, "Bearer tok123")
 		}
+		if got := r.Header.Get("X-Request-Id"); got != "req-42" {
+			t.Errorf("X-Request-Id = %q, want %q", got, "req-42")
+		}
 		w.Header().Set("ETag", `"v1"`)
 		io.WriteString(w, "http: body\n")
 	}))
@@ -88,8 +91,11 @@ func TestFetchSourceHTTP(t *testing.T) {
 	resp, err := client.FetchSource(context.Background(), &pipelinesourcepb.FetchSourceRequest{
 		Reference: "http:" + ts.URL + "/file.yaml",
 		Credential: &pipelinesourcepb.SourceCredential{
-			Kind:  "http",
-			Token: "tok123",
+			Kind: "http",
+			Headers: []*pipelinesourcepb.HTTPHeader{
+				{Name: "Authorization", Value: "Bearer tok123"},
+				{Name: "X-Request-Id", Value: "req-42"},
+			},
 		},
 	})
 	if err != nil {

@@ -32,14 +32,13 @@ func (h *httpClient) fetch(ctx context.Context, ref *Reference, cred *httpCreden
 	if err != nil {
 		return nil, "", "", fmt.Errorf("http: build request: %w", err)
 	}
-	if cred != nil && cred.Token != "" {
-		header := cred.Header
-		if header == "" {
-			// Default: send the token as a bearer token in Authorization.
-			req.Header.Set("Authorization", "Bearer "+cred.Token)
-		} else {
-			// A named header: send the token as-is in that header.
-			req.Header.Set(header, cred.Token)
+	if cred != nil {
+		// Each header's value carries the secret (the API decrypts it when it
+		// is marked sensitive, F-21.3); send every header as-is on the GET.
+		for _, hdr := range cred.Headers {
+			if hdr.Name != "" && hdr.Value != "" {
+				req.Header.Set(hdr.Name, hdr.Value)
+			}
 		}
 	}
 	resp, err := h.client.Do(req)
@@ -62,10 +61,18 @@ func (h *httpClient) fetch(ctx context.Context, ref *Reference, cred *httpCreden
 	return body, version, hex.EncodeToString(sum[:]), nil
 }
 
-// httpCredential is the plaintext secret material for an http fetch (F-21.3).
+// httpHeader is one header an http fetch sends (F-21.3): a name and a value.
+// The value carries the secret (the API decrypts it when it is marked
+// sensitive before handing it to the fetcher).
+type httpHeader struct {
+	Name  string
+	Value string
+}
+
+// httpCredential is the plaintext secret material for an http fetch (F-21.3):
+// the list of headers to send on the GET.
 type httpCredential struct {
-	Token  string
-	Header string // the header the token is sent in (default Authorization: Bearer)
+	Headers []httpHeader
 }
 
 // toHTTPCredential converts a proto SourceCredential to an httpCredential. It
@@ -74,5 +81,9 @@ func toHTTPCredential(c *pipelinesourcepb.SourceCredential) *httpCredential {
 	if c == nil || c.GetKind() != "http" {
 		return nil
 	}
-	return &httpCredential{Token: c.GetToken(), Header: c.GetHeader()}
+	cred := &httpCredential{}
+	for _, h := range c.GetHeaders() {
+		cred.Headers = append(cred.Headers, httpHeader{Name: h.GetName(), Value: h.GetValue()})
+	}
+	return cred
 }

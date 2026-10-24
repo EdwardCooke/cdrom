@@ -120,6 +120,17 @@ const (
 	Database_ListSSHKnownHosts_FullMethodName              = "/cdrom.db.v1.Database/ListSSHKnownHosts"
 	Database_CreateSSHKnownHost_FullMethodName             = "/cdrom.db.v1.Database/CreateSSHKnownHost"
 	Database_DeleteSSHKnownHost_FullMethodName             = "/cdrom.db.v1.Database/DeleteSSHKnownHost"
+	Database_ListSourceCredentials_FullMethodName          = "/cdrom.db.v1.Database/ListSourceCredentials"
+	Database_CreateSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/CreateSourceCredential"
+	Database_GetSourceCredential_FullMethodName            = "/cdrom.db.v1.Database/GetSourceCredential"
+	Database_UpdateSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/UpdateSourceCredential"
+	Database_DeleteSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/DeleteSourceCredential"
+	Database_AttachPipelineSource_FullMethodName           = "/cdrom.db.v1.Database/AttachPipelineSource"
+	Database_GetPipelineSource_FullMethodName              = "/cdrom.db.v1.Database/GetPipelineSource"
+	Database_CountSourcesByCredential_FullMethodName       = "/cdrom.db.v1.Database/CountSourcesByCredential"
+	Database_SetPipelineSourceState_FullMethodName         = "/cdrom.db.v1.Database/SetPipelineSourceState"
+	Database_GetPipelineSourceState_FullMethodName         = "/cdrom.db.v1.Database/GetPipelineSourceState"
+	Database_DetachPipelineSource_FullMethodName           = "/cdrom.db.v1.Database/DetachPipelineSource"
 	Database_CreateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/CreateEnvironment"
 	Database_GetEnvironment_FullMethodName                 = "/cdrom.db.v1.Database/GetEnvironment"
 	Database_ListEnvironments_FullMethodName               = "/cdrom.db.v1.Database/ListEnvironments"
@@ -593,6 +604,59 @@ type DatabaseClient interface {
 	// DeleteSSHKnownHost removes a host key by id. A missing key returns
 	// NotFound.
 	DeleteSSHKnownHost(ctx context.Context, in *DeleteSSHKnownHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Source credentials (F-21.3). Named, database-stored credentials that
+	// authenticate a fetch of a private source (a private git repository, or an
+	// HTTP/HTTPS endpoint that requires a token). They are matched to a source
+	// by the longest matching prefix (or an explicit credential name on the
+	// source), and their secret material is encrypted at rest (F-12) when marked
+	// sensitive. The Database service stores the secret material opaquely
+	// (ciphertext or plaintext) and never sees the key; the API is the only
+	// component that can decrypt it.
+	//
+	// ListSourceCredentials returns every stored credential (secret material
+	// returned as stored — the API redacts it on read).
+	ListSourceCredentials(ctx context.Context, in *ListSourceCredentialsRequest, opts ...grpc.CallOption) (*ListSourceCredentialsResponse, error)
+	// CreateSourceCredential adds a credential. It rejects an empty name, an
+	// unknown kind, and a duplicate name.
+	CreateSourceCredential(ctx context.Context, in *CreateSourceCredentialRequest, opts ...grpc.CallOption) (*SourceCredential, error)
+	// GetSourceCredential returns the named credential. A missing credential
+	// returns NotFound.
+	GetSourceCredential(ctx context.Context, in *GetSourceCredentialRequest, opts ...grpc.CallOption) (*SourceCredential, error)
+	// UpdateSourceCredential edits a credential's prefix, description, and
+	// secret material. A missing credential returns NotFound.
+	UpdateSourceCredential(ctx context.Context, in *UpdateSourceCredentialRequest, opts ...grpc.CallOption) (*SourceCredential, error)
+	// DeleteSourceCredential removes a credential by name. A missing credential
+	// returns NotFound.
+	DeleteSourceCredential(ctx context.Context, in *DeleteSourceCredentialRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Pipeline sources (F-21.5.1). Where a pipeline is pulled from: a kind
+	// (git / http / file), a reference (the <type>:<spec> locator, F-21.2), a
+	// refresh schedule, and a credential name. The source is a database concept
+	// configured through the API (it is not in the file). The minimal slice
+	// implemented here supports the source-credential guards (F-21.3): attaching
+	// a source, reading it back, counting the sources that reference a
+	// credential (so a credential in use cannot be deleted), and recording the
+	// last sync's bookkeeping (including last_error, so a credential that fails
+	// to authenticate is diagnosable).
+	//
+	// AttachPipelineSource attaches (or replaces) a source on a pipeline. It
+	// rejects an unknown kind and a missing pipeline.
+	AttachPipelineSource(ctx context.Context, in *AttachPipelineSourceRequest, opts ...grpc.CallOption) (*PipelineSource, error)
+	// GetPipelineSource returns a pipeline's source. A pipeline with no source
+	// returns NotFound.
+	GetPipelineSource(ctx context.Context, in *GetPipelineSourceRequest, opts ...grpc.CallOption) (*PipelineSource, error)
+	// CountSourcesByCredential counts the sources that reference the named
+	// credential (F-21.3.3's delete guard).
+	CountSourcesByCredential(ctx context.Context, in *CountSourcesByCredentialRequest, opts ...grpc.CallOption) (*CountSourcesByCredentialResponse, error)
+	// SetPipelineSourceState records the last sync's bookkeeping for a
+	// pipeline's source (F-21.5.1 / F-21.5.2): last_synced_at, last_version,
+	// file_hash, and last_error (set on a sync failure, cleared on success).
+	SetPipelineSourceState(ctx context.Context, in *SetPipelineSourceStateRequest, opts ...grpc.CallOption) (*PipelineSourceState, error)
+	// GetPipelineSourceState returns a pipeline's source state. A pipeline with
+	// no recorded state returns NotFound.
+	GetPipelineSourceState(ctx context.Context, in *GetPipelineSourceStateRequest, opts ...grpc.CallOption) (*PipelineSourceState, error)
+	// DetachPipelineSource removes a pipeline's source (and its state). A
+	// pipeline with no source returns NotFound.
+	DetachPipelineSource(ctx context.Context, in *DetachPipelineSourceRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Environments (F-17). Environments are named deployment targets that group
 	// execution targets and carry the deployment policy that governs how work
 	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
@@ -1664,6 +1728,116 @@ func (c *databaseClient) DeleteSSHKnownHost(ctx context.Context, in *DeleteSSHKn
 	return out, nil
 }
 
+func (c *databaseClient) ListSourceCredentials(ctx context.Context, in *ListSourceCredentialsRequest, opts ...grpc.CallOption) (*ListSourceCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSourceCredentialsResponse)
+	err := c.cc.Invoke(ctx, Database_ListSourceCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CreateSourceCredential(ctx context.Context, in *CreateSourceCredentialRequest, opts ...grpc.CallOption) (*SourceCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SourceCredential)
+	err := c.cc.Invoke(ctx, Database_CreateSourceCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetSourceCredential(ctx context.Context, in *GetSourceCredentialRequest, opts ...grpc.CallOption) (*SourceCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SourceCredential)
+	err := c.cc.Invoke(ctx, Database_GetSourceCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateSourceCredential(ctx context.Context, in *UpdateSourceCredentialRequest, opts ...grpc.CallOption) (*SourceCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SourceCredential)
+	err := c.cc.Invoke(ctx, Database_UpdateSourceCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteSourceCredential(ctx context.Context, in *DeleteSourceCredentialRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteSourceCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) AttachPipelineSource(ctx context.Context, in *AttachPipelineSourceRequest, opts ...grpc.CallOption) (*PipelineSource, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineSource)
+	err := c.cc.Invoke(ctx, Database_AttachPipelineSource_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetPipelineSource(ctx context.Context, in *GetPipelineSourceRequest, opts ...grpc.CallOption) (*PipelineSource, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineSource)
+	err := c.cc.Invoke(ctx, Database_GetPipelineSource_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CountSourcesByCredential(ctx context.Context, in *CountSourcesByCredentialRequest, opts ...grpc.CallOption) (*CountSourcesByCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CountSourcesByCredentialResponse)
+	err := c.cc.Invoke(ctx, Database_CountSourcesByCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) SetPipelineSourceState(ctx context.Context, in *SetPipelineSourceStateRequest, opts ...grpc.CallOption) (*PipelineSourceState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineSourceState)
+	err := c.cc.Invoke(ctx, Database_SetPipelineSourceState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetPipelineSourceState(ctx context.Context, in *GetPipelineSourceStateRequest, opts ...grpc.CallOption) (*PipelineSourceState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineSourceState)
+	err := c.cc.Invoke(ctx, Database_GetPipelineSourceState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DetachPipelineSource(ctx context.Context, in *DetachPipelineSourceRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DetachPipelineSource_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) CreateEnvironment(ctx context.Context, in *CreateEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Environment)
@@ -2243,6 +2417,59 @@ type DatabaseServer interface {
 	// DeleteSSHKnownHost removes a host key by id. A missing key returns
 	// NotFound.
 	DeleteSSHKnownHost(context.Context, *DeleteSSHKnownHostRequest) (*emptypb.Empty, error)
+	// Source credentials (F-21.3). Named, database-stored credentials that
+	// authenticate a fetch of a private source (a private git repository, or an
+	// HTTP/HTTPS endpoint that requires a token). They are matched to a source
+	// by the longest matching prefix (or an explicit credential name on the
+	// source), and their secret material is encrypted at rest (F-12) when marked
+	// sensitive. The Database service stores the secret material opaquely
+	// (ciphertext or plaintext) and never sees the key; the API is the only
+	// component that can decrypt it.
+	//
+	// ListSourceCredentials returns every stored credential (secret material
+	// returned as stored — the API redacts it on read).
+	ListSourceCredentials(context.Context, *ListSourceCredentialsRequest) (*ListSourceCredentialsResponse, error)
+	// CreateSourceCredential adds a credential. It rejects an empty name, an
+	// unknown kind, and a duplicate name.
+	CreateSourceCredential(context.Context, *CreateSourceCredentialRequest) (*SourceCredential, error)
+	// GetSourceCredential returns the named credential. A missing credential
+	// returns NotFound.
+	GetSourceCredential(context.Context, *GetSourceCredentialRequest) (*SourceCredential, error)
+	// UpdateSourceCredential edits a credential's prefix, description, and
+	// secret material. A missing credential returns NotFound.
+	UpdateSourceCredential(context.Context, *UpdateSourceCredentialRequest) (*SourceCredential, error)
+	// DeleteSourceCredential removes a credential by name. A missing credential
+	// returns NotFound.
+	DeleteSourceCredential(context.Context, *DeleteSourceCredentialRequest) (*emptypb.Empty, error)
+	// Pipeline sources (F-21.5.1). Where a pipeline is pulled from: a kind
+	// (git / http / file), a reference (the <type>:<spec> locator, F-21.2), a
+	// refresh schedule, and a credential name. The source is a database concept
+	// configured through the API (it is not in the file). The minimal slice
+	// implemented here supports the source-credential guards (F-21.3): attaching
+	// a source, reading it back, counting the sources that reference a
+	// credential (so a credential in use cannot be deleted), and recording the
+	// last sync's bookkeeping (including last_error, so a credential that fails
+	// to authenticate is diagnosable).
+	//
+	// AttachPipelineSource attaches (or replaces) a source on a pipeline. It
+	// rejects an unknown kind and a missing pipeline.
+	AttachPipelineSource(context.Context, *AttachPipelineSourceRequest) (*PipelineSource, error)
+	// GetPipelineSource returns a pipeline's source. A pipeline with no source
+	// returns NotFound.
+	GetPipelineSource(context.Context, *GetPipelineSourceRequest) (*PipelineSource, error)
+	// CountSourcesByCredential counts the sources that reference the named
+	// credential (F-21.3.3's delete guard).
+	CountSourcesByCredential(context.Context, *CountSourcesByCredentialRequest) (*CountSourcesByCredentialResponse, error)
+	// SetPipelineSourceState records the last sync's bookkeeping for a
+	// pipeline's source (F-21.5.1 / F-21.5.2): last_synced_at, last_version,
+	// file_hash, and last_error (set on a sync failure, cleared on success).
+	SetPipelineSourceState(context.Context, *SetPipelineSourceStateRequest) (*PipelineSourceState, error)
+	// GetPipelineSourceState returns a pipeline's source state. A pipeline with
+	// no recorded state returns NotFound.
+	GetPipelineSourceState(context.Context, *GetPipelineSourceStateRequest) (*PipelineSourceState, error)
+	// DetachPipelineSource removes a pipeline's source (and its state). A
+	// pipeline with no source returns NotFound.
+	DetachPipelineSource(context.Context, *DetachPipelineSourceRequest) (*emptypb.Empty, error)
 	// Environments (F-17). Environments are named deployment targets that group
 	// execution targets and carry the deployment policy that governs how work
 	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
@@ -2613,6 +2840,39 @@ func (UnimplementedDatabaseServer) CreateSSHKnownHost(context.Context, *CreateSS
 }
 func (UnimplementedDatabaseServer) DeleteSSHKnownHost(context.Context, *DeleteSSHKnownHostRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteSSHKnownHost not implemented")
+}
+func (UnimplementedDatabaseServer) ListSourceCredentials(context.Context, *ListSourceCredentialsRequest) (*ListSourceCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSourceCredentials not implemented")
+}
+func (UnimplementedDatabaseServer) CreateSourceCredential(context.Context, *CreateSourceCredentialRequest) (*SourceCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSourceCredential not implemented")
+}
+func (UnimplementedDatabaseServer) GetSourceCredential(context.Context, *GetSourceCredentialRequest) (*SourceCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSourceCredential not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateSourceCredential(context.Context, *UpdateSourceCredentialRequest) (*SourceCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateSourceCredential not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteSourceCredential(context.Context, *DeleteSourceCredentialRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSourceCredential not implemented")
+}
+func (UnimplementedDatabaseServer) AttachPipelineSource(context.Context, *AttachPipelineSourceRequest) (*PipelineSource, error) {
+	return nil, status.Error(codes.Unimplemented, "method AttachPipelineSource not implemented")
+}
+func (UnimplementedDatabaseServer) GetPipelineSource(context.Context, *GetPipelineSourceRequest) (*PipelineSource, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPipelineSource not implemented")
+}
+func (UnimplementedDatabaseServer) CountSourcesByCredential(context.Context, *CountSourcesByCredentialRequest) (*CountSourcesByCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CountSourcesByCredential not implemented")
+}
+func (UnimplementedDatabaseServer) SetPipelineSourceState(context.Context, *SetPipelineSourceStateRequest) (*PipelineSourceState, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetPipelineSourceState not implemented")
+}
+func (UnimplementedDatabaseServer) GetPipelineSourceState(context.Context, *GetPipelineSourceStateRequest) (*PipelineSourceState, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPipelineSourceState not implemented")
+}
+func (UnimplementedDatabaseServer) DetachPipelineSource(context.Context, *DetachPipelineSourceRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DetachPipelineSource not implemented")
 }
 func (UnimplementedDatabaseServer) CreateEnvironment(context.Context, *CreateEnvironmentRequest) (*Environment, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateEnvironment not implemented")
@@ -4471,6 +4731,204 @@ func _Database_DeleteSSHKnownHost_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ListSourceCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSourceCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListSourceCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListSourceCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListSourceCredentials(ctx, req.(*ListSourceCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CreateSourceCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSourceCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateSourceCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateSourceCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateSourceCredential(ctx, req.(*CreateSourceCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetSourceCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSourceCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetSourceCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetSourceCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetSourceCredential(ctx, req.(*GetSourceCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateSourceCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateSourceCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateSourceCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateSourceCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateSourceCredential(ctx, req.(*UpdateSourceCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteSourceCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSourceCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteSourceCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteSourceCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteSourceCredential(ctx, req.(*DeleteSourceCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_AttachPipelineSource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AttachPipelineSourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AttachPipelineSource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AttachPipelineSource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AttachPipelineSource(ctx, req.(*AttachPipelineSourceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetPipelineSource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPipelineSourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetPipelineSource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetPipelineSource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetPipelineSource(ctx, req.(*GetPipelineSourceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CountSourcesByCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CountSourcesByCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CountSourcesByCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CountSourcesByCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CountSourcesByCredential(ctx, req.(*CountSourcesByCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_SetPipelineSourceState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPipelineSourceStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).SetPipelineSourceState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_SetPipelineSourceState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).SetPipelineSourceState(ctx, req.(*SetPipelineSourceStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetPipelineSourceState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPipelineSourceStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetPipelineSourceState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetPipelineSourceState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetPipelineSourceState(ctx, req.(*GetPipelineSourceStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DetachPipelineSource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DetachPipelineSourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DetachPipelineSource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DetachPipelineSource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DetachPipelineSource(ctx, req.(*DetachPipelineSourceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_CreateEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateEnvironmentRequest)
 	if err := dec(in); err != nil {
@@ -5093,6 +5551,50 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteSSHKnownHost",
 			Handler:    _Database_DeleteSSHKnownHost_Handler,
+		},
+		{
+			MethodName: "ListSourceCredentials",
+			Handler:    _Database_ListSourceCredentials_Handler,
+		},
+		{
+			MethodName: "CreateSourceCredential",
+			Handler:    _Database_CreateSourceCredential_Handler,
+		},
+		{
+			MethodName: "GetSourceCredential",
+			Handler:    _Database_GetSourceCredential_Handler,
+		},
+		{
+			MethodName: "UpdateSourceCredential",
+			Handler:    _Database_UpdateSourceCredential_Handler,
+		},
+		{
+			MethodName: "DeleteSourceCredential",
+			Handler:    _Database_DeleteSourceCredential_Handler,
+		},
+		{
+			MethodName: "AttachPipelineSource",
+			Handler:    _Database_AttachPipelineSource_Handler,
+		},
+		{
+			MethodName: "GetPipelineSource",
+			Handler:    _Database_GetPipelineSource_Handler,
+		},
+		{
+			MethodName: "CountSourcesByCredential",
+			Handler:    _Database_CountSourcesByCredential_Handler,
+		},
+		{
+			MethodName: "SetPipelineSourceState",
+			Handler:    _Database_SetPipelineSourceState_Handler,
+		},
+		{
+			MethodName: "GetPipelineSourceState",
+			Handler:    _Database_GetPipelineSourceState_Handler,
+		},
+		{
+			MethodName: "DetachPipelineSource",
+			Handler:    _Database_DetachPipelineSource_Handler,
 		},
 		{
 			MethodName: "CreateEnvironment",

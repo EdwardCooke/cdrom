@@ -239,6 +239,59 @@ type Pipeline struct {
 	SecretSources []SecretSource `gorm:"type:text;serializer:json" json:"secret_sources,omitempty"`
 }
 
+// PipelineSource is where a pipeline is pulled from (F-21.5.1): a `kind` of
+// `git` / `http` / `file` and a `reference` — the `<type>:<spec>` locator
+// string (F-21.2) that names the file to fetch — a refresh `schedule`, and a
+// `credential` (the name of the SourceCredential used to authenticate; empty
+// means the source is public / needs no credential). The source is a database
+// concept configured through the API — it is not in the file — so the same
+// file is portable across source kinds. A pipeline becomes externally-sourced
+// when a PipelineSource is attached to it.
+type PipelineSource struct {
+	gorm.Model
+	// PipelineID is the pipeline this source belongs to (one source per
+	// pipeline).
+	PipelineID uint `gorm:"uniqueIndex;not null" json:"pipeline_id"`
+	// Kind is the source kind: "git", "http", or "file".
+	Kind string `gorm:"size:16;not null" json:"kind"`
+	// Reference is the `<type>:<spec>` locator string (F-21.2) that names the
+	// file to fetch. It is the single source of truth for the locator and is
+	// what the API passes to FetchSource.
+	Reference string `gorm:"size:1024;not null" json:"reference"`
+	// Schedule is a cron expression for the scheduled refresh; empty means no
+	// scheduled refresh.
+	Schedule string `gorm:"size:128" json:"schedule,omitempty"`
+	// Credential is the name of the SourceCredential used to authenticate the
+	// fetch; empty means the source is public / needs no credential (the
+	// longest matching prefix is used instead, F-21.3.2).
+	Credential string `gorm:"size:128;index" json:"credential,omitempty"`
+}
+
+// PipelineSourceState is the last sync's bookkeeping for a pipeline's source
+// (F-21.5.1): when it last synced, the source's version identifier, the
+// content hash of the file at that version, and the last error (set when a
+// sync fails — including a credential that fails to authenticate — and
+// cleared on the next success). It is how a stale credential or a dead source
+// is diagnosable without a repo checkout.
+type PipelineSourceState struct {
+	gorm.Model
+	// PipelineID is the pipeline whose source this state belongs to (one state
+	// per pipeline).
+	PipelineID uint `gorm:"uniqueIndex;not null" json:"pipeline_id"`
+	// LastSyncedAt is when the source last synced (successfully or not).
+	LastSyncedAt time.Time `json:"last_synced_at"`
+	// LastVersion is the source's version identifier at the last successful
+	// sync (the git commit hash, an HTTP ETag/Last-Modified, or the file's
+	// mtime) — so a no-change can be detected cheaply.
+	LastVersion string `gorm:"size:255" json:"last_version,omitempty"`
+	// FileHash is the content hash (SHA-256, hex) of the file at the last
+	// successful sync.
+	FileHash string `gorm:"size:64" json:"file_hash,omitempty"`
+	// LastError is the last sync's error (set when a sync fails, cleared on
+	// the next success).
+	LastError string `gorm:"type:text" json:"last_error,omitempty"`
+}
+
 // PipelineVersion is an immutable snapshot of a pipeline's definition at one
 // version (F-11). Each change to a pipeline produces a new version; the
 // database service stores one PipelineVersion row per version, capturing the
@@ -1066,6 +1119,74 @@ type SSHKnownHost struct {
 	Description string `gorm:"size:255" json:"description,omitempty"`
 }
 
+// HTTPHeader is one header an http source credential sends on its fetch
+// (F-21.3): a name and a value, plus a per-header `sensitive` flag. A header
+// marked sensitive carries secret material (encrypted at rest with the API's
+// F-12 store, redacted on read); a non-sensitive header is stored in plaintext
+// and returned as-is, so it is easily viewed and modified.
+type HTTPHeader struct {
+	// Name is the header name (e.g. "Authorization"). It is not secret
+	// material and is returned to the UI.
+	Name string `json:"name"`
+	// Value is the header value (e.g. "Bearer <token>"). It carries the secret
+	// when Sensitive is true (stored as F-12 ciphertext and masked on read);
+	// otherwise it is stored in plaintext and returned as-is.
+	Value string `json:"value"`
+	// Sensitive marks the header value as secret material (encrypted at rest,
+	// masked on read). It defaults to false, so a non-sensitive header is
+	// stored in plaintext and returned as-is.
+	Sensitive bool `json:"sensitive"`
+}
+
+// SourceCredential is a named, database-stored credential that authenticates a
+// fetch of a private source (F-21.3): a private git repository (git-ssh /
+// git-https) or an HTTP/HTTPS endpoint that requires a token (http). It is
+// matched to a source by the longest matching prefix (or an explicit
+// credential name on the source), and its secret material is encrypted at rest
+// with the API's secret store (F-12) when marked sensitive. The Database
+// service stores the secret material opaquely (ciphertext or plaintext) and
+// never sees the key; the API is the only component that can decrypt it. The
+// source-fetcher (F-21.2) holds no credentials at rest — the API decrypts the
+// chosen credential for a single fetch and hands the plaintext to the fetcher.
+type SourceCredential struct {
+	gorm.Model
+	// Name is the unique credential name. It is the value a
+	// PipelineSource.credential references (an explicit override of the
+	// prefix match).
+	Name string `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	// Kind is the credential kind: "git-ssh", "git-https", or "http".
+	Kind string `gorm:"size:16;not null;index" json:"kind"`
+	// Prefix is a string prefix matched against a source's reference (the
+	// repository URL for a git source, the endpoint URL for an http source).
+	// When a fetch needs a credential, the source's reference is matched
+	// against every credential's prefix; the longest matching prefix wins. A
+	// prefix match is a plain string prefix (not a regex), so a "." in a
+	// hostname need not be escaped.
+	Prefix string `gorm:"size:512;not null" json:"prefix"`
+	// Description is an optional human-readable note.
+	Description string `gorm:"size:255" json:"description,omitempty"`
+	// Username is the git-https credential's username (may be empty for
+	// token-only auth). It is not secret material and is returned to the UI.
+	Username string `gorm:"size:255" json:"username,omitempty"`
+	// Token is the git-https / http credential's token (a personal access
+	// token, bot password, or API key). It is secret material: stored as F-12
+	// ciphertext and never returned to the UI.
+	Token string `gorm:"size:1024" json:"-"`
+	// PrivateKey is the git-ssh credential's PEM-encoded private key. It is
+	// secret material: stored as F-12 ciphertext and never returned to the UI.
+	PrivateKey string `gorm:"type:text" json:"-"`
+	// HostKey is the git-ssh credential's expected host public key (for
+	// host-key verification so a fetch is not vulnerable to a MITM). It is
+	// secret material: stored as F-12 ciphertext and never returned to the UI.
+	HostKey string `gorm:"size:512" json:"-"`
+	// Headers is the http credential's list of headers (name + value + a
+	// per-header sensitive flag). Each header's value is secret material only
+	// when its own Sensitive flag is true (stored as F-12 ciphertext and
+	// masked on read); otherwise it is stored in plaintext and returned as-is.
+	// Stored as a JSON column (the list is a value, not a separate table).
+	Headers []HTTPHeader `gorm:"type:text;serializer:json" json:"headers,omitempty"`
+}
+
 // StepCompletion records that one worker completed one step of a job's
 // current attempt (the cross-worker step barrier). A job that fans out to a
 // worker group with the step barrier enabled waits, after each step, until
@@ -1752,5 +1873,8 @@ func All() []any {
 		&Environment{},
 		&Tag{},
 		&SSHKnownHost{},
+		&SourceCredential{},
+		&PipelineSource{},
+		&PipelineSourceState{},
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"cdrom/internal/authz"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	pipelinesourcepb "cdrom/internal/gen/cdrom/pipelinesource/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/metrics"
 	"cdrom/internal/secrets"
@@ -36,6 +37,11 @@ type Clients struct {
 	Database  dbpb.DatabaseClient
 	Scheduler schedpb.SchedulerClient
 	Artifacts artifactspb.ArtifactsClient
+	// PipelineSource is the source-fetcher client (F-21.2) the API dials to
+	// pull an externally-sourced pipeline's definition file (F-21.5.2). It is
+	// nil in tests that do not exercise the sync routine; the sync routine
+	// reports a clear error when it is nil.
+	PipelineSource pipelinesourcepb.PipelineSourceClient
 }
 
 // Server is the HTTP API server.
@@ -183,6 +189,16 @@ func (s *Server) Handler() http.Handler {
 	// JSON body as run parameters.
 	mux.HandleFunc("POST /api/pipelines/{id}/webhook", s.webhook)
 
+	// Pipeline source (F-21.5.1, minimal slice for F-21.3): where a pipeline
+	// is pulled from (a kind, a reference, a schedule, and a credential name).
+	// Attaching requires pipelines.can-edit; reading the source + its last
+	// sync state requires pipelines.can-view; a refresh runs the sync routine
+	// (select + decrypt the credential, dial the fetcher, record the outcome).
+	mux.HandleFunc("POST /api/pipelines/{id}/source", s.attachPipelineSource)
+	mux.HandleFunc("GET /api/pipelines/{id}/source", s.getPipelineSource)
+	mux.HandleFunc("DELETE /api/pipelines/{id}/source", s.detachPipelineSource)
+	mux.HandleFunc("POST /api/pipelines/{id}/source/refresh", s.refreshPipelineSource)
+
 	// Jobs (via the scheduler service).
 	mux.HandleFunc("POST /api/jobs", s.submitJob)
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
@@ -243,6 +259,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/ssh-known-hosts", s.listSSHKnownHosts)
 	mux.HandleFunc("POST /api/ssh-known-hosts", s.createSSHKnownHost)
 	mux.HandleFunc("DELETE /api/ssh-known-hosts/{id}", s.deleteSSHKnownHost)
+	// Source credentials (F-21.3): named, database-stored credentials that
+	// authenticate a fetch of a private source. They are matched to a source by
+	// the longest matching prefix (or an explicit credential name) and their
+	// secret material is encrypted at rest (F-12) when marked sensitive.
+	// Listing requires source-credentials.can-view; create/update/delete
+	// require source-credentials.can-manage.
+	mux.HandleFunc("GET /api/source-credentials", s.listSourceCredentials)
+	mux.HandleFunc("POST /api/source-credentials", s.createSourceCredential)
+	mux.HandleFunc("GET /api/source-credentials/{name}", s.getSourceCredential)
+	mux.HandleFunc("PUT /api/source-credentials/{name}", s.updateSourceCredential)
+	mux.HandleFunc("DELETE /api/source-credentials/{name}", s.deleteSourceCredential)
 	// Proceed (F-17): release a run (or a single job) held by a `manual`
 	// environment. It requires runs.can-proceed.
 	mux.HandleFunc("POST /api/runs/{id}/proceed", s.proceedRun)

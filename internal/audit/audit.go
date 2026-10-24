@@ -190,10 +190,16 @@ const (
 	// source-fetcher uses to verify a git-ssh server's host key.
 	ActionSSHKnownHostCreate = "ssh-known-host.create"
 	ActionSSHKnownHostDelete = "ssh-known-host.delete"
-	ActionLogin              = "auth.login"
-	ActionRegister           = "auth.register"
-	ActionWorkerRegister     = "worker.register"
-	ActionWorkerDeregister   = "worker.deregister"
+	// ActionSourceCredential* are the source-credential management actions
+	// (F-21.3): creating, updating, or deleting a named credential that
+	// authenticates a fetch of a private source.
+	ActionSourceCredentialCreate = "source-credential.create"
+	ActionSourceCredentialUpdate = "source-credential.update"
+	ActionSourceCredentialDelete = "source-credential.delete"
+	ActionLogin                  = "auth.login"
+	ActionRegister               = "auth.register"
+	ActionWorkerRegister         = "worker.register"
+	ActionWorkerDeregister       = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
@@ -229,6 +235,10 @@ const (
 	// TargetSSHKnownHost is the target kind of a runtime-managed SSH host key
 	// (F-21.2.4.1).
 	TargetSSHKnownHost = "ssh-known-host"
+	// TargetSourceCredential is the target kind of a source credential
+	// (F-21.3): a named credential that authenticates a fetch of a private
+	// source.
+	TargetSourceCredential = "source-credential"
 )
 
 // Outcomes (F-15).

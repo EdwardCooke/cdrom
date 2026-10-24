@@ -24,6 +24,7 @@ import (
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	idppb "cdrom/internal/gen/cdrom/idp/v1"
+	pipelinesourcepb "cdrom/internal/gen/cdrom/pipelinesource/v1"
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
@@ -100,11 +101,22 @@ func main() {
 		os.Exit(1)
 	}
 	defer artConn.Close()
+	// The source-fetcher (F-21.2): the API dials it to pull an
+	// externally-sourced pipeline's definition file (F-21.5.2). The dial is
+	// lazy (grpc.NewClient), so it does not require the fetcher to be up yet —
+	// a fetch only happens when a source is synced.
+	psConn, err := grpcutil.Dial(ctx, cfg.PipelineSourceAddress, cfg.TLS)
+	if err != nil {
+		logger.Error("dial pipelinesource", "addr", cfg.PipelineSourceAddress, "err", err)
+		os.Exit(1)
+	}
+	defer psConn.Close()
 
 	clients := api.Clients{
-		Database:  dbpb.NewDatabaseClient(dbConn),
-		Scheduler: schedpb.NewSchedulerClient(schedConn),
-		Artifacts: artifactspb.NewArtifactsClient(artConn),
+		Database:       dbpb.NewDatabaseClient(dbConn),
+		Scheduler:      schedpb.NewSchedulerClient(schedConn),
+		Artifacts:      artifactspb.NewArtifactsClient(artConn),
+		PipelineSource: pipelinesourcepb.NewPipelineSourceClient(psConn),
 	}
 
 	// The secret store (F-12): encrypts a pipeline's secret plaintexts on

@@ -143,9 +143,9 @@ fetch "$E2E_PS_ADDR" "http:http://127.0.0.1:$E2E_PS_HTTP/file.yaml"
 [ "$F_CONTENT" = "http: body" ] || { echo "http content mismatch: $F_CONTENT" >&2; exit 1; }
 [ "$F_VERSION" = '"v1"' ] || { echo "http version (ETag) mismatch: $F_VERSION" >&2; exit 1; }
 
-# --- http: fetch (credential header) ------------------------------------------
+# --- http: fetch (credential headers) ------------------------------------------
 log ">> http: credential-supplied Authorization header"
-fetch "$E2E_PS_ADDR" "http:http://127.0.0.1:$E2E_PS_HTTP/file.yaml" -cred-kind http -cred-token tok123
+fetch "$E2E_PS_ADDR" "http:http://127.0.0.1:$E2E_PS_HTTP/file.yaml" -cred-kind http -cred-header "Authorization=Bearer tok123"
 [ "$F_CONTENT" = "http: body" ] || { echo "http (cred) content mismatch: $F_CONTENT" >&2; exit 1; }
 grep -q "Bearer tok123" "$WORK/ps-http-auth.log" || { echo "http credential header was not sent" >&2; exit 1; }
 
