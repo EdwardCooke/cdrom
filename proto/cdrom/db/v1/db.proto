@@ -465,6 +465,24 @@ service Database {
   // NotFound.
   rpc DeleteConcurrencyLimit(DeleteConcurrencyLimitRequest) returns (google.protobuf.Empty);
 
+  // SSH known hosts (F-21.2.4.1). Runtime-managed SSH host keys the
+  // source-fetcher uses to verify a git-ssh server's host key. They live in
+  // the database (owned by the Database service) and are managed through the
+  // API, so an admin can add a key for a self-hosted or corporate-firewalled
+  // git host at runtime without a redeployment. The API accumulates them and
+  // passes them to the fetcher on each git-ssh fetch (FetchSourceRequest.
+  // known_hosts); the fetcher combines them with its built-in common provider
+  // keys.
+  //
+  // ListSSHKnownHosts returns every stored host key.
+  rpc ListSSHKnownHosts(ListSSHKnownHostsRequest) returns (ListSSHKnownHostsResponse);
+  // CreateSSHKnownHost adds a host key. It rejects an empty host pattern, an
+  // empty key, and a duplicate host pattern (a host has one stored key line).
+  rpc CreateSSHKnownHost(CreateSSHKnownHostRequest) returns (SSHKnownHost);
+  // DeleteSSHKnownHost removes a host key by id. A missing key returns
+  // NotFound.
+  rpc DeleteSSHKnownHost(DeleteSSHKnownHostRequest) returns (google.protobuf.Empty);
+
   // Environments (F-17). Environments are named deployment targets that group
   // execution targets and carry the deployment policy that governs how work
   // reaches them: an approval policy (requires_approval, an F-13 gate) and an
@@ -3346,5 +3364,54 @@ message UpdateConcurrencyLimitRequest {
 // rule.
 message DeleteConcurrencyLimitRequest {
   // id is the rule to delete.
+  int64 id = 1;
+}
+
+// SSHKnownHost is a runtime-managed SSH host key (F-21.2.4.1): a known_hosts
+// line the source-fetcher uses to verify a git-ssh server's host key.
+message SSHKnownHost {
+  // id is the key's id.
+  int64 id = 1;
+  // host_pattern is the known_hosts host pattern (e.g. "git.example.com",
+  // "[git.example.com]:2222", or a wildcard). It is the unique key of the row.
+  string host_pattern = 2;
+  // key_type is the SSH public key type (e.g. "ssh-ed25519", "ssh-rsa",
+  // "ecdsa-sha2-nistp256").
+  string key_type = 3;
+  // key is the base64-encoded public key (the third field of a known_hosts
+  // line).
+  string key = 4;
+  // description is an optional human-readable note.
+  string description = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// ListSSHKnownHostsRequest lists the stored SSH host keys.
+message ListSSHKnownHostsRequest {
+}
+
+// ListSSHKnownHostsResponse is the result of a ListSSHKnownHosts call.
+message ListSSHKnownHostsResponse {
+  // hosts are the stored host keys (ordered by host pattern).
+  repeated SSHKnownHost hosts = 1;
+}
+
+// CreateSSHKnownHostRequest is the request to add an SSH host key.
+message CreateSSHKnownHostRequest {
+  // host_pattern is the known_hosts host pattern. It must be non-empty and is
+  // unique (a host has one stored key line).
+  string host_pattern = 1;
+  // key_type is the SSH public key type. It must be non-empty.
+  string key_type = 2;
+  // key is the base64-encoded public key. It must be non-empty.
+  string key = 3;
+  // description is an optional human-readable note.
+  string description = 4;
+}
+
+// DeleteSSHKnownHostRequest is the request to remove an SSH host key.
+message DeleteSSHKnownHostRequest {
+  // id is the key to delete.
   int64 id = 1;
 }

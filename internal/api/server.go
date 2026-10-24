@@ -234,6 +234,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/worker-groups/{name}", s.getWorkerGroup)
 	mux.HandleFunc("PUT /api/worker-groups/{name}", s.updateWorkerGroup)
 	mux.HandleFunc("DELETE /api/worker-groups/{name}", s.deleteWorkerGroup)
+	// SSH known hosts (F-21.2.4.1): runtime-managed SSH host keys the
+	// source-fetcher uses to verify a git-ssh server's host key. They are
+	// stored in the database and managed here, so the UI can add a key for a
+	// self-hosted or corporate-firewalled git host at runtime without a
+	// redeployment. Listing requires ssh-known-hosts.can-view; create and
+	// delete require ssh-known-hosts.can-manage.
+	mux.HandleFunc("GET /api/ssh-known-hosts", s.listSSHKnownHosts)
+	mux.HandleFunc("POST /api/ssh-known-hosts", s.createSSHKnownHost)
+	mux.HandleFunc("DELETE /api/ssh-known-hosts/{id}", s.deleteSSHKnownHost)
 	// Proceed (F-17): release a run (or a single job) held by a `manual`
 	// environment. It requires runs.can-proceed.
 	mux.HandleFunc("POST /api/runs/{id}/proceed", s.proceedRun)

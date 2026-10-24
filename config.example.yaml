@@ -17,6 +17,7 @@
 #scheduler_address: 127.0.0.1:7102
 #artifacts_address: 127.0.0.1:7103
 #api_address: 127.0.0.1:7105
+#pipeline_source_address: 127.0.0.1:7107
 
 # HTTP address the API binds for the UI.
 #api_http_address: 127.0.0.1:8080
@@ -34,6 +35,16 @@ db:
 # built-in default is "filesystem"; "s3" and "azureblob" are reserved for
 # future built-in implementations.
 #artifacts_store: filesystem
+
+# Source-fetcher (F-21.2). The pipelinesource service fetches externally-sourced
+# pipeline definitions named by a reference (git / http / file).
+#pipeline_source:
+#  # Root of the on-disk git repository cache. Empty defaults to a
+#  # "repositories" directory under the OS temp directory.
+#  repo_cache_dir: /tmp/repositories
+#  # Local-filesystem root that "file:" references are resolved against
+#  # (a file is read from <root><path>). Empty disables the "file" kind.
+#  file_root: /shared
 
 
 # Worker identity (used by the worker).

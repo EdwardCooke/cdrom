@@ -196,6 +196,46 @@ db:
 	}
 }
 
+func TestPipelineSourceConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+pipeline_source:
+  repo_cache_dir: /var/cdrom/repos
+  file_root: /shared
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.PipelineSourceRepoCacheDir != "/var/cdrom/repos" {
+		t.Errorf("PipelineSourceRepoCacheDir = %q, want /var/cdrom/repos", cfg.PipelineSourceRepoCacheDir)
+	}
+	if cfg.PipelineSourceFileRoot != "/shared" {
+		t.Errorf("PipelineSourceFileRoot = %q, want /shared", cfg.PipelineSourceFileRoot)
+	}
+	// The address defaults to the pipeline source default.
+	if cfg.PipelineSourceAddress != DefaultPipelineSourceAddress {
+		t.Errorf("PipelineSourceAddress = %q, want %q", cfg.PipelineSourceAddress, DefaultPipelineSourceAddress)
+	}
+
+	// Env overrides the file.
+	t.Setenv("CDROM_PIPELINE_SOURCE_ADDR", "127.0.0.1:7999")
+	t.Setenv("CDROM_PIPELINE_SOURCE_FILE_ROOT", "/other")
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile (env): %v", err)
+	}
+	if cfg.PipelineSourceAddress != "127.0.0.1:7999" {
+		t.Errorf("PipelineSourceAddress = %q, want 127.0.0.1:7999", cfg.PipelineSourceAddress)
+	}
+	if cfg.PipelineSourceFileRoot != "/other" {
+		t.Errorf("PipelineSourceFileRoot = %q, want /other", cfg.PipelineSourceFileRoot)
+	}
+}
+
 func TestEnvOverridesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := "worker_name: from-file\n"

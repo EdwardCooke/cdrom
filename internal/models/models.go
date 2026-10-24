@@ -1040,6 +1040,32 @@ type ConcurrencyLimit struct {
 	Limit int `gorm:"not null;default:0" json:"limit"`
 }
 
+// SSHKnownHost is a runtime-managed SSH host key (F-21.2.4.1): a known_hosts
+// line (the OpenSSH format — a host pattern, a key type, and a base64-encoded
+// public key) that the source-fetcher uses to verify a git-ssh server's host
+// key. The keys live in the database (owned by the Database service) and are
+// managed through the API (GET/POST/DELETE /api/ssh-known-hosts), so an admin
+// can add a key for a self-hosted or corporate-firewalled git host at runtime
+// (via the UI) without a redeployment and without editing the fetcher's
+// built-in common provider keys. The API passes the accumulated keys to the
+// fetcher on each git-ssh fetch (FetchSourceRequest.known_hosts); the fetcher
+// combines them with its built-in common keys for host-key verification.
+type SSHKnownHost struct {
+	gorm.Model
+	// HostPattern is the known_hosts host pattern (e.g. "git.example.com",
+	// "[git.example.com]:2222", or a wildcard). It is the unique key of the
+	// row (a host has one stored key line).
+	HostPattern string `gorm:"size:255;not null;uniqueIndex" json:"host_pattern"`
+	// KeyType is the SSH public key type (e.g. "ssh-ed25519", "ssh-rsa",
+	// "ecdsa-sha2-nistp256").
+	KeyType string `gorm:"size:64;not null" json:"key_type"`
+	// Key is the base64-encoded public key (the third field of a known_hosts
+	// line).
+	Key string `gorm:"size:512;not null" json:"key"`
+	// Description is an optional human-readable note (e.g. "corporate git").
+	Description string `gorm:"size:255" json:"description,omitempty"`
+}
+
 // StepCompletion records that one worker completed one step of a job's
 // current attempt (the cross-worker step barrier). A job that fans out to a
 // worker group with the step barrier enabled waits, after each step, until
@@ -1725,5 +1751,6 @@ func All() []any {
 		&ConcurrencyLimit{},
 		&Environment{},
 		&Tag{},
+		&SSHKnownHost{},
 	}
 }

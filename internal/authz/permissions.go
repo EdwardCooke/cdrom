@@ -67,6 +67,11 @@ const (
 	// tags.
 	PermWorkerGroupsView   = "worker-groups.can-view"
 	PermWorkerGroupsManage = "worker-groups.can-manage"
+	// SSH known-host management permissions (F-21.2.4.1). The runtime-managed
+	// SSH host keys the source-fetcher uses to verify a git-ssh server's host
+	// key are platform-wide: can-view reads them, can-manage adds/removes them.
+	PermSSHKnownHostsView   = "ssh-known-hosts.can-view"
+	PermSSHKnownHostsManage = "ssh-known-hosts.can-manage"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -106,6 +111,8 @@ var AllPermissions = []string{
 	PermRunsProceed,
 	PermWorkerGroupsView,
 	PermWorkerGroupsManage,
+	PermSSHKnownHostsView,
+	PermSSHKnownHostsManage,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

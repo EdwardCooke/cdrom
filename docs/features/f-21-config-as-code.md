@@ -1068,7 +1068,7 @@ the same shape as the other services (`db`, `scheduler`, `artifacts`, `idp`):
   repos/endpoints it must reach, and it can be scaled or replaced independently
   of the control plane. It also keeps the API's process free of long-running
   git operations — repeated fetches of the same repository are served from the
-  fetcher's local cache (refetched from upstream on a debounce) instead of
+  fetcher's local cache (fetched from upstream on every request, incrementally) instead of
   re-cloning.
 - **Protos.** `proto/cdrom/pipelinesource/v1/` defines `FetchSource` (and the
   `SourceCredential` message); generated code is committed under
@@ -1374,7 +1374,7 @@ itself.
   fetcher's git / HTTP / filesystem clients (a single file named by a
   `reference`, authenticated by a `SourceCredential` when one is needed) and the
   fetcher's git repository cache (cache root + text index + per-repository lock
-  + fetch debounce + cleanup thread).
+  + cleanup thread).
   File-format fields that are new to the
   schema: the Kubernetes-style manifest envelope (`apiVersion` / `kind` /
   `metadata` / `spec`, with `metadata.labels` and `metadata.annotations`),

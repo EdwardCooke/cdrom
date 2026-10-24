@@ -105,7 +105,7 @@ tool.
 | F-21.2.2 | Reference format & parsing (the `<type>:<spec>` `git` / `http` / `file` reference, backslash escaping, left-to-right parser) | planned | [F-21.2.2](features/f-21.2.2-reference-format.md) |
 | F-21.2.3 | Git repository cache (overview; decomposed into F-21.2.3.1…F-21.2.3.4) | planned | [F-21.2.3](features/f-21.2.3-git-repository-cache.md) |
 | F-21.2.3.1 | Cache structure & index (on-disk cache root, portable per-repo directory naming, atomic text index file) | planned | [F-21.2.3.1](features/f-21.2.3.1-cache-structure-index.md) |
-| F-21.2.3.2 | Fetch lifecycle (rolling-24h window, refetch-on-request, fetch debounce, resync-on-failure) | planned | [F-21.2.3.2](features/f-21.2.3.2-fetch-lifecycle.md) |
+| F-21.2.3.2 | Fetch lifecycle (rolling-24h window, fetch-on-request, resync-on-failure) | planned | [F-21.2.3.2](features/f-21.2.3.2-fetch-lifecycle.md) |
 | F-21.2.3.3 | Cross-replica locking (per-repo OS file lock with stale-lock timeout, shared cache across replicas) | planned | [F-21.2.3.3](features/f-21.2.3.3-cross-replica-locking.md) |
 | F-21.2.3.4 | Cleanup thread (prune repositories inactive >24h, sweep orphaned directories, skip locked repos) | planned | [F-21.2.3.4](features/f-21.2.3.4-cleanup-thread.md) |
 | F-21.2.4 | Fetch clients (overview; decomposed into F-21.2.4.1…F-21.2.4.3, one per fetcher) | planned | [F-21.2.4](features/f-21.2.4-fetch-clients.md) |
@@ -210,7 +210,7 @@ Tick each feature off as it lands.
 - [ ] F-21.2.2 Reference format & parsing
 - [ ] F-21.2.3 Git repository cache (overview; see F-21.2.3.1…F-21.2.3.4)
 - [ ] F-21.2.3.1 Cache structure & index
-- [ ] F-21.2.3.2 Fetch lifecycle (refetch, debounce, resync)
+- [ ] F-21.2.3.2 Fetch lifecycle (fetch-on-request, resync)
 - [ ] F-21.2.3.3 Cross-replica locking
 - [ ] F-21.2.3.4 Cleanup thread
 - [ ] F-21.2.4 Fetch clients (overview; see F-21.2.4.1…F-21.2.4.3)

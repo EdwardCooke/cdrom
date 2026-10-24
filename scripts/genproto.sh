@@ -18,6 +18,7 @@ protoc \
   proto/cdrom/scheduler/v1/scheduler.proto \
   proto/cdrom/artifacts/v1/artifacts.proto \
   proto/cdrom/api/v1/api.proto \
-  proto/cdrom/idp/v1/idp.proto
+  proto/cdrom/idp/v1/idp.proto \
+  proto/cdrom/pipelinesource/v1/pipelinesource.proto
 
 echo "generated Go code in $OUT"

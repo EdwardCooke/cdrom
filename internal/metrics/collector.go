@@ -138,6 +138,8 @@ func DefaultMetricsAddr(component string) string {
 		return "127.0.0.1:9104"
 	case "idp":
 		return "127.0.0.1:9105"
+	case "pipelinesource":
+		return "127.0.0.1:9106"
 	default:
 		return "127.0.0.1:9100"
 	}

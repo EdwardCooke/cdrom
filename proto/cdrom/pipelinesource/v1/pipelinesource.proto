@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package cdrom.pipelinesource.v1;
+
+option go_package = "cdrom/internal/gen/cdrom/pipelinesource/v1;pipelinesourcev1";
+
+// PipelineSource is the source-fetcher service (F-21.2): a dedicated,
+// standalone gRPC process that performs the actual fetch of a pipeline
+// definition file named by a *reference* (a "<type>:<spec>" string — git /
+// http / file). It is dialed only by the API over gRPC (mutual TLS when a CA
+// is configured). The fetcher holds no pipeline definitions, no credentials,
+// and no encryption key at rest; its only on-disk state is a transient git
+// repository cache (F-21.2.3).
+service PipelineSource {
+  // FetchSource retrieves the file named by the reference and returns its
+  // content, its version identifier, and its content hash. The credential is
+  // optional and is needed only for a private git repository or an
+  // authenticated HTTP endpoint.
+  rpc FetchSource(FetchSourceRequest) returns (FetchSourceResponse);
+}
+
+message FetchSourceRequest {
+  // reference is the "<type>:<spec>" string that names the file to fetch
+  // (F-21.2.2): "git:<repo>@<branch>[<path>]", "http:<url>", or
+  // "file:<path>".
+  string reference = 1;
+  // credential is the optional plaintext secret material for this fetch
+  // (F-21.3). The API decrypts it and passes it in; the fetcher uses it to
+  // authenticate the fetch and discards it — it is never persisted or logged.
+  SourceCredential credential = 2;
+  // known_hosts is the runtime-managed SSH host keys (F-21.2.4.1), as
+  // OpenSSH known_hosts lines ("host keytype base64key"), that the API
+  // accumulates from its database and passes for this fetch. The fetcher
+  // combines them with its built-in common provider keys when verifying a
+  // git-ssh server's host key. Empty means the built-in keys only.
+  repeated string known_hosts = 3;
+}
+
+message SourceCredential {
+  // kind is the credential's kind: "git-ssh" | "git-https" | "http".
+  string kind = 1;
+  // username is the git-https username (may be empty for token-only auth).
+  string username = 2;
+  // token is the git-https / http token.
+  string token = 3;
+  // private_key is the git-ssh PEM-encoded private key.
+  string private_key = 4;
+  // host_key is the git-ssh expected host public key (for host-key
+  // verification).
+  string host_key = 5;
+  // header is the http header the token is sent in (default
+  // "Authorization: Bearer <token>").
+  string header = 6;
+}
+
+message FetchSourceResponse {
+  // content is the file's content.
+  bytes content = 1;
+  // version is the source's version identifier: the git commit hash, an HTTP
+  // ETag|Last-Modified, or the file's mtime.
+  string version = 2;
+  // hash is the SHA-256 of content (hex).
+  string hash = 3;
+}

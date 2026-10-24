@@ -44,5 +44,9 @@ FROM base AS scheduler
 COPY --from=build /src/bin/scheduler scheduler
 CMD ["/scheduler"]
 
+FROM base AS pipelinesource
+COPY --from=build /src/bin/pipelinesource pipelinesource
+CMD ["/pipelinesource"]
+
 FROM base AS all
 COPY --from=build /src/bin/* /

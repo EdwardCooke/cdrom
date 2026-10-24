@@ -6,7 +6,7 @@
 # platform only.
 
 # Control-plane binaries (host platform only).
-CONTROL_BINS := api db scheduler artifacts idp
+CONTROL_BINS := api db scheduler artifacts idp pipelinesource
 # Execution-layer binaries (shipped for Windows + Linux).
 EXEC_BINS    := worker agent
 
@@ -17,8 +17,9 @@ GOOS_WIN   := windows
 
 all: build
 
-## build: build all binaries for the host platform into ./bin
-build: $(addprefix build-,$(CONTROL_BINS) $(EXEC_BINS))
+## build: build all binaries (and the e2e fetchclient helper) for the host
+##        platform into ./bin
+build: $(addprefix build-,$(CONTROL_BINS) $(EXEC_BINS)) build-fetchclient
 
 ## certs: generate a local development mTLS certificate set into ./certs
 ##        (CA, server, and client certs). Point your config file's tls
@@ -66,6 +67,14 @@ build-artifacts:
 
 build-idp:
 	go build -o bin/idp ./cmd/idp
+
+build-pipelinesource:
+	go build -o bin/pipelinesource ./cmd/pipelinesource
+
+# e2e helper: a tiny gRPC client for the source-fetcher (F-21.2), used by
+# scripts/e2e/13-source-fetcher.sh.
+build-fetchclient:
+	go build -o bin/fetchclient ./scripts/e2e/fetchclient
 
 # Execution-layer binaries.
 build-worker:

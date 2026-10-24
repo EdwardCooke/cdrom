@@ -117,6 +117,9 @@ const (
 	Database_CreateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/CreateConcurrencyLimit"
 	Database_UpdateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/UpdateConcurrencyLimit"
 	Database_DeleteConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/DeleteConcurrencyLimit"
+	Database_ListSSHKnownHosts_FullMethodName              = "/cdrom.db.v1.Database/ListSSHKnownHosts"
+	Database_CreateSSHKnownHost_FullMethodName             = "/cdrom.db.v1.Database/CreateSSHKnownHost"
+	Database_DeleteSSHKnownHost_FullMethodName             = "/cdrom.db.v1.Database/DeleteSSHKnownHost"
 	Database_CreateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/CreateEnvironment"
 	Database_GetEnvironment_FullMethodName                 = "/cdrom.db.v1.Database/GetEnvironment"
 	Database_ListEnvironments_FullMethodName               = "/cdrom.db.v1.Database/ListEnvironments"
@@ -573,6 +576,23 @@ type DatabaseClient interface {
 	// DeleteConcurrencyLimit removes a limit rule. A missing rule returns
 	// NotFound.
 	DeleteConcurrencyLimit(ctx context.Context, in *DeleteConcurrencyLimitRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// SSH known hosts (F-21.2.4.1). Runtime-managed SSH host keys the
+	// source-fetcher uses to verify a git-ssh server's host key. They live in
+	// the database (owned by the Database service) and are managed through the
+	// API, so an admin can add a key for a self-hosted or corporate-firewalled
+	// git host at runtime without a redeployment. The API accumulates them and
+	// passes them to the fetcher on each git-ssh fetch (FetchSourceRequest.
+	// known_hosts); the fetcher combines them with its built-in common provider
+	// keys.
+	//
+	// ListSSHKnownHosts returns every stored host key.
+	ListSSHKnownHosts(ctx context.Context, in *ListSSHKnownHostsRequest, opts ...grpc.CallOption) (*ListSSHKnownHostsResponse, error)
+	// CreateSSHKnownHost adds a host key. It rejects an empty host pattern, an
+	// empty key, and a duplicate host pattern (a host has one stored key line).
+	CreateSSHKnownHost(ctx context.Context, in *CreateSSHKnownHostRequest, opts ...grpc.CallOption) (*SSHKnownHost, error)
+	// DeleteSSHKnownHost removes a host key by id. A missing key returns
+	// NotFound.
+	DeleteSSHKnownHost(ctx context.Context, in *DeleteSSHKnownHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Environments (F-17). Environments are named deployment targets that group
 	// execution targets and carry the deployment policy that governs how work
 	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
@@ -1614,6 +1634,36 @@ func (c *databaseClient) DeleteConcurrencyLimit(ctx context.Context, in *DeleteC
 	return out, nil
 }
 
+func (c *databaseClient) ListSSHKnownHosts(ctx context.Context, in *ListSSHKnownHostsRequest, opts ...grpc.CallOption) (*ListSSHKnownHostsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSSHKnownHostsResponse)
+	err := c.cc.Invoke(ctx, Database_ListSSHKnownHosts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CreateSSHKnownHost(ctx context.Context, in *CreateSSHKnownHostRequest, opts ...grpc.CallOption) (*SSHKnownHost, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SSHKnownHost)
+	err := c.cc.Invoke(ctx, Database_CreateSSHKnownHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteSSHKnownHost(ctx context.Context, in *DeleteSSHKnownHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteSSHKnownHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) CreateEnvironment(ctx context.Context, in *CreateEnvironmentRequest, opts ...grpc.CallOption) (*Environment, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Environment)
@@ -2176,6 +2226,23 @@ type DatabaseServer interface {
 	// DeleteConcurrencyLimit removes a limit rule. A missing rule returns
 	// NotFound.
 	DeleteConcurrencyLimit(context.Context, *DeleteConcurrencyLimitRequest) (*emptypb.Empty, error)
+	// SSH known hosts (F-21.2.4.1). Runtime-managed SSH host keys the
+	// source-fetcher uses to verify a git-ssh server's host key. They live in
+	// the database (owned by the Database service) and are managed through the
+	// API, so an admin can add a key for a self-hosted or corporate-firewalled
+	// git host at runtime without a redeployment. The API accumulates them and
+	// passes them to the fetcher on each git-ssh fetch (FetchSourceRequest.
+	// known_hosts); the fetcher combines them with its built-in common provider
+	// keys.
+	//
+	// ListSSHKnownHosts returns every stored host key.
+	ListSSHKnownHosts(context.Context, *ListSSHKnownHostsRequest) (*ListSSHKnownHostsResponse, error)
+	// CreateSSHKnownHost adds a host key. It rejects an empty host pattern, an
+	// empty key, and a duplicate host pattern (a host has one stored key line).
+	CreateSSHKnownHost(context.Context, *CreateSSHKnownHostRequest) (*SSHKnownHost, error)
+	// DeleteSSHKnownHost removes a host key by id. A missing key returns
+	// NotFound.
+	DeleteSSHKnownHost(context.Context, *DeleteSSHKnownHostRequest) (*emptypb.Empty, error)
 	// Environments (F-17). Environments are named deployment targets that group
 	// execution targets and carry the deployment policy that governs how work
 	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
@@ -2537,6 +2604,15 @@ func (UnimplementedDatabaseServer) UpdateConcurrencyLimit(context.Context, *Upda
 }
 func (UnimplementedDatabaseServer) DeleteConcurrencyLimit(context.Context, *DeleteConcurrencyLimitRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteConcurrencyLimit not implemented")
+}
+func (UnimplementedDatabaseServer) ListSSHKnownHosts(context.Context, *ListSSHKnownHostsRequest) (*ListSSHKnownHostsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSSHKnownHosts not implemented")
+}
+func (UnimplementedDatabaseServer) CreateSSHKnownHost(context.Context, *CreateSSHKnownHostRequest) (*SSHKnownHost, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateSSHKnownHost not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteSSHKnownHost(context.Context, *DeleteSSHKnownHostRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSSHKnownHost not implemented")
 }
 func (UnimplementedDatabaseServer) CreateEnvironment(context.Context, *CreateEnvironmentRequest) (*Environment, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateEnvironment not implemented")
@@ -4341,6 +4417,60 @@ func _Database_DeleteConcurrencyLimit_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ListSSHKnownHosts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSSHKnownHostsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListSSHKnownHosts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListSSHKnownHosts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListSSHKnownHosts(ctx, req.(*ListSSHKnownHostsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CreateSSHKnownHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSSHKnownHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateSSHKnownHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateSSHKnownHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateSSHKnownHost(ctx, req.(*CreateSSHKnownHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteSSHKnownHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSSHKnownHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteSSHKnownHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteSSHKnownHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteSSHKnownHost(ctx, req.(*DeleteSSHKnownHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_CreateEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateEnvironmentRequest)
 	if err := dec(in); err != nil {
@@ -4951,6 +5081,18 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteConcurrencyLimit",
 			Handler:    _Database_DeleteConcurrencyLimit_Handler,
+		},
+		{
+			MethodName: "ListSSHKnownHosts",
+			Handler:    _Database_ListSSHKnownHosts_Handler,
+		},
+		{
+			MethodName: "CreateSSHKnownHost",
+			Handler:    _Database_CreateSSHKnownHost_Handler,
+		},
+		{
+			MethodName: "DeleteSSHKnownHost",
+			Handler:    _Database_DeleteSSHKnownHost_Handler,
 		},
 		{
 			MethodName: "CreateEnvironment",

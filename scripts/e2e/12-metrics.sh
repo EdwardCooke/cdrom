@@ -120,7 +120,7 @@ e2e_metrics_check() {
 # body (SIGPIPE, see e2e_metrics_check).
 e2e_wait_for_metric() {
   local name="$1" port="$2" metric="$3" what="$4" i
-  local bodyfile
+  local bodyfile cdromlines
   bodyfile="$(mktemp "${TMPDIR:-/tmp}/cdrom-metrics.XXXXXX")"
   for i in $(seq 1 100); do
     curl -s --max-time 5 -o "$bodyfile" "http://127.0.0.1:${port}/metrics" || true
@@ -131,8 +131,13 @@ e2e_wait_for_metric() {
     sleep 0.2
   done
   echo ">> timed out waiting for: $what ($name :$port, metric $metric)" >&2
-  grep -F "cdrom_" "$bodyfile" | head -n 40 >&2 || true
-  rm -f "$bodyfile"
+  # Show the cdrom_* lines that ARE present. SIGPIPE-free: grep to a temp
+  # file, then head the file — `grep | head` would SIGPIPE grep under
+  # pipefail once head exits after 40 lines.
+  cdromlines="$(mktemp "${TMPDIR:-/tmp}/cdrom-metrics.XXXXXX")"
+  grep -F "cdrom_" "$bodyfile" > "$cdromlines" 2>/dev/null || true
+  head -n 40 "$cdromlines" >&2 || true
+  rm -f "$cdromlines" "$bodyfile"
   exit 1
 }
 

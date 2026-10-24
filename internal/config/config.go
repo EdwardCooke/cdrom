@@ -32,6 +32,10 @@ const (
 	// provider (cmd/idp) binds to for its API-only surface (job-token minting
 	// and user management), which the API dials over mTLS.
 	DefaultIdPGRPCAddress = "127.0.0.1:7106"
+	// DefaultPipelineSourceAddress is the gRPC address the source-fetcher
+	// service (cmd/pipelinesource, F-21.2) binds to, which the API dials to
+	// fetch externally-sourced pipeline definitions.
+	DefaultPipelineSourceAddress = "127.0.0.1:7107"
 )
 
 // Config is the shared configuration for every cdrom binary.
@@ -65,6 +69,23 @@ type Config struct {
 	// for future built-in implementations). Only the artifacts service uses
 	// it; other binaries ignore it.
 	ArtifactsStore string
+
+	// PipelineSourceAddress is the gRPC address of the source-fetcher service
+	// (F-21.2). The API dials it to fetch externally-sourced pipeline
+	// definitions. Only the api binary uses it; other binaries ignore it.
+	PipelineSourceAddress string
+
+	// PipelineSourceRepoCacheDir is the root of the source-fetcher's on-disk
+	// git repository cache (F-21.2.3). Empty means the default: a
+	// "repositories" directory under the OS temp directory. Only the
+	// pipelinesource binary uses it; other binaries ignore it.
+	PipelineSourceRepoCacheDir string
+
+	// PipelineSourceFileRoot is the local-filesystem root the source-fetcher
+	// resolves "file:" references against (F-21.2.4.3): a file is read from
+	// <root><path>. Empty means the "file" kind is disabled. Only the
+	// pipelinesource binary uses it; other binaries ignore it.
+	PipelineSourceFileRoot string
 
 	// WorkerName and WorkerGroup identify a worker process.
 	WorkerName  string
@@ -733,18 +754,22 @@ func Load() (*Config, error) {
 // empty string skips the file layer.
 func LoadWithFile(file string) (*Config, error) {
 	cfg := &Config{
-		DBAddress:          DefaultDBAddress,
-		SchedulerAddress:   DefaultSchedulerAddress,
-		ArtifactsAddress:   DefaultArtifactsAddress,
-		APIAddress:         DefaultAPIAddress,
-		APIHTTPAddress:     DefaultAPIHTTPAddress,
-		ArtifactsRoot:      "artifacts",
-		ArtifactsStore:     "filesystem",
-		WorkerName:         "worker-1",
-		WorkerGroup:        "default",
-		WorkerEnvironments: []string{},
-		WorkerTags:         map[string]string{},
-		AgentName:          defaultAgentName(),
+		DBAddress:        DefaultDBAddress,
+		SchedulerAddress: DefaultSchedulerAddress,
+		ArtifactsAddress: DefaultArtifactsAddress,
+		APIAddress:       DefaultAPIAddress,
+		APIHTTPAddress:   DefaultAPIHTTPAddress,
+		ArtifactsRoot:    "artifacts",
+		ArtifactsStore:   "filesystem",
+		// The source-fetcher (F-21.2) default: its gRPC address (the cache root
+		// and file root default to empty — the fetcher resolves them to their
+		// own defaults).
+		PipelineSourceAddress: DefaultPipelineSourceAddress,
+		WorkerName:              "worker-1",
+		WorkerGroup:                     "default",
+		WorkerEnvironments:              []string{},
+		WorkerTags:                      map[string]string{},
+		AgentName:                       defaultAgentName(),
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
 			SQLitePath:  "cdrom.db",
@@ -824,14 +849,19 @@ func LoadWithFile(file string) (*Config, error) {
 // distinguish "absent" from "set" so a file only overrides the values it
 // actually contains.
 type fileConfig struct {
-	ListenAddress      *string            `yaml:"listen_address"`
-	DBAddress          *string            `yaml:"db_address"`
-	SchedulerAddress   *string            `yaml:"scheduler_address"`
-	ArtifactsAddress   *string            `yaml:"artifacts_address"`
-	APIAddress         *string            `yaml:"api_address"`
-	APIHTTPAddress     *string            `yaml:"api_http_address"`
-	ArtifactsRoot      *string            `yaml:"artifacts_root"`
-	ArtifactsStore     *string            `yaml:"artifacts_store"`
+	ListenAddress    *string `yaml:"listen_address"`
+	DBAddress        *string `yaml:"db_address"`
+	SchedulerAddress *string `yaml:"scheduler_address"`
+	ArtifactsAddress *string `yaml:"artifacts_address"`
+	APIAddress       *string `yaml:"api_address"`
+	APIHTTPAddress   *string `yaml:"api_http_address"`
+	ArtifactsRoot    *string `yaml:"artifacts_root"`
+	ArtifactsStore   *string `yaml:"artifacts_store"`
+	PipelineSource   *struct {
+		Address      *string `yaml:"address"`
+		RepoCacheDir *string `yaml:"repo_cache_dir"`
+		FileRoot     *string `yaml:"file_root"`
+	} `yaml:"pipeline_source"`
 	WorkerName         *string            `yaml:"worker_name"`
 	WorkerGroup        *string            `yaml:"worker_group"`
 	WorkerEnvironments *[]string          `yaml:"worker_environments"`
@@ -953,6 +983,17 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.ArtifactsStore != nil {
 		cfg.ArtifactsStore = *f.ArtifactsStore
+	}
+	if f.PipelineSource != nil {
+		if f.PipelineSource.Address != nil {
+			cfg.PipelineSourceAddress = *f.PipelineSource.Address
+		}
+		if f.PipelineSource.RepoCacheDir != nil {
+			cfg.PipelineSourceRepoCacheDir = *f.PipelineSource.RepoCacheDir
+		}
+		if f.PipelineSource.FileRoot != nil {
+			cfg.PipelineSourceFileRoot = *f.PipelineSource.FileRoot
+		}
 	}
 	if f.WorkerName != nil {
 		cfg.WorkerName = *f.WorkerName
@@ -1217,6 +1258,11 @@ func applyEnv(cfg *Config) {
 	cfg.ListenAddress = envOr("CDROM_LISTEN_ADDR", cfg.ListenAddress)
 	cfg.ArtifactsRoot = envOr("CDROM_ARTIFACTS_ROOT", cfg.ArtifactsRoot)
 	cfg.ArtifactsStore = envOr("CDROM_ARTIFACTS_STORE", cfg.ArtifactsStore)
+	// Source-fetcher (F-21.2): the gRPC address the API dials, and the
+	// fetcher's own cache root and file root.
+	cfg.PipelineSourceAddress = envOr("CDROM_PIPELINE_SOURCE_ADDR", cfg.PipelineSourceAddress)
+	cfg.PipelineSourceRepoCacheDir = envOr("CDROM_PIPELINE_SOURCE_REPO_CACHE_DIR", cfg.PipelineSourceRepoCacheDir)
+	cfg.PipelineSourceFileRoot = envOr("CDROM_PIPELINE_SOURCE_FILE_ROOT", cfg.PipelineSourceFileRoot)
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.WorkerGroup = envOr("CDROM_WORKER_GROUP", cfg.WorkerGroup)
 	if v := os.Getenv("CDROM_WORKER_ENVIRONMENTS"); v != "" {

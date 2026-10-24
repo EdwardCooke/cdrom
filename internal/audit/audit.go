@@ -185,10 +185,15 @@ const (
 	ActionWorkerGroupCreate = "worker-group.create"
 	ActionWorkerGroupUpdate = "worker-group.update"
 	ActionWorkerGroupDelete = "worker-group.delete"
-	ActionLogin             = "auth.login"
-	ActionRegister          = "auth.register"
-	ActionWorkerRegister    = "worker.register"
-	ActionWorkerDeregister  = "worker.deregister"
+	// ActionSSHKnownHost* are the SSH known-host management actions
+	// (F-21.2.4.1): adding or removing a runtime-managed SSH host key the
+	// source-fetcher uses to verify a git-ssh server's host key.
+	ActionSSHKnownHostCreate = "ssh-known-host.create"
+	ActionSSHKnownHostDelete = "ssh-known-host.delete"
+	ActionLogin              = "auth.login"
+	ActionRegister           = "auth.register"
+	ActionWorkerRegister     = "worker.register"
+	ActionWorkerDeregister   = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
@@ -221,6 +226,9 @@ const (
 	// TargetWorkerGroup is the target kind of a worker group (F-29): a named
 	// group of long-lived workers that carries tags.
 	TargetWorkerGroup = "worker-group"
+	// TargetSSHKnownHost is the target kind of a runtime-managed SSH host key
+	// (F-21.2.4.1).
+	TargetSSHKnownHost = "ssh-known-host"
 )
 
 // Outcomes (F-15).

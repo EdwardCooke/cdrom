@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -542,6 +543,11 @@ type fakeDatabase struct {
 	versions            *dbpb.ListPipelineVersionsResponse
 	version             *dbpb.PipelineVersion
 	queue               *dbpb.QueueStatus
+	// SSH known hosts (F-21.2.4.1) canned responses for the /api/ssh-known-hosts
+	// handler tests.
+	sshKnownHosts       *dbpb.ListSSHKnownHostsResponse
+	createdSSHKnownHost *dbpb.SSHKnownHost
+	deletedSSHKnownHost int64
 }
 
 // GetQueueStatus returns the canned queue status (F-16) for the /api/queue
@@ -551,6 +557,35 @@ func (f *fakeDatabase) GetQueueStatus(ctx context.Context, in *dbpb.GetQueueStat
 		return f.queue, nil
 	}
 	return &dbpb.QueueStatus{}, nil
+}
+
+// ListSSHKnownHosts returns the canned SSH known hosts (F-21.2.4.1) for the
+// /api/ssh-known-hosts handler tests.
+func (f *fakeDatabase) ListSSHKnownHosts(ctx context.Context, in *dbpb.ListSSHKnownHostsRequest, opts ...grpc.CallOption) (*dbpb.ListSSHKnownHostsResponse, error) {
+	if f.sshKnownHosts != nil {
+		return f.sshKnownHosts, nil
+	}
+	return &dbpb.ListSSHKnownHostsResponse{}, nil
+}
+
+// CreateSSHKnownHost records the create request and returns a canned host
+// (F-21.2.4.1) for the /api/ssh-known-hosts handler tests.
+func (f *fakeDatabase) CreateSSHKnownHost(ctx context.Context, in *dbpb.CreateSSHKnownHostRequest, opts ...grpc.CallOption) (*dbpb.SSHKnownHost, error) {
+	f.createdSSHKnownHost = &dbpb.SSHKnownHost{
+		Id:          1,
+		HostPattern: in.GetHostPattern(),
+		KeyType:     in.GetKeyType(),
+		Key:         in.GetKey(),
+		Description: in.GetDescription(),
+	}
+	return f.createdSSHKnownHost, nil
+}
+
+// DeleteSSHKnownHost records the deleted id (F-21.2.4.1) for the
+// /api/ssh-known-hosts handler tests.
+func (f *fakeDatabase) DeleteSSHKnownHost(ctx context.Context, in *dbpb.DeleteSSHKnownHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	f.deletedSSHKnownHost = in.GetId()
+	return &emptypb.Empty{}, nil
 }
 
 func (f *fakeDatabase) CreatePipeline(ctx context.Context, in *dbpb.CreatePipelineRequest, opts ...grpc.CallOption) (*dbpb.Pipeline, error) {
