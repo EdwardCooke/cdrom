@@ -783,6 +783,10 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			// the instance so the API can resolve each to a concrete value at
 			// dispatch and hand the plaintext to the execution target.
 			Variables: jobDef.Variables,
+			// The job's every-key vault imports (F-21.4) are denormalized onto
+			// the instance (a snapshot, like the variables) so the API can
+			// expand each into one variable per vault key at dispatch.
+			VaultImports: jobDef.VaultImports,
 		}
 		if jobDef.Spec.Retry != nil {
 			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
@@ -4505,8 +4509,9 @@ func variablesToProto(vars []models.Variable) []*dbpb.Variable {
 // set (F-21.1.3).
 func variableSetFromProto(s *dbpb.VariableSet) models.VariableSet {
 	return models.VariableSet{
-		Name:      s.GetName(),
-		Variables: variablesFromProto(s.GetVariables()),
+		Name:         s.GetName(),
+		Variables:    variablesFromProto(s.GetVariables()),
+		VaultImports: vaultImportsFromProto(s.GetVaultImports()),
 	}
 }
 
@@ -4514,9 +4519,54 @@ func variableSetFromProto(s *dbpb.VariableSet) models.VariableSet {
 // (F-21.1.3).
 func variableSetToProto(s models.VariableSet) *dbpb.VariableSet {
 	return &dbpb.VariableSet{
-		Name:      s.Name,
-		Variables: variablesToProto(s.Variables),
+		Name:         s.Name,
+		Variables:    variablesToProto(s.Variables),
+		VaultImports: vaultImportsToProto(s.VaultImports),
 	}
+}
+
+// vaultImportFromProto converts a proto vault import into the model's vault
+// import (F-21.4).
+func vaultImportFromProto(v *dbpb.VaultImport) models.VaultImport {
+	return models.VaultImport{
+		Source: v.GetSource(),
+		Keys:   v.GetKeys(),
+	}
+}
+
+// vaultImportToProto converts the model's vault import into its proto form
+// (F-21.4).
+func vaultImportToProto(v models.VaultImport) *dbpb.VaultImport {
+	return &dbpb.VaultImport{
+		Source: v.Source,
+		Keys:   v.Keys,
+	}
+}
+
+// vaultImportsFromProto converts a list of proto vault imports into the
+// model's vault imports (F-21.4). An empty list yields nil.
+func vaultImportsFromProto(vs []*dbpb.VaultImport) []models.VaultImport {
+	if len(vs) == 0 {
+		return nil
+	}
+	out := make([]models.VaultImport, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, vaultImportFromProto(v))
+	}
+	return out
+}
+
+// vaultImportsToProto converts the model's vault imports into a list of proto
+// vault imports (F-21.4). An empty slice yields nil.
+func vaultImportsToProto(vs []models.VaultImport) []*dbpb.VaultImport {
+	if len(vs) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.VaultImport, 0, len(vs))
+	for i := range vs {
+		out = append(out, vaultImportToProto(vs[i]))
+	}
+	return out
 }
 
 // variableSetsFromProto converts a list of proto variable sets into the
@@ -4668,6 +4718,11 @@ func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
 			// references (merged at import time by the API). They are
 			// denormalized onto each job instance at run creation.
 			Variables: variablesFromProto(def.GetVariables()),
+			// The job's every-key vault imports (F-21.4): the union of the
+			// referenced sets' vault imports (collected at import time by the
+			// API). They are denormalized onto each job instance at run
+			// creation and expanded at dispatch.
+			VaultImports: vaultImportsFromProto(def.GetVaultImports()),
 		})
 	}
 	return jobs
@@ -4767,13 +4822,14 @@ func toProtoPipelineJobDefinitions(jobs []models.Job, keyMap map[uint]string) []
 	defs := make([]*dbpb.JobDefinition, 0, len(jobs))
 	for i := range jobs {
 		defs = append(defs, &dbpb.JobDefinition{
-			Id:          int64(jobs[i].ID),
-			Key:         jobs[i].Key,
-			Name:        jobs[i].Name,
-			TargetGroup: jobs[i].TargetGroup,
-			Spec:        specToProto(jobs[i].Spec),
-			Needs:       needsFromDependsOn(jobs[i].DependsOn, keyMap),
-			Variables:   variablesToProto(jobs[i].Variables),
+			Id:           int64(jobs[i].ID),
+			Key:          jobs[i].Key,
+			Name:         jobs[i].Name,
+			TargetGroup:  jobs[i].TargetGroup,
+			Spec:         specToProto(jobs[i].Spec),
+			Needs:        needsFromDependsOn(jobs[i].DependsOn, keyMap),
+			Variables:    variablesToProto(jobs[i].Variables),
+			VaultImports: vaultImportsToProto(jobs[i].VaultImports),
 		})
 	}
 	return defs
@@ -4829,13 +4885,14 @@ func jobDefinitionsToProto(snapshots []models.JobDefinitionSnapshot) []*dbpb.Job
 	out := make([]*dbpb.JobDefinition, 0, len(snapshots))
 	for i := range snapshots {
 		out = append(out, &dbpb.JobDefinition{
-			Key:         snapshots[i].Key,
-			Name:        snapshots[i].Name,
-			TargetGroup: snapshots[i].TargetGroup,
-			Needs:       snapshots[i].Needs,
-			Spec:        specToProto(snapshots[i].Spec),
-			Tags:        snapshots[i].Tags,
-			Variables:   variablesToProto(snapshots[i].Variables),
+			Key:          snapshots[i].Key,
+			Name:         snapshots[i].Name,
+			TargetGroup:  snapshots[i].TargetGroup,
+			Needs:        snapshots[i].Needs,
+			Spec:         specToProto(snapshots[i].Spec),
+			Tags:         snapshots[i].Tags,
+			Variables:    variablesToProto(snapshots[i].Variables),
+			VaultImports: vaultImportsToProto(snapshots[i].VaultImports),
 		})
 	}
 	return out
@@ -4852,13 +4909,14 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 	snapshots := make([]models.JobDefinitionSnapshot, 0, len(defs))
 	for i := range defs {
 		snapshots = append(snapshots, models.JobDefinitionSnapshot{
-			Key:         defs[i].Key,
-			Name:        defs[i].Name,
-			TargetGroup: defs[i].TargetGroup,
-			Needs:       needsFromDependsOn(defs[i].DependsOn, keyMap),
-			Spec:        defs[i].Spec,
-			Tags:        defs[i].Tags,
-			Variables:   defs[i].Variables,
+			Key:          defs[i].Key,
+			Name:         defs[i].Name,
+			TargetGroup:  defs[i].TargetGroup,
+			Needs:        needsFromDependsOn(defs[i].DependsOn, keyMap),
+			Spec:         defs[i].Spec,
+			Tags:         defs[i].Tags,
+			Variables:    defs[i].Variables,
+			VaultImports: defs[i].VaultImports,
 		})
 	}
 	return &models.PipelineVersion{
@@ -4976,6 +5034,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		Approval:            approvalPolicyToProto(job.Approval),
 		Tags:                job.Tags,
 		Variables:           variablesToProto(job.Variables),
+		VaultImports:        vaultImportsToProto(job.VaultImports),
 	}
 	if job.ConcurrencyAdmittedAt != nil {
 		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)

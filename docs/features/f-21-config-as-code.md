@@ -182,11 +182,11 @@ and source credentials out of the API and scheduler.
       name** (not an ordinal); the compiler stores each step's name on the
       `JobStep` (`name` field) and the executor's condition context is keyed by
       step name, so the stored spec and the file both use names (no rewrite).
-- [ ] A pipeline can pull in sets of variables, steps, or entire jobs from other
+- [x] A pipeline can pull in sets of variables, steps, or entire jobs from other
       files with explicit fields (`importFrom` on a step or job, `import` on a
       variable set); an imported unit is spliced in place and validated as if it
       were inline.
-- [ ] Steps can be reused across environments: shared steps under `spec.steps`
+- [x] Steps can be reused across environments: shared steps under `spec.steps`
       are referenced by a job with `ref`, and each environment is a distinct job
       (unique name) that reuses the shared steps and differs only by its
       variable sets and a few job-local steps.
@@ -202,21 +202,21 @@ and source credentials out of the API and scheduler.
       (their values are redacted in logs and hidden in the UI), and all
       variables — masked or not — are referenced the same way, as
       `{{ .params.<name> }}`.
-- [ ] A variable set can import a vault's values with `import: [{vault: <name>}]`
+- [x] A variable set can import a vault's values with `import: [{vault: <name>}]`
       (every key in the vault, as masked variables) or
       `import: [{vault: <name>, keys: [a, b, c]}]` (a subset of keys).
-- [ ] A job's `steps` is a name → spec map that can be pulled in from another
+- [x] A job's `steps` is a name → spec map that can be pulled in from another
       file with `importFrom`; any steps the job defines locally override the
       imported steps by name (the imported steps are the base, local steps win).
-- [ ] An empty step entry in a job's `steps` map (no fields) is shorthand for
+- [x] An empty step entry in a job's `steps` map (no fields) is shorthand for
       `ref: <same name>` — it implicitly references the shared step of the same
       name; a name with no matching shared step is a validation error.
-- [ ] A job can be pulled in from another file with `importFrom: <uri>`; any
+- [x] A job can be pulled in from another file with `importFrom: <uri>`; any
       fields set on the local job override the imported job's (like a step's
       `importFrom`).
 - [ ] A job names the environment it targets (`environment`, F-17) and the
       worker group it runs on (`workerGroup`, defaulting to `spec.workerGroup`).
-- [ ] Variable sets are either inline `variables` maps or `import` from
+- [x] Variable sets are either inline `variables` maps or `import` from
       external files or vaults; a job references sets by name in its
       `variableSets` list.
 - [x] Mapping keys in the file are camelCase (`concurrencyKeys`, `variableSets`,

@@ -98,6 +98,14 @@ type VariableSet struct {
 	// pipeline's own win on a name collision), so a set that declares its own
 	// sources is self-contained.
 	SecretSources map[string]*SecretSource
+	// VaultImports are the set's every-key vault imports (F-21.4): a set's
+	// `import: [{vault: <name>}]` entry (no keys) imports every value in the
+	// named secret source as masked variables. The vault's keys are not known
+	// at compile time, so the import is recorded here (a per-key import is
+	// materialized as concrete VariableSecretSource variables in Variables)
+	// and expanded at dispatch (the API fetches the vault and creates one
+	// variable per key). Empty means the set has no every-key vault imports.
+	VaultImports []VaultImport
 }
 
 // SecretSource is a named secret source (F-21.1.3 / F-12): a `kind` (a
@@ -240,11 +248,16 @@ func CompileVariableSets(file string, value Value) (map[string]*VariableSet, Err
 
 // compileVariableSet compiles a single variable set (a name → set-spec map
 // entry) into a VariableSet. A set is a mapping whose recognized keys are
-// `variables` (an inline variables map) and `secretSources` (the set's own
-// secret sources, shaped like the pipeline's spec.secretSources, F-21.4);
-// external-file / vault imports are F-21.4. A set with no `variables` key is
-// an empty set. A set that is not a mapping, or that carries an unrecognized
-// key, is a validation error.
+// `variables` (an inline variables map), `secretSources` (the set's own secret
+// sources, shaped like the pipeline's spec.secretSources, F-21.4), and
+// `import` (a list of external-file / vault imports, F-21.4). The `import`
+// list is resolved by the Resolver (which fetches the referenced files and
+// splices their variables in place, consuming the key); the every-key vault
+// imports ({vault: <name>} with no keys) are recorded on the set's
+// VaultImports (they are dynamic — the vault's keys are not known at compile
+// time — and are expanded at dispatch). A set with no `variables` key is an
+// empty set. A set that is not a mapping, or that carries an unrecognized key,
+// is a validation error.
 func compileVariableSet(file string, base Path, name string, value Value) (*VariableSet, Errors) {
 	if value.Type != Map {
 		return nil, Errors{Error{File: file, Key: base.String(),
@@ -266,8 +279,11 @@ func compileVariableSet(file string, base Path, name string, value Value) (*Vari
 				srcs[k] = src
 			}
 		default:
+			// `import` is resolved (consumed) by the compiler's import phase
+			// (F-21.4) before set compilation, so a set that reaches here with
+			// an import — or any other unrecognized key — is a validation error.
 			errs = append(errs, Error{File: file, Key: base.Extend(e.Key).String(),
-				Reason: fmt.Sprintf("a variable set has only variables and secretSources keys (external-file / vault imports are F-21.4); %q is not recognized", e.Key)})
+				Reason: fmt.Sprintf("a variable set has only variables and secretSources keys (its import list is resolved by the compiler's import phase, F-21.4); %q is not recognized", e.Key)})
 		}
 	}
 	if len(errs) > 0 {

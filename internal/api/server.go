@@ -30,6 +30,7 @@ import (
 	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/metrics"
 	"cdrom/internal/secrets"
+	"cdrom/internal/sourceref"
 )
 
 // Clients are the gRPC clients the API bridges to.
@@ -418,7 +419,13 @@ type pipelineRequest struct {
 // parses as a file-format document is run through the compiler (validate + map
 // to the schema); otherwise it is decoded as the JSON schema form. This is what
 // makes a YAML definition runnable via the API (F-21.1.4 import).
-func decodePipelineRequest(r *http.Request) (*pipelineRequest, error) {
+//
+// pipelineID identifies the pipeline being created or updated (0 for a create,
+// where no source is attached yet). When the pipeline has an attached source
+// (F-21.5.1), its reference is the root against which the file's relative
+// import locators are resolved (F-21.4); a freshly created pipeline has no
+// source, so only full references are resolvable in its file.
+func (s *Server) decodePipelineRequest(r *http.Request, pipelineID int64) (*pipelineRequest, error) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
@@ -430,9 +437,9 @@ func decodePipelineRequest(r *http.Request) (*pipelineRequest, error) {
 	// schema form has no such key). A body that is not valid YAML/JSON at all
 	// is reported as an invalid body.
 	if isPipelineFileFormat(body) {
-		req, variableSets, secretSources, err := pipelineFileToRequest("", body)
-		if err != nil {
-			return nil, err
+		req, variableSets, secretSources, cerr := s.compilePipelineFile(r.Context(), "", body, s.importRootReference(r.Context(), pipelineID))
+		if cerr != nil {
+			return nil, cerr
 		}
 		req.VariableSets = variableSets
 		req.SecretSources = secretSources
@@ -443,6 +450,25 @@ func decodePipelineRequest(r *http.Request) (*pipelineRequest, error) {
 		return nil, fmt.Errorf("invalid body: %w", err)
 	}
 	return &req, nil
+}
+
+// importRootReference returns the pipeline's source reference (parsed) as the
+// root for resolving the file's relative import locators (F-21.4). It is nil
+// when the pipeline has no attached source (freshly created) or the source
+// cannot be read, in which case only full references are resolvable.
+func (s *Server) importRootReference(ctx context.Context, pipelineID int64) *sourceref.Reference {
+	if pipelineID <= 0 || s.clients.Database == nil {
+		return nil
+	}
+	src, err := s.clients.Database.GetPipelineSource(ctx, &dbpb.GetPipelineSourceRequest{PipelineId: pipelineID})
+	if err != nil {
+		return nil
+	}
+	ref, err := sourceref.ParseReference(src.GetReference())
+	if err != nil {
+		return nil
+	}
+	return ref
 }
 
 // isPipelineFileFormat reports whether body is a definition in the file format
@@ -529,6 +555,13 @@ type pipelineJobRequest struct {
 	// a key collision). They are denormalized onto each job instance at run
 	// creation.
 	Variables []*dbpb.Variable `json:"variables,omitempty"`
+	// VaultImports are the job's every-key vault imports (F-21.4): the union of
+	// the referenced sets' vault imports. They are denormalized onto each job
+	// instance at run creation and expanded at dispatch (the API fetches each
+	// vault and creates one variable per key). Populated only by the
+	// file-format import path (decodePipelineRequest); a JSON body carries no
+	// vault imports.
+	VaultImports []*dbpb.VaultImport `json:"-"`
 	// Tags are the job's tags (F-29): a set of key/value pairs that label the
 	// job. They are combined with the tags of the run's other resources
 	// (pipeline, environment, worker group, worker) onto the run's job
@@ -540,7 +573,10 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesCreate, authz.Resource{}) {
 		return
 	}
-	req, err := decodePipelineRequest(r)
+	// A newly created pipeline has no attached source yet, so the file's
+	// relative import locators resolve against no root (only full references
+	// are usable until a source is attached, F-21.4 / F-21.5.1).
+	req, err := s.decodePipelineRequest(r, 0)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
@@ -592,7 +628,9 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesEdit, authz.Resource{PipelineID: pipelineID}) {
 		return
 	}
-	req, err := decodePipelineRequest(r)
+	// The pipeline's attached source (if any) is the root the file's relative
+	// import locators resolve against (F-21.4 / F-21.5.1).
+	req, err := s.decodePipelineRequest(r, pipelineID)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
@@ -774,16 +812,17 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 			targetGroup = job.WorkerGroup
 		}
 		defs = append(defs, &dbpb.JobDefinition{
-			Key:         job.Key,
-			Name:        job.Name,
-			TargetGroup: targetGroup,
-			Needs:       job.Needs,
-			Spec:        spec,
-			Tags:        job.Tags,
-			Environment: job.Environment,
-			Automation:  automationFromName(job.Automation),
-			Approval:    approvalPolicyFromName(job.Approval),
-			Variables:   job.Variables,
+			Key:          job.Key,
+			Name:         job.Name,
+			TargetGroup:  targetGroup,
+			Needs:        job.Needs,
+			Spec:         spec,
+			Tags:         job.Tags,
+			Environment:  job.Environment,
+			Automation:   automationFromName(job.Automation),
+			Approval:     approvalPolicyFromName(job.Approval),
+			Variables:    job.Variables,
+			VaultImports: job.VaultImports,
 		})
 	}
 	return defs, nil

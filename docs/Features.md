@@ -116,7 +116,7 @@ tool.
 | F-21.3.1 | SourceCredential model (a `name`, a `kind` of `git-ssh` / `git-https` / `http`, a `prefix`, a `description`, and the kind's secret material — F-12-encrypted when marked sensitive) + database storage | planned | [F-21.3.1](features/f-21.3.1-source-credential-model.md) |
 | F-21.3.2 | Credential matching & use (explicit `credential` name, else longest matching `prefix`; the API decrypts the chosen credential for a single fetch and hands the plaintext to the fetcher) | planned | [F-21.3.2](features/f-21.3.2-credential-matching.md) |
 | F-21.3.3 | Source-credential API (CRUD & redaction) (`GET/POST /api/source-credentials` + `GET/PUT/DELETE /api/source-credentials/{name}`, encrypt-on-write / redact-on-read, `source-credentials.can-view` / `can-manage`, `source_credential` WS event) | planned | [F-21.3.3](features/f-21.3.3-source-credential-api.md) |
-| F-21.4 | Reusable units & cross-file imports (`importFrom` / `import` / `ref`) | planned | [F-21.4](features/f-21.4-reusable-units-imports.md) |
+| F-21.4 | Reusable units & cross-file imports (`importFrom` / `import` / `ref`) | done | [F-21.4](features/f-21.4-reusable-units-imports.md) |
 | F-21.5 | Externally-sourced pipelines (overview + source-model reference; decomposed into F-21.5.1…F-21.5.3) | planned | [F-21.5](features/f-21.5-externally-sourced-pipelines.md) |
 | F-21.5.1 | Source model & storage (`PipelineSource`/`State`, stored YAML+hash, source CRUD, `GET …/source`) | planned | [F-21.5.1](features/f-21.5.1-source-model-storage.md) |
 | F-21.5.2 | The sync routine (fetch → hash → compare → recompile if changed; credential selection; serialization) | planned | [F-21.5.2](features/f-21.5.2-sync-routine.md) |
@@ -224,7 +224,7 @@ Tick each feature off as it lands.
 - [x] F-21.3.1 SourceCredential model
 - [x] F-21.3.2 Credential matching & use (selection + decrypt/hand-off + sync-failure surfacing via the minimal F-21.5.1/F-21.5.2 slice)
 - [x] F-21.3.3 Source-credential API (CRUD & redaction + the delete-rejection guard via the minimal F-21.5.1 slice)
-- [ ] F-21.4 Reusable units & cross-file imports
+- [x] F-21.4 Reusable units & cross-file imports
 - [ ] F-21.5 Externally-sourced pipelines (overview; see F-21.5.1…F-21.5.3)
 - [ ] F-21.5.1 Source model & storage
 - [ ] F-21.5.2 The sync routine

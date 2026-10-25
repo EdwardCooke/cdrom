@@ -123,6 +123,26 @@ type VariableSet struct {
 	Name string `json:"name"`
 	// Variables are the set's variables, in file order.
 	Variables []Variable `json:"variables,omitempty"`
+	// VaultImports are the set's every-key vault imports (F-21.4): a set's
+	// `import: [{vault: <name>}]` entry (no keys) imports every value in the
+	// named secret source as masked variables. The vault's keys are not known
+	// at compile time, so the import is recorded here (a per-key import is
+	// materialized as concrete VariableSecretSource variables in Variables)
+	// and expanded at dispatch (the API fetches the vault and creates one
+	// variable per key). Empty means the set has no every-key vault imports.
+	VaultImports []VaultImport `json:"vault_imports,omitempty"`
+}
+
+// VaultImport is a variable set's vault import (F-21.4): a reference to a named
+// secret source (vault) whose values are imported as masked variables. A
+// per-key import (Keys set) is materialized at compile time as concrete
+// VariableSecretSource variables (one per key); an every-key import (Keys
+// empty) is dynamic and is recorded here, to be expanded at dispatch.
+type VaultImport struct {
+	// Source is the name of the secret source (vault) to import.
+	Source string `json:"source"`
+	// Keys are the specific keys to import; empty means every key in the vault.
+	Keys []string `json:"keys,omitempty"`
 }
 
 // SecretSource is a named secret source (F-21.1.3 / F-12): a Kind (a
@@ -401,6 +421,13 @@ type JobDefinitionSnapshot struct {
 	// referenced sets' variables) and denormalized onto each job instance at
 	// run creation (Job.Variables). Empty means the job has no variables.
 	Variables []Variable `json:"variables,omitempty"`
+	// VaultImports are the job's every-key vault imports (F-21.4): the union of
+	// the every-key vault imports of the variable sets the job references. They
+	// are computed at import time (the API collects the referenced sets'
+	// VaultImports) and denormalized onto each job instance at run creation
+	// (Job.VaultImports). At dispatch the API expands each into one variable
+	// per vault key. Empty means the job has no every-key vault imports.
+	VaultImports []VaultImport `json:"vault_imports,omitempty"`
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -987,6 +1014,13 @@ type Job struct {
 	// SQLite and PostgreSQL), like RunParams. Empty means the job has no
 	// variables.
 	Variables []Variable `gorm:"type:text;serializer:json" json:"variables,omitempty"`
+	// VaultImports are the job's every-key vault imports (F-21.4): the union of
+	// the every-key vault imports of the variable sets the job references. They
+	// are denormalized onto the job instance at run creation (a snapshot, like
+	// Variables) and expanded at dispatch (the API fetches each vault and
+	// creates one variable per key). Empty means the job has no every-key vault
+	// imports.
+	VaultImports []VaultImport `gorm:"type:text;serializer:json" json:"vault_imports,omitempty"`
 	// ApprovalMessage is the (rendered) message an approval gate (F-13) shows
 	// to the user while the job is awaiting approval. It is set by the
 	// execution target when it reports the job awaiting_approval and is

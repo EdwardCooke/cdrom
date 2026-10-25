@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1977,7 +1978,19 @@ func (s *GRPCServer) resolveSecretSourceValue(ctx context.Context, dbJob *dbpb.J
 			s.logger.Warn("api: resolve secret source for variable", "job", dbJob.GetId(), "variable", v.GetName(), "source", source.GetName(), "err", err)
 			return "", false
 		}
-		return decrypted, true
+		// Vault (F-21.4): the path decrypts to a JSON object of key -> value;
+		// the variable's key selects the value within it.
+		obj, objErr := aesVaultObject(decrypted)
+		if objErr != nil {
+			s.logger.Warn("api: vault source path is not a JSON object", "job", dbJob.GetId(), "source", source.GetName(), "err", objErr)
+			return "", false
+		}
+		val, ok := obj[v.GetKey()]
+		if !ok {
+			s.logger.Warn("api: vault key not found", "job", dbJob.GetId(), "source", source.GetName(), "key", v.GetKey())
+			return "", false
+		}
+		return val, true
 	case secrets.StoreKindVault, secrets.StoreKindOpenBao:
 		s.logger.Warn("api: secret source kind not implemented", "job", dbJob.GetId(), "variable", v.GetName(), "source", source.GetName(), "kind", kind)
 		return "", false
@@ -1987,31 +2000,140 @@ func (s *GRPCServer) resolveSecretSourceValue(ctx context.Context, dbJob *dbpb.J
 	}
 }
 
-// resolveVariables resolves the job's effective variables (F-21.1.3) into the
-// run's parameters so a step's spec can reference them as `{{ .params.name }}`.
-// Each variable is resolved to its concrete value (plain as-is, encrypted
+// needSources reports whether the job's effective variables (its stored
+// variables plus its vault imports, F-21.4) include anything that needs the
+// pipeline's named secret sources to resolve: a sourced variable, or a vault
+// import (an every-key vault import is expanded into sourced variables at
+// dispatch). A job with none of these does not need the sources fetched.
+func needSources(dbJob *dbpb.Job) bool {
+	for _, v := range dbJob.GetVariables() {
+		if v.GetShape() == dbpb.VariableShape_VARIABLE_SECRET_SOURCE {
+			return true
+		}
+	}
+	return len(dbJob.GetVaultImports()) > 0
+}
+
+// collectEffectiveVariables gathers the job's effective variables (F-21.1.3 /
+// F-21.4): its stored variables plus the variables its every-key vault imports
+// expand into (one VARIABLE_SECRET_SOURCE variable per vault key). It returns
+// the gathered variables and the pipeline's named secret sources (needed to
+// resolve the sourced ones; nil when the job needs none).
+func (s *GRPCServer) collectEffectiveVariables(ctx context.Context, dbJob *dbpb.Job) ([]*dbpb.Variable, map[string]*dbpb.SecretSource) {
+	variables := dbJob.GetVariables()
+	var sources map[string]*dbpb.SecretSource
+	if needSources(dbJob) {
+		sources = s.pipelineSecretSources(ctx, dbJob.GetPipelineId())
+	}
+	for _, imp := range dbJob.GetVaultImports() {
+		variables = append(variables, s.expandVaultImport(ctx, dbJob, imp, sources)...)
+	}
+	return variables, sources
+}
+
+// expandVaultImport expands an every-key vault import (F-21.4) into one
+// VARIABLE_SECRET_SOURCE variable per key in the named secret source (the
+// vault's values, as masked variables). The source's kind selects the backend:
+// the built-in AES store (the default) decrypts the source's path as a JSON
+// object of key -> value and emits one variable per key; an external store
+// (Vault / OpenBao) is not yet implemented and yields no variables (logged).
+// A missing or unreadable source yields no variables (logged), so the import
+// is simply absent from the run params rather than failing the dispatch.
+func (s *GRPCServer) expandVaultImport(ctx context.Context, dbJob *dbpb.Job, imp *dbpb.VaultImport, sources map[string]*dbpb.SecretSource) []*dbpb.Variable {
+	source, ok := sources[imp.GetSource()]
+	if !ok {
+		s.logger.Warn("api: unknown vault for import", "job", dbJob.GetId(), "vault", imp.GetSource())
+		return nil
+	}
+	kind := source.GetKind()
+	if kind == "" {
+		kind = string(secrets.StoreKindAES)
+	}
+	switch secrets.StoreKind(kind) {
+	case secrets.StoreKindAES, "":
+		if s.secretStore == nil {
+			return nil
+		}
+		// The AES-kind vault stores its values as a JSON object (key -> value)
+		// in the source's path (ciphertext). Enumerate the keys and emit one
+		// variable per key; each resolves through resolveSecretSourceValue.
+		decrypted, err := s.secretStore.Decrypt(ctx, source.GetPath())
+		if err != nil {
+			s.logger.Warn("api: decrypt vault for import", "job", dbJob.GetId(), "vault", imp.GetSource(), "err", err)
+			return nil
+		}
+		obj, objErr := aesVaultObject(decrypted)
+		if objErr != nil {
+			s.logger.Warn("api: vault source path is not a JSON object", "job", dbJob.GetId(), "vault", imp.GetSource(), "err", objErr)
+			return nil
+		}
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		out := make([]*dbpb.Variable, 0, len(keys))
+		for _, key := range keys {
+			out = append(out, &dbpb.Variable{
+				Name:         key,
+				Shape:        dbpb.VariableShape_VARIABLE_SECRET_SOURCE,
+				SecretSource: imp.GetSource(),
+				Key:          key,
+			})
+		}
+		return out
+	case secrets.StoreKindVault, secrets.StoreKindOpenBao:
+		s.logger.Warn("api: vault import kind not implemented", "job", dbJob.GetId(), "vault", imp.GetSource(), "kind", kind)
+		return nil
+	default:
+		s.logger.Warn("api: unknown vault import kind", "job", dbJob.GetId(), "vault", imp.GetSource(), "kind", kind)
+		return nil
+	}
+}
+
+// aesVaultObject parses a decrypted AES-vault source path as a JSON object of
+// key -> value (F-21.4). It is how an every-key vault import enumerates the
+// vault's keys and how a per-key sourced variable selects its value. A legacy
+// path that decrypts to a plain (non-object) value is an error here (it is
+// handled separately by resolveSecretSourceValue's no-key branch).
+func aesVaultObject(raw string) (map[string]string, error) {
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return nil, fmt.Errorf("expected a JSON object of key -> value: %w", err)
+	}
+	out := make(map[string]string, len(obj))
+	for k, v := range obj {
+		switch sv := v.(type) {
+		case string:
+			out[k] = sv
+		case float64:
+			out[k] = strconv.FormatFloat(sv, 'f', -1, 64)
+		case bool:
+			out[k] = strconv.FormatBool(sv)
+		default:
+			b, _ := json.Marshal(v)
+			out[k] = string(b)
+		}
+	}
+	return out, nil
+}
+
+// resolveVariables resolves the job's effective variables (F-21.1.3 / F-21.4)
+// into the run's parameters so a step's spec can reference them as
+// `{{ .params.name }}`. The effective variables are the job's stored variables
+// plus the variables its every-key vault imports expand into (one per vault
+// key). Each variable is resolved to its concrete value (plain as-is, encrypted
 // decrypted, sourced through the pipeline's named secret source) and merged
 // into the job's run params (a variable's value wins over a run parameter of
 // the same name, since a variable is a more specific value for this job). The
-// function returns the plaintexts of the masked variables (encrypted or
-// sourced) so the caller can redact them from the job's logs. A job with no
-// variables is left unchanged.
+// function returns the plaintexts of the masked variables (encrypted, sourced,
+// or vault-derived) so the caller can redact them from the job's logs. A job
+// with no variables is left unchanged.
 func (s *GRPCServer) resolveVariables(ctx context.Context, apiJob *apipb.Job, dbJob *dbpb.Job) []string {
-	variables := dbJob.GetVariables()
+	variables, sources := s.collectEffectiveVariables(ctx, dbJob)
 	if len(variables) == 0 {
 		return nil
 	}
-	// The pipeline's named secret sources, needed to resolve a sourced
-	// variable. Fetched once, best-effort (a job with no sourced variables
-	// does not need it).
-	var sources map[string]*dbpb.SecretSource
-	for _, v := range variables {
-		if v.GetShape() == dbpb.VariableShape_VARIABLE_SECRET_SOURCE {
-			sources = s.pipelineSecretSources(ctx, dbJob.GetPipelineId())
-			break
-		}
-	}
-
 	params := apiJob.GetRunParams()
 	merged := make(map[string]string, len(params)+len(variables))
 	for k, v := range params {
@@ -2040,22 +2162,16 @@ func (s *GRPCServer) resolveVariables(ctx context.Context, apiJob *apipb.Job, db
 	return masked
 }
 
-// maskedVariableValues resolves the job's masked variables (F-21.1.3) to their
-// plaintexts, for log redaction. It mirrors resolveVariables' resolution but
-// returns only the masked plaintexts (the values to redact from the job's
-// logs). A job with no variables, or no masked variables that resolve, yields
-// nil.
+// maskedVariableValues resolves the job's masked variables (F-21.1.3 / F-21.4)
+// to their plaintexts, for log redaction. It considers the job's effective
+// variables (its stored variables plus the variables its vault imports expand
+// into) and returns only the masked plaintexts (the values to redact from the
+// job's logs). A job with no variables, or no masked variables that resolve,
+// yields nil.
 func (s *GRPCServer) maskedVariableValues(ctx context.Context, dbJob *dbpb.Job) []string {
-	variables := dbJob.GetVariables()
+	variables, sources := s.collectEffectiveVariables(ctx, dbJob)
 	if len(variables) == 0 {
 		return nil
-	}
-	var sources map[string]*dbpb.SecretSource
-	for _, v := range variables {
-		if v.GetShape() == dbpb.VariableShape_VARIABLE_SECRET_SOURCE {
-			sources = s.pipelineSecretSources(ctx, dbJob.GetPipelineId())
-			break
-		}
 	}
 	var masked []string
 	for _, v := range variables {

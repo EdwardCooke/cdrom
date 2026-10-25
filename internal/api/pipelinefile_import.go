@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/pipelinefile"
+	"cdrom/internal/sourceref"
 )
 
 // pipelineFileToRequest runs a pipeline definition in the file format (F-21.1)
@@ -16,14 +18,49 @@ import (
 // step indices, job names to job keys, and named variables/sources to their
 // stored forms.
 //
+// This entry point resolves no imports (it has no source-fetcher): a document
+// that carries an importFrom / import fails with a clear error telling the
+// reader to submit it through the API (which wires the fetcher). Handlers use
+// (*Server).compilePipelineFile instead.
+//
 // Only Pipeline documents are importable (a VariableSet / Step / Job document
 // is a reusable unit pulled in by import, F-21.4, not a standalone pipeline).
 // A non-Pipeline document, or a document that fails validation, is an error
 // (the compiler's actionable errors, joined).
 func pipelineFileToRequest(name string, data []byte) (*pipelineRequest, []*dbpb.VariableSet, []*dbpb.SecretSource, error) {
-	doc, err := pipelinefile.Parse(name, data)
-	if err != nil {
-		return nil, nil, nil, err
+	// No server (no fetcher, no source): imports cannot be resolved. A
+	// document with no imports compiles fine; one with an import fails with a
+	// clear error.
+	return (&Server{}).compilePipelineFile(context.Background(), name, data, nil)
+}
+
+// compilePipelineFile runs a pipeline definition in the file format through
+// the compiler, first resolving its imports (F-21.4) with the given root
+// reference (the main file's source, for resolving relative locators; nil =
+// only full references) and the server's fetcher (nil when the source-fetcher
+// is not configured, in which case a document with an import fails with a
+// clear error), and then mapping the flattened document onto the schema the
+// API hands to the database service. The every-key vault imports collected by
+// the resolver (by set name) are applied onto the compiled variable sets so
+// the jobs that reference them carry them (expanded at dispatch).
+func (s *Server) compilePipelineFile(ctx context.Context, name string, data []byte, root *sourceref.Reference) (*pipelineRequest, []*dbpb.VariableSet, []*dbpb.SecretSource, error) {
+	return requestFromFile(ctx, name, data, root, s.pipelineFileFetcher())
+}
+
+// requestFromFile is the import orchestration (F-21.1 / F-21.4): it resolves
+// the document's imports with the given root reference (the main file's source,
+// for resolving relative locators; nil = only full references) and fetcher
+// (nil = imports cannot be resolved), then maps the flattened document onto the
+// schema the API hands to the database service. Factored out of
+// compilePipelineFile so tests can inject a fake fetcher. The every-key vault
+// imports collected by the resolver (by set name) are applied onto the
+// compiled variable sets so the jobs that reference them carry them (expanded
+// at dispatch).
+func requestFromFile(ctx context.Context, name string, data []byte, root *sourceref.Reference, fetch pipelinefile.Fetcher) (*pipelineRequest, []*dbpb.VariableSet, []*dbpb.SecretSource, error) {
+	resolver := pipelinefile.NewResolver(ctx, fetch, root)
+	doc, vaultImportsBySet, rErrs := resolver.ResolveMain(name, data)
+	if len(rErrs) > 0 {
+		return nil, nil, nil, rErrs
 	}
 	if doc.Kind != pipelinefile.KindPipeline {
 		return nil, nil, nil, fmt.Errorf("a %s document is a reusable unit (pulled in by import, F-21.4), not a pipeline; import a Pipeline document", doc.Kind)
@@ -60,6 +97,17 @@ func pipelineFileToRequest(name string, data []byte) (*pipelineRequest, []*dbpb.
 		for name, src := range set.SecretSources {
 			if _, ok := secretSources[name]; !ok {
 				secretSources[name] = src
+			}
+		}
+	}
+	// Apply the resolver-collected every-key vault imports (F-21.4) onto the
+	// compiled sets (bubble-ups from imported VariableSet files arrive here
+	// keyed by the importing set's name), so the jobs that reference the sets
+	// carry them (expanded at dispatch).
+	for name, vis := range vaultImportsBySet {
+		if set, ok := variableSets[name]; ok {
+			for _, vi := range vis {
+				set.VaultImports = append(set.VaultImports, vi)
 			}
 		}
 	}
@@ -204,6 +252,23 @@ func pipelineFileJob(file, name string, value pipelinefile.Value, shared map[str
 	errs = append(errs, pipelinefile.ValidateSecretSourceRefs(file, base.Extend("variables"), merged, secretSources)...)
 	job.Variables = variablesToProto(merged)
 
+	// The job's every-key vault imports (F-21.4): the union of the referenced
+	// sets' vault imports (deduplicated by source). Each must name a declared
+	// secret source (the merged namespace, which includes the sets' own
+	// sources), so a typo in a vault name is caught at import time.
+	var jobVaultImports []pipelinefile.VaultImport
+	for _, set := range resolvedSets {
+		jobVaultImports = append(jobVaultImports, set.VaultImports...)
+	}
+	jobVaultImports = dedupeVaultImports(jobVaultImports)
+	for _, vi := range jobVaultImports {
+		if _, ok := secretSources[vi.Source]; !ok {
+			errs = append(errs, pipelinefile.Error{File: file, Key: base.Extend("variableSets").String(),
+				Reason: fmt.Sprintf("vault import references secret source %q, which is not declared (neither by the pipeline nor by the variable set that imports it)", vi.Source)})
+		}
+	}
+	job.VaultImports = vaultImportsToProto(jobVaultImports)
+
 	if len(errs) > 0 {
 		return pipelineJobRequest{}, errs
 	}
@@ -343,9 +408,67 @@ func variableSetsToProto(sets map[string]*pipelinefile.VariableSet) []*dbpb.Vari
 	out := make([]*dbpb.VariableSet, 0, len(sets))
 	for _, s := range sets {
 		out = append(out, &dbpb.VariableSet{
-			Name:      s.Name,
-			Variables: variablesToProto(s.Variables),
+			Name:         s.Name,
+			Variables:    variablesToProto(s.Variables),
+			VaultImports: vaultImportsToProto(s.VaultImports),
 		})
+	}
+	return out
+}
+
+// vaultImportsToProto converts the compiler's vault imports (F-21.4) into the
+// proto VaultImport list carried to the database service. An empty slice yields
+// nil.
+func vaultImportsToProto(vs []pipelinefile.VaultImport) []*dbpb.VaultImport {
+	if len(vs) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.VaultImport, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, &dbpb.VaultImport{Source: v.Source, Keys: v.Keys})
+	}
+	return out
+}
+
+// dedupeVaultImports collapses a job's every-key vault imports (the union of
+// the referenced sets' imports) into a unique, order-stable list, merging the
+// keys of imports that share a source. Two sets that both import the same
+// vault contribute one import (the union of their keys; an every-key import
+// swallows a per-key one for the same source).
+func dedupeVaultImports(in []pipelinefile.VaultImport) []pipelinefile.VaultImport {
+	type acc struct {
+		source string
+		keys   map[string]bool
+		all    bool
+		order  []string
+	}
+	index := make(map[string]*acc)
+	var seq []*acc
+	for _, v := range in {
+		a, ok := index[v.Source]
+		if !ok {
+			a = &acc{source: v.Source, keys: make(map[string]bool)}
+			index[v.Source] = a
+			seq = append(seq, a)
+		}
+		if len(v.Keys) == 0 {
+			a.all = true
+			continue
+		}
+		for _, k := range v.Keys {
+			if !a.keys[k] {
+				a.order = append(a.order, k)
+				a.keys[k] = true
+			}
+		}
+	}
+	out := make([]pipelinefile.VaultImport, 0, len(seq))
+	for _, a := range seq {
+		vi := pipelinefile.VaultImport{Source: a.source}
+		if !a.all {
+			vi.Keys = a.order
+		}
+		out = append(out, vi)
 	}
 	return out
 }
