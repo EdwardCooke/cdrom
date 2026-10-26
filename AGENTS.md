@@ -2,14 +2,13 @@
 
 > **Living document.** Keep this file up to date as the project evolves; when an
 > architectural decision changes, update the relevant section so every agent
-> (human or AI) starts from the same shared context.
->
-> **Deep detail lives in `docs/`:** `docs/Architecture.md` (system design),
-> `docs/features/` (one file per feature, F-01…F-29, each with acceptance
-> criteria), `docs/Features.md` (the summary index: baseline, per-phase feature
-> list, build order, checklist), and `docs/HighAvailability.md` (the F-23
-> control plane). This file is the concise orientation + conventions; consult
-> the docs for the full spec of any feature.
+> (human or AI) starts from the same shared context. Deep detail lives in
+> `docs/`: `docs/Architecture.md` (system design + configuration reference),
+> `docs/Features.md` (feature index, build order, checklist),
+> `docs/features/` (one spec per feature, F-01…F-29, with acceptance
+> criteria), `docs/HighAvailability.md` (the F-23 control plane), and
+> `docs/Monitoring.md` (metric scrape targets). This file is the concise
+> orientation + conventions; consult the docs for the full spec of any feature.
 
 ## Project Overview
 
@@ -19,628 +18,406 @@ execution targets. Everything except the React frontend is Go.
 
 ## Architecture
 
-N-tier architecture, top to bottom:
+Four layers, top to bottom: **UI** (React) → **API/control plane** (Go, one or
+more replicas) → **services** (standalone gRPC servers) → **execution targets**
+(workers/agents). Details, diagrams, and the RPC inventory are in
+`docs/Architecture.md`.
 
-1. **UI layer** — React (the only non-Go component).
-2. **API / controller layer** — Go. The **control plane** (one or more
-   replicas, F-23). Exposes the HTTP API to the UI *and* a gRPC API to execution
-   targets (workers, agents). Holds workers' `WatchJobs` streams, tails the
-   shared event log (F-23) to fan job assignments / cancellations / status out
-   to local workers and UI clients, and proxies artifact traffic. No business
-   logic lives here.
-3. **Service layer** — standalone Go services, one per concern, each a gRPC
-   server (protos in `proto/`, generated code in `internal/gen/`):
-   - **Database** (`cmd/db`) — owns the storage backend (SQLite/PostgreSQL); the
-     only component that touches it. Everyone else reads/writes through its gRPC API.
-   - **Scheduler** (`cmd/scheduler`) — job lifecycle + dispatch. Talks **only**
-     to the Database service (F-23): it appends "assignment" events to the shared
-     event log that every API pod tails and fans out to live workers. Runs the
-     background loops below on exactly one replica via **leader election** (a
-     portable lease on the Database service): watchdog (F-03), retry (F-04),
-     dependency resolver (F-06/F-08), run-status (F-07), job-status (fan-out),
-     and cron + event triggers (F-09). Also `CreateRun` (F-07) and `TriggerRun` (F-09).
-   - **Artifacts** (`cmd/artifacts`) — a general-purpose **namespaced file store**
-     (filesystem-backed, streamed). A job's artifacts/logs use the job id as the
-     namespace; it also stores streamed job logs. The store is an interface
-     (`internal/services/artifacts/store.go`); the kind is configurable
-     (`CDROM_ARTIFACTS_STORE`, default `filesystem`) so S3 / Azure Blob can be added later.
-   - **IdP** (`cmd/idp`) — a local OIDC identity provider / JWT issuer. It serves
-     the standard OIDC surface over **HTTP** (discovery, JWKS, `/auth`, the
-     `authorization_code` token grant — a browser-based protocol that cannot be
-     gRPC) and its **API-only** surface over **gRPC** (job-token minting and user
-     management), which the API dials over mTLS so only the API can reach it.
-     It auto-rotates its RSA key. Its state (keys + auth codes + users) lives in
-     the Database service.
-4. **Execution layer** — where jobs actually run (see Execution Model).
+- **API / control plane** (`cmd/api`) — the only component execution targets
+  talk to. Serves the HTTP API to the UI (:8080, incl. `/api/ws` live events)
+  and a gRPC API to workers/agents/the scheduler (:7105). Holds workers'
+  `WatchJobs` streams, tails the shared event log (F-23) to fan assignments /
+  cancellations / status out to local workers and UI clients, proxies artifact
+  traffic, and is the only component that can decrypt secrets (F-12). No
+  business logic lives here.
+- **Services** (one gRPC server each; protos in `proto/`, generated code in
+  `internal/gen/`):
+  - **Database** (`cmd/db`, :7101) — owns the storage backend (SQLite/PostgreSQL);
+    the only component that touches it. Everyone else reads/writes through its
+    gRPC API.
+  - **Scheduler** (`cmd/scheduler`, :7102) — job lifecycle + dispatch. Talks
+    **only** to the Database service: it appends "assignment" events to the
+    shared event log that every API pod tails and fans out to live workers
+    (hybrid push+pull, F-23). Background loops (watchdog F-03, retry F-04,
+    dependency resolver F-06/F-08, run-status F-07, job-status fan-out,
+    cron + event triggers F-09, concurrency admission F-16) run on exactly one
+    replica via **leader election** (a portable lease on the Database service).
+    Also `CreateRun` (F-07) and `TriggerRun` (F-09).
+  - **Artifacts** (`cmd/artifacts`, :7103) — a general-purpose **namespaced
+    file store** (filesystem-backed, streamed; job id is the namespace for a
+    job's artifacts/logs). Store kind is configurable
+    (`CDROM_ARTIFACTS_STORE`, default `filesystem`) so S3/Azure Blob can be
+    added later.
+  - **IdP** (`cmd/idp`, HTTP :7104 + gRPC :7106) — local OIDC identity
+    provider / JWT issuer. Standard OIDC surface over HTTP (browser protocol,
+    cannot be gRPC); API-only surface over gRPC (job-token minting, user/API-key/
+    service-account management), dialed by the API over mTLS so only the API
+    can reach it. State (keys, auth codes, users) lives in the Database service.
+  - **Pipeline Source** (`cmd/pipelinesource`, :7107) — the source-fetcher
+    service (F-21.2): fetches pipeline-definition files from `git`/`http`/`file`
+    references, keeps a shallow bare-object-store git cache (go-git, no external
+    `git` binary), pins SSH host keys, and serves fetched bytes to the API.
+- **Execution layer** — long-lived **workers** (resident, targetable by group
+  and environment; hold a `WatchJobs` stream *and* poll as the authoritative
+  delivery path, F-23) and ephemeral **agents** (spun up in Kubernetes for a
+  one-off job; `GetJob` → run → report). Both run on Windows and Linux.
 
-**Topology rule:** execution targets (workers, agents) talk **only** to the API.
-The API talks to everything else (database, scheduler, artifacts). The scheduler
-talks **only** to the Database service — job delivery to workers flows through
-the shared event log that every API pod tails. There is no central logs service;
-every process logs locally (see Logging).
+**Topology rule:** execution targets talk **only** to the API. The API talks
+to everything else. The scheduler talks **only** to the Database service — job
+delivery flows through the shared event log. There is no central logs service;
+every process logs locally.
 
-### gRPC Conventions
+### gRPC conventions
 
-- All inter-component communication is gRPC. With a TLS CA configured
-  (`TLSConfig` in `internal/config`) every connection uses **mutual TLS**;
-  without a CA it falls back to plaintext (local dev).
-- mTLS creds are built in `internal/grpcutil` (`ServerCreds` / `ClientCreds`).
-- Protos in `proto/cdrom/<service>/v1/`; generated code is committed under
-  `internal/gen/` (regenerate with `make proto`).
-- Service impls live in `internal/services/<service>/server.go` and implement
-  the generated `*Server` interface (embedding `Unimplemented*Server`).
-- Addresses + TLS paths come from config / env vars (see `internal/config`);
-  defaults target localhost.
+- Inter-component comms are gRPC. With a TLS CA configured every connection
+  uses **mutual TLS** (creds in `internal/grpcutil`); without one it falls back
+  to plaintext (local dev).
+- Protos in `proto/cdrom/<service>/v1/`; generated code committed under
+  `internal/gen/` (**regenerate with `make proto`** after editing any `.proto`).
+- Service impls live in `internal/services/<service>/server.go` implementing
+  the generated `*Server` interface (embed `Unimplemented*Server`).
 
-### Execution Model
+### Execution model
 
-Two execution targets, both talking **only** to the API:
+A job carries a declarative `JobSpec`: an ordered list of steps. Each step's
+`type` selects a handler (empty → `executor.DefaultType`); handler-specific
+settings live in `params` (scalar-string or string-list values), so a new step
+type needs no schema change. The spec is a **per-run snapshot** on the `Job`
+row (GORM `serializer:json`), so editing a pipeline never changes what a past
+run did. Both targets run the spec through the shared `internal/executor`
+(steps in order; fail on the first errored step; no spec = no-op success).
 
-- **Long-lived workers** — resident processes, targetable **by group**. A worker
-  registers with the API and holds a `WatchJobs` stream open; the API pushes
-  `JobAssignment`s down it.
-- **Ephemeral agents** — short-lived processes spun up in Kubernetes for a
-  one-off job; they fetch the job from the API and report status back.
+Built-in handlers (`internal/stephandlers`): **`shell`** (default),
+**`token_exchange`**, **`approval`** (F-13), **`email`** and **`webhook`**
+(F-18 — the target renders the fields and calls the API's `SendEmail`/
+`SendWebhook` RPCs; the API does the actual send). New types register via
+`executor.RegisterStepType(name, handler)`; worker and agent blank-import
+`internal/stephandlers` so built-ins register first — the future plugin seam.
 
-**Job spec.** A job carries a declarative `JobSpec`: an ordered list of steps.
-Each step is agnostic about how it runs — a `type` field selects a step handler,
-and the handler reads everything it needs from the common fields (`workdir`,
-`env`, `timeout`) plus `params` (a name→value map; a value is a scalar string or
-a list of strings). Handler-specific settings live in `params`, so a new step
-type needs no schema change. The spec is a **per-run snapshot** stored on the
-`Job` row (JSON via GORM `serializer:json`), so editing a pipeline never changes
-what a past run did. Canonical type: `cdrom.db.v1.JobSpec`.
+**Shell contract** (`shell` handler reads `command`, `args`, `shell` from
+`params`):
 
-Both targets run the spec through the shared `internal/executor`
-(`executor.Execute(ctx, spec, logger)`): steps run in order, the job fails on the
-first step that errors, and a job with no spec is a no-op that succeeds.
+- No `shell` param and no `args` → `command` is a one-line shell command run
+  through the target OS's **default shell** (`bash -c` on Linux when bash is on
+  the PATH, else `sh -c`; `pwsh -Command` on Windows when PowerShell Core is on
+  the PATH, else `powershell -Command`). This backs the file format's
+  `shell: <string>` shorthand (F-21.1.2).
+- `args` set (invocation constructed explicitly) → the command runs **directly,
+  no implicit shell** (no `&&`, pipes, globs, `$VAR` expansion) — the portable
+  case.
+- `shell` set → the target runs `<shell> <args> <command>` (opt into a
+  specific shell, e.g. `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`).
 
-**Step handlers.** The executor is a generic dispatch engine: it selects an
-`executor.StepHandler` by the step's `type` (empty → `executor.DefaultType`) and
-runs it. Built-in handlers live in `internal/stephandlers`: **`shell`**
-(registered under `executor.DefaultType`), **`token_exchange`**, and
-**`approval`** (F-13). A target or plugin adds new types with
-`executor.RegisterStepType(name, handler)` (e.g. `ansible`, `terraform`). A step
-whose type is unregistered fails the job with a clear error. Worker and agent
-blank-import `internal/stephandlers` so built-ins register before any job runs —
-this is the seam for the later plugin architecture.
+Never rely on shell features in a step's `command`/`args` unless the step is
+meant to run through a shell. Step stdout/stderr go to the target's local logs
+and, when a log sink is set, stream to the API in near-real-time (F-02,
+`internal/logstream`); the API persists them to the artifacts service and fans
+them out to the UI as `job_log` events.
 
-**Shell contract.** The `shell` handler reads `command` (string), `args` (list),
-and `shell` (string) from `params`. When a step sets **no `shell` param and no
-`args`**, its `command` is a one-line shell command and is run through the
-target OS's **default shell** (`bash -c …` on Linux when bash is on the PATH,
-else `sh -c …`, and on Windows `pwsh -Command …` when PowerShell Core is on the
-PATH, else `powershell -Command …`) — this is what makes the file format's
-`shell: <string>` shorthand (F-21.1.2) portable.
-When a step sets `args` (it is constructing the invocation explicitly) the
-command is executed **directly by the target OS — no implicit shell** (no `&&`,
-pipes, globbing, or `$VAR` expansion), which is what makes such a spec portable
-across Windows and Linux. A step that needs shell behavior with a *specific*
-shell sets the `shell` param (e.g. `shell: "pwsh"`, `args: ["-NoProfile",
-"-Command"]`), and the target runs `<shell> <args> <command>`. Step stdout/stderr
-go to the target's local logs and, when a log sink is set, are streamed to the
-API in near-real-time (F-02, `internal/logstream`); the API persists them to the
-artifacts service and fans them out to the UI as `job_log` events.
+**Secrets (F-12).** Named secrets declared on pipelines; values encrypted with
+a single AES-256-GCM key in the API's config (`CDROM_SECRETS_KEY`), stored
+opaquely on the pipeline/version/job rows. The API alone decrypts — at dispatch
+it hands plaintext to the target via the `Job.secrets` map (never persisted),
+available to specs as `{{ .secrets.name }}`; nonces come from a DB-backed
+counter so all API replicas share one key + sequence. The API redacts secret
+values from job logs. `POST /api/secrets/encrypt` returns ciphertext for a
+declared value.
 
-**Secrets (F-12).** Pipelines declare named secrets (like `params`); values are
-encrypted with a single AES-256-GCM key held in the API's config and stored
-opaquely (ciphertext) on the pipeline, its version snapshots, and each run's job
-instances. The API is the **only** component that can decrypt: it decrypts at
-dispatch and hands plaintext to the target via the API `Job.secrets` map (never
-persisted), which the executor exposes to specs as `{{ .secrets.name }}`.
-Nonces come from a DB-backed counter (`NextSecretNonce`), so all API replicas
-share one key + one sequence. The API also redacts secret values from job logs
-before they reach the artifacts store / UI. An authenticated user can encrypt a
-value directly via `POST /api/secrets/encrypt` (body `{"value": "…"}` →
-`{"ciphertext": "…"}`), which returns the ciphertext a pipeline's secret
-declaration stores.
-
-**Feature index.** The detailed spec, acceptance criteria, and RPC/field changes
-for each feature are in `docs/features/` (one file per feature; `docs/Features.md`
-is the summary index). Summary:
-
-| ID | Feature |
-|----|---------|
-| F-01 | Job execution spec (steps, `type`→handler, `params`, per-run snapshot) |
-| F-02 | Job log streaming (target→API→artifacts→UI `job_log`, replayable) |
-| F-03 | Timeouts (job + per-step; `timed_out` status; scheduler watchdog) |
-| F-04 | Retry & re-run (`max_attempts`/`backoff`; retry loop; `POST /api/jobs/{id}/rerun`) |
-| F-05 | Cancellation (persist + signal target to stop; late reports can't clobber terminal status) |
-| F-06 | Skip / step `condition` / `ignore_failed` / step `outputs` / job `depends_on` (dependency resolver) |
-| F-07 | Pipeline runs (`PipelineRun` + per-run job instances; atomic `CreateRun`; derived run status) |
-| F-08 | Job dependencies DAG (`needs` by stable `key`; validated at save; reuses F-06 resolver) |
-| F-09 | Triggers (cron / webhook / event; atomic `TriggerRun`; cron + event loops; webhook endpoint) |
-| F-10 | Parameters & variables (pipeline `Parameter`s; run values; Go-template interpolation) |
-| F-11 | Pipeline versioning (immutable `PipelineVersion` snapshots; a run binds to the version active at start; run against a specific version) |
-| F-12 | Secrets management (pipeline-level named secrets; AES-256-GCM with a configured key; DB-backed nonce counter; API decrypts at dispatch; log redaction) |
-| F-13 | Approval gates (`approval` step; `awaiting_approval` status; `POST /api/jobs/{id}/approve` / `.../reject`; decision + actor + reason persisted) |
-| F-14 | Roles & permissions (RBAC) (fine-grained permissions, built-in + custom roles with composition, user/service-account bindings optionally scoped per pipeline; deny-by-default; roles live in the Database service, evaluated in the API via `internal/authz` with a cache invalidated by `role_change` events on the shared event log; JWT claim mapping via `auth.roles`; delegation rules; synthetic admin when auth is off; backend-only — UI screens deferred) |
-| F-15 | Audit log (append-only record of who did what to which resource, when, from where, with what outcome and what changed; written to a local rotating file — separate from the default log, JSON or text, hourly/daily, `-` for stdout — and to the shared audit log in the Database service; queryable via `GET /api/audit` (requires `audit.can-view`); old entries pruned by age on a schedule; a secret's value is never stored or displayed (name only, redacted); the API records UI/gRPC actions and the scheduler records trigger-fired runs) |
-| F-16 | Concurrency control & queueing (per-group + global + per-key limits, a visible pending queue, and cross-pipeline **concurrency keys** — named, global locks a pipeline and/or job declares, **templatable** against run params/identity; a job's keys are OR'd, so it is blocked while any one is held and it holds all of them while running; the limits are **regex-based rules stored in the database** (a rule = kind + regex pattern + limit; a resource's limit is the most-specific matching rule, a key matching none defaults to 1 = a lock) managed at runtime via `GET/POST/PUT/DELETE /api/concurrency-limits` (gated on `concurrency-limits.can-view`/`can-manage`), not configuration; durable atomic slot accounting in the Database service; a scheduler admission gate on every dispatch path + a leader-gated admission loop; `GET /api/queue` + a `queue` WS event; priority deferred) |
-| F-17 | Environments & deployment targets (first-class **environments** — `dev`/`staging`/`prod`/`prod-auto` — that group targets and carry deployment policy; a worker declares which environments it belongs to (configurable, multiple) and a job targeting an environment dispatches to the workers registered for it; an environment's `requires_approval` inserts an F-13 approval gate before dispatch, and its `automation` policy (`automatic`/`manual`) governs whether a run proceeds on its own or pauses for an explicit proceed call — a `manual` environment overrides any trigger (cron/webhook/event) and the previous environment, an `automatic` one ignores the previous environment; a job's own automation setting is used only when the environment has none configured; environments live in the database and are managed via `GET/POST/PUT/DELETE /api/environments[/{name}]` (gated on `environments.can-view`/`can-manage`), proceeding a held run requires `runs.can-proceed`) |
-| F-18 | Notifications (built-in `email` and `webhook` **step handlers** that send from the **API server**: the target renders the step's fields — email `to`/`cc`/`bcc`/`subject`/`body`, webhook `url`/`headers`/`body` — against the step's condition context (F-06/F-10, like the approval message) and calls the API's `SendEmail`/`SendWebhook` gRPC RPCs; both bodies take a `content_type` of `plain` / `html` / `markdown` (default `markdown`, rendered to HTML by the API; `plain`/`html` are sent as-is); a step's standard `once` field (F-01) sends at most one notification per job attempt (a fan-out job doesn't notify once per worker); the SMTP server config and the webhook response timeout — default 10s, capped by a configurable max — live on the API; a failed send fails the step unless `ignore_failed`) |
-| F-19, F-20, F-22 | Roadmap: artifact promotion, observability, post-deploy verification (not yet implemented) |
-| F-21 | Config as code (decomposed into **F-21.1…F-21.7**: file format & compiler, source-fetcher service, source credentials, reusable units & cross-file imports, externally-sourced pipelines, artifact package references, and the `tags`→`labels` rename; **F-21.1** is further decomposed into F-21.1.1…F-21.1.4 (manifest envelope, step spec, variables/secrets, jobs + import/export), **F-21.2** into F-21.2.1…F-21.2.4 (service + gRPC contract, reference format & parsing, git repository cache, fetch clients) — with **F-21.2.3** (the git repository cache) itself decomposed into F-21.2.3.1…F-21.2.3.4 (cache structure & index, fetch lifecycle, cross-replica locking, cleanup thread) and **F-21.2.4** (the fetch clients) into F-21.2.4.1…F-21.2.4.3 (one per fetcher: git, http, file; the git client uses **go-git** — no external `git` binary — and keeps a **bare object store per repository URL** (shared across branches): a **shallow (depth 1) clone** on first use, then an **incremental fetch** of the requested branch on every request (no debounce, no worktree, no reset — the file is read from the objects at the branch's tip), so the cache holds the branch tip plus only the commits added since the last fetch (never the full history), and verifies SSH host keys strictly against built-in common provider keys + **runtime-managed host keys** added/removed via `GET/POST/DELETE /api/ssh-known-hosts` and passed to the fetcher per-fetch) — **F-21.3** into F-21.3.1…F-21.3.3 (SourceCredential model, credential matching & use, source-credential API) — and **F-21.5** into F-21.5.1…F-21.5.3 (source model + stored YAML/hash + kickoff provenance on the run row, sync routine, refresh triggers — cadence from the file's `spec.periodicRefresh` (`interval` duration / `schedule` cron) overriding the system default (2 min), gated by admins via a global config knob + a per-pipeline DB flag); the overview + shared file-format reference is `docs/features/f-21-config-as-code.md`, one spec per sub-feature in `docs/features/`) |
-| F-23 | High availability (shared event log, hybrid push+pull dispatch, leader election, cross-pod logs — see `docs/HighAvailability.md`) |
-| F-24 | Username/password authentication (unauthenticated `POST /api/login` + `POST /api/register` proxied to the IdP over gRPC; bcrypt password hashes + roles in the Database service; admin role management via `/api/users`; enabled by default for local dev) |
-| F-25 | API keys (per-user `cdrom-`+64-char credentials, hashed at rest, presented as `Bearer <username>:<apikey>`; description + ≤1-year expiration + per-pipeline scope; edit/renew without changing the secret, or rotate; effective permissions = owner's ∩ key's scope; `api-keys.can-manage` lets a user manage their own keys, while acting on **another user's** keys (create-for-them, get/edit/rotate/delete) requires the explicit `api-keys.can-manage-all` permission (admins have it by default); `GET /api/api-keys` lists only the caller's own keys, while `GET /api/api-keys/all` lists **all** keys in the system and requires `api-keys.can-list-all`; an admin can reset a user's lockout; a separate per-user API-key lockout; real logic in the IdP, proxied by the API) |
-| F-26 | Roadmap: service accounts (role-assignable non-human identities; exactly two individually rotatable API keys generated and hashed by the Database service, returned once on create/rotate for UI display; disable/enable; permanent soft deletion with both key slots cleared; granular create/edit/rotate/disable/enable/delete/assign-role/remove-role management permissions; not yet implemented) |
-| F-27 | Roadmap: approval groups (named sets of users an `approval` step (F-13) references via an `approvers` param instead of individual users; a decision is accepted only from a member of a referenced group / named individual who also holds the F-14 approve/reject permission; membership resolved at decision time; optional role references and N-of-M quorum; not yet implemented) |
-| F-28 | Roadmap: SCIM 2.0 user provisioning (a service-provider endpoint on the built-in IdP so an external IdP like Azure AD/Entra ID provisions, updates, and deprovisions users and groups into the IdP's user directory; SCIM Groups map to F-14 roles / F-27 approval groups; **users are soft-deleted, never hard-deleted**, so audit (F-15) / approval (F-13) / trigger (F-07/F-09) actor references stay resolvable after deprovisioning; provisioning is mutually exclusive — with SCIM **enabled** the corporate IdP is the sole source of users (no auto-provisioning on login), with SCIM **disabled** the IdP auto-provisions users just-in-time on first OIDC login; not yet implemented) |
-| F-29 | Labeling (free-form **key/value labels** on pipelines, jobs in a pipeline, environments, worker groups, and workers; the `tags` term is renamed to `labels` as part of F-21. Labels are stored **normalized in a `Label` table** — one row per key/value pair, keyed by `owner_type` + `owner_id` + `key`, with a `(key, value)` index — so a resource can be searched/filtered by label key and/or value; when a job is kicked off its run combines the labels of every resource in its context — pipeline + job + environment + worker group at run creation, plus the assigned worker's labels at dispatch — with the more specific source winning on a key collision (`worker > worker group > environment > job > pipeline`), and stores the result as a snapshot on the job run; worker groups become first-class, labelable rows managed via `GET/POST/PUT/DELETE /api/worker-groups[/{name}]` (gated on `worker-groups.can-view`/`can-manage`); environment labels via the existing environment endpoints, pipeline/job labels via the pipeline body, and worker labels declared at registration via `CDROM_WORKER_LABELS`) |
-
-Cross-cutting execution concepts (full detail in `docs/features/` /
-`docs/Architecture.md`):
+**Cross-cutting execution concepts** (specs in `docs/features/`):
 
 - **Fan-out (worker groups).** A job targeting a group runs on **every** worker
-  in it; each worker's run is a separate `JobExecution`. The job row's status is
-  *derived* by the scheduler **job-status loop** from the per-worker outcomes of
-  **alive** workers, per the job's `failure_mode` (`all` default / `best_effort`
-  / `any`). Worker restarts abandon stale executions; the job-level watchdog skips group jobs.
-- **Step barrier.** A group job with `step_barrier` set makes its workers
-  synchronize at each step boundary (report completion, wait for every alive
-  worker) via `ReportStepCompletion` / `CheckStepBarrier`; a dead worker is dropped.
-- **`once` step field (F-01).** A step may set `once` to run on at most one
-  target of a fan-out job: the executor runs it on a single worker of the group
-  (the first to claim a durable slot, job id + step name + attempt, in the
-  Database service) and the other workers skip it (recorded `skipped`, not
-  failed); a retry (a new attempt) may run it again. This is what keeps a
-  notification step (F-18) from sending once per worker, and lets any step type
-  run on a single worker of a group.
-- **Token exchange handler.** The `token_exchange` step handler requests a new
-  job token for a different `audience` (via the executor's `TokenExchange`,
-  backed by the API's `ExchangeJobToken`) and writes it to a step output.
-- **Approval gate (F-13).** An `approval` step pauses the job: the handler
-  renders its `message` param (same interpolation as conditions — secrets, step
-  outputs, run params, upstream job outputs, job identity, env) and reports the
-  job `awaiting_approval` with the message via the API (`internal/approval`
-  gate), then polls `CheckApproval` until a decision lands. The UI sees the
-  pending gate + message on `GET /api/jobs/{id}` and decides via
-  `POST /api/jobs/{id}/approve` / `POST /api/jobs/{id}/reject` (optional
-  `reason` body); the decision (actor, timestamp, reason) is persisted on the
-  job row. Approved → the step succeeds and the job resumes; rejected → the
-  step fails the job; a timeout or cancellation ends the job as usual. The
-  gate is job-level: one approval unblocks every worker of a fan-out job.
-- **Concurrency admission (F-16).** Before a job is dispatched the scheduler
-  asks the Database service to admit it (`AcquireJobSlots`): the database holds
-  one slot per resource the job consumes — each of its **concurrency keys**
-  (a key is a named, global lock; a job's keys are the union of its pipeline's
-  and its own, and are **OR'd**, so the job is blocked while any one is held
-  and it holds all of them while running), its target group's cap (when the
-  group has a limit), and the global cap (when set). A job is dispatched only
-  when it is admitted (every resource has room); otherwise it stays `pending`
-  and the leader-gated **admission loop** re-checks it once a slot frees. Slot
-  accounting is a durable `Held` counter per resource in the Database service
-  (a guarded atomic increment/decrement), so multiple scheduler replicas can
-  never double-allocate the last free slot. The dependency resolver no longer
-  dispatches a released job — it only clears `depends_on` and leaves it pending
-  for the admission loop, which is the single dispatch path. The queue is
-  surfaced via `GET /api/queue` and a `queue` WS event (published on every job
-  status change). Priority is deferred.
-- **Concurrency limits (F-16).** The limits that bound how much runs in
-  parallel — the system-wide cap, per-worker-group caps, and per-concurrency-key
-  caps — are **regex-based rules stored in the database** (the `ConcurrencyLimit`
-  table), not configuration, so they can be edited at runtime via the API
-  (`GET/POST/PUT/DELETE /api/concurrency-limits`) without a redeployment. A rule
-  has a `kind` (`global` / `group` / `key`), a `pattern` (a regex matched
-  against the dimension's name — a worker group's name or a concurrency key's
-  name; empty for the single `global` resource), and a `limit` (0 = unlimited).
-  A concrete resource's effective limit is the limit of the **most specific
-  (longest) matching rule** of its kind; a resource matching no rule falls back
-  to a default (a concurrency key defaults to a limit of 1 — a lock; a group or
-  the global resource defaults to unlimited). The Database service caches the
-  rules briefly (invalidated on change) so the dispatch path does not query per
-  job. Listing requires `concurrency-limits.can-view`; create/update/delete
-  require `concurrency-limits.can-manage` (admins have both). A change publishes
-  a `concurrency_limits` WS event and the rules are in the WS snapshot.
-- **Templatable concurrency keys (F-16).** A pipeline's and a job's concurrency
-  keys are **templatable**: each is rendered as a Go template against the run's
-  parameters and identity (run id, pipeline id, trigger) when the run's job
-  instances are created, so a key can be derived from a run parameter (e.g.
-  `{{ .params.env }}-db`). A key that references a parameter with no value fails
-  run creation (a run is never created with a key that could not be resolved).
-- **Environments (F-17).** An **environment** (`dev`/`staging`/`prod`/`prod-auto`) is a
-  policy-bearing target: it names the workers that serve it and carries two gates.
-  A worker declares the environments it belongs to at registration
-  (`CDROM_WORKER_ENVIRONMENTS`, multiple allowed) and a job targeting environment
-  `E` is dispatched to the live workers registered for `E` (∩ `E.target_group` when
-  set). `requires_approval` inserts an F-13 approval gate before dispatch; the
-  `automation` policy (`automatic`/`manual`) decides whether a run proceeds on its
-  own or pauses for an explicit proceed call (`POST /api/runs/{id}/proceed` or
-  per-job `POST /api/jobs/{id}/proceed`, gated on `runs.can-proceed`). A `manual`
-  environment is authoritative: it overrides a
-  job's automation setting *and* any trigger (cron/webhook/event) and the previous
-  environment, holding the run until someone proceeds it; an `automatic` environment
-  ignores the previous environment. A job's own automation setting is consulted only
-  when the environment has none configured. Environments are stored in the database
-  and managed via `GET/POST/PUT/DELETE /api/environments[/{name}]` (gated on
-  `environments.can-view`/`can-manage`); a change publishes an `environment` WS
-  event.
-- **Labeling (F-29).** Free-form **key/value labels** label pipelines, jobs in
-  a pipeline, environments, worker groups, and workers (the `tags` term is
-  renamed to `labels` as part of F-21). They are stored **normalized in a
-  `Label` table** (one row per key/value pair, keyed by `owner_type` +
-  `owner_id` + `key`, with a `(key, value)` index) — not a JSON column — so a
-  resource can be searched/filtered by label key and/or value. The parent's
-  in-memory `Labels` map (`gorm:"-"`) is populated from the `Label` table on
-  load and written back on save by the Database service. When a job is kicked
-  off its run combines the labels of every resource in its context — pipeline +
-  job + environment + worker group at run creation, plus the assigned worker's
-  labels at dispatch — with the more specific source winning on a key collision
-  (`worker > worker group > environment > job > pipeline`), and stores the
-  result as a snapshot on the job run (relabeling a resource later does not
-  change a past run's labels). Worker groups are first-class, labelable rows
-  managed via `GET/POST/PUT/DELETE /api/worker-groups[/{name}]` (gated on
-  `worker-groups.can-view`/`can-manage`); environment labels via the existing
-  environment endpoints, pipeline/job labels via the pipeline body, and worker
-  labels declared at registration via `CDROM_WORKER_LABELS`.
+  in it; each worker's run is a separate `JobExecution`. The job row's status
+  is *derived* by the scheduler job-status loop from alive workers' outcomes,
+  per the job's `failure_mode` (`all` default / `best_effort` / `any`).
+- **Step barrier.** A group job with `step_barrier` synchronizes workers at
+  each step boundary (`ReportStepCompletion` / `CheckStepBarrier`); a dead
+  worker is dropped.
+- **`once` step field (F-01).** Runs on at most one target of a fan-out job
+  (first to claim a durable slot in the Database service); others record
+  `skipped`. Keeps a notification step from firing once per worker.
+- **Approval gate (F-13).** An `approval` step pauses the job
+  (`awaiting_approval`), renders its `message` against the condition context,
+  and polls `CheckApproval`; decided via `POST /api/jobs/{id}/approve|reject`.
+  Gate is job-level: one approval unblocks every worker of a fan-out job.
+- **Concurrency admission (F-16).** Before dispatch the scheduler admits the
+  job durably (`AcquireJobSlots`): one slot per concurrency key (keys are
+  OR'd — blocked while any is held), the target group's cap, and the global
+  cap. Limits are **regex-based rules in the database**
+  (`GET/POST/PUT/DELETE /api/concurrency-limits`), most-specific-match wins,
+  unmatched keys default to 1 (= a lock). Blocked jobs stay `pending` for the
+  leader-gated admission loop — the single dispatch path. Queue visible via
+  `GET /api/queue` + a `queue` WS event. Keys are **templatable** against run
+  params/identity.
+- **Environments (F-17).** Policy-bearing targets (`dev`/`staging`/`prod`/…)
+  carrying `requires_approval` (inserts an F-13 gate) and an
+  `automatic`/`manual` automation policy; a `manual` environment holds a run
+  (`awaiting_proceed`) until `POST /api/runs/{id}/proceed` (or per-job),
+  overriding any trigger and the job's own setting. Managed via
+  `GET/POST/PUT/DELETE /api/environments[/{name}]`.
+- **Labeling (F-29).** Normalized key/value labels (a `Label` table, indexed
+  on `(key,value)`) on pipelines, jobs, environments, worker groups, and
+  workers. A run snapshots the combined labels of its context
+  (`worker > worker group > environment > job > pipeline` on collisions).
+  Worker groups are first-class rows managed via
+  `GET/POST/PUT/DELETE /api/worker-groups[/{name}]`.
 
-### Logging
+### Logging & metrics
 
-No central logs service. Every process logs locally via `internal/logging` to
-**stdout** by default, or to the file named by `CDROM_LOG_FILE` (append mode).
-`CDROM_LOG_FORMAT` selects the handler (`json` default / `text`); `CDROM_LOG_LEVEL`
-sets the minimum level. Custom handlers via `logging.NewHandler` /
-`logging.NewWithHandler`.
+- **Logging** — no central service. Every process logs locally via
+  `internal/logging` to stdout or `CDROM_LOG_FILE` (append); `CDROM_LOG_FORMAT`
+  (`json` default / `text`), `CDROM_LOG_LEVEL`.
+- **Audit (F-15)** — append-only who/what/where/outcome/change record via
+  `internal/audit` (rotating file or stdout, separately from the default log;
+  plus a durable copy in the Database service queried via `GET /api/audit`);
+  secret values are never stored (name only, redacted).
+- **Metrics (F-20)** — every component serves Prometheus `/metrics` +
+  `/healthz` on a **dedicated port** (`CDROM_METRICS_ADDR`, 9100–9105+, not
+  behind auth; `CDROM_METRICS_ENABLED=false` disables). Plumbing + per-component
+  sets in `internal/metrics`; all metrics prefixed `cdrom_`, low-cardinality
+  labels only. Scrape targets: `docs/Monitoring.md`; catalog:
+  `docs/features/f-20-observability.md`.
 
-### Metrics (F-20)
+## Feature index
 
-Every component exposes **Prometheus metrics** (built on
-`github.com/prometheus/client_golang`) at a `/metrics` endpoint, plus a
-`/healthz` probe, on a **dedicated metrics port** — separate from the
-component's service ports. Every binary starts a small HTTP server on
-`metrics.addr` (`CDROM_METRICS_ADDR`, default `127.0.0.1:9100`–`9105`, one
-per component) serving only `/metrics` and `/healthz`; the API and IdP serve
-it on this port too, not on their UI/OIDC HTTP servers. Keeping metrics on
-their own port means the service ports (gRPC, UI HTTP, the IdP's OIDC
-surface) can sit behind a firewall while only the metrics port is exposed to
-a scraper — and the metrics port needs no token (it is not behind the auth
-middleware). Disable with `CDROM_METRICS_ENABLED=false`.
+Full descriptions, status, build order, and checklist: `docs/Features.md`.
+One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 
-The shared plumbing (registry, `promhttp` handler, `/healthz`, label
-conventions, histogram bucket presets, and a gRPC server-side `stats.Handler`)
-lives in `internal/metrics`, which also holds one per-component metric set
-(`api.go`, `scheduler.go`, `database.go`, `artifacts.go`, `idp.go`,
-`worker.go`). All metrics are prefixed `cdrom_`; domain labels are
-low-cardinality (`status`, `trigger`, `environment`, `group`, `step_type`,
-`method`, `code`, `route`, `kind`, `resource`, `op`, `outcome`) — never a job
-id, run id, user, worker name, or secret name. The catalog covers job/run
-throughput and duration, success/failure rates, queue depth and wait, worker
-utilization, artifact volume, and control-plane health (event-log tail lag,
-leader state, loop health); the run metrics also yield the DORA-style
-deployment indicators (deployment frequency, lead time, change failure rate,
-MTTR) per environment. The UI's dashboards are DB-fed (existing API routes),
-not Prometheus-fed. Full spec: `docs/features/f-20-observability.md`.
+| ID | Feature | Spec |
+|----|---------|------|
+| F-01 | Job execution spec (steps, `type`→handler, `params`, per-run snapshot) | [f-01](docs/features/f-01-job-execution-spec.md) |
+| F-02 | Job log streaming (target→API→artifacts→UI `job_log`, replayable) | [f-02](docs/features/f-02-job-log-streaming.md) |
+| F-03 | Timeouts (job + per-step; `timed_out`; scheduler watchdog) | [f-03](docs/features/f-03-job-timeouts.md) |
+| F-04 | Retry & re-run (`max_attempts`/`backoff`; `POST /api/jobs/{id}/rerun`) | [f-04](docs/features/f-04-retry-rerun.md) |
+| F-05 | Cancellation (signal target; late reports can't clobber terminal status) | [f-05](docs/features/f-05-cancellation-propagation.md) |
+| F-06 | Skip / step `condition` / `ignore_failed` / step `outputs` / `depends_on` | [f-06](docs/features/f-06-skipped-status.md) |
+| F-07 | Pipeline runs (`PipelineRun` + per-run job instances; atomic `CreateRun`) | [f-07](docs/features/f-07-pipeline-runs.md) |
+| F-08 | Job dependencies DAG (`needs` by stable `key`; validated at save) | [f-08](docs/features/f-08-job-dependencies.md) |
+| F-09 | Triggers (cron / webhook / event; atomic `TriggerRun`) | [f-09](docs/features/f-09-triggers.md) |
+| F-10 | Parameters & variables (run values; Go-template interpolation) | [f-10](docs/features/f-10-parameters-variables.md) |
+| F-11 | Pipeline versioning (immutable snapshots; run binds to active-at-start) | [f-11](docs/features/f-11-pipeline-versioning.md) |
+| F-12 | Secrets management (AES-256-GCM; API decrypts at dispatch; log redaction) | [f-12](docs/features/f-12-secrets-management.md) |
+| F-13 | Approval gates (`approval` step; `awaiting_approval`; decide endpoints) | [f-13](docs/features/f-13-approval-gates.md) |
+| F-14 | Roles & permissions (deny-by-default RBAC; `internal/authz`) | [f-14](docs/features/f-14-rbac.md) |
+| F-15 | Audit log (local rotating file + durable DB copy; `GET /api/audit`) | [f-15](docs/features/f-15-audit-log.md) |
+| F-16 | Concurrency control & queueing (regex-rule limits; concurrency keys) | [f-16](docs/features/f-16-concurrency-queueing.md) |
+| F-17 | Environments & deployment targets (policy-bearing targets) | [f-17](docs/features/f-17-environments.md) |
+| F-18 | Notifications (`email`/`webhook` step handlers; API-side send) | [f-18](docs/features/f-18-notifications.md) |
+| F-19 | Artifact promotion *(planned)* | [f-19](docs/features/f-19-artifact-promotion.md) |
+| F-20 | Observability & metrics (Prometheus; DORA indicators) | [f-20](docs/features/f-20-observability.md) |
+| F-21 | Config as code (F-21.1…F-21.7; F-21.1–F-21.5 done, F-21.6/F-21.7 planned) | [f-21](docs/features/f-21-config-as-code.md) |
+| F-22 | Post-deploy verification & rollback *(planned)* | [f-22](docs/features/f-22-verification-rollback.md) |
+| F-23 | High availability (event log, hybrid dispatch, leader election) | [f-23](docs/features/f-23-high-availability.md) · [HA design](docs/HighAvailability.md) |
+| F-24 | Username/password authentication (login/register proxied to IdP) | [f-24](docs/features/f-24-username-password-auth.md) |
+| F-25 | API keys (`cdrom-`+64-char; per-pipeline scope; rotate/reset) | [f-25](docs/features/f-25-api-keys.md) |
+| F-26 | Service accounts (non-human identities; two rotatable key slots) | [f-26](docs/features/f-26-service-accounts.md) |
+| F-27 | Approval groups *(planned)* | [f-27](docs/features/f-27-approval-groups.md) |
+| F-28 | SCIM 2.0 user provisioning *(planned)* | [f-28](docs/features/f-28-scim-provisioning.md) |
+| F-29 | Labeling (normalized `Label` table; run label snapshot) | [f-29](docs/features/f-29-tagging.md) |
 
 ## Tech Stack & Constraints
 
 - **Everything except the frontend is Go**; the frontend is React.
 - **Database:** SQLite for local dev, PostgreSQL for deployments.
 - **ORM: GORM** with `gorm.io/driver/postgres` and **`github.com/glebarez/sqlite`**
-  (pure-Go; the official `gorm.io/driver/sqlite` needs cgo and breaks Windows cross-compiles).
+  (pure-Go; the official sqlite driver needs cgo and breaks Windows
+  cross-compiles). **Never add cgo dependencies.**
 - **Migrations: `AutoMigrate`** — schema is derived from the GORM models in
-  `internal/models` (register new entities in `models.All()`). No hand-written SQL.
-- All persistence goes through the database service; code outside it must never
-  talk to a specific driver directly.
+  `internal/models` (register new entities in `models.All()`). No hand-written
+  SQL.
+- All persistence goes through the database service; code outside it must
+  never talk to a specific driver directly.
 
 ## Cross-Platform Requirements
 
 - Both workers **and** agents must run on **Windows and Linux**.
-- Use portable Go (`filepath`, `os` env handling); no hard-coded path separators,
-  Unix-only syscalls, or shell assumptions without a Windows equivalent. Windows
-  path/line-ending handling is a known failure mode.
-- Job steps are type-agnostic and the `shell` handler runs a command: a step
-  with no `shell` param and no `args` runs its one-line command through the
-  target OS's default shell, while a step that sets `args` runs the command
-  directly (no implicit shell) — so never rely on shell features in a step's
-  `command`/`args` unless the step is meant to run through a shell. New step
-  types must also be portable.
+- Portable Go only (`filepath`, `os` env handling); no hard-coded path
+  separators, Unix-only syscalls, or shell assumptions without a Windows
+  equivalent. Windows path/line-ending handling is a known failure mode.
+- New step types must be portable (see the shell contract above).
 
 ## Repository Layout
 
 Standard Go layout; the frontend lives outside the Go module.
 
 ```
-cmd/
-  api/        API/controller entrypoint (HTTP for UI + gRPC for targets/scheduler)
-  db/         database service entrypoint (gRPC)
-  scheduler/  scheduler service entrypoint (gRPC)
-  artifacts/  artifacts service entrypoint (gRPC)
-  idp/        local OIDC IdP entrypoint (HTTP OIDC surface + gRPC API-only surface)
-  worker/     long-lived worker entrypoint
-  agent/      ephemeral Kubernetes agent entrypoint
+cmd/            thin mains: api, db, scheduler, artifacts, idp, pipelinesource, worker, agent
 internal/
-  api/        API/controller: HTTP routing + gRPC control-plane server (worker hub,
-              artifact proxy, StreamJobLogs persistence + job_log fan-out, event hub + /api/ws)
-  auth/       OIDC auth (provider, PKCE, Bearer verification, discovery, middleware)
-  authz/      RBAC engine (F-14): permission catalog, role/binding resolution,
-              composition, resource scoping, deny-by-default Check/PermissionsFor
-  config/     shared config loading for all binaries
-  models/     GORM entities (single source of truth for the schema)
-  gen/        generated gRPC/protobuf Go code (committed; `make proto`)
-  grpcutil/   shared gRPC plumbing (client dial, serve-until-signal, TLS creds)
-  logging/    centralized logging (stdout or CDROM_LOG_FILE)
-  metrics/    Prometheus metrics (F-20): shared plumbing (registry, /metrics +
-              /healthz handler, label conventions, bucket presets, gRPC
-              stats.Handler) + per-component metric sets
-  logstream/  executor.LogSink streaming a job's step output to the API (worker + agent)
-  tokenexchange/ shared executor.TokenExchange via the API's ExchangeJobToken (worker + agent)
-  approval/   executor.Approval gate via the API (worker + agent): report
-              awaiting_approval + poll CheckApproval (F-13)
-  target/     shared execution layer for worker + agent (run context, status reporting,
-              post-run status decision; worker supplies the StepBarrier, agent runs unbarriered)
-  executor/   shared job-step executor: dispatch engine (handler by type, job/step timeouts,
-              LogSink, StepStatusReporter, StepBarrier, TokenExchange, RunInfo; spec
-              interpolation F-10, step condition F-06, step outputs, token exchange)
-  stephandlers/ built-in handlers: `shell` (DefaultType) + `token_exchange` +
-              `approval` (F-13); extend via executor.RegisterStepType
-  secrets/    secret store: `Store` interface + built-in AES-256-GCM store; nonces
-              come from the Database service's `NextSecretNonce` (F-12)
-  audit/      audit log (F-15): rotating file/stdout Logger (json/text), Recorder
-              (fans events to the local log + a durable Sink, best-effort), Pruner
-              (age-based retention), Redactor (secret values -> marker)
+  api/          API/controller: HTTP routing + gRPC control plane (worker hub,
+                artifact proxy, StreamJobLogs persistence + job_log fan-out,
+                event hub + /api/ws, job-token auth)
+  auth/         OIDC/Bearer verification (JWKS, discovery ad, middleware)
+  authz/        RBAC engine (F-14): permission catalog, role/binding resolution,
+                composition, resource scoping, deny-by-default Check/PermissionsFor
+  config/       shared config loading for all binaries
+  models/       GORM entities (single source of truth for the schema)
+  gen/          generated gRPC/protobuf Go code (committed; `make proto`)
+  grpcutil/     shared gRPC plumbing (client dial, serve-until-signal, mTLS creds,
+                bearer presentation)
+  logging/      centralized logging (stdout or CDROM_LOG_FILE)
+  metrics/      Prometheus plumbing (F-20) + per-component metric sets
+  logstream/    streams a job's step output to the API (worker + agent)
+  tokenexchange/ executor.TokenExchange via the API's ExchangeJobToken
+  approval/     approval gate (F-13): report awaiting_approval + poll CheckApproval
+  target/       shared execution layer for worker + agent (run context, status
+                reporting, post-run decision; worker supplies the StepBarrier)
+  executor/     shared job-step executor: dispatch engine (handler by type,
+                job/step timeouts, LogSink, StepStatusReporter, StepBarrier,
+                TokenExchange; spec interpolation F-10, step condition F-06,
+                step outputs)
+  stephandlers/ built-in handlers: `shell` (DefaultType), `token_exchange`,
+                `approval` (F-13), `email` + `webhook` (F-18); extend via
+                executor.RegisterStepType
+  secrets/      secret store: `Store` interface + AES-256-GCM builtin; nonces
+                from the Database service's `NextSecretNonce` (F-12)
+  audit/        audit log (F-15): rotating file/stdout writer, Recorder, Pruner,
+                Redactor
+  notify/       notification rendering/support (F-18)
+  webhook/      webhook trigger support (F-09)
+  pipelinefile/ config-as-code file format + compiler (F-21.1)
+  sourceref/    `<type>:<spec>` source-reference parsing (F-21.2.2)
   services/
-    data/     pipeline/job data service
-    artifacts/ namespaced file store (artifacts + job logs; gRPC server; store interface)
-    scheduler/ job lifecycle + dispatch + background loops (watchdog F-03, retry F-04,
-              dependency resolver F-06/F-08, run-status F-07, job-status fan-out,
-              cron + event triggers F-09) + CreateRun/TriggerRun
-    database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
-  worker/     long-lived worker (run context + status via internal/target; StepBarrier)
-  agent/      ephemeral agent (run context + status via internal/target; unbarriered)
-  idp/        local OIDC IdP (JWT issuer, auto key rotation; HTTP OIDC surface +
-              gRPC API-only surface for job-token minting + user management; state via Database service)
-proto/        protobuf definitions (proto/cdrom/<service>/v1/)
-ui/           React frontend (separate from the Go module) + ui/tests/
-docs/         documentation (Architecture.md, Features.md summary index,
-              features/ per-feature specs, HighAvailability.md)
-scripts/      build/release scripts (genproto.sh regenerates gRPC code);
-              e2e.sh is the end-to-end test main script (boots the stack once,
-              runs scripts/e2e/*.sh in order); scripts/e2e/ holds the
-              single-purpose e2e test scripts (01-shell-job … 07-audit, each
-              executable on its own) + lib.sh (shared helpers: stack boot,
-              wait/poll, HTTP, job submission); update-known-hosts.sh refreshes
-              the built-in git provider SSH host keys
-              (internal/services/pipelinesource/common_known_hosts) via
-              ssh-keyscan (F-21.2.4.1)
+    database/   storage backend abstraction + gRPC server (SQLite / PostgreSQL)
+    scheduler/  job lifecycle + dispatch + background loops (watchdog F-03,
+                retry F-04, dependency resolver F-06/F-08, run-status F-07,
+                job-status fan-out, cron + event triggers F-09, admission F-16)
+                + CreateRun/TriggerRun
+    artifacts/  namespaced file store (artifacts + job logs; gRPC server;
+                pluggable store interface)
+    pipelinesource/ source-fetcher service (F-21.2): git/http/file fetch
+                clients, shallow bare-object-store git cache, strict SSH
+                host-key pinning
+  worker/       long-lived worker (registration, WatchJobs + poll, StepBarrier)
+  agent/        ephemeral agent (GetJob → run → report; unbarriered)
+  idp/          local OIDC IdP (JWT issuer, auto key rotation; users, keys,
+                codes via the Database service)
+proto/          protobuf definitions (proto/cdrom/<service>/v1/)
+ui/             React frontend (own tooling) + ui/tests/
+docs/           Architecture.md, Features.md, features/, HighAvailability.md,
+                Monitoring.md
+scripts/        genproto.sh, gencerts.sh, update-known-hosts.sh (SSH host keys
+                for F-21.2.4.1); e2e.sh boots the stack once and runs
+                scripts/e2e/NN-*.sh in order (each runnable standalone; shared
+                helpers in scripts/e2e/lib.sh)
 ```
 
 Rules:
-- All shared Go code goes under `internal/` — no `pkg/` or importable top-level packages.
-- `cmd/*` packages contain only thin `main` entrypoints; real logic lives in `internal/`.
-- The UI is not part of the Go module; it has its own tooling under `ui/`.
+- All shared Go code goes under `internal/` — no `pkg/` or importable
+  top-level packages.
+- `cmd/*` packages contain only thin `main` entrypoints; real logic lives in
+  `internal/`.
+- The UI is not part of the Go module.
 
 ## Build & Tooling
 
-- `Makefile`: `make build` (host binaries → `./bin`), `make proto` (regenerate
-  gRPC code), `make test`, `make vet`, `make fmt`, `make clean`, `make certs`.
-- Build with `go build ./...`; verify with `go vet ./...`.
-- **gRPC codegen:** `make proto` runs `scripts/genproto.sh` (protoc +
-  protoc-gen-go + protoc-gen-go-grpc). Generated code is committed under
-  `internal/gen/` — regenerate after editing any `.proto`.
+- `Makefile`: `make build` (host binaries → `./bin`, incl. the e2e
+  `fetchclient` helper), `make proto` (regen gRPC code), `make test`,
+  `make vet`, `make fmt`, `make e2e` (boot stack + run `scripts/e2e/*.sh`),
+  `make certs` (local mTLS set → `./certs`), `make clean`.
+- Verify with `go vet ./...`; build with `go build ./...`.
 - **Cross-compile check:** `GOOS=windows GOARCH=amd64 go build ./cmd/...` must
-  stay green — worker and agent ship for Windows. Never add cgo dependencies.
+  stay green — worker and agent ship for Windows.
+- Regenerate `internal/gen/` after editing any `.proto` (`make proto`).
 
 ## Running Locally
 
-All service addresses come from env vars (see `internal/config`); defaults target
-a localhost dev setup. Every binary also accepts `--config-file <path>` (see
-`config.example.yaml`). Precedence, lowest→highest: built-in defaults → config
-file → env vars.
+Addresses come from env vars (precedence: built-in defaults → config file →
+env vars; every binary accepts `--config-file <path>`, see
+`config.example.yaml`). Full reference: `docs/Architecture.md` §11.
 
-| Service      | Default address | Listen env var        |
-|--------------|-----------------|-----------------------|
-| db           | 127.0.0.1:7101  | `CDROM_LISTEN_ADDR`   |
-| idp (HTTP)   | 127.0.0.1:7104  | `CDROM_LISTEN_ADDR`   |
-| idp (gRPC)   | 127.0.0.1:7106  | `CDROM_IDP_GRPC_ADDR` |
-| scheduler    | 127.0.0.1:7102  | `CDROM_LISTEN_ADDR`   |
-| artifacts    | 127.0.0.1:7103  | `CDROM_LISTEN_ADDR`   |
-| api (gRPC)   | 127.0.0.1:7105  | `CDROM_LISTEN_ADDR`   |
-| api (HTTP)   | 127.0.0.1:8080  | `CDROM_API_HTTP_ADDR` |
-| worker/agent | —               | `CDROM_API_ADDR`      |
-| metrics      | 127.0.0.1:9100–9105 (one per component) | `CDROM_METRICS_ADDR` |
+| Service         | Default address | Listen env var        |
+|-----------------|-----------------|-----------------------|
+| db              | 127.0.0.1:7101  | `CDROM_LISTEN_ADDR`   |
+| scheduler       | 127.0.0.1:7102  | `CDROM_LISTEN_ADDR`   |
+| artifacts       | 127.0.0.1:7103  | `CDROM_LISTEN_ADDR`   |
+| idp (HTTP)      | 127.0.0.1:7104  | `CDROM_LISTEN_ADDR`   |
+| api (gRPC)      | 127.0.0.1:7105  | `CDROM_LISTEN_ADDR`   |
+| idp (gRPC)      | 127.0.0.1:7106  | `CDROM_IDP_GRPC_ADDR` |
+| pipelinesource  | 127.0.0.1:7107  | `CDROM_LISTEN_ADDR`   |
+| api (HTTP)      | 127.0.0.1:8080  | `CDROM_API_HTTP_ADDR` |
+| worker/agent    | —               | `CDROM_API_ADDR`      |
+| metrics         | 127.0.0.1:91xx  | `CDROM_METRICS_ADDR`  |
 
-Other notable vars: `CDROM_DB_BACKEND` (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH`,
-`CDROM_DB_POSTGRES_DSN`, `CDROM_ARTIFACTS_ROOT`, `CDROM_ARTIFACTS_STORE`,
-`CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_WORKER_ENVIRONMENTS` (comma-separated
-environment membership, F-17), `CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`,
-the mTLS paths `CDROM_TLS_CA_FILE`/`CDROM_TLS_CERT_FILE`/`CDROM_TLS_KEY_FILE`, the
-auth vars `CDROM_AUTH_*` (incl. `CDROM_AUTH_USERPASS_ENABLED`, username/password
-auth, default on; the API-key vars `CDROM_AUTH_APIKEY_ENABLED` (default on),
-`CDROM_AUTH_APIKEY_MAX_FAILURES`, `CDROM_AUTH_APIKEY_LOCKOUT_DURATION`, and
-`CDROM_AUTH_APIKEY_PEPPER` (F-25); and the RBAC claim-mapping vars
-`CDROM_AUTH_ROLE_CLAIM`, `CDROM_AUTH_ROLE_MAPPINGS` (comma-separated
-`claimValue=roleName`), and `CDROM_AUTH_ROLE_CLAIM_AS_NAMES`, F-14), the IdP
-vars `CDROM_IDP_*` (incl. `CDROM_IDP_GRPC_ADDR`, the
-IdP's gRPC listen address; the API dials it via `CDROM_IDP_GRPC_ADDR`), the
-job-token auth vars `CDROM_GRPC_AUTH_*`, the secrets vars
-`CDROM_SECRETS_KIND` / `CDROM_SECRETS_KEY` (base64 32-byte AES-256-GCM key;
-when unset, secrets are disabled), the pipeline-source vars
-`CDROM_PIPELINE_SOURCE_REFRESH_INTERVAL` (system-default refresh cadence for
-externally-sourced pipelines, default `120s`),
-`CDROM_PIPELINE_SOURCE_OVERRIDES_ALLOWED` (whether the file's
-`spec.periodicRefresh` overrides are honored; default on),
-`CDROM_PIPELINE_SOURCE_MAX_PARALLEL` (cap on the refresh loop's simultaneous
-in-flight syncs; `0` = unlimited, the default), and
-`CDROM_PIPELINE_SOURCE_SYNC_TIMEOUT` (bounds a single source sync; default
-`5m`; F-21.5), and the audit-log vars `CDROM_AUDIT_FILE`
-(path of the current audit log file, separate from `CDROM_LOG_FILE`; `-` for
-stdout), `CDROM_AUDIT_FORMAT` (`json`/`text`), `CDROM_AUDIT_ROTATION`
-(`hourly`/`daily`), `CDROM_AUDIT_RETENTION` (max age of database audit
-entries), and `CDROM_AUDIT_PRUNE_INTERVAL` (F-15), and the metrics vars
-`CDROM_METRICS_ENABLED` (default on) and `CDROM_METRICS_ADDR` (the
-`/metrics` + `/healthz` listen address, on a dedicated port separate from
-the component's service ports) (F-20).
+Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
+(`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH` / `CDROM_DB_POSTGRES_DSN`,
+`CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_WORKER_{NAME,GROUP,ENVIRONMENTS,TAGS}`,
+`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
+(OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping),
+`CDROM_IDP_*`, `CDROM_GRPC_AUTH_*` (job-token auth), `CDROM_SECRETS_{KIND,KEY}`,
+`CDROM_PIPELINE_SOURCE_*` (F-21.2/F-21.5), `CDROM_AUDIT_*` (F-15),
+`CDROM_EMAIL_*` + `CDROM_WEBHOOK_TIMEOUT{,_MAX}` (F-18), `CDROM_METRICS_*`
+(F-20), `CDROM_LOG_{FILE,FORMAT,LEVEL}`.
 
-A minimal local run (plaintext, no certs):
+Minimal local run (plaintext, no certs):
 
 ```sh
 make build
-./bin/db          # owns the SQLite file (cdrom.db) and runs migrations
-./bin/scheduler   # dials db; runs background loops only while it holds the leader lease
+./bin/db          # owns the SQLite file (cdrom.db), runs migrations
+./bin/scheduler   # dials db; loops run only while it holds the leader lease
 ./bin/artifacts   # stores files under ./artifacts
-./bin/api         # gRPC :7105 + HTTP :8080, dials db/scheduler/artifacts
+./bin/api         # gRPC :7105 + HTTP :8080
 ./bin/worker      # registers with the api, watches for jobs
 ```
 
-To exercise authentication, also run `./bin/idp` (OIDC IdP / JWT issuer: HTTP
-OIDC surface on :7104 + gRPC API-only surface on :7106, auto key rotation). For
-**username/password** sign-in (enabled by default), point
-the API's `auth.issuer` at it (`http://127.0.0.1:7104`), then register the first
-user (`POST /api/register` — it becomes an `admin`) and sign in with
-`POST /api/login`. For the full **OIDC** authorization-code flow, additionally
-enable it (`auth.enabled: true`, `auth.issuer: http://127.0.0.1:7104`,
-`auth.client_id: cdrom-ui`, `auth.redirect_url: http://127.0.0.1:8080/api/auth/callback`).
-For mTLS, run `make certs` and point every binary at the cert set via the `tls`
-section of the config file.
+For auth also run `./bin/idp` and point the API's `auth.issuer` at
+`http://127.0.0.1:7104`. Username/password sign-in is on by default: register
+the first user (`POST /api/register` → `admin`) and sign in with
+`POST /api/login`. For the full OIDC authorization-code flow set
+`auth.enabled: true` + `client_id`/`redirect_url`. For mTLS run `make certs`
+and configure the `tls` section.
 
-## Authentication & Live Events
+## Authentication Overview
 
-The API's UI-facing HTTP surface (and its WebSocket endpoint) supports OIDC auth,
-implemented in `internal/auth`.
+Mechanisms per surface (deep dive: `docs/Architecture.md` §6 + the F-14/F-24/
+F-25/F-26 specs):
 
-- **Disabled by default.** With no `auth` config the API is open. Enable with
-  `auth.enabled: true` (`CDROM_AUTH_ENABLED=true`); `issuer`, `client_id`, and
-  `redirect_url` are then required.
-- **Flow:** the API is a pure token verifier — it does not run sign-in. A client
-  performs OIDC authorization-code + PKCE against the IdP and presents the
-  resulting token as `Authorization: Bearer <token>`. `GET /api/auth/oidc`
-  advertises the IdP's discovery doc (404 means auth is disabled). The API
-  verifies each token against the IdP's JWKS (`github.com/coreos/go-oidc/v3`) and,
-  when `token_audience` is set, checks `aud` against it (else `client_id`).
-- **Middleware:** when enabled, every `/api/*` request (incl. the WebSocket
-  upgrade) must carry a valid Bearer token or it gets a 401; the user is
-  available via `auth.UserFromContext`. When disabled it's a passthrough.
-- **Live events:** `GET /api/ws` (gorilla/websocket). On connect the client gets
-  a state snapshot (jobs + workers + runs); afterwards one message per event.
-  Event types: `job_status`, `worker` (registered/deregistered/watching),
-  `job_log` (F-02), and `run_status` (F-07). Events are published from the gRPC
-  server and HTTP handlers through a shared `EventHub` (`internal/api/events.go`);
-  slow subscribers drop events and resync from the snapshot on reconnect.
-- **Local IdP (`cmd/idp`):** a standalone OIDC IdP / JWT issuer. Its **HTTP**
-  surface serves the standard OIDC protocol (discovery doc, JWKS, `/auth`
-  authorization-code + PKCE, and the `authorization_code` token grant minting
-  RS256 tokens); its **gRPC** surface serves the API-only operations (job-token
-  minting and user management), which the API dials over mTLS. It auto-rotates
-  its RSA key near expiry and keeps serving predecessor keys until they expire.
-  Its state (signing keys + auth codes + the user directory for
-  username/password auth) lives in the Database service, so multiple IdP
-  replicas can share keys and users behind a load balancer — it requires
-  `./bin/db` to be running.
+- **UI (HTTP):** OIDC — the API is a pure Bearer-token verifier against the
+  IdP's JWKS; disabled by default (passthrough, requests act as a synthetic
+  admin). Alongside it, username/password (`POST /api/login` /
+  `/api/register`, enabled by default) and per-user **API keys**
+  (`Bearer <username>:<apikey>`, F-25) and **service accounts** (F-26) are
+  handled by the IdP; the API proxies.
+- **RBAC (F-14):** deny-by-default; effective permissions = union of the
+  principal's roles (token `roles` claim ⊕ JWT claim mapping ⊕ stored
+  bindings, composed transitively), filtered by resource scope. Evaluated in
+  the API (`internal/authz`) with a cache invalidated by `role_change` events
+  on the shared event log. Delegation: granting a role requires
+  `roles.can-assign` + direct possession of the role at ≥ the granted scope.
+- **Targets (gRPC):** job tokens (RS256, minted by the API via the IdP over
+  mTLS; one per job, `sub: "job:<id>"`). Validity is gated on the job's live
+  status, not `exp`; `ExchangeJobToken` mints short-lived tokens for other
+  audiences (used by the `token_exchange` step). Disabled by default
+  (`CDROM_GRPC_AUTH_ENABLED`).
 
-### Username/password authentication
+## Live Events
 
-Alongside OIDC, the API supports username/password sign-in for easy local
-testing of the UI. **Enabled by default** (`auth.userpass_enabled: true`,
-`CDROM_AUTH_USERPASS_ENABLED`); set it to `false` to disable (e.g. when using an
-external identity provider). All the real logic lives in the **IdP**; the API is
-a thin proxy (the API's gRPC/HTTP surface never sees the password hash or
-verifies credentials itself). The API reaches the IdP's user operations over
-**gRPC** (the IdP's API-only surface, over mTLS when TLS is configured), so only
-the API can register users, log them in, or manage roles.
-
-- **Unauthenticated endpoints** (reachable without a token even when OIDC auth
-  is on — they are exempted from the auth middleware): `POST /api/login`
-  (body `{"email","password"}` → the IdP verifies the password and returns an
-  OIDC `access_token` stamped with the user's roles, plus the user's profile)
-  and `POST /api/register` (body `{"first_name","last_name","email","password"}`
-  → the IdP hashes the password (bcrypt) and stores the user; the **first** user
-  registered becomes an `admin`, later users get the default `user` role).
-- **Role management** (require an authenticated caller with the `admin` role):
-  `GET /api/users`, `POST /api/users` (create with explicit roles),
-  `PUT /api/users/{id}` (update profile/roles/password), `DELETE /api/users/{id}`.
-  The API proxies these to the IdP's gRPC user-management RPCs.
-- **Tokens:** a login returns the same OIDC token the API verifies on every
-  other request (against the IdP's JWKS); the user's roles are stamped onto the
-  token and surfaced via `auth.User.Roles` (`User.HasRole`).
-- The user directory (profiles, bcrypt password hashes, roles) is persisted
-  through the Database service (`internal/models.IDPUser`), like the IdP's keys
-  and auth codes, so multiple IdP replicas share it.
-
-### Roles & permissions (RBAC, F-14)
-
-A deny-by-default authorization layer. A principal's effective permissions are
-the union of the permissions of every role it holds, expanded through role
-composition, then filtered by resource scope per request. Roles reach a
-principal through three mechanisms that compose:
-
-- **Token `roles` claim** — the built-in IdP stamps the user's registered roles
-  (F-24) onto the token; the API reads them from the verified token (the fast
-  path, no per-request DB lookup).
-- **JWT claim mapping** — `auth.roles.role_claim` names a token claim (e.g.
-  `groups`) whose values are mapped to role names via `auth.roles.role_mappings`
-  (or treated as role names directly when `role_claim_as_names` is set), so an
-  external enterprise IdP's group membership drives Cdrom roles.
-- **Stored bindings** — `RoleBinding` rows in the Database service attach a role
-  to a principal, optionally scoped to a single pipeline (a scoped binding grants
-  the role's resource-scoped permissions only for that pipeline; platform-wide
-  permissions are granted only by unscoped bindings).
-
-- **Engine.** `internal/authz` resolves a principal's roles, expands composition,
-  and answers `Check(ctx, principal, permission, resource)` /
-  `PermissionsFor(ctx, principal)`. Roles and bindings are owned by the Database
-  service (seeded built-in roles `admin`/`operator`/`viewer`/`user` on startup);
-  each API replica evaluates locally with a cache that is invalidated by
-  `role_change` events on the shared event log (F-23), so a grant takes effect on
-  every pod without a restart.
-- **Enforcement.** The API enforces permissions on the UI-facing HTTP surface
-  (pipelines, runs, jobs, approvals, workers, logs, secrets, role/binding
-  management). The gRPC target surface keeps job-token auth (a separate,
-  job-scoped mechanism). **When authentication is disabled, requests act as a
-  synthetic admin** (the engine is wired in but bypassed).
-- **Delegation.** Granting a role requires `roles.can-assign` *and* that the
-  caller directly holds the role (a role reached only by composition does not
-  count) with a scope at least as wide as the one being granted; `admin` is
-  grantable only by an `admin`.
-- **Endpoints.** `GET/POST /api/roles`, `GET/PUT/DELETE /api/roles/{name}`,
-  `GET/POST /api/role-bindings`, `DELETE /api/role-bindings/{id}`, and
-  `GET /api/me/permissions` (the caller's effective permissions per scope).
-  Backend-only: the React UI role/binding screens are not built.
-
-### Job Tokens (gRPC surface)
-
-Separate from the UI's OIDC token, the API's **gRPC surface** (workers/agents)
-supports **job-token auth** (`internal/api/jobsauth.go`).
-
-- **Disabled by default.** Enable with `grpc_auth.enabled: true`
-  (`CDROM_GRPC_AUTH_ENABLED=true`); `idp_address` and `audiences` are then required.
-- **Minting:** the API is the **only** caller of the IdP's `MintJobToken` gRPC
-  RPC, authenticating with its **mTLS client certificate** (no shared secret), so
-  only a CA-signed client (the API) can mint job tokens. It mints one RS256
-  token per job (claims: `sub: "job:<jobID>"`, `aud`, `job_id`, `pipeline_id`,
-  `target_group`, `token_type: "job"`, plus the run's trigger context when
-  trigger-fired). The main token's `exp` is a long placeholder (a week) —
-  validity is gated on the job's live status, not `exp`.
-- **Exchange:** a job requests a new token for a different `audience` via
-  `ExchangeJobToken` (presents its own token); the exchanged token has a short
-  lifetime (`expires_in`, else `grpc_auth.exchanged_token_lifetime`, default 15m)
-  and re-stamps the trigger context.
-- **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs require
-  a `Bearer <token>`. The API verifies it against the IdP's JWKS, checks an
-  audience, and rejects unless the token's `job_id` matches the targeted job
-  (artifact namespaces parse back to a job id). It **skips `exp`** and instead
-  rejects tokens for a job in a terminal state — so a token is invalidated the
-  moment the job stops (missing/invalid → `Unauthenticated`; wrong/finished job →
-  `PermissionDenied`). Targets present the token via `grpcutil.WithBearerToken`.
+`GET /api/ws` (gorilla/websocket). Connect → state snapshot (jobs + workers +
+runs + …); thereafter one message per event: `job_status`, `worker`,
+`job_log` (F-02), `run_status` (F-07), `queue`, `environment`,
+`concurrency_limits`, `role_change`, `source_credential`, …. Published from
+the gRPC server and HTTP handlers through a shared `EventHub`
+(`internal/api/events.go`); in HA mode the hub rides the shared event log
+(every pod tails it). Slow subscribers drop events and resync from the
+snapshot on reconnect.
 
 ## Conventions
 
-- The database service routes GORM logs through slog via the adapter in
-  `internal/services/database/logger.go`.
-- Errors: wrap with `fmt.Errorf("context: %w", err)`; no panics across service boundaries.
-- Testing: integration-style tests use SQLite via `database.Open` with a path
-  under `t.TempDir()` (or `:memory:`) — never require a live Postgres.
-- Variable names should make sense, except for Go idioms like `err` and `ok`.
-- TODO: error handling strategy.
-- TODO: testing conventions (unit vs integration, SQLite for tests?).
+- Error handling: wrap with `fmt.Errorf("context: %w", err)`; no panics across
+  service boundaries.
+- Tests: integration-style tests use SQLite via `database.Open` with a path
+  under `t.TempDir()` (or `:memory:`) — never require a live Postgres. End-to-
+  end scenarios live in `scripts/e2e/NN-name.sh` (run via `make e2e` or
+  standalone); add a new scenario as the next NN number.
+- The database service routes GORM logs through slog
+  (`internal/services/database/logger.go`).
+- Variable names should make sense, except Go idioms like `err` and `ok`.
+- Docs discipline: when landing a feature, fold lasting design decisions back
+  into this file / `docs/Architecture.md` and tick the checklist in
+  `docs/Features.md`.
 
 ## Open Decisions
 
-- Go module path is the placeholder `cdrom`; update `go.mod` and all imports when
-  the repo is hosted (e.g. `github.com/<owner>/cdrom`).
-- **Event-log retention (F-23, remaining).** The HA control plane (F-23) is
-  implemented (shared event log, hybrid push+pull dispatch, scheduler leader
-  election, cross-pod near-live logs — see `docs/HighAvailability.md`). The one
-  open item is retention: the `events` table is an unpruned append-only log;
-  partitioning by `created_at` + a retention schedule is a deployment concern to
-  add when the log's growth warrants it.
+- Go module path is the placeholder `cdrom`; update `go.mod` and all imports
+  when the repo is hosted (e.g. `github.com/<owner>/cdrom`).
+- **Event-log retention (F-23, remaining).** The `events` table is an
+  unpruned append-only log; partitioning by `created_at` + a retention
+  schedule is a deployment concern to add when growth warrants it.

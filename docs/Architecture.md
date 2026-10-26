@@ -297,8 +297,9 @@ and the handler reads everything it needs from the common fields (`workdir`,
 (a map of name → value, where a value is either a scalar string or a list of
 strings), not in the step's own fields, so a new step type can be added without
 changing the spec schema. The built-in **`shell`** handler (also the default
-when `type` is empty) runs a command — directly, or through a user-chosen
-shell — reading its `command`, `args`, and `shell` from `params`. The
+when `type` is empty) runs a command — through the target OS's default shell,
+directly, or through a user-chosen shell — reading its `command`, `args`, and
+`shell` from `params`. The
 canonical type is `cdrom.db.v1.JobSpec`; the API and scheduler protos
 reference it rather than redefining it.
 
@@ -325,16 +326,26 @@ reference it rather than redefining it.
   registering a handler, not changing the executor core.
 - **Shell contract (portability, shell handler).** The shell handler reads its
   `command` (string param), `args` (list param), and `shell` (string param)
-  from the step's `params`. The command is executed **directly by the target
-  OS — no implicit shell**. This is what makes a spec portable across Windows
-  and Linux (no `&&`, pipes, globbing, or `$VAR` expansion). A step that needs
-  shell behavior invokes a shell explicitly (`bash -c ...` on Linux,
-  `pwsh -Command ...` on Windows). Step stdout/stderr are inherited from the
-  target's own stdout/stderr (local logging) and, when the target has a log
-  sink, also
-  streamed to the API in near-real-time (F-02, `internal/logstream`); the API
-  persists the output to the artifacts service and fans it out to the UI as
-  `job_log` events.
+  from the step's `params`, and behaves differently depending on which are
+  set:
+  - **Neither `shell` nor `args`** — `command` is a one-line shell command and
+    is run through the target OS's **default shell**: `bash -c <command>` on
+    Linux (falling back to `sh -c` when bash is not on the PATH) and
+    `pwsh -Command <command>` on Windows (falling back to `powershell`
+    `-Command` when PowerShell Core is absent). This is what makes the file
+    format's `shell: <string>` shorthand (F-21.1.2) portable.
+  - **`args` set** — the step constructs the invocation explicitly, so the
+    command is executed **directly by the target OS — no implicit shell** (no
+    `&&`, pipes, globbing, or `$VAR` expansion). This is the maximally
+    portable case.
+  - **`shell` set** — the target runs `<shell> <args> <command>`: `args` are
+    the shell's own flags and `command` is the final argument (e.g.
+    `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`). This is the portable
+    way to opt a step into shell behavior with a *specific* shell.
+  Step stdout/stderr are logged on the target (local logging) and, when the
+  target has a log sink, also streamed to the API in near-real-time (F-02,
+  `internal/logstream`); the API persists the output to the artifacts service
+  and fans it out to the UI as `job_log` events.
 - **Timeouts (F-03).** A job declares a job-level `timeout` on its `JobSpec`
   (the sum of all steps) and each step may declare its own `timeout` (an
   individual step); whichever deadline expires first terminates the job. The
@@ -558,17 +569,18 @@ reference it rather than redefining it.
   each claim's structure — a claim that is an object or a list, e.g. GitLab's
   `user_identities` or `job_config`, stays an object/list), denormalized onto
   the run's job instances and stamped onto their job tokens as `upstream_*`
-  claims (alongside `trigger_name` / `trigger_type`). See AGENTS.md for the
-  full design.
-- **Shell override (shell handler).** A step may set the `shell` param to run
-  through a user-chosen interpreter instead of executing `command` directly.
-  When `shell` is set the target executes `<shell> <args> <command>` — `args`
-  are the shell's own flags and `command` is passed as the final argument
-  (e.g. `shell: "pwsh"`, `args: ["-NoProfile", "-Command"]`,
-  `command: "Get-ChildItem"`). This is the portable way to opt a step into
-  shell behavior with a specific shell rather than a platform default. When
-  `shell` is empty the step runs `command` directly, preserving the
-  no-implicit-shell contract.
+  claims (alongside `trigger_name` / `trigger_type`). Full design:
+  `docs/features/f-09-triggers.md`.
+- **Notification handlers (F-18).** The built-in `email` and `webhook` step
+  handlers send from the **API server**: the target renders the step's fields
+  (email `to`/`cc`/`bcc`/`subject`/`body`; webhook `url`/`headers`/`body`) against
+  the step's condition context (F-06/F-10, like the approval message) and calls
+  the API's `SendEmail` / `SendWebhook` gRPC RPCs; the API performs the actual
+  send (SMTP config on the API; webhook response timeout default 10s, capped by
+  a configurable max). Bodies take a `content_type` of `plain` / `html` /
+  `markdown` (default `markdown`, rendered to HTML by the API). A step's
+  standard `once` field (F-01) sends at most one notification per job attempt;
+  a failed send fails the step unless `ignore_failed`.
 
 ---
 
@@ -944,13 +956,14 @@ Standard Go layout; the frontend lives outside the Go module.
 
 ```
 cmd/
-  api/        API/controller entrypoint (HTTP for UI + gRPC for workers/agents/scheduler)
-  db/         database service entrypoint (gRPC)
-  scheduler/  scheduler service entrypoint (gRPC)
-  artifacts/  artifacts service entrypoint (gRPC)
-  idp/        local OIDC identity provider entrypoint (HTTP)
-  worker/     long-lived worker entrypoint
-  agent/      ephemeral Kubernetes agent entrypoint
+  api/             API/controller entrypoint (HTTP for UI + gRPC for workers/agents/scheduler)
+  db/              database service entrypoint (gRPC)
+  scheduler/       scheduler service entrypoint (gRPC)
+  artifacts/       artifacts service entrypoint (gRPC)
+  idp/             local OIDC identity provider entrypoint (HTTP + gRPC)
+  pipelinesource/  source-fetcher service entrypoint (F-21.2, gRPC)
+  worker/          long-lived worker entrypoint
+  agent/           ephemeral Kubernetes agent entrypoint
 internal/
   api/        API/controller layer: HTTP routing + gRPC control-plane server
               (worker hub, artifact proxy, StreamJobLogs persistence + job_log
@@ -968,6 +981,10 @@ internal/
               stats.Handler) + per-component metric sets
   logstream/  executor.LogSink that streams a job's step output to the API's
               StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
+  tokenexchange/ executor.TokenExchange via the API's ExchangeJobToken (worker + agent)
+  approval/   approval gate (F-13): report awaiting_approval + poll CheckApproval
+  target/     shared execution layer for worker + agent (run context, status
+              reporting, post-run decision; worker supplies the StepBarrier)
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
@@ -976,29 +993,38 @@ internal/
               false, and reporting each step's terminal status for a
               caller's StepResultCollector to attach to its final status
               report; used by worker + agent)
-  stephandlers/ built-in step handlers (the "shell" handler, registered under
-              executor.DefaultType, tees step output to a LogSink when present);
-              a target or plugin adds more via executor.RegisterStepType
+  stephandlers/ built-in step handlers: `shell` (DefaultType), `token_exchange`,
+              `approval` (F-13), `email` + `webhook` (F-18); a target or plugin
+              adds more via executor.RegisterStepType
+  secrets/    secret store: `Store` interface + built-in AES-256-GCM store;
+              nonces come from the Database service's `NextSecretNonce` (F-12)
+  audit/      audit log (F-15): rotating file/stdout writer, Recorder, Pruner,
+              Redactor
+  notify/     notification rendering/support (F-18)
+  webhook/    webhook trigger support (F-09)
+  pipelinefile/ config-as-code file format + compiler (F-21.1)
+  sourceref/  `<type>:<spec>` source-reference parsing (F-21.2.2)
   services/
-    data/     pipeline/job data service
-    artifacts/ general namespaced file store (artifacts + job logs; gRPC server;
-              store interface with a filesystem implementation)
-    scheduler/ job lifecycle + dispatch (gRPC server) + CreateRun (F-07) + a
-              background run-status loop that re-derives each in-flight run's
-              status from its job instances (F-07) + a background watchdog
-              that reaps running jobs past their timeout (F-03) + a background
-              retry loop that re-dispatches failed jobs per their retry policy
-              (F-04) + a background dependency resolver that skips/dispatches
-              a pending job once its depends_on dependencies resolve (F-06)
-    database/ storage backend abstraction + gRPC server (SQLite / PostgreSQL)
+    database/   storage backend abstraction + gRPC server (SQLite / PostgreSQL)
+    scheduler/  job lifecycle + dispatch (gRPC server) + CreateRun (F-07) +
+                background loops: run-status derivation (F-07), watchdog (F-03),
+                retry (F-04), dependency resolver (F-06), cron + event triggers
+                (F-09), concurrency admission (F-16)
+    artifacts/  namespaced file store (artifacts + job logs; gRPC server;
+                store interface with a filesystem implementation)
+    pipelinesource/ source-fetcher service (F-21.2): git/http/file fetch
+                    clients, shallow bare-object-store git cache, strict SSH
+                    host-key pinning
   worker/     long-lived worker implementation
   agent/      ephemeral agent implementation
   idp/        local OIDC identity provider (JWT issuer, auto key rotation;
-              signing keys + auth codes persisted through the Database service)
+              signing keys + auth codes + user directory persisted through the
+              Database service)
 proto/        protobuf definitions (proto/cdrom/<service>/v1/)
 ui/           React frontend (separate from the Go module)
 docs/         documentation
-scripts/      build/release scripts (genproto.sh regenerates gRPC code)
+scripts/      build/release scripts (genproto.sh regenerates gRPC code; e2e.sh
+              boots the stack once and runs scripts/e2e/NN-*.sh in order)
 ```
 
 Rules:
@@ -1051,7 +1077,6 @@ flowchart TB
     APIG --> IDP
     IDP --> DB
     SCHED --> DB
-    SCHED --> APIG
     W <--> APIG
     A <--> APIG
 ```
@@ -1094,3 +1119,111 @@ make certs        # writes certs/ca.crt, certs/cert.crt, certs/cert.key
 ./bin/db --config-file config.yaml
 # ... and so on for the other services, api, and worker
 ```
+
+---
+
+## 11. Configuration reference
+
+Every binary loads configuration from three places, lowest to highest
+precedence: built-in defaults (localhost addresses, sensible intervals) → an
+optional config file (`--config-file <path>`, see `config.example.yaml`) →
+environment variables. Where a variable is set it wins, which is what lets the
+same binary run in a container or on a laptop unchanged.
+
+### Address wiring
+
+| Dialer | Target | Client env var | Server listens on |
+|--------|--------|----------------|--------------------|
+| scheduler | db | `CDROM_DB_ADDR` | `CDROM_LISTEN_ADDR` (default `127.0.0.1:7101`) |
+| api | db / scheduler / artifacts | `CDROM_DB_ADDR` / `CDROM_SCHEDULER_ADDR` / `CDROM_ARTIFACTS_ADDR` | respective `CDROM_LISTEN_ADDR` |
+| api | idp (gRPC, mTLS) | `CDROM_IDP_GRPC_ADDR` | `CDROM_IDP_GRPC_ADDR` (default `127.0.0.1:7106`) |
+| api | pipelinesource | `CDROM_PIPELINE_SOURCE_ADDR` | `CDROM_LISTEN_ADDR` (default `127.0.0.1:7107`) |
+| worker / agent | api (gRPC) | `CDROM_API_ADDR` | `CDROM_LISTEN_ADDR` (default `127.0.0.1:7105`) |
+| UI | api (HTTP) | — | `CDROM_API_HTTP_ADDR` (default `127.0.0.1:8080`) |
+| scrapers | any component | — | `CDROM_METRICS_ADDR` (per-component default port; see `Monitoring.md`) |
+
+Note the scheduler dials **only** the Database service: job deliveries flow
+through the shared event log that every API pod tails (F-23), so there is no
+scheduler→API hop anymore.
+
+### Storage & artifacts
+
+| Var | Meaning |
+|-----|---------|
+| `CDROM_DB_BACKEND` | `sqlite` (local dev) or `postgres` (deployments) |
+| `CDROM_DB_SQLITE_PATH` | path of the SQLite file (owned by the db service, which runs `AutoMigrate` on it) |
+| `CDROM_DB_POSTGRES_DSN` | PostgreSQL connection string |
+| `CDROM_ARTIFACTS_ROOT` | filesystem root of the artifacts store |
+| `CDROM_ARTIFACTS_STORE` | store kind (`filesystem` default; extensible for S3/Azure Blob) |
+
+### TLS (mutual)
+
+`CDROM_TLS_CA_FILE`, `CDROM_TLS_CERT_FILE`, `CDROM_TLS_KEY_FILE` — when a CA is
+configured, every gRPC connection between components uses mutual TLS
+(credentials built in `internal/grpcutil`); without one it falls back to
+plaintext. `make certs` generates a local set.
+
+### Auth & RBAC (`CDROM_AUTH_*`)
+
+| Var | Meaning |
+|-----|---------|
+| `CDROM_AUTH_ENABLED` | enable OIDC Bearer verification on the UI surface (off by default; passthrough as synthetic admin) |
+| `CDROM_AUTH_ISSUER`, `CDROM_AUTH_CLIENT_ID`, `CDROM_AUTH_REDIRECT_URL`, `CDROM_AUTH_TOKEN_AUDIENCE` | OIDC verifier settings (required when enabled) |
+| `CDROM_AUTH_USERPASS_ENABLED` | username/password sign-in (on by default; F-24) |
+| `CDROM_AUTH_APIKEY_ENABLED`, `CDROM_AUTH_APIKEY_MAX_FAILURES`, `CDROM_AUTH_APIKEY_LOCKOUT_DURATION`, `CDROM_AUTH_APIKEY_PEPPER` | per-user API keys (F-25) |
+| `CDROM_AUTH_SERVICEACCOUNT_ENABLED`, `CDROM_AUTH_SERVICEACCOUNT_MAX_FAILURES`, `CDROM_AUTH_SERVICEACCOUNT_LOCKOUT_DURATION`, `CDROM_AUTH_SERVICEACCOUNT_PEPPER` | service accounts (F-26) |
+| `CDROM_AUTH_ROLE_CLAIM`, `CDROM_AUTH_ROLE_MAPPINGS`, `CDROM_AUTH_ROLE_CLAIM_AS_NAMES` | map an external IdP's group claim onto Cdrom roles (F-14) |
+
+### Job-token auth (target gRPC surface, `CDROM_GRPC_AUTH_*`)
+
+`CDROM_GRPC_AUTH_ENABLED` (off by default), `CDROM_GRPC_AUTH_IDP_ADDR`,
+`CDROM_GRPC_AUTH_AUDIENCES`, `CDROM_GRPC_AUTH_EXCHANGED_TOKEN_LIFETIME`
+(short-lived exchanged tokens; default 15m). See §6.
+
+### IdP (`CDROM_IDP_*`)
+
+`CDROM_IDP_GRPC_ADDR` (API-only gRPC surface, :7106), `CDROM_IDP_ISSUER`,
+`CDROM_IDP_TOKEN_LIFETIME`, `CDROM_IDP_KEY_LIFETIME`,
+`CDROM_IDP_ROTATE_BEFORE`, `CDROM_IDP_CHECK_INTERVAL` (key auto-rotation
+tuning).
+
+### Secrets (F-12)
+
+`CDROM_SECRETS_KIND`, `CDROM_SECRETS_KEY` — base64-encoded 32-byte AES-256-GCM
+key; when unset, secret encryption is disabled. Held by the API only.
+
+### Pipeline source (F-21.2/F-21.5, `CDROM_PIPELINE_SOURCE_*`)
+
+`CDROM_PIPELINE_SOURCE_ADDR`, `CDROM_PIPELINE_SOURCE_REPO_CACHE_DIR`,
+`CDROM_PIPELINE_SOURCE_FILE_ROOT` (root for `file:` references; the file client
+is disabled without one), `CDROM_PIPELINE_SOURCE_REFRESH_INTERVAL`
+(system-default refresh cadence for externally-sourced pipelines, default
+`120s`), `CDROM_PIPELINE_SOURCE_OVERRIDES_ALLOWED` (honor a file's
+`spec.periodicRefresh`? default on), `CDROM_PIPELINE_SOURCE_MAX_PARALLEL`
+(simultaneous in-flight syncs; `0` = unlimited),
+`CDROM_PIPELINE_SOURCE_SYNC_TIMEOUT` (bound on a single sync, default `5m`).
+
+### Audit (F-15, `CDROM_AUDIT_*`)
+
+`CDROM_AUDIT_FILE` (current audit file; separate from `CDROM_LOG_FILE`; `-`
+for stdout), `CDROM_AUDIT_FORMAT` (`json`/`text`), `CDROM_AUDIT_ROTATION`
+(`hourly`/`daily`), `CDROM_AUDIT_RETENTION` (max age of durable entries),
+`CDROM_AUDIT_PRUNE_INTERVAL`.
+
+### Notifications (F-18)
+
+`CDROM_EMAIL_{HOST,PORT,FROM,USERNAME,PASSWORD,STARTTLS,INSECURE}` (SMTP on the
+API), `CDROM_WEBHOOK_TIMEOUT` (default 10s), `CDROM_WEBHOOK_TIMEOUT_MAX`.
+
+### Logging & metrics
+
+`CDROM_LOG_FILE` (stdout when unset; append mode), `CDROM_LOG_FORMAT`
+(`json` default / `text`), `CDROM_LOG_LEVEL`; `CDROM_METRICS_ENABLED` (default
+on), `CDROM_METRICS_ADDR` (dedicated `/metrics` + `/healthz` port; see
+`Monitoring.md`).
+
+### Execution targets
+
+`CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_WORKER_ENVIRONMENTS`
+(comma-separated environment memberships, F-17), `CDROM_WORKER_TAGS`;
+`CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`.
