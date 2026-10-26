@@ -257,6 +257,44 @@ type Pipeline struct {
 	// are stored as a JSON document in a text column, like Params. Empty means
 	// the pipeline declares no secret sources.
 	SecretSources []SecretSource `gorm:"type:text;serializer:json" json:"secret_sources,omitempty"`
+	// SourceFile is the raw definition text of an externally-sourced pipeline
+	// (F-21.5.1): the verbatim file the source-fetcher returned at the last
+	// successful sync, stored so it is retrievable through the API and is the
+	// exact input the compiler ran. Empty for a UI-authored pipeline.
+	SourceFile string `gorm:"column:source_file;type:text" json:"source_file,omitempty"`
+	// SourceHash is the SHA-256 (hex) of SourceFile (F-21.5.1): the change
+	// detector. A sync that yields the same hash is a no-op (no recompile, no
+	// version bump); a differing hash re-imports the pipeline (bumping its
+	// version, F-11).
+	SourceHash string `gorm:"column:source_hash;size:64" json:"source_hash,omitempty"`
+	// PeriodicRefreshInterval is the steady-state refresh cadence the
+	// pipeline's FILE declares (F-21.5.1, spec.periodicRefresh.interval): a
+	// duration string (e.g. "2m"). Empty means unpinned — the system default
+	// applies. Stored verbatim as authored; the refresh loop parses it at sync
+	// time. Malformed values are rejected at import time (the compiler).
+	PeriodicRefreshInterval string `gorm:"column:periodic_refresh_interval;size:64" json:"periodic_refresh_interval,omitempty"`
+	// PeriodicRefreshSchedule is the cron expression the pipeline's FILE
+	// declares (F-21.5.1, spec.periodicRefresh.schedule): precise timing —
+	// e.g. syncing only during after-hours when load is minimal. When
+	// non-empty it DRIVES the periodic refresh (the interval is ignored).
+	// Malformed expressions are rejected at import time (the compiler).
+	PeriodicRefreshSchedule string `gorm:"column:periodic_refresh_schedule;size:128" json:"periodic_refresh_schedule,omitempty"`
+	// PeriodicRefreshOverridesAllowed is the per-pipeline half of the admin
+	// gate (F-21.5.1): whether this pipeline's file-directed periodicRefresh
+	// override is honored. Nil (unset) or true means allowed; false means the
+	// file's cadence is ignored and the system default applies — denying
+	// restores the safe default, it does not halt polling. Editable through
+	// the pipeline API by whoever may edit the pipeline. A pointer (rather
+	// than a bool with a default tag) sidesteps GORM's zero-value omission:
+	// an explicit false must be writable.
+	PeriodicRefreshOverridesAllowed *bool `gorm:"column:periodic_refresh_overrides_allowed;not null;default:true" json:"periodic_refresh_overrides_allowed,omitempty"`
+}
+
+// AllowsPeriodicRefreshOverrides reports whether the pipeline's file-directed
+// periodicRefresh override is honored (F-21.5.1): an unset (nil) flag counts
+// as allowed, so pre-existing rows behave safely.
+func (p *Pipeline) AllowsPeriodicRefreshOverrides() bool {
+	return p.PeriodicRefreshOverridesAllowed == nil || *p.PeriodicRefreshOverridesAllowed
 }
 
 // PipelineSource is where a pipeline is pulled from (F-21.5.1): a `kind` of
@@ -374,6 +412,15 @@ type PipelineVersion struct {
 	// snapshot so a run bound to this version resolves the sources that were
 	// active when it started.
 	SecretSources []SecretSource `gorm:"type:text;serializer:json" json:"secret_sources,omitempty"`
+	// PeriodicRefreshInterval is the steady-state refresh cadence the
+	// pipeline's file declared at this version (F-21.5.1); see
+	// Pipeline.PeriodicRefreshInterval. Captured in the snapshot for history;
+	// the refresh loop acts on the CURRENT definition.
+	PeriodicRefreshInterval string `gorm:"column:periodic_refresh_interval;size:64" json:"periodic_refresh_interval,omitempty"`
+	// PeriodicRefreshSchedule is the cron expression the pipeline's file
+	// declared at this version (F-21.5.1); see
+	// Pipeline.PeriodicRefreshSchedule.
+	PeriodicRefreshSchedule string `gorm:"column:periodic_refresh_schedule;size:128" json:"periodic_refresh_schedule,omitempty"`
 }
 
 // JobDefinitionSnapshot is the declarative form of a job definition as captured
@@ -579,6 +626,29 @@ type PipelineRun struct {
 	// can stamp them (prefixed with upstream_) onto the job tokens it hands to
 	// execution targets.
 	UpstreamClaims map[string]any `gorm:"type:text;serializer:json" json:"upstream_claims,omitempty"`
+	// SourceKind is the kind of the pipeline's external source at kickoff
+	// (F-21.5.1): "git" / "http" / "file". Empty for a run of a UI-authored
+	// pipeline (one with no attached source). Snapshotted at run creation,
+	// after the refresh-on-run hook has settled, so it records the source the
+	// definition the run executed was pulled from.
+	SourceKind string `gorm:"column:source_kind;size:16" json:"source_kind,omitempty"`
+	// SourceReference is the source's <type>:<spec> locator at kickoff
+	// (F-21.5.1) — the path/location of the file the run's definition came
+	// from (e.g. "git:org/repo@main[pipelines/prod.yaml]"). Empty for a run of
+	// a UI-authored pipeline.
+	SourceReference string `gorm:"column:source_reference;size:1024" json:"source_reference,omitempty"`
+	// SourceVersion is the source's version identifier at the sync the run's
+	// definition came from (F-21.5.1): the git commit hash, an HTTP
+	// ETag/Last-Modified, or the file's mtime. Empty for a run of a
+	// UI-authored pipeline.
+	SourceVersion string `gorm:"column:source_version;size:255" json:"source_version,omitempty"`
+	// SourceFileHash is the SHA-256 (hex) of the definition file the run
+	// executed (F-21.5.1) — the content hash at the last successful sync.
+	// Empty for a run of a UI-authored pipeline. Together with
+	// SourceReference/SourceVersion it answers "which file, at which
+	// revision, produced this run?" even after the source is repointed or
+	// detached.
+	SourceFileHash string `gorm:"column:source_file_hash;size:64" json:"source_file_hash,omitempty"`
 	// StartedAt is when the run started (its first job began); nil until then.
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// FinishedAt is when the run reached a terminal status; nil while the run

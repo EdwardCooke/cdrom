@@ -127,6 +127,7 @@ const (
 	Database_DeleteSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/DeleteSourceCredential"
 	Database_AttachPipelineSource_FullMethodName           = "/cdrom.db.v1.Database/AttachPipelineSource"
 	Database_GetPipelineSource_FullMethodName              = "/cdrom.db.v1.Database/GetPipelineSource"
+	Database_ListPipelineSources_FullMethodName            = "/cdrom.db.v1.Database/ListPipelineSources"
 	Database_CountSourcesByCredential_FullMethodName       = "/cdrom.db.v1.Database/CountSourcesByCredential"
 	Database_SetPipelineSourceState_FullMethodName         = "/cdrom.db.v1.Database/SetPipelineSourceState"
 	Database_GetPipelineSourceState_FullMethodName         = "/cdrom.db.v1.Database/GetPipelineSourceState"
@@ -644,6 +645,10 @@ type DatabaseClient interface {
 	// GetPipelineSource returns a pipeline's source. A pipeline with no source
 	// returns NotFound.
 	GetPipelineSource(ctx context.Context, in *GetPipelineSourceRequest, opts ...grpc.CallOption) (*PipelineSource, error)
+	// ListPipelineSources returns every attached source (F-21.5.3): the
+	// API's leader-gated source-refresh loop walks this list to resolve each
+	// source's effective cadence and sync the due ones.
+	ListPipelineSources(ctx context.Context, in *ListPipelineSourcesRequest, opts ...grpc.CallOption) (*ListPipelineSourcesResponse, error)
 	// CountSourcesByCredential counts the sources that reference the named
 	// credential (F-21.3.3's delete guard).
 	CountSourcesByCredential(ctx context.Context, in *CountSourcesByCredentialRequest, opts ...grpc.CallOption) (*CountSourcesByCredentialResponse, error)
@@ -1798,6 +1803,16 @@ func (c *databaseClient) GetPipelineSource(ctx context.Context, in *GetPipelineS
 	return out, nil
 }
 
+func (c *databaseClient) ListPipelineSources(ctx context.Context, in *ListPipelineSourcesRequest, opts ...grpc.CallOption) (*ListPipelineSourcesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPipelineSourcesResponse)
+	err := c.cc.Invoke(ctx, Database_ListPipelineSources_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) CountSourcesByCredential(ctx context.Context, in *CountSourcesByCredentialRequest, opts ...grpc.CallOption) (*CountSourcesByCredentialResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CountSourcesByCredentialResponse)
@@ -2457,6 +2472,10 @@ type DatabaseServer interface {
 	// GetPipelineSource returns a pipeline's source. A pipeline with no source
 	// returns NotFound.
 	GetPipelineSource(context.Context, *GetPipelineSourceRequest) (*PipelineSource, error)
+	// ListPipelineSources returns every attached source (F-21.5.3): the
+	// API's leader-gated source-refresh loop walks this list to resolve each
+	// source's effective cadence and sync the due ones.
+	ListPipelineSources(context.Context, *ListPipelineSourcesRequest) (*ListPipelineSourcesResponse, error)
 	// CountSourcesByCredential counts the sources that reference the named
 	// credential (F-21.3.3's delete guard).
 	CountSourcesByCredential(context.Context, *CountSourcesByCredentialRequest) (*CountSourcesByCredentialResponse, error)
@@ -2861,6 +2880,9 @@ func (UnimplementedDatabaseServer) AttachPipelineSource(context.Context, *Attach
 }
 func (UnimplementedDatabaseServer) GetPipelineSource(context.Context, *GetPipelineSourceRequest) (*PipelineSource, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPipelineSource not implemented")
+}
+func (UnimplementedDatabaseServer) ListPipelineSources(context.Context, *ListPipelineSourcesRequest) (*ListPipelineSourcesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPipelineSources not implemented")
 }
 func (UnimplementedDatabaseServer) CountSourcesByCredential(context.Context, *CountSourcesByCredentialRequest) (*CountSourcesByCredentialResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CountSourcesByCredential not implemented")
@@ -4857,6 +4879,24 @@ func _Database_GetPipelineSource_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_ListPipelineSources_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPipelineSourcesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListPipelineSources(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListPipelineSources_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListPipelineSources(ctx, req.(*ListPipelineSourcesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_CountSourcesByCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CountSourcesByCredentialRequest)
 	if err := dec(in); err != nil {
@@ -5579,6 +5619,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetPipelineSource",
 			Handler:    _Database_GetPipelineSource_Handler,
+		},
+		{
+			MethodName: "ListPipelineSources",
+			Handler:    _Database_ListPipelineSources_Handler,
 		},
 		{
 			MethodName: "CountSourcesByCredential",

@@ -31,11 +31,13 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-# The main stack runs no fetcher, so this script boots its own (gRPC :7110,
-# metrics :9110, http sink :10091, 401 sink :10092) and points the stack's API
-# at it (CDROM_PIPELINE_SOURCE_ADDR) so a source refresh dials this fetcher.
-# In shared mode the API is already up (dialing the default :7107), so the
-# refresh half is skipped; the fetcher + API-redaction halves still run.
+# Standalone: this script boots its own fetcher (gRPC :7110, metrics :9110,
+# http sink :10091, 401 sink :10092) and points the stack's API at it
+# (CDROM_PIPELINE_SOURCE_ADDR) so a source refresh dials this fetcher. Shared
+# (run from e2e.sh): the API is already up, dialed to the STOCK fetcher that
+# e2e.sh boots — so the refresh halves are skipped here (they are covered by
+# 15-externally-sourced-pipelines.sh + the unit tests); the fetcher +
+# API-redaction halves still run.
 E2E_PS_ADDR=127.0.0.1:7110
 E2E_PS_METRICS=9110
 E2E_PS_HTTP=10091

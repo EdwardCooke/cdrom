@@ -25,6 +25,17 @@
 #                        credential's header (name + value) on the GET, and the API redacts a
 #                        sensitive http header on read while returning a non-sensitive one in
 #                        plaintext
+#   (the shared stack also runs a source-fetcher on the default :7107 — the
+#    API dials it at startup — so 15 can exercise the API ↔ fetcher link)
+#   15-externally-sourced-pipelines.sh externally-sourced pipelines (F-21.5): attaching a source
+#                        bootstraps the import (the file's jobs + periodicRefresh policy adopt
+#                        onto the pipeline, the raw YAML + hash are stored), a manual refresh
+#                        applies a changed file (version bump + a run executes the new
+#                        definition), an unchanged refresh is a no-op, the run row carries the
+#                        kickoff provenance (surviving a repoint), the source view explains the
+#                        effective cadence, a per-pipeline gate denial falls back to the
+#                        2-minute system default, and a broken source records last_error
+#                        without wiping the last-good state
 #
 # Each test script is also executable on its own (it boots and tears down its
 # own stack); when run from this main script they share the one stack booted
@@ -78,6 +89,21 @@ e2e_start idp       "$WORK/idp.log"       'idp starting' CDROM_LOG_FORMAT=text -
 # target. The API is configured to send email to the SMTP sink (plaintext,
 # STARTTLS disabled); a webhook step's url points at the webhook sink.
 e2e_start_sinks
+# The STOCK source-fetcher (F-21.2) on :7109 (metrics :9112). It must be up
+# BEFORE the API, which dials it at startup (CDROM_PIPELINE_SOURCE_ADDR, set
+# below) — otherwise the API's source-sync routines have no fetcher to dial
+# (15-externally-sourced-pipelines.sh exercises the API ↔ fetcher link). Ports
+# are chosen CLEAR of the suite's incumbents: :7107/:9106 (13's fetcher),
+# :7108/:9107 (13's no-root fetcher), :7110/:9110 (14's fetcher), :7111/:9111
+# (15's standalone fetcher), :8081 (06-rbac's auxiliary API). Its file root is
+# $WORK/shared-files (15 writes its definition files there).
+mkdir -p "$WORK/shared-files" "$WORK/shared-ps-cache"
+e2e_start pipelinesource "$WORK/pipelinesource.log" 'service starting' \
+  CDROM_LISTEN_ADDR=127.0.0.1:7109 \
+  CDROM_METRICS_ADDR=127.0.0.1:9112 \
+  CDROM_PIPELINE_SOURCE_FILE_ROOT="$WORK/shared-files" \
+  CDROM_PIPELINE_SOURCE_REPO_CACHE_DIR="$WORK/shared-ps-cache" \
+  CDROM_LOG_FORMAT=text -- "$BIN/pipelinesource"
 # The IdP logs "starting" before its HTTP server is listening, so poll its
 # discovery endpoint until it responds; the API's job-token auth performs OIDC
 # discovery against the IdP at startup and would fail if the IdP is not up.
@@ -99,7 +125,7 @@ curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 
 # action is also appended to the shared audit log in the database (queryable
 # via GET /api/audit), which both API instances share. The email config points
 # the API's SMTP sender at the fake SMTP sink (F-18).
-e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
+e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_PIPELINE_SOURCE_ADDR=127.0.0.1:7109 CDROM_LOG_FORMAT=text -- "$BIN/api"
 e2e_start worker    "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
 
 # Gate on the API having the worker's WatchJobs stream open before dispatching.
@@ -131,5 +157,6 @@ run_test 11-tagging.sh
 run_test 12-metrics.sh
 run_test 13-source-fetcher.sh
 run_test 14-source-credentials.sh
+run_test 15-externally-sourced-pipelines.sh
 
 log ">> e2e PASSED: worker job ran all steps (including a token_exchange step whose exchanged token flowed to a later step), persisted as succeeded, logs are retrievable, a job-level timeout terminates the job as timed_out, a failing job is retried up to its limit, a finished job can be re-run for a fresh execution, an approval gate pauses a job until it is approved (continuing to its later steps) or rejected (failing it), username/password auth registers users (first becomes admin), logs in with a valid password (minting a JWT), rejects bad credentials, and gates user management behind an authenticated caller, RBAC (F-14) allows the actions each role grants and disallows (403) the actions it does not (admin does everything, operator runs but does not create, the default user views but does not trigger, a role-less principal does nothing, and unauthenticated requests are rejected), the audit log (F-15) records each audited action (job trigger, approval, login, worker lifecycle, status report) to a separate JSON file and the shared database log (queryable/filterable via GET /api/audit) with the actor, and never stores or displays a secret's value, and API keys (F-25) let an admin create a key for another user (the plaintext returned once), authenticate as that user via Bearer username:apikey (even with OIDC on), list every key (admin) or only their own (a user), limit a key's resource-scoped permissions to its pipeline scope, lock a user out after repeated failures until an admin resets it, and rotate (new plaintext, old stops working) or delete (revokes) a key, and concurrency keys (F-16) serialize jobs that share a key: the first job acquires the key and runs, a second job sharing the key is held pending (the queue reports the key blocking it), and once the first job finishes and releases the key the admission loop admits and runs the second, and notifications (F-18) are sent from the API: an email step sends an SMTP message (markdown rendered to HTML) to the API's configured SMTP server, a webhook step performs an HTTP request to the templated url with the step's headers and body (markdown rendered to HTML, or plain sent as-is), a notification step with the standard once field sends at most once per job attempt (a fan-out job does not notify once per worker), and a failed send (a webhook non-2xx) fails the job unless the step sets ignore_failed, and every component's dedicated metrics port (F-20) serves /metrics + /healthz with the component's own metric set (plus the process metrics), a completed job is reflected in the worker/api/scheduler/artifacts/idp/database metrics, and the service ports (the API's UI HTTP and the IdP's OIDC surface) do not serve /metrics"

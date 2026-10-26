@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"cdrom/internal/audit"
 	"cdrom/internal/auth"
 	"cdrom/internal/authz"
+	"cdrom/internal/config"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	pipelinesourcepb "cdrom/internal/gen/cdrom/pipelinesource/v1"
@@ -103,6 +106,51 @@ type Server struct {
 	// (F-20). It is kept in sync by handleWebSocket (incremented on connect,
 	// decremented on close) and mirrored to the cdrom_api_ws_clients gauge.
 	wsClients atomic.Int64
+	// cfg is the API's configuration the server needs beyond its clients
+	// (F-21.5.1): the system-default refresh interval and the global
+	// periodic-refresh override gate. Populated via SetConfig; nil in tests
+	// that do not exercise the cadence logic (the defaults floor sensibly).
+	cfg *config.Config
+	// logger records the server's operational log lines (background loops,
+	// sync diagnostics). Populated via SetLogger; falls back to slog.Default()
+	// when unset.
+	logger *slog.Logger
+	// syncLocks serializes a pipeline's source syncs (F-21.5.2): one lazy
+	// mutex per pipeline id (LoadOrStore), so two triggers (a periodic tick
+	// and a run-kickoff refresh) cannot sync the same source concurrently.
+	// Guarded implicitly by sync.Map's atomic ops; the mutexes themselves are
+	// never freed (bounded by the number of sourced pipelines).
+	syncLocks sync.Map
+	// srcInFlight counts the source syncs currently in flight on this pod
+	// (F-21.5.3): fed to the max-parallel throttle and mirrored to the
+	// cdrom_api_source_sync_in_flight gauge. Initialized in New.
+	srcInFlight *inFlightCounter
+	// slowSyncWarner rate-limits the "a sync took longer than its own
+	// interval" warning (F-21.5.3). Initialized in New.
+	slowSyncWarner *slowSyncWarner
+}
+
+// SetConfig attaches the API's configuration (F-21.5.1): the system-default
+// refresh interval and the global override gate the cadence resolution reads.
+func (s *Server) SetConfig(cfg *config.Config) {
+	s.cfg = cfg
+}
+
+// SetLogger attaches the server's operational logger (falls back to
+// slog.Default() when unset).
+func (s *Server) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		s.logger = logger
+	}
+}
+
+// serverLogger returns the server's operational logger (slog.Default() when
+// none was attached).
+func (s *Server) serverLogger() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // SetUserPassClient attaches the IdP username/password proxy client, enabling
@@ -155,7 +203,15 @@ func New(clients Clients, hub *EventHub, secretStore ...secrets.Store) *Server {
 	if len(secretStore) > 0 {
 		store = secretStore[0]
 	}
-	return &Server{clients: clients, hub: hub, webhookOIDC: newWebhookOIDCVerifier(), secretStore: store}
+	s := &Server{
+		clients:        clients,
+		hub:            hub,
+		webhookOIDC:    newWebhookOIDCVerifier(),
+		secretStore:    store,
+		srcInFlight:    &inFlightCounter{},
+		slowSyncWarner: &slowSyncWarner{cooldown: srcSlowSyncWarnCooldown},
+	}
+	return s
 }
 
 // Handler builds the HTTP handler for the API.
@@ -165,6 +221,7 @@ func (s *Server) Handler() http.Handler {
 	// Pipelines (via the database service).
 	mux.HandleFunc("POST /api/pipelines", s.createPipeline)
 	mux.HandleFunc("GET /api/pipelines", s.listPipelines)
+	mux.HandleFunc("GET /api/pipelines/{id}", s.getPipeline)
 	mux.HandleFunc("PUT /api/pipelines/{id}", s.updatePipeline)
 
 	// Pipeline runs (F-07): triggering a pipeline creates a run and its job
@@ -411,6 +468,26 @@ type pipelineRequest struct {
 	// They are populated only by the file-format import path (decodePipelineRequest);
 	// a JSON body carries no secret sources.
 	SecretSources []*dbpb.SecretSource `json:"-"`
+	// PeriodicRefresh is the pipeline's file-declared periodic-refresh policy
+	// (F-21.5.1, spec.periodicRefresh): the steady-state cadence (a duration)
+	// and/or the cron expression, plus the per-pipeline admin gate. It is
+	// carried by BOTH the file-format import path (populated by the compiler)
+	// and the JSON schema form (a nested "periodicRefresh" object). Nil means
+	// the body does not mention the policy — the database service leaves the
+	// stored policy and gate untouched.
+	PeriodicRefresh *periodicRefreshRequest `json:"periodicRefresh,omitempty"`
+}
+
+// periodicRefreshRequest is the request form of a pipeline's file-declared
+// periodic-refresh policy (F-21.5.1, spec.periodicRefresh). Interval is a
+// duration string (e.g. "2m"); Schedule is a cron expression (precise timing
+// — e.g. after-hours syncs when load is minimal); when both are set the cron
+// drives. OverridesAllowed, when present, sets the per-pipeline admin gate
+// (whether the file's cadence is honored); absent means the default (allowed).
+type periodicRefreshRequest struct {
+	Interval         string `json:"interval,omitempty"`
+	Schedule         string `json:"schedule,omitempty"`
+	OverridesAllowed *bool  `json:"overridesAllowed,omitempty"`
 }
 
 // decodePipelineRequest reads a pipeline request body, which is either a
@@ -591,6 +668,7 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid secrets: %v", err)
 		return
 	}
+	policy := periodicRefreshPolicy(req)
 	pipeline, err := s.clients.Database.CreatePipeline(r.Context(), &dbpb.CreatePipelineRequest{
 		Name:            req.Name,
 		Description:     req.Description,
@@ -603,6 +681,11 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		Tags:            req.Tags,
 		VariableSets:    req.VariableSets,
 		SecretSources:   req.SecretSources,
+		// A create always carries the policy (possibly empty — no policy) and
+		// the stated gate value (defaulting to allowed).
+		PeriodicRefreshInterval:         policy.interval,
+		PeriodicRefreshSchedule:         policy.schedule,
+		PeriodicRefreshOverridesAllowed: policy.allowed,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -618,6 +701,25 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		NewValue:   auditPipelineValue(pipeline),
 	})
 	writeJSON(w, http.StatusCreated, pipeline)
+}
+
+// getPipeline returns a single pipeline's compiled definition (F-21.5.1):
+// the same shape the UI editor shows, so the UI and the file are two views of
+// the same model. It requires pipelines.can-view.
+func (s *Server) getPipeline(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{PipelineID: pipelineID}) {
+		return
+	}
+	pipeline, err := s.clients.Database.GetPipeline(r.Context(), &dbpb.GetPipelineRequest{Id: pipelineID})
+	if err != nil {
+		grpcError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pipeline)
 }
 
 func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
@@ -649,19 +751,24 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 	// changed (old value vs new value, F-15). A failure to fetch it (the
 	// pipeline was deleted concurrently) does not block the update.
 	oldPipeline, _ := s.clients.Database.GetPipeline(r.Context(), &dbpb.GetPipelineRequest{Id: pipelineID})
+	policy := periodicRefreshPolicy(req)
 	pipeline, err := s.clients.Database.UpdatePipeline(r.Context(), &dbpb.UpdatePipelineRequest{
-		Id:              pipelineID,
-		Name:            req.Name,
-		Description:     req.Description,
-		FailureMode:     failureModeFromName(req.FailureMode),
-		Jobs:            jobs,
-		Triggers:        triggersToProto(req.Triggers),
-		Params:          pipelineParamsToProto(req.Params),
-		Secrets:         secrets,
-		ConcurrencyKeys: req.ConcurrencyKeys,
-		Tags:            req.Tags,
-		VariableSets:    req.VariableSets,
-		SecretSources:   req.SecretSources,
+		Id:                              pipelineID,
+		Name:                            req.Name,
+		Description:                     req.Description,
+		FailureMode:                     failureModeFromName(req.FailureMode),
+		Jobs:                            jobs,
+		Triggers:                        triggersToProto(req.Triggers),
+		Params:                          pipelineParamsToProto(req.Params),
+		Secrets:                         secrets,
+		ConcurrencyKeys:                 req.ConcurrencyKeys,
+		Tags:                            req.Tags,
+		VariableSets:                    req.VariableSets,
+		SecretSources:                   req.SecretSources,
+		PeriodicRefreshInterval:         policy.interval,
+		PeriodicRefreshSchedule:         policy.schedule,
+		HasPeriodicRefresh:              policy.present,
+		PeriodicRefreshOverridesAllowed: policy.allowed,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -678,6 +785,33 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		NewValue:   auditPipelineValue(pipeline),
 	})
 	writeJSON(w, http.StatusOK, pipeline)
+}
+
+// periodicRefreshPolicy extracts the file-declared periodic-refresh policy
+// (F-21.5.1) from a pipeline request: present reports whether the body
+// mentioned the policy at all (driving the update's has_periodic_refresh),
+// interval/schedule carry the values, and allowed is the stated gate (an
+// absent gate defaults to allowed).
+func periodicRefreshPolicy(req *pipelineRequest) (policy struct {
+	present  bool
+	interval string
+	schedule string
+	allowed  bool
+}) {
+	// Absent ⇒ the default stance: ALLOWED. A body that does not mention the
+	// policy neither denies nor grants anything special — the gate stays at
+	// its safe default (true), so the view never misleadingly reports a
+	// denial on a plain pipeline.
+	policy.allowed = true
+	if req.PeriodicRefresh == nil {
+		return policy
+	}
+	pr := req.PeriodicRefresh
+	policy.present = true
+	policy.interval = pr.Interval
+	policy.schedule = pr.Schedule
+	policy.allowed = pr.OverridesAllowed == nil || *pr.OverridesAllowed
+	return policy
 }
 
 // triggersToProto converts the JSON trigger definitions into the proto Trigger
@@ -914,6 +1048,13 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
+	// Refresh-on-run (F-21.5.3): for an externally-sourced pipeline, sync the
+	// source FIRST so the run executes the latest reviewed definition —
+	// "what I just kicked off is what is in the source right now". A failure
+	// does NOT block the run (it proceeds on the last good definition; the
+	// error is recorded on the source state). No-op for UI-authored
+	// pipelines.
+	s.refreshOnRun(r.Context(), pipelineID)
 	run, err := s.clients.Scheduler.CreateRun(r.Context(), &schedpb.CreateRunRequest{
 		PipelineId:      pipelineID,
 		Trigger:         req.Trigger,
@@ -1133,6 +1274,11 @@ func (s *Server) webhook(w http.ResponseWriter, r *http.Request) {
 	for k, v := range payload {
 		params[k] = v
 	}
+	// Refresh-on-run (F-21.5.3): for an externally-sourced pipeline, sync the
+	// source FIRST so the run executes the latest reviewed definition. A
+	// failure does NOT block the run (last good definition; error recorded on
+	// the source state). No-op for UI-authored pipelines.
+	s.refreshOnRun(r.Context(), pipelineID)
 	run, err := s.clients.Scheduler.TriggerRun(r.Context(), &schedpb.TriggerRunRequest{
 		PipelineId:     pipelineID,
 		TriggerName:    matched.GetName(),

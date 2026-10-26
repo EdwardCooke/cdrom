@@ -67,6 +67,24 @@ type APIMetrics struct {
 	// Notifications counts email/webhook sends (F-18) by kind (email /
 	// webhook) and outcome (sent / failed).
 	Notifications *prometheus.CounterVec
+	// SourceSyncs counts source-refresh syncs (F-21.5.3) by outcome:
+	// success (a changed file was re-imported), unchanged (a no-op), error
+	// (fetch/compile/re-import failed), deferred_peer (another replica held
+	// the cross-replica sync lease), skipped_busy (the loop's own
+	// skip-if-in-flight guard declined a due fire), and skipped_throttled
+	// (the loop's max-parallel throttle deferred a due fire to the next tick).
+	SourceSyncs *prometheus.CounterVec
+	// SourceSyncDuration is a source sync's wall-clock duration (F-21.5.3),
+	// by outcome — the latency signal that reveals a source whose syncs
+	// outrun its own interval.
+	SourceSyncDuration *prometheus.HistogramVec
+	// SourceSyncInFlight is the number of source syncs currently in flight on
+	// this pod (F-21.5.3) — the saturation signal.
+	SourceSyncInFlight prometheus.Gauge
+	// LeaderState is 1 while this pod holds the source-refresh leader lease
+	// (F-21.5.3 / F-23), 0 otherwise — parity with the scheduler's leader
+	// metric; a stuck 0 on every pod means nobody is polling.
+	LeaderState prometheus.Gauge
 }
 
 // NewAPIMetrics builds the API metric set, registering its collectors with
@@ -127,11 +145,29 @@ func NewAPIMetrics(reg prometheus.Registerer) *APIMetrics {
 			Name: Prefix + "_api_notifications_total",
 			Help: "Email/webhook notification sends (F-18), by kind and outcome.",
 		}, []string{"kind", "outcome"}),
+		SourceSyncs: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: Prefix + "_api_source_syncs_total",
+			Help: "Source-refresh syncs (F-21.5.3), by outcome.",
+		}, []string{"outcome"}),
+		SourceSyncDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    Prefix + "_api_source_sync_duration_seconds",
+			Help:    "Source-refresh sync duration (F-21.5.3), by outcome.",
+			Buckets: JobRunBuckets,
+		}, []string{"outcome"}),
+		SourceSyncInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: Prefix + "_api_source_sync_in_flight",
+			Help: "Source-refresh syncs currently in flight on this pod (F-21.5.3).",
+		}),
+		LeaderState: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: Prefix + "_api_leader_state",
+			Help: "1 while this pod holds the source-refresh leader lease (F-21.5.3), 0 otherwise.",
+		}),
 	}
 	reg.MustRegister(
 		m.HTTPRequests, m.HTTPDuration, m.AuthFailures, m.WSClients, m.Workers,
 		m.EventLogLag, m.JobStatus, m.JobDuration, m.ArtifactBytes,
 		m.LogStreamBytes, m.TokensMinted, m.SecretsDecrypted, m.Notifications,
+		m.SourceSyncs, m.SourceSyncDuration, m.SourceSyncInFlight, m.LeaderState,
 	)
 	return m
 }

@@ -36,13 +36,14 @@ var pipelineSourceKinds = map[string]bool{
 }
 
 // toProtoPipelineSource renders a stored source as its Database-service form.
+// The source is a pure location fact (F-21.5.1): the cadence the refresh loop
+// honors lives on the pipeline's file (spec.periodicRefresh), not here.
 func toProtoPipelineSource(src *models.PipelineSource) *dbpb.PipelineSource {
 	return &dbpb.PipelineSource{
 		Id:         int64(src.ID),
 		PipelineId: int64(src.PipelineID),
 		Kind:       src.Kind,
 		Reference:  src.Reference,
-		Schedule:   src.Schedule,
 		Credential: src.Credential,
 		CreatedAt:  timestamppb.New(src.CreatedAt),
 		UpdatedAt:  timestamppb.New(src.UpdatedAt),
@@ -73,7 +74,6 @@ func (s *Server) AttachPipelineSource(ctx context.Context, req *dbpb.AttachPipel
 	if err := db.Where("pipeline_id = ?", pipeline.ID).First(&existing).Error; err == nil {
 		existing.Kind = req.GetKind()
 		existing.Reference = req.GetReference()
-		existing.Schedule = req.GetSchedule()
 		existing.Credential = req.GetCredential()
 		if err := db.Save(&existing).Error; err != nil {
 			return nil, grpcErr(err)
@@ -86,7 +86,6 @@ func (s *Server) AttachPipelineSource(ctx context.Context, req *dbpb.AttachPipel
 		PipelineID: pipeline.ID,
 		Kind:       req.GetKind(),
 		Reference:  req.GetReference(),
-		Schedule:   req.GetSchedule(),
 		Credential: req.GetCredential(),
 	}
 	if err := db.Create(src).Error; err != nil {
@@ -103,6 +102,21 @@ func (s *Server) GetPipelineSource(ctx context.Context, req *dbpb.GetPipelineSou
 		return nil, grpcErr(err)
 	}
 	return toProtoPipelineSource(&src), nil
+}
+
+// ListPipelineSources returns every attached source (F-21.5.3): the API's
+// leader-gated source-refresh loop walks this list to resolve each source's
+// effective cadence and sync the due ones.
+func (s *Server) ListPipelineSources(ctx context.Context, req *dbpb.ListPipelineSourcesRequest) (*dbpb.ListPipelineSourcesResponse, error) {
+	var sources []models.PipelineSource
+	if err := s.db.WithContext(ctx).Order("id ASC").Find(&sources).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	out := &dbpb.ListPipelineSourcesResponse{Sources: make([]*dbpb.PipelineSource, 0, len(sources))}
+	for i := range sources {
+		out.Sources = append(out.Sources, toProtoPipelineSource(&sources[i]))
+	}
+	return out, nil
 }
 
 // CountSourcesByCredential counts the sources that reference the named
@@ -133,8 +147,16 @@ func (s *Server) SetPipelineSourceState(ctx context.Context, req *dbpb.SetPipeli
 	} else {
 		state.LastSyncedAt = time.Now().UTC()
 	}
-	state.LastVersion = req.GetLastVersion()
-	state.FileHash = req.GetFileHash()
+	// last_version and file_hash mark the LAST SUCCESSFUL sync: a failure
+	// record (empty version/hash) must not wipe them — the kickoff-provenance
+	// fallback (F-21.5.1) leans on the surviving values when a refresh-on-run
+	// fails. Assign only when the caller supplies them (a success).
+	if v := req.GetLastVersion(); v != "" {
+		state.LastVersion = v
+	}
+	if h := req.GetFileHash(); h != "" {
+		state.FileHash = h
+	}
 	state.LastError = req.GetLastError()
 	if err := db.Save(&state).Error; err != nil {
 		return nil, grpcErr(err)

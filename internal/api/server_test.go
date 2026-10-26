@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -582,6 +583,16 @@ type fakeDatabase struct {
 	pipelineSource      *dbpb.PipelineSource
 	pipelineSourceState *dbpb.PipelineSourceState
 	sourceRefCount      int64
+	// Leases (F-23 / F-21.5.2 cross-replica sync serialization): simulate a
+	// held lease so AcquireLease declines (leased=true, holder≠requester).
+	mu     sync.Mutex
+	leased bool
+	holder string
+	// Source-refresh loop (F-21.5.3) canned populations.
+	sources      []*dbpb.PipelineSource
+	allPipelines []*dbpb.Pipeline
+	// Recorded re-import (F-21.5.2).
+	updatedPipeline *dbpb.UpdatePipelineRequest
 }
 
 // GetQueueStatus returns the canned queue status (F-16) for the /api/queue
@@ -692,9 +703,56 @@ func (f *fakeDatabase) AttachPipelineSource(ctx context.Context, in *dbpb.Attach
 		PipelineId: in.GetPipelineId(),
 		Kind:       in.GetKind(),
 		Reference:  in.GetReference(),
-		Schedule:   in.GetSchedule(),
 		Credential: in.GetCredential(),
 	}, nil
+}
+
+// AcquireLease simulates the Database service's lease semantics (F-23) for
+// the source-refresh loop + per-pipeline sync-serialization tests: a lease is
+// acquired iff nobody ELSE holds it (or the holder is the same identity — a
+// renewal). Lease-held assertions flip leased=false.
+func (f *fakeDatabase) AcquireLease(ctx context.Context, in *dbpb.AcquireLeaseRequest, opts ...grpc.CallOption) (*dbpb.AcquireLeaseResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leased && f.holder != in.GetHolder() {
+		return &dbpb.AcquireLeaseResponse{Acquired: false}, nil
+	}
+	f.leased = true
+	f.holder = in.GetHolder()
+	return &dbpb.AcquireLeaseResponse{Acquired: true}, nil
+}
+
+// ReleaseLease flips the simulated lease state (F-23).
+func (f *fakeDatabase) ReleaseLease(ctx context.Context, in *dbpb.ReleaseLeaseRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.holder == in.GetHolder() {
+		f.leased = false
+		f.holder = ""
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ListPipelineSources returns the canned source list (F-21.5.3) for the
+// source-refresh loop tests.
+func (f *fakeDatabase) ListPipelineSources(ctx context.Context, in *dbpb.ListPipelineSourcesRequest, opts ...grpc.CallOption) (*dbpb.ListPipelineSourcesResponse, error) {
+	return &dbpb.ListPipelineSourcesResponse{Sources: f.sources}, nil
+}
+
+// ListPipelines returns the canned pipeline list (F-21.5.3) for the
+// source-refresh loop tests.
+func (f *fakeDatabase) ListPipelines(ctx context.Context, in *dbpb.ListPipelinesRequest, opts ...grpc.CallOption) (*dbpb.ListPipelinesResponse, error) {
+	return &dbpb.ListPipelinesResponse{Pipelines: f.allPipelines}, nil
+}
+
+// UpdatePipeline records the update (F-21.5.2 re-import) and returns the
+// canned pipeline.
+func (f *fakeDatabase) UpdatePipeline(ctx context.Context, in *dbpb.UpdatePipelineRequest, opts ...grpc.CallOption) (*dbpb.Pipeline, error) {
+	f.updatedPipeline = in
+	if f.pipeline != nil {
+		return f.pipeline, nil
+	}
+	return &dbpb.Pipeline{Id: in.GetId(), Name: in.GetName()}, nil
 }
 
 // GetPipelineSource returns the canned source (F-21.5.1) for the
@@ -713,16 +771,32 @@ func (f *fakeDatabase) CountSourcesByCredential(ctx context.Context, in *dbpb.Co
 }
 
 // SetPipelineSourceState records the state (F-21.5.1) for the
-// /api/pipelines/{id}/source/refresh handler tests.
+// /api/pipelines/{id}/source/refresh handler tests. It MIRRORS the real
+// database service's semantics: a failure record (EMPTY version/hash) must
+// not WIPE the last-good survivors — they are preserved (the
+// kickoff-provenance fallback leans on them).
 func (f *fakeDatabase) SetPipelineSourceState(ctx context.Context, in *dbpb.SetPipelineSourceStateRequest, opts ...grpc.CallOption) (*dbpb.PipelineSourceState, error) {
-	f.pipelineSourceState = &dbpb.PipelineSourceState{
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	prev := f.pipelineSourceState
+	if prev == nil {
+		prev = &dbpb.PipelineSourceState{}
+	}
+	next := &dbpb.PipelineSourceState{
 		PipelineId:   in.GetPipelineId(),
 		LastSyncedAt: in.GetLastSyncedAt(),
-		LastVersion:  in.GetLastVersion(),
-		FileHash:     in.GetFileHash(),
 		LastError:    in.GetLastError(),
+		LastVersion:  prev.GetLastVersion(),
+		FileHash:     prev.GetFileHash(),
 	}
-	return f.pipelineSourceState, nil
+	if in.GetLastVersion() != "" {
+		next.LastVersion = in.GetLastVersion()
+	}
+	if in.GetFileHash() != "" {
+		next.FileHash = in.GetFileHash()
+	}
+	f.pipelineSourceState = next
+	return next, nil
 }
 
 // GetPipelineSourceState returns the canned state (F-21.5.1) for the

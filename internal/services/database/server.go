@@ -112,6 +112,15 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// (with a key); the API resolves the named source to a concrete value at
 		// dispatch.
 		SecretSources: secretSourcesFromProto(req.GetSecretSources()),
+		// The pipeline's file-declared periodic-refresh policy (F-21.5.1,
+		// spec.periodicRefresh): the steady-state cadence and/or the cron
+		// expression. Validated at import time by the compiler; the database
+		// stores them verbatim.
+		PeriodicRefreshInterval: req.GetPeriodicRefreshInterval(),
+		PeriodicRefreshSchedule: req.GetPeriodicRefreshSchedule(),
+		// The per-pipeline admin gate (F-21.5.1): a create always carries the
+		// importer's stated value (present ⇒ honor the file's cadence).
+		PeriodicRefreshOverridesAllowed: ptrBool(req.GetPeriodicRefreshOverridesAllowed()),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -379,6 +388,26 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 		pipeline.SecretSources = secretSourcesFromProto(req.GetSecretSources())
+	}
+	// When the requester carries the file-declared periodic-refresh policy
+	// (F-21.5.1 — a file import, or a JSON-schema update mentioning the
+	// cadence; flagged by has_periodic_refresh) it REPLACES the pipeline's
+	// policy (the values may be empty — removing the policy from the file
+	// reverts the pipeline to the system default cadence) and the stated
+	// gate value is applied. Without the flag the policy and the gate are
+	// left untouched, so a partial update never touches them.
+	if req.GetHasPeriodicRefresh() {
+		pipeline.PeriodicRefreshInterval = req.GetPeriodicRefreshInterval()
+		pipeline.PeriodicRefreshSchedule = req.GetPeriodicRefreshSchedule()
+		pipeline.PeriodicRefreshOverridesAllowed = ptrBool(req.GetPeriodicRefreshOverridesAllowed())
+	}
+	// When the raw definition text arrives (F-21.5.1 — the sync routine's
+	// re-import) it REPLACES the pipeline's stored source_file / source_hash
+	// (the verbatim file + its content-hash change detector). Regular updates
+	// omit it, leaving the stored file untouched.
+	if req.GetSourceFile() != "" {
+		pipeline.SourceFile = req.GetSourceFile()
+		pipeline.SourceHash = req.GetSourceHash()
 	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
@@ -714,6 +743,24 @@ type runDefinition struct {
 // The run row is created first so the job instances can reference it. The
 // caller is responsible for committing (or rolling back) the transaction.
 func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, run *models.PipelineRun, requestedVersion int) (*models.PipelineRun, []models.Job, error) {
+	// Kickoff provenance (F-21.5.1): a run of an externally-sourced pipeline
+	// snaps the source's location and revision onto the run row, so "which
+	// file, at which revision, produced this run?" stays answerable even
+	// after the source is repointed or detached. The values reflect the
+	// definition the run EXECUTES: the source's last successful sync (the
+	// refresh-on-run hook, when it ran, has already settled the state — a
+	// failed kickoff fetch leaves the last-good values in place). Missing
+	// source/state rows (a UI-authored pipeline) leave the fields empty.
+	var provSrc models.PipelineSource
+	if err := tx.Where("pipeline_id = ?", pipeline.ID).First(&provSrc).Error; err == nil {
+		var provState models.PipelineSourceState
+		if err := tx.Where("pipeline_id = ?", pipeline.ID).First(&provState).Error; err == nil {
+			run.SourceKind = provSrc.Kind
+			run.SourceReference = provSrc.Reference
+			run.SourceVersion = provState.LastVersion
+			run.SourceFileHash = provState.FileHash
+		}
+	}
 	if err := tx.Create(run).Error; err != nil {
 		return nil, nil, err
 	}
@@ -4837,21 +4884,26 @@ func toProtoPipelineJobDefinitions(jobs []models.Job, keyMap map[uint]string) []
 
 func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 	return &dbpb.Pipeline{
-		Id:              int64(pipeline.ID),
-		Name:            pipeline.Name,
-		Description:     pipeline.Description,
-		CreatedAt:       timestamppb.New(pipeline.CreatedAt),
-		UpdatedAt:       timestamppb.New(pipeline.UpdatedAt),
-		FailureMode:     failureModeToProto(pipeline.FailureMode),
-		Jobs:            toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
-		Triggers:        triggersToProto(pipeline.Triggers),
-		Params:          pipelineParamsToProto(pipeline.Params),
-		Version:         int32(pipeline.Version),
-		Secrets:         secretsToProto(pipeline.Secrets),
-		ConcurrencyKeys: pipeline.ConcurrencyKeys,
-		Tags:            pipeline.Tags,
-		VariableSets:    variableSetsToProto(pipeline.VariableSets),
-		SecretSources:   secretSourcesToProto(pipeline.SecretSources),
+		Id:                              int64(pipeline.ID),
+		Name:                            pipeline.Name,
+		Description:                     pipeline.Description,
+		CreatedAt:                       timestamppb.New(pipeline.CreatedAt),
+		UpdatedAt:                       timestamppb.New(pipeline.UpdatedAt),
+		FailureMode:                     failureModeToProto(pipeline.FailureMode),
+		Jobs:                            toProtoPipelineJobDefinitions(pipeline.Jobs, pipelineKeyMap(pipeline.Jobs)),
+		Triggers:                        triggersToProto(pipeline.Triggers),
+		Params:                          pipelineParamsToProto(pipeline.Params),
+		Version:                         int32(pipeline.Version),
+		Secrets:                         secretsToProto(pipeline.Secrets),
+		ConcurrencyKeys:                 pipeline.ConcurrencyKeys,
+		Tags:                            pipeline.Tags,
+		VariableSets:                    variableSetsToProto(pipeline.VariableSets),
+		SecretSources:                   secretSourcesToProto(pipeline.SecretSources),
+		SourceFile:                      pipeline.SourceFile,
+		SourceHash:                      pipeline.SourceHash,
+		PeriodicRefreshInterval:         pipeline.PeriodicRefreshInterval,
+		PeriodicRefreshSchedule:         pipeline.PeriodicRefreshSchedule,
+		PeriodicRefreshOverridesAllowed: pipeline.AllowsPeriodicRefreshOverrides(),
 	}
 }
 
@@ -4861,21 +4913,23 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 // be re-executed or re-saved without loss.
 func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 	return &dbpb.PipelineVersion{
-		Id:              int64(v.ID),
-		PipelineId:      int64(v.PipelineID),
-		Version:         int32(v.Version),
-		Name:            v.Name,
-		Description:     v.Description,
-		FailureMode:     failureModeToProto(v.FailureMode),
-		Jobs:            jobDefinitionsToProto(v.Jobs),
-		Triggers:        triggersToProto(v.Triggers),
-		Params:          pipelineParamsToProto(v.Params),
-		CreatedAt:       timestamppb.New(v.CreatedAt),
-		Secrets:         secretsToProto(v.Secrets),
-		ConcurrencyKeys: v.ConcurrencyKeys,
-		Tags:            v.Tags,
-		VariableSets:    variableSetsToProto(v.VariableSets),
-		SecretSources:   secretSourcesToProto(v.SecretSources),
+		Id:                      int64(v.ID),
+		PipelineId:              int64(v.PipelineID),
+		Version:                 int32(v.Version),
+		Name:                    v.Name,
+		Description:             v.Description,
+		FailureMode:             failureModeToProto(v.FailureMode),
+		Jobs:                    jobDefinitionsToProto(v.Jobs),
+		Triggers:                triggersToProto(v.Triggers),
+		Params:                  pipelineParamsToProto(v.Params),
+		CreatedAt:               timestamppb.New(v.CreatedAt),
+		Secrets:                 secretsToProto(v.Secrets),
+		ConcurrencyKeys:         v.ConcurrencyKeys,
+		Tags:                    v.Tags,
+		VariableSets:            variableSetsToProto(v.VariableSets),
+		SecretSources:           secretSourcesToProto(v.SecretSources),
+		PeriodicRefreshInterval: v.PeriodicRefreshInterval,
+		PeriodicRefreshSchedule: v.PeriodicRefreshSchedule,
 	}
 }
 
@@ -4920,19 +4974,21 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		})
 	}
 	return &models.PipelineVersion{
-		PipelineID:      pipeline.ID,
-		Version:         pipeline.Version,
-		Name:            pipeline.Name,
-		Description:     pipeline.Description,
-		FailureMode:     pipeline.FailureMode,
-		Jobs:            snapshots,
-		Triggers:        pipeline.Triggers,
-		Params:          pipeline.Params,
-		Secrets:         pipeline.Secrets,
-		ConcurrencyKeys: pipeline.ConcurrencyKeys,
-		Tags:            pipeline.Tags,
-		VariableSets:    pipeline.VariableSets,
-		SecretSources:   pipeline.SecretSources,
+		PipelineID:              pipeline.ID,
+		Version:                 pipeline.Version,
+		Name:                    pipeline.Name,
+		Description:             pipeline.Description,
+		FailureMode:             pipeline.FailureMode,
+		Jobs:                    snapshots,
+		Triggers:                pipeline.Triggers,
+		Params:                  pipeline.Params,
+		Secrets:                 pipeline.Secrets,
+		ConcurrencyKeys:         pipeline.ConcurrencyKeys,
+		Tags:                    pipeline.Tags,
+		VariableSets:            pipeline.VariableSets,
+		SecretSources:           pipeline.SecretSources,
+		PeriodicRefreshInterval: pipeline.PeriodicRefreshInterval,
+		PeriodicRefreshSchedule: pipeline.PeriodicRefreshSchedule,
 	}
 }
 
@@ -4982,6 +5038,10 @@ func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 		TriggerName:     run.TriggerName,
 		UpstreamClaims:  upstreamClaimsToStruct(run.UpstreamClaims),
 		PipelineVersion: int32(run.PipelineVersion),
+		SourceKind:      run.SourceKind,
+		SourceReference: run.SourceReference,
+		SourceVersion:   run.SourceVersion,
+		SourceFileHash:  run.SourceFileHash,
 	}
 	if run.Pipeline != nil {
 		// The pipeline's name (F-09): the scheduler's event loop matches a

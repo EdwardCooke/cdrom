@@ -68,6 +68,14 @@ func pipelineToDocument(pipeline *dbpb.Pipeline) pipelinefile.Value {
 	if triggers := pipeline.GetTriggers(); len(triggers) > 0 {
 		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "triggers", Value: exportTriggers(triggers)})
 	}
+	// The file-declared periodic-refresh policy (F-21.5.1): emitted only when
+	// the pipeline actually carries one (a UI-authored pipeline synthesizes
+	// no periodicRefresh block).
+	if iv := pipeline.GetPeriodicRefreshInterval(); iv != "" {
+		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "periodicRefresh", Value: exportPeriodicRefresh(iv, pipeline.GetPeriodicRefreshSchedule())})
+	} else if sch := pipeline.GetPeriodicRefreshSchedule(); sch != "" {
+		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "periodicRefresh", Value: exportPeriodicRefresh("", sch)})
+	}
 	if sets := pipeline.GetVariableSets(); len(sets) > 0 {
 		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "variableSets", Value: exportVariableSets(sets)})
 	}
@@ -86,6 +94,21 @@ func pipelineToDocument(pipeline *dbpb.Pipeline) pipelinefile.Value {
 		pipelinefile.Entry{Key: "spec", Value: spec},
 	)
 	return doc
+}
+
+// exportPeriodicRefresh builds the spec.periodicRefresh mapping (F-21.5.1):
+// the steady-state interval (a duration) and/or the cron schedule, in the
+// file's key order (interval first, then schedule). At least one argument is
+// non-empty (callers suppress the block otherwise).
+func exportPeriodicRefresh(interval, schedule string) pipelinefile.Value {
+	out := pipelinefile.Value{Type: pipelinefile.Map}
+	if interval != "" {
+		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "interval", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: interval}})
+	}
+	if schedule != "" {
+		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "schedule", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: schedule}})
+	}
+	return out
 }
 
 // exportMetadata builds the document's metadata block: the pipeline's name,

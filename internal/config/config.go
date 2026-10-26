@@ -36,6 +36,15 @@ const (
 	// service (cmd/pipelinesource, F-21.2) binds to, which the API dials to
 	// fetch externally-sourced pipeline definitions.
 	DefaultPipelineSourceAddress = "127.0.0.1:7107"
+	// DefaultPipelineSourceRefreshInterval is the system-default steady-state
+	// refresh cadence for externally-sourced pipelines (F-21.5.1): how often a
+	// source is pulled when the pipeline's file declares no periodicRefresh
+	// interval (or its override is denied by the admin gate).
+	DefaultPipelineSourceRefreshInterval = 2 * time.Minute
+	// DefaultPipelineSourceSyncTimeout bounds a single source sync (F-21.5.3):
+	// generous for a cold git clone, tight against a blackholed origin — a
+	// zombie sync must occupy its goroutine only for a bounded time.
+	DefaultPipelineSourceSyncTimeout = 5 * time.Minute
 )
 
 // Config is the shared configuration for every cdrom binary.
@@ -86,6 +95,40 @@ type Config struct {
 	// <root><path>. Empty means the "file" kind is disabled. Only the
 	// pipelinesource binary uses it; other binaries ignore it.
 	PipelineSourceFileRoot string
+
+	// PipelineSourceRefreshInterval is the system-default steady-state refresh
+	// cadence for externally-sourced pipelines (F-21.5.1): the interval a
+	// source is due on when the pipeline's file declares no periodicRefresh
+	// interval (or its override is denied by the admin gate). Zero/negative
+	// falls back to DefaultPipelineSourceRefreshInterval (2 minutes). Only the
+	// api binary uses it; other binaries ignore it.
+	PipelineSourceRefreshInterval time.Duration
+
+	// PipelineSourceOverridesAllowed is the GLOBAL half of the admin gate
+	// (F-21.5.1): whether a pipeline's file-declared periodicRefresh override
+	// is honored AT ALL. When false, every pipeline falls back to the system
+	// default cadence regardless of its file. Combined with the per-pipeline
+	// flag (Pipeline.PeriodicRefreshOverridesAllowed), an override is honored
+	// only when BOTH allow it. True by default. Only the api binary uses it;
+	// other binaries ignore it.
+	PipelineSourceOverridesAllowed bool
+
+	// PipelineSourceMaxParallel caps the source-refresh loop's SIMULTANEOUS
+	// in-flight syncs (F-21.5.3): zero (the default) means UNLIMITED — the
+	// loop issues every due source at once (goroutines are cheap; the fetcher
+	// is the shared choke point and self-regulates via its per-repo locks).
+	// A positive value is an operator's throttle for constrained deployments:
+	// a due source that cannot get a slot is deferred to the NEXT tick (not
+	// blocked), so a saturated throttle delays rather than couples. Negative
+	// values clamp to zero (unlimited). Only the api binary uses it; other
+	// binaries ignore it.
+	PipelineSourceMaxParallel int
+
+	// PipelineSourceSyncTimeout bounds a single source sync (F-21.5.3): the
+	// context handed to each sync (fetch + re-import). Zero/negative falls
+	// back to DefaultPipelineSourceSyncTimeout (5 minutes). Only the api
+	// binary uses it; other binaries ignore it.
+	PipelineSourceSyncTimeout time.Duration
 
 	// WorkerName and WorkerGroup identify a worker process.
 	WorkerName  string
@@ -763,13 +806,19 @@ func LoadWithFile(file string) (*Config, error) {
 		ArtifactsStore:   "filesystem",
 		// The source-fetcher (F-21.2) default: its gRPC address (the cache root
 		// and file root default to empty — the fetcher resolves them to their
-		// own defaults).
-		PipelineSourceAddress: DefaultPipelineSourceAddress,
-		WorkerName:              "worker-1",
-		WorkerGroup:                     "default",
-		WorkerEnvironments:              []string{},
-		WorkerTags:                      map[string]string{},
-		AgentName:                       defaultAgentName(),
+		// own defaults). Plus the externally-sourced-pipeline refresh defaults
+		// (F-21.5.1): the system-default cadence and the global override gate
+		// (allowed by default).
+		PipelineSourceAddress:          DefaultPipelineSourceAddress,
+		PipelineSourceRefreshInterval:  DefaultPipelineSourceRefreshInterval,
+		PipelineSourceOverridesAllowed: true,
+		PipelineSourceMaxParallel:      0,
+		PipelineSourceSyncTimeout:      DefaultPipelineSourceSyncTimeout,
+		WorkerName:                     "worker-1",
+		WorkerGroup:                    "default",
+		WorkerEnvironments:             []string{},
+		WorkerTags:                     map[string]string{},
+		AgentName:                      defaultAgentName(),
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
 			SQLitePath:  "cdrom.db",
@@ -861,6 +910,18 @@ type fileConfig struct {
 		Address      *string `yaml:"address"`
 		RepoCacheDir *string `yaml:"repo_cache_dir"`
 		FileRoot     *string `yaml:"file_root"`
+		// RefreshInterval is the system-default steady-state refresh cadence
+		// (F-21.5.1), a duration string (e.g. "2m").
+		RefreshInterval *string `yaml:"refresh_interval"`
+		// OverridesAllowed is the global admin gate (F-21.5.1): whether a
+		// pipeline's file-declared periodicRefresh override is honored at all.
+		OverridesAllowed *bool `yaml:"overrides_allowed"`
+		// MaxParallel caps the source-refresh loop's simultaneous in-flight
+		// syncs (F-21.5.3); 0 (the default) means unlimited.
+		MaxParallel *int `yaml:"max_parallel"`
+		// SyncTimeout bounds a single source sync (F-21.5.3), a duration
+		// string (e.g. "5m").
+		SyncTimeout *string `yaml:"sync_timeout"`
 	} `yaml:"pipeline_source"`
 	WorkerName         *string            `yaml:"worker_name"`
 	WorkerGroup        *string            `yaml:"worker_group"`
@@ -987,6 +1048,22 @@ func applyFile(cfg *Config, path string) error {
 	if f.PipelineSource != nil {
 		if f.PipelineSource.Address != nil {
 			cfg.PipelineSourceAddress = *f.PipelineSource.Address
+		}
+		if f.PipelineSource.RefreshInterval != nil {
+			if d, err := time.ParseDuration(*f.PipelineSource.RefreshInterval); err == nil {
+				cfg.PipelineSourceRefreshInterval = d
+			}
+		}
+		if f.PipelineSource.OverridesAllowed != nil {
+			cfg.PipelineSourceOverridesAllowed = *f.PipelineSource.OverridesAllowed
+		}
+		if f.PipelineSource.MaxParallel != nil {
+			cfg.PipelineSourceMaxParallel = *f.PipelineSource.MaxParallel
+		}
+		if f.PipelineSource.SyncTimeout != nil {
+			if d, err := time.ParseDuration(*f.PipelineSource.SyncTimeout); err == nil {
+				cfg.PipelineSourceSyncTimeout = d
+			}
 		}
 		if f.PipelineSource.RepoCacheDir != nil {
 			cfg.PipelineSourceRepoCacheDir = *f.PipelineSource.RepoCacheDir
@@ -1263,6 +1340,24 @@ func applyEnv(cfg *Config) {
 	cfg.PipelineSourceAddress = envOr("CDROM_PIPELINE_SOURCE_ADDR", cfg.PipelineSourceAddress)
 	cfg.PipelineSourceRepoCacheDir = envOr("CDROM_PIPELINE_SOURCE_REPO_CACHE_DIR", cfg.PipelineSourceRepoCacheDir)
 	cfg.PipelineSourceFileRoot = envOr("CDROM_PIPELINE_SOURCE_FILE_ROOT", cfg.PipelineSourceFileRoot)
+	if v := os.Getenv("CDROM_PIPELINE_SOURCE_REFRESH_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.PipelineSourceRefreshInterval = d
+		}
+	}
+	if v := os.Getenv("CDROM_PIPELINE_SOURCE_OVERRIDES_ALLOWED"); v != "" {
+		cfg.PipelineSourceOverridesAllowed = v == "true" || v == "1"
+	}
+	if v := os.Getenv("CDROM_PIPELINE_SOURCE_MAX_PARALLEL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.PipelineSourceMaxParallel = n
+		}
+	}
+	if v := os.Getenv("CDROM_PIPELINE_SOURCE_SYNC_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.PipelineSourceSyncTimeout = d
+		}
+	}
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.WorkerGroup = envOr("CDROM_WORKER_GROUP", cfg.WorkerGroup)
 	if v := os.Getenv("CDROM_WORKER_ENVIRONMENTS"); v != "" {

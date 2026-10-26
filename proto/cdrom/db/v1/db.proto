@@ -524,6 +524,10 @@ service Database {
   // GetPipelineSource returns a pipeline's source. A pipeline with no source
   // returns NotFound.
   rpc GetPipelineSource(GetPipelineSourceRequest) returns (PipelineSource);
+  // ListPipelineSources returns every attached source (F-21.5.3): the
+  // API's leader-gated source-refresh loop walks this list to resolve each
+  // source's effective cadence and sync the due ones.
+  rpc ListPipelineSources(ListPipelineSourcesRequest) returns (ListPipelineSourcesResponse);
   // CountSourcesByCredential counts the sources that reference the named
   // credential (F-21.3.3's delete guard).
   rpc CountSourcesByCredential(CountSourcesByCredentialRequest) returns (CountSourcesByCredentialResponse);
@@ -817,6 +821,32 @@ message Pipeline {
   // stored as a JSON document in a text column, like params. Empty means the
   // pipeline declares no secret sources.
   repeated SecretSource secret_sources = 15;
+  // source_file is the raw definition text of an externally-sourced pipeline
+  // (F-21.5.1): the verbatim file the source-fetcher returned at the last
+  // successful sync. Empty for a UI-authored pipeline.
+  string source_file = 16;
+  // source_hash is the SHA-256 (hex) of source_file (F-21.5.1): the change
+  // detector. A sync yielding the same hash is a no-op; a differing hash
+  // re-imports the pipeline (bumping its version, F-11).
+  string source_hash = 17;
+  // periodic_refresh_interval is the steady-state refresh cadence the
+  // pipeline's file declares (F-21.5.1, spec.periodicRefresh.interval): a
+  // duration string (e.g. "2m"). Empty means unpinned — the system default
+  // applies. Malformed values are rejected at import time (the compiler).
+  string periodic_refresh_interval = 18;
+  // periodic_refresh_schedule is the cron expression the pipeline's file
+  // declares (F-21.5.1, spec.periodicRefresh.schedule): precise timing — e.g.
+  // syncing only during after-hours when load is minimal. When non-empty it
+  // drives the periodic refresh (the interval is ignored). Malformed
+  // expressions are rejected at import time (the compiler).
+  string periodic_refresh_schedule = 19;
+  // periodic_refresh_overrides_allowed is the per-pipeline half of the admin
+  // gate (F-21.5.1): whether this pipeline's file-directed periodicRefresh
+  // override is honored. Absent/false means the file's cadence is ignored and
+  // the system default applies — denying restores the safe default, it does
+  // not halt polling. Present and true means the file's cadence is honored
+  // (given the global gate allows it).
+  bool periodic_refresh_overrides_allowed = 20;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -921,6 +951,19 @@ message CreatePipelineRequest {
   // secret_sources are the pipeline's named secret sources (F-21.1.3 / F-12);
   // see Pipeline.secret_sources. They are persisted alongside the pipeline.
   repeated SecretSource secret_sources = 11;
+  // periodic_refresh_interval is the steady-state refresh cadence the
+  // pipeline's file declares (F-21.5.1, spec.periodicRefresh.interval); see
+  // Pipeline.periodic_refresh_interval. Persisted alongside the pipeline.
+  string periodic_refresh_interval = 12;
+  // periodic_refresh_schedule is the cron expression the pipeline's file
+  // declares (F-21.5.1, spec.periodicRefresh.schedule); see
+  // Pipeline.periodic_refresh_schedule. Persisted alongside the pipeline.
+  string periodic_refresh_schedule = 13;
+  // periodic_refresh_overrides_allowed, when present, sets the per-pipeline
+  // admin gate (F-21.5.1): whether this pipeline's file-directed
+  // periodicRefresh override is honored. When absent the flag is left
+  // unchanged (defaults to allowed).
+  bool periodic_refresh_overrides_allowed = 14;
 }
 
 message GetPipelineRequest {
@@ -988,6 +1031,35 @@ message UpdatePipelineRequest {
   // sources (F-21.1.3 / F-12). When absent the pipeline's secret sources are
   // left unchanged.
   repeated SecretSource secret_sources = 12;
+  // periodic_refresh_interval, when present, replaces the pipeline's
+  // steady-state refresh cadence (F-21.5.1, spec.periodicRefresh.interval).
+  // When absent the pipeline's value is left unchanged.
+  string periodic_refresh_interval = 13;
+  // periodic_refresh_schedule, when present, replaces the pipeline's cron
+  // refresh expression (F-21.5.1, spec.periodicRefresh.schedule). When
+  // absent the pipeline's value is left unchanged.
+  string periodic_refresh_schedule = 14;
+  // periodic_refresh_overrides_allowed sets the per-pipeline admin gate
+  // (F-21.5.1): whether this pipeline's file-directed periodicRefresh
+  // override is honored. It is applied only when has_periodic_refresh is
+  // true; otherwise the pipeline's flag is left unchanged.
+  bool periodic_refresh_overrides_allowed = 15;
+  // has_periodic_refresh, when true, directs the update to REPLACE the
+  // pipeline's periodic-refresh policy with the request's values (which may
+  // be empty — removing the policy from the file reverts the pipeline to the
+  // system default cadence). When false (the default) the policy and the
+  // gate are left unchanged, so a partial update that does not mention the
+  // cadence never perturbs it.
+  bool has_periodic_refresh = 16;
+  // source_file, when non-empty, REPLACES the pipeline's stored raw
+  // definition text (F-21.5.1): the VERBATIM file the source-fetcher
+  // returned at the last successful sync. Carried by the sync routine's
+  // re-import; a regular update omits it (the stored file is untouched).
+  string source_file = 17;
+  // source_hash, when non-empty, REPLACES the pipeline's stored content hash
+  // (F-21.5.1): the SHA-256 (hex) of source_file — the change detector the
+  // next sync compares against. Carried alongside source_file.
+  string source_hash = 18;
 }
 
 message DeletePipelineRequest {
@@ -1063,6 +1135,27 @@ message PipelineRun {
   // re-run of an old run) records that version instead of the pipeline's
   // current one.
   int32 pipeline_version = 14;
+  // source_kind is the kind of the pipeline's external source at kickoff
+  // (F-21.5.1): "git" / "http" / "file". Empty for a run of a UI-authored
+  // pipeline (one with no attached source). Snapshotted at run creation,
+  // after the refresh-on-run hook has settled.
+  string source_kind = 15;
+  // source_reference is the source's <type>:<spec> locator at kickoff
+  // (F-21.5.1) — the path/location of the file the run's definition came
+  // from. Empty for a run of a UI-authored pipeline.
+  string source_reference = 16;
+  // source_version is the source's version identifier at the sync the run's
+  // definition came from (F-21.5.1): the git commit hash, an HTTP
+  // ETag/Last-Modified, or the file's mtime. Empty for a run of a
+  // UI-authored pipeline.
+  string source_version = 17;
+  // source_file_hash is the SHA-256 (hex) of the definition file the run
+  // executed (F-21.5.1) — the content hash at the last successful sync.
+  // Empty for a run of a UI-authored pipeline. Together with
+  // source_reference / source_version it answers "which file, at which
+  // revision, produced this run?" even after the source is repointed or
+  // detached.
+  string source_file_hash = 18;
 }
 
 message CreateRunRequest {
@@ -1227,6 +1320,16 @@ message PipelineVersion {
   // snapshot so a run bound to this version resolves the sources that were
   // active when it started.
   repeated SecretSource secret_sources = 15;
+  // periodic_refresh_interval is the steady-state refresh cadence the
+  // pipeline's file declared at this version (F-21.5.1,
+  // spec.periodicRefresh.interval): a duration string (e.g. "2m"). Captured in
+  // the snapshot for history; the refresh loop acts on the CURRENT
+  // definition.
+  string periodic_refresh_interval = 16;
+  // periodic_refresh_schedule is the cron expression the pipeline's file
+  // declared at this version (F-21.5.1, spec.periodicRefresh.schedule); see
+  // Pipeline.periodic_refresh_schedule.
+  string periodic_refresh_schedule = 17;
 }
 
 message ListPipelineVersionsRequest {
@@ -3642,10 +3745,11 @@ message DeleteSourceCredentialRequest {
   string name = 1;
 }
 
-// PipelineSource is where a pipeline is pulled from (F-21.5.1): a kind
-// (git / http / file), a reference (the <type>:<spec> locator, F-21.2), a
-// refresh schedule, and a credential name. The source is a database concept
-// configured through the API (it is not in the file).
+// PipelineSource is WHERE a pipeline is pulled from (F-21.5.1): a kind
+// (git / http / file), a reference (the <type>:<spec> locator, F-21.2), and a
+// credential name. The source is a database concept configured through the
+// API (it is not in the file). HOW OFTEN it is pulled is a property of the
+// pipeline's file (spec.periodicRefresh, F-21.5.1) — it is not on this row.
 message PipelineSource {
   // id is the source's id.
   int64 id = 1;
@@ -3656,9 +3760,10 @@ message PipelineSource {
   // reference is the <type>:<spec> locator string (F-21.2) that names the
   // file to fetch.
   string reference = 4;
-  // schedule is a cron expression for the scheduled refresh; empty means no
-  // scheduled refresh.
-  string schedule = 5;
+  // Reserved: the early-slice "schedule" field (a cron expression on the
+  // source row). Cadence moved to the pipeline's file (spec.periodicRefresh,
+  // F-21.5.1); the number is reserved so it is never reassigned.
+  reserved 5;
   // credential is the name of the SourceCredential used to authenticate the
   // fetch; empty means the source is public / needs no credential.
   string credential = 6;
@@ -3693,9 +3798,10 @@ message AttachPipelineSourceRequest {
   string kind = 2;
   // reference is the <type>:<spec> locator string (F-21.2).
   string reference = 3;
-  // schedule is a cron expression for the scheduled refresh; empty means no
-  // scheduled refresh.
-  string schedule = 4;
+  // Reserved: the early-slice "schedule" field. Cadence moved to the
+  // pipeline's file (spec.periodicRefresh, F-21.5.1); the number is reserved
+  // so it is never reassigned.
+  reserved 4;
   // credential is the name of the SourceCredential used to authenticate;
   // empty means the source is public / needs no credential.
   string credential = 5;
@@ -3705,6 +3811,18 @@ message AttachPipelineSourceRequest {
 message GetPipelineSourceRequest {
   // pipeline_id is the pipeline whose source to fetch.
   int64 pipeline_id = 1;
+}
+
+// ListPipelineSourcesRequest is the request to list every attached source
+// (F-21.5.3). It intentionally carries no filters: the refresh loop needs the
+// COMPLETE population (filtering by cadence happens on the API side, where
+// the pipeline rows + config live).
+message ListPipelineSourcesRequest {}
+
+// ListPipelineSourcesResponse is the result of a ListPipelineSources call.
+message ListPipelineSourcesResponse {
+  // sources are every attached pipeline source.
+  repeated PipelineSource sources = 1;
 }
 
 // CountSourcesByCredentialRequest is the request to count the sources that

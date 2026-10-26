@@ -288,6 +288,7 @@ A `Pipeline` document's `spec` has these fields (all optional except `jobs`):
 | `concurrencyKeys` | Pipeline-level concurrency keys (F-16, templatable) | — |
 | `params` | Pipeline-level parameters (F-10) | `{{ .params.<name> }}` |
 | `triggers` | Pipeline-level triggers (F-09) | — |
+| `periodicRefresh` | The periodic-refresh policy for an externally-sourced pipeline (F-21.5): an `interval` (a duration) and/or a `schedule` (a cron expression) overriding the system default cadence (2 minutes); honored only when the admin gate allows it | the source-refresh loop (F-21.5.3) |
 | `artifacts` | A list of named artifact (package) references the pipeline consumes (see [Artifacts (package references)](#artifacts-package-references)) | a step's params / env (by the artifact's `name`) |
 
 The same "declare a named thing in a section, reference it by name everywhere

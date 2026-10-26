@@ -189,6 +189,16 @@ func main() {
 	// Attach the API's Prometheus metric set (F-20) so the UI HTTP surface
 	// keeps the live WebSocket client gauge (cdrom_api_ws_clients) current.
 	apiServer.SetMetrics(apiMetrics)
+	// Attach the API's configuration + operational logger (F-21.5.1): the
+	// system-default refresh interval and the global periodic-refresh
+	// override gate feed the cadence resolution; the logger feeds the
+	// background source-refresh loop.
+	apiServer.SetConfig(cfg)
+	apiServer.SetLogger(logger)
+	// Boot the leader-gated periodic source-refresh loop (F-21.5.3): exactly
+	// one API replica leads (a named lease on the Database service) and syncs
+	// each externally-sourced pipeline at its effective cadence.
+	apiServer.StartSourceRefreshLoop(ctx)
 
 	// Role-based access control (F-14). When authentication is enabled the API
 	// enforces RBAC: a request is allowed only if the authenticated

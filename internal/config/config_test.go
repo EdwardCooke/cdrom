@@ -202,6 +202,10 @@ func TestPipelineSourceConfig(t *testing.T) {
 pipeline_source:
   repo_cache_dir: /var/cdrom/repos
   file_root: /shared
+  refresh_interval: 90s
+  overrides_allowed: false
+  max_parallel: 16
+  sync_timeout: 7m
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -220,10 +224,27 @@ pipeline_source:
 	if cfg.PipelineSourceAddress != DefaultPipelineSourceAddress {
 		t.Errorf("PipelineSourceAddress = %q, want %q", cfg.PipelineSourceAddress, DefaultPipelineSourceAddress)
 	}
+	// The externally-sourced-pipeline refresh knobs (F-21.5.1 / F-21.5.3).
+	if cfg.PipelineSourceRefreshInterval != 90*time.Second {
+		t.Errorf("PipelineSourceRefreshInterval = %v, want 90s", cfg.PipelineSourceRefreshInterval)
+	}
+	if cfg.PipelineSourceOverridesAllowed {
+		t.Error("PipelineSourceOverridesAllowed = true, want false (file)")
+	}
+	if cfg.PipelineSourceMaxParallel != 16 {
+		t.Errorf("PipelineSourceMaxParallel = %d, want 16 (file)", cfg.PipelineSourceMaxParallel)
+	}
+	if cfg.PipelineSourceSyncTimeout != 7*time.Minute {
+		t.Errorf("PipelineSourceSyncTimeout = %v, want 7m (file)", cfg.PipelineSourceSyncTimeout)
+	}
 
 	// Env overrides the file.
 	t.Setenv("CDROM_PIPELINE_SOURCE_ADDR", "127.0.0.1:7999")
 	t.Setenv("CDROM_PIPELINE_SOURCE_FILE_ROOT", "/other")
+	t.Setenv("CDROM_PIPELINE_SOURCE_REFRESH_INTERVAL", "45s")
+	t.Setenv("CDROM_PIPELINE_SOURCE_OVERRIDES_ALLOWED", "true")
+	t.Setenv("CDROM_PIPELINE_SOURCE_MAX_PARALLEL", "0")
+	t.Setenv("CDROM_PIPELINE_SOURCE_SYNC_TIMEOUT", "3m")
 	cfg, err = LoadWithFile(path)
 	if err != nil {
 		t.Fatalf("LoadWithFile (env): %v", err)
@@ -233,6 +254,19 @@ pipeline_source:
 	}
 	if cfg.PipelineSourceFileRoot != "/other" {
 		t.Errorf("PipelineSourceFileRoot = %q, want /other", cfg.PipelineSourceFileRoot)
+	}
+	// The refresh knobs: env overrides the file (F-21.5.1 / F-21.5.3).
+	if cfg.PipelineSourceRefreshInterval != 45*time.Second {
+		t.Errorf("PipelineSourceRefreshInterval = %v, want 45s (env)", cfg.PipelineSourceRefreshInterval)
+	}
+	if !cfg.PipelineSourceOverridesAllowed {
+		t.Error("PipelineSourceOverridesAllowed = false, want true (env)")
+	}
+	if cfg.PipelineSourceMaxParallel != 0 {
+		t.Errorf("PipelineSourceMaxParallel = %d, want 0 (env)", cfg.PipelineSourceMaxParallel)
+	}
+	if cfg.PipelineSourceSyncTimeout != 3*time.Minute {
+		t.Errorf("PipelineSourceSyncTimeout = %v, want 3m (env)", cfg.PipelineSourceSyncTimeout)
 	}
 }
 

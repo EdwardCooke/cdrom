@@ -117,6 +117,18 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 		Description: doc.Metadata.Description,
 		Tags:        doc.Metadata.Labels,
 	}
+	// The file-declared periodic-refresh policy (F-21.5.1,
+	// spec.periodicRefresh): compiled + validated (a malformed duration or
+	// cron is an actionable error) and carried to the database service;
+	// absent when the file declares none (the pipeline inherits the system
+	// default cadence). A file that declares a policy states the gate's
+	// INTENDED value — allowed (the author proposes it; the admin gate
+	// decides whether it is honored).
+	if pol, polErrs := pipelinefile.CompilePeriodicRefresh(file, doc.Spec); len(polErrs) > 0 {
+		return nil, nil, nil, polErrs
+	} else if pol != nil {
+		req.PeriodicRefresh = &periodicRefreshRequest{Interval: pol.Interval, Schedule: pol.Schedule}
+	}
 	// The pipeline-level deployment options (F-21.1.4): the default failure
 	// mode, the pipeline's concurrency keys, its parameter declarations, and
 	// its triggers. The default worker group is not a pipeline field in the
