@@ -144,6 +144,14 @@ const (
 	Database_ListWorkerGroups_FullMethodName               = "/cdrom.db.v1.Database/ListWorkerGroups"
 	Database_UpdateWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/UpdateWorkerGroup"
 	Database_DeleteWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/DeleteWorkerGroup"
+	Database_AllocateStorageObject_FullMethodName          = "/cdrom.db.v1.Database/AllocateStorageObject"
+	Database_ConfirmStorageObject_FullMethodName           = "/cdrom.db.v1.Database/ConfirmStorageObject"
+	Database_GetStorageObject_FullMethodName               = "/cdrom.db.v1.Database/GetStorageObject"
+	Database_ListStorageObjects_FullMethodName             = "/cdrom.db.v1.Database/ListStorageObjects"
+	Database_TouchStorageObject_FullMethodName             = "/cdrom.db.v1.Database/TouchStorageObject"
+	Database_SyncLogSize_FullMethodName                    = "/cdrom.db.v1.Database/SyncLogSize"
+	Database_DeleteStorageObject_FullMethodName            = "/cdrom.db.v1.Database/DeleteStorageObject"
+	Database_ResolvePackageReference_FullMethodName        = "/cdrom.db.v1.Database/ResolvePackageReference"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -723,6 +731,55 @@ type DatabaseClient interface {
 	// (they keep their group string) or the jobs that target it (they still
 	// dispatch to the group's workers); it only removes the group's tags.
 	DeleteWorkerGroup(ctx context.Context, in *DeleteWorkerGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Storage objects (F-21.6 storage redesign). A storage_object is the
+	// DATABASE'S record of a file held by the artifacts service: its kind,
+	// namespace, display name, size, content hash, package coordinates (when
+	// it is a registry filing), provenance, and activity counters. The
+	// artifacts service itself is a dumb blob store keyed by the record's UID
+	// — it neither knows nor cares what a file is. Two-phase lifecycle:
+	// Allocate reserves a (hidden) record + UID for an inbound upload; Confirm
+	// settles it with the observed size/hash and makes it visible.
+	//
+	// AllocateStorageObject provisions a record for an upcoming upload. The
+	// record is INVISIBLE to listings and to package resolution until it is
+	// Confirmed (a crashed uploader leaves a stale row that pruning sweeps).
+	// Duplicate (namespace, name) among VISIBLE records is rejected
+	// (AlreadyExists); allocating over a HIDDEN duplicate adopts it (returns
+	// the existing record) — recovery for an interrupted upload.
+	AllocateStorageObject(ctx context.Context, in *AllocateStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error)
+	// ConfirmStorageObject settles an allocated record with the OBSERVED size
+	// and content hash of the bytes actually stored (the artifacts service
+	// measures them independently of the writer's attestation) and flips the
+	// record to visible. Unknown uids return NotFound.
+	ConfirmStorageObject(ctx context.Context, in *ConfirmStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error)
+	// GetStorageObject returns the record for a (namespace, name). Hidden
+	// (unconfirmed) records are invisible here; a miss returns NotFound.
+	GetStorageObject(ctx context.Context, in *GetStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error)
+	// ListStorageObjects returns the visible records of a namespace (kinds
+	// filtered when kind is set; "" = all kinds). Namespaces are arbitrary
+	// strings owned by the caller — the database trusts the API's
+	// authentication to scope them.
+	ListStorageObjects(ctx context.Context, in *ListStorageObjectsRequest, opts ...grpc.CallOption) (*ListStorageObjectsResponse, error)
+	// TouchStorageObject records a RETRIEVAL of a record: increments
+	// download_count and stamps last_downloaded_at (best-effort analytics;
+	// never fails a download).
+	TouchStorageObject(ctx context.Context, in *TouchStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error)
+	// SyncLogSize updates a log record's size WITHOUT changing its visibility
+	// (logs are grown by the artifacts service's AppendBlob; the API reconciles
+	// the record periodically so consumers see the growing size).
+	SyncLogSize(ctx context.Context, in *SyncLogSizeRequest, opts ...grpc.CallOption) (*StorageObject, error)
+	// DeleteStorageObject removes a record (the caller deletes the blob
+	// SEPARATELY through the artifacts service; orphaned blobs are harmless).
+	DeleteStorageObject(ctx context.Context, in *DeleteStorageObjectRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ResolvePackageReference resolves ONE spec.artifacts reference against the
+	// registry records (F-21.6): use_latest picks the newest eligible version
+	// BY UPLOAD TIME (release-channel records only, unless allow_pre_release —
+	// further constrained by pre_release_regex when set); a tagged reference
+	// demands that exact version. Eligibility rests on the IS_PRE_RELEASE FLAG
+	// stamped at publish time — never on parsing the version string. Returns
+	// the winning record (whose name is the registry filing name the run's
+	// snapshot pins).
+	ResolvePackageReference(ctx context.Context, in *ResolvePackageReferenceRequest, opts ...grpc.CallOption) (*StorageObject, error)
 }
 
 type databaseClient struct {
@@ -1973,6 +2030,86 @@ func (c *databaseClient) DeleteWorkerGroup(ctx context.Context, in *DeleteWorker
 	return out, nil
 }
 
+func (c *databaseClient) AllocateStorageObject(ctx context.Context, in *AllocateStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageObject)
+	err := c.cc.Invoke(ctx, Database_AllocateStorageObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ConfirmStorageObject(ctx context.Context, in *ConfirmStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageObject)
+	err := c.cc.Invoke(ctx, Database_ConfirmStorageObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetStorageObject(ctx context.Context, in *GetStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageObject)
+	err := c.cc.Invoke(ctx, Database_GetStorageObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListStorageObjects(ctx context.Context, in *ListStorageObjectsRequest, opts ...grpc.CallOption) (*ListStorageObjectsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListStorageObjectsResponse)
+	err := c.cc.Invoke(ctx, Database_ListStorageObjects_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) TouchStorageObject(ctx context.Context, in *TouchStorageObjectRequest, opts ...grpc.CallOption) (*StorageObject, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageObject)
+	err := c.cc.Invoke(ctx, Database_TouchStorageObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) SyncLogSize(ctx context.Context, in *SyncLogSizeRequest, opts ...grpc.CallOption) (*StorageObject, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageObject)
+	err := c.cc.Invoke(ctx, Database_SyncLogSize_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteStorageObject(ctx context.Context, in *DeleteStorageObjectRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteStorageObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ResolvePackageReference(ctx context.Context, in *ResolvePackageReferenceRequest, opts ...grpc.CallOption) (*StorageObject, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StorageObject)
+	err := c.cc.Invoke(ctx, Database_ResolvePackageReference_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DatabaseServer is the server API for Database service.
 // All implementations must embed UnimplementedDatabaseServer
 // for forward compatibility.
@@ -2550,6 +2687,55 @@ type DatabaseServer interface {
 	// (they keep their group string) or the jobs that target it (they still
 	// dispatch to the group's workers); it only removes the group's tags.
 	DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error)
+	// Storage objects (F-21.6 storage redesign). A storage_object is the
+	// DATABASE'S record of a file held by the artifacts service: its kind,
+	// namespace, display name, size, content hash, package coordinates (when
+	// it is a registry filing), provenance, and activity counters. The
+	// artifacts service itself is a dumb blob store keyed by the record's UID
+	// — it neither knows nor cares what a file is. Two-phase lifecycle:
+	// Allocate reserves a (hidden) record + UID for an inbound upload; Confirm
+	// settles it with the observed size/hash and makes it visible.
+	//
+	// AllocateStorageObject provisions a record for an upcoming upload. The
+	// record is INVISIBLE to listings and to package resolution until it is
+	// Confirmed (a crashed uploader leaves a stale row that pruning sweeps).
+	// Duplicate (namespace, name) among VISIBLE records is rejected
+	// (AlreadyExists); allocating over a HIDDEN duplicate adopts it (returns
+	// the existing record) — recovery for an interrupted upload.
+	AllocateStorageObject(context.Context, *AllocateStorageObjectRequest) (*StorageObject, error)
+	// ConfirmStorageObject settles an allocated record with the OBSERVED size
+	// and content hash of the bytes actually stored (the artifacts service
+	// measures them independently of the writer's attestation) and flips the
+	// record to visible. Unknown uids return NotFound.
+	ConfirmStorageObject(context.Context, *ConfirmStorageObjectRequest) (*StorageObject, error)
+	// GetStorageObject returns the record for a (namespace, name). Hidden
+	// (unconfirmed) records are invisible here; a miss returns NotFound.
+	GetStorageObject(context.Context, *GetStorageObjectRequest) (*StorageObject, error)
+	// ListStorageObjects returns the visible records of a namespace (kinds
+	// filtered when kind is set; "" = all kinds). Namespaces are arbitrary
+	// strings owned by the caller — the database trusts the API's
+	// authentication to scope them.
+	ListStorageObjects(context.Context, *ListStorageObjectsRequest) (*ListStorageObjectsResponse, error)
+	// TouchStorageObject records a RETRIEVAL of a record: increments
+	// download_count and stamps last_downloaded_at (best-effort analytics;
+	// never fails a download).
+	TouchStorageObject(context.Context, *TouchStorageObjectRequest) (*StorageObject, error)
+	// SyncLogSize updates a log record's size WITHOUT changing its visibility
+	// (logs are grown by the artifacts service's AppendBlob; the API reconciles
+	// the record periodically so consumers see the growing size).
+	SyncLogSize(context.Context, *SyncLogSizeRequest) (*StorageObject, error)
+	// DeleteStorageObject removes a record (the caller deletes the blob
+	// SEPARATELY through the artifacts service; orphaned blobs are harmless).
+	DeleteStorageObject(context.Context, *DeleteStorageObjectRequest) (*emptypb.Empty, error)
+	// ResolvePackageReference resolves ONE spec.artifacts reference against the
+	// registry records (F-21.6): use_latest picks the newest eligible version
+	// BY UPLOAD TIME (release-channel records only, unless allow_pre_release —
+	// further constrained by pre_release_regex when set); a tagged reference
+	// demands that exact version. Eligibility rests on the IS_PRE_RELEASE FLAG
+	// stamped at publish time — never on parsing the version string. Returns
+	// the winning record (whose name is the registry filing name the run's
+	// snapshot pins).
+	ResolvePackageReference(context.Context, *ResolvePackageReferenceRequest) (*StorageObject, error)
 	mustEmbedUnimplementedDatabaseServer()
 }
 
@@ -2931,6 +3117,30 @@ func (UnimplementedDatabaseServer) UpdateWorkerGroup(context.Context, *UpdateWor
 }
 func (UnimplementedDatabaseServer) DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteWorkerGroup not implemented")
+}
+func (UnimplementedDatabaseServer) AllocateStorageObject(context.Context, *AllocateStorageObjectRequest) (*StorageObject, error) {
+	return nil, status.Error(codes.Unimplemented, "method AllocateStorageObject not implemented")
+}
+func (UnimplementedDatabaseServer) ConfirmStorageObject(context.Context, *ConfirmStorageObjectRequest) (*StorageObject, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfirmStorageObject not implemented")
+}
+func (UnimplementedDatabaseServer) GetStorageObject(context.Context, *GetStorageObjectRequest) (*StorageObject, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetStorageObject not implemented")
+}
+func (UnimplementedDatabaseServer) ListStorageObjects(context.Context, *ListStorageObjectsRequest) (*ListStorageObjectsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListStorageObjects not implemented")
+}
+func (UnimplementedDatabaseServer) TouchStorageObject(context.Context, *TouchStorageObjectRequest) (*StorageObject, error) {
+	return nil, status.Error(codes.Unimplemented, "method TouchStorageObject not implemented")
+}
+func (UnimplementedDatabaseServer) SyncLogSize(context.Context, *SyncLogSizeRequest) (*StorageObject, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncLogSize not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteStorageObject(context.Context, *DeleteStorageObjectRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteStorageObject not implemented")
+}
+func (UnimplementedDatabaseServer) ResolvePackageReference(context.Context, *ResolvePackageReferenceRequest) (*StorageObject, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolvePackageReference not implemented")
 }
 func (UnimplementedDatabaseServer) mustEmbedUnimplementedDatabaseServer() {}
 func (UnimplementedDatabaseServer) testEmbeddedByValue()                  {}
@@ -5185,6 +5395,150 @@ func _Database_DeleteWorkerGroup_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_AllocateStorageObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AllocateStorageObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AllocateStorageObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AllocateStorageObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AllocateStorageObject(ctx, req.(*AllocateStorageObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ConfirmStorageObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfirmStorageObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ConfirmStorageObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ConfirmStorageObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ConfirmStorageObject(ctx, req.(*ConfirmStorageObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetStorageObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetStorageObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetStorageObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetStorageObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetStorageObject(ctx, req.(*GetStorageObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListStorageObjects_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListStorageObjectsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListStorageObjects(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListStorageObjects_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListStorageObjects(ctx, req.(*ListStorageObjectsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_TouchStorageObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TouchStorageObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).TouchStorageObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_TouchStorageObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).TouchStorageObject(ctx, req.(*TouchStorageObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_SyncLogSize_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncLogSizeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).SyncLogSize(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_SyncLogSize_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).SyncLogSize(ctx, req.(*SyncLogSizeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteStorageObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteStorageObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteStorageObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteStorageObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteStorageObject(ctx, req.(*DeleteStorageObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ResolvePackageReference_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolvePackageReferenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ResolvePackageReference(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ResolvePackageReference_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ResolvePackageReference(ctx, req.(*ResolvePackageReferenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Database_ServiceDesc is the grpc.ServiceDesc for Database service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -5687,6 +6041,38 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteWorkerGroup",
 			Handler:    _Database_DeleteWorkerGroup_Handler,
+		},
+		{
+			MethodName: "AllocateStorageObject",
+			Handler:    _Database_AllocateStorageObject_Handler,
+		},
+		{
+			MethodName: "ConfirmStorageObject",
+			Handler:    _Database_ConfirmStorageObject_Handler,
+		},
+		{
+			MethodName: "GetStorageObject",
+			Handler:    _Database_GetStorageObject_Handler,
+		},
+		{
+			MethodName: "ListStorageObjects",
+			Handler:    _Database_ListStorageObjects_Handler,
+		},
+		{
+			MethodName: "TouchStorageObject",
+			Handler:    _Database_TouchStorageObject_Handler,
+		},
+		{
+			MethodName: "SyncLogSize",
+			Handler:    _Database_SyncLogSize_Handler,
+		},
+		{
+			MethodName: "DeleteStorageObject",
+			Handler:    _Database_DeleteStorageObject_Handler,
+		},
+		{
+			MethodName: "ResolvePackageReference",
+			Handler:    _Database_ResolvePackageReference_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

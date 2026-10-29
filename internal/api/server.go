@@ -111,6 +111,11 @@ type Server struct {
 	// periodic-refresh override gate. Populated via SetConfig; nil in tests
 	// that do not exercise the cadence logic (the defaults floor sensibly).
 	cfg *config.Config
+	// resolver translates (namespace, name) to storage_object records and
+	// drives the blob service by uid (F-21.6 storage redesign). Wired at
+	// construction from the clients; the gRPC face shares the SAME instance
+	// (GRPCServer.SetResolver).
+	resolver *fileResolver
 	// logger records the server's operational log lines (background loops,
 	// sync diagnostics). Populated via SetLogger; falls back to slog.Default()
 	// when unset.
@@ -210,8 +215,17 @@ func New(clients Clients, hub *EventHub, secretStore ...secrets.Store) *Server {
 		secretStore:    store,
 		srcInFlight:    &inFlightCounter{},
 		slowSyncWarner: &slowSyncWarner{cooldown: srcSlowSyncWarnCooldown},
+		// The (namespace, name) <-> storage_object bridge (F-21.6 storage
+		// redesign). Wired from the clients at construction so the HTTP face
+		// translates artifact/log traffic through the records + blob service.
+		resolver: NewFileResolver(clients.Database, clients.Artifacts),
 	}
 	return s
+}
+
+// SetResolver replaces the HTTP face's file resolver (tests inject a fake).
+func (s *Server) SetResolver(fr *fileResolver) {
+	s.resolver = fr
 }
 
 // Handler builds the HTTP handler for the API.
@@ -335,6 +349,16 @@ func (s *Server) Handler() http.Handler {
 
 	// Artifacts (via the artifacts service).
 	mux.HandleFunc("GET /api/jobs/{id}/artifacts", s.listJobArtifacts)
+
+	// Package registry (F-21.6): publishing a version into the reserved
+	// "packages" namespace (packages.can-publish), browsing/downloading the
+	// registry (packages.can-view), and promoting an artifact between
+	// namespaces (packages.can-promote — the former F-19 operation).
+	mux.HandleFunc("POST /api/packages", s.publishPackage)
+	mux.HandleFunc("GET /api/packages", s.listPackages)
+	mux.HandleFunc("GET /api/packages/{name}", s.getPackage)
+	mux.HandleFunc("GET /api/packages/{name}/{version}/contents", s.getPackageContents)
+	mux.HandleFunc("POST /api/artifacts/promote", s.promoteArtifact)
 
 	// Job logs (via the artifacts service). A job's logs are stored as one
 	// file per step (<step-name>.log) plus a combined job.log.
@@ -468,6 +492,16 @@ type pipelineRequest struct {
 	// They are populated only by the file-format import path (decodePipelineRequest);
 	// a JSON body carries no secret sources.
 	SecretSources []*dbpb.SecretSource `json:"-"`
+	// Artifacts are the pipeline's named package references (F-21.6,
+	// spec.artifacts). They are populated only by the file-format import path
+	// (decodePipelineRequest); a JSON body carries no package references.
+	Artifacts []*dbpb.PackageArtifact `json:"-"`
+	// HasArtifacts reports whether the REQUEST mentions the pipeline's
+	// package references at all (F-21.6): a file-format import that carries a
+	// spec.artifacts key (even an empty one — clearing the references) sets
+	// it, so the update path knows to REPLACE the stored references rather
+	// than leave them untouched. A JSON-schema body never sets it.
+	HasArtifacts bool `json:"-"`
 	// PeriodicRefresh is the pipeline's file-declared periodic-refresh policy
 	// (F-21.5.1, spec.periodicRefresh): the steady-state cadence (a duration)
 	// and/or the cron expression, plus the per-pipeline admin gate. It is
@@ -681,6 +715,9 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		Tags:            req.Tags,
 		VariableSets:    req.VariableSets,
 		SecretSources:   req.SecretSources,
+		// The pipeline's named package references (F-21.6, spec.artifacts); a
+		// create always carries them (possibly empty — no references).
+		Artifacts: req.Artifacts,
 		// A create always carries the policy (possibly empty — no policy) and
 		// the stated gate value (defaulting to allowed).
 		PeriodicRefreshInterval:         policy.interval,
@@ -753,18 +790,25 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 	oldPipeline, _ := s.clients.Database.GetPipeline(r.Context(), &dbpb.GetPipelineRequest{Id: pipelineID})
 	policy := periodicRefreshPolicy(req)
 	pipeline, err := s.clients.Database.UpdatePipeline(r.Context(), &dbpb.UpdatePipelineRequest{
-		Id:                              pipelineID,
-		Name:                            req.Name,
-		Description:                     req.Description,
-		FailureMode:                     failureModeFromName(req.FailureMode),
-		Jobs:                            jobs,
-		Triggers:                        triggersToProto(req.Triggers),
-		Params:                          pipelineParamsToProto(req.Params),
-		Secrets:                         secrets,
-		ConcurrencyKeys:                 req.ConcurrencyKeys,
-		Tags:                            req.Tags,
-		VariableSets:                    req.VariableSets,
-		SecretSources:                   req.SecretSources,
+		Id:              pipelineID,
+		Name:            req.Name,
+		Description:     req.Description,
+		FailureMode:     failureModeFromName(req.FailureMode),
+		Jobs:            jobs,
+		Triggers:        triggersToProto(req.Triggers),
+		Params:          pipelineParamsToProto(req.Params),
+		Secrets:         secrets,
+		ConcurrencyKeys: req.ConcurrencyKeys,
+		Tags:            req.Tags,
+		VariableSets:    req.VariableSets,
+		SecretSources:   req.SecretSources,
+		// The pipeline's named package references (F-21.6): replaced only
+		// when the request MENTIONED them (the file-format import path sets
+		// HasArtifacts from the presence of the spec.artifacts key — an
+		// empty/null key clears them; a JSON-schema body never mentions them
+		// and leaves the stored references untouched).
+		Artifacts:                       req.Artifacts,
+		HasArtifacts:                    req.HasArtifacts,
 		PeriodicRefreshInterval:         policy.interval,
 		PeriodicRefreshSchedule:         policy.schedule,
 		HasPeriodicRefresh:              policy.present,
@@ -1807,14 +1851,34 @@ func (s *Server) listJobArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
-	response, err := s.clients.Artifacts.ListArtifacts(r.Context(), &artifactspb.ListArtifactsRequest{
-		Namespace: strconv.FormatInt(jobID, 10),
-	})
+	// Translated from the storage_object records (F-21.6 storage redesign):
+	// the job's namespace is its id; the KIND filter keeps the listing to
+	// artifacts (excluding the job's log files, which have their own
+	// endpoint).
+	objects, err := s.resolver.listFiles(r.Context(), strconv.FormatInt(jobID, 10), "artifact")
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(response.GetArtifacts()))
+	type fileView struct {
+		Namespace   string `json:"namespace"`
+		Name        string `json:"name"`
+		Size        int64  `json:"size"`
+		ContentType string `json:"contentType,omitempty"`
+		CreatedAt   string `json:"createdAt,omitempty"`
+	}
+	views := make([]fileView, 0, len(objects))
+	for _, o := range objects {
+		v := fileView{Namespace: o.GetNamespace(), Name: o.GetName(), Size: o.GetSize()}
+		if ct := contentTypeByName(o.GetName()); ct != "" {
+			v.ContentType = ct
+		}
+		if ts := o.GetCreatedAt(); ts != nil {
+			v.CreatedAt = ts.AsTime().UTC().Format(time.RFC3339)
+		}
+		views = append(views, v)
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 // ---------------------------------------------------------------------------
@@ -1822,7 +1886,7 @@ func (s *Server) listJobArtifacts(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // listJobLogs lists a job's log files (one per step plus the combined
-// job.log) via the artifacts service.
+// job.log) via the storage_object records (F-21.6 storage redesign).
 func (s *Server) listJobLogs(w http.ResponseWriter, r *http.Request) {
 	jobID, ok := pathID(w, r)
 	if !ok {
@@ -1831,14 +1895,26 @@ func (s *Server) listJobLogs(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
-	response, err := s.clients.Artifacts.ListLogs(r.Context(), &artifactspb.ListLogsRequest{
-		Namespace: strconv.FormatInt(jobID, 10),
-	})
+	objects, err := s.resolver.listFiles(r.Context(), strconv.FormatInt(jobID, 10), "log")
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(response.GetLogs()))
+	type logView struct {
+		Namespace string `json:"namespace"`
+		Name      string `json:"name"`
+		Size      int64  `json:"size"`
+		CreatedAt string `json:"createdAt,omitempty"`
+	}
+	views := make([]logView, 0, len(objects))
+	for _, o := range objects {
+		v := logView{Namespace: o.GetNamespace(), Name: o.GetName(), Size: o.GetSize()}
+		if ts := o.GetCreatedAt(); ts != nil {
+			v.CreatedAt = ts.AsTime().UTC().Format(time.RFC3339)
+		}
+		views = append(views, v)
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 // getJobLog streams a job's log file (a step's output or the combined
@@ -1857,30 +1933,20 @@ func (s *Server) getJobLog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "log name is required")
 		return
 	}
-	stream, err := s.clients.Artifacts.DownloadLog(r.Context(), &artifactspb.DownloadLogRequest{
-		Namespace: strconv.FormatInt(jobID, 10),
-		Name:      name,
-	})
+	// Translate the (job, log) coordinate to the log's blob uid (F-21.6
+	// storage redesign), then stream the blob's bytes to the response body.
+	rec, err := s.resolver.getFile(r.Context(), strconv.FormatInt(jobID, 10), name)
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
-	// The first chunk carries metadata; set the content type from it, then
-	// stream the data chunks to the response body.
-	first, err := stream.Recv()
+	stream, err := s.clients.Artifacts.GetBlob(r.Context(), &artifactspb.BlobRef{Id: rec.GetUid()})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
-	if contentType := first.GetMetadata().GetContentType(); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	} else {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(first.GetData()); err != nil {
-		return
-	}
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {

@@ -5,60 +5,46 @@ import (
 	"fmt"
 	"io"
 	"strings"
-
-	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 )
 
-// Store is the storage backend for the artifacts service: a general-purpose,
-// namespaced file store. It stores two kinds of data:
+// Store is the storage backend for the artifacts service: a dumb blob store
+// keyed by opaque ids. Bytes in, bytes out — no names, no namespaces, no
+// metadata derivation. All file ATTRIBUTES live in the Database service's
+// storage_object records (F-21.6 storage redesign); a Store implementation
+// must treat an id as an opaque string and derive nothing from it.
 //
-//   - artifacts: immutable files (one per namespace/name); and
-//   - logs: append-only files that grow over time (for a job: one per step
-//     plus a combined file), so a log can be read while it is still being
-//     written (tail) and replayed in full afterwards.
+// Semantics:
 //
-// Every file lives in a *namespace*: an opaque scope string that groups
-// related files. The store is agnostic about what a namespace means — it is
-// up to the caller. A job's artifacts and logs use the job's id as the
-// namespace, while a deployed release's artifacts might use a release
-// identifier.
+//   - Put: write the WHOLE content of a blob to a fresh id. Double-writes to
+//     an id that already holds a NON-EMPTY blob fail (AlreadyExists);
+//     rewriting an EMPTY blob (a put that ended with zero bytes) is allowed
+//     (adopt-the-slot recovery).
+//   - Get: read a blob's bytes, optionally from a byte offset (range reads
+//     power cross-pod log tailing, F-23). Offset >= size yields an empty
+//     reader.
+//   - Append: grow a blob in place (LOGS). Absent blobs are created.
+//   - Copy: replicate a blob to another id SERVER-SIDE (promotion).
+//   - Delete: remove a blob outright (missing ids are a no-op).
 //
-// The gRPC Server (server.go) handles the streaming/chunking protocol and
-// delegates the actual I/O to a Store. Implementations must be safe for
-// concurrent use.
+// Implementations must be safe for concurrent use.
 type Store interface {
-	// UploadArtifact stores data as an artifact named name in namespace,
-	// replacing any existing artifact with the same name. It returns the
-	// stored artifact's metadata.
-	UploadArtifact(ctx context.Context, namespace, name string, r io.Reader) (*artifactspb.Artifact, error)
-	// DownloadArtifact opens the artifact named name in namespace for
-	// reading. The caller must close the returned reader.
-	DownloadArtifact(ctx context.Context, namespace, name string) (*artifactspb.Artifact, io.ReadCloser, error)
-	// GetArtifact returns the metadata of the artifact named name in
-	// namespace.
-	GetArtifact(ctx context.Context, namespace, name string) (*artifactspb.Artifact, error)
-	// ListArtifacts lists the artifacts in namespace (all namespaces when
-	// namespace is "").
-	ListArtifacts(ctx context.Context, namespace string) ([]*artifactspb.Artifact, error)
-	// DeleteArtifact deletes the artifact named name in namespace.
-	DeleteArtifact(ctx context.Context, namespace, name string) error
-
-	// AppendLog appends data to the log named name in namespace, creating the
-	// log if it does not exist. It returns the updated log's metadata.
-	AppendLog(ctx context.Context, namespace, name string, data []byte) (*artifactspb.Artifact, error)
-	// DownloadLog opens the log named name in namespace for reading. The
-	// caller must close the returned reader. Reading a log that is still
-	// being written returns the output captured so far. When offset is
-	// greater than zero the reader is positioned at that byte offset (a
-	// range read of the log's tail); when it is zero the whole log is
-	// returned from the start. An offset beyond the log's current size
-	// yields an empty reader.
-	DownloadLog(ctx context.Context, namespace, name string, offset int64) (*artifactspb.Artifact, io.ReadCloser, error)
-	// GetLog returns the metadata of the log named name in namespace.
-	GetLog(ctx context.Context, namespace, name string) (*artifactspb.Artifact, error)
-	// ListLogs lists the logs in namespace (all namespaces when namespace is
-	// "").
-	ListLogs(ctx context.Context, namespace string) ([]*artifactspb.Artifact, error)
+	// Put stores data as the blob at id, replacing any EMPTY blob sitting
+	// there. It returns the number of bytes stored.
+	Put(ctx context.Context, id string, r io.Reader) (int64, error)
+	// Get opens the blob at id for reading from offset (0 = from the
+	// start). It returns the blob's total size and a reader the caller must
+	// close.
+	Get(ctx context.Context, id string, offset int64) (int64, io.ReadCloser, error)
+	// Stat returns the blob's size without transferring its bytes.
+	Stat(ctx context.Context, id string) (int64, error)
+	// Append appends data to the blob at id (creating it when absent). It
+	// returns the blob's total size after the append.
+	Append(ctx context.Context, id string, data []byte) (int64, error)
+	// Copy replicates the blob at src to dst (dst must not hold a non-empty
+	// blob). It returns the copied size.
+	Copy(ctx context.Context, src, dst string) (int64, error)
+	// Delete removes the blob at id. A missing id is a no-op.
+	Delete(ctx context.Context, id string) error
 }
 
 // StoreKind names a built-in Store implementation.
@@ -66,7 +52,7 @@ type StoreKind string
 
 // Built-in store implementations.
 const (
-	// StoreKindFilesystem is the local-filesystem store (the default).
+	// StoreKindFilesystem is the local-filesystem blob store (the default).
 	StoreKindFilesystem StoreKind = "filesystem"
 	// StoreKindS3 is an S3-backed store (not yet implemented).
 	StoreKindS3 StoreKind = "s3"
@@ -80,7 +66,7 @@ const (
 func NewStore(kind StoreKind, root string) (Store, error) {
 	switch StoreKind(strings.ToLower(string(kind))) {
 	case StoreKindFilesystem:
-		return NewFilesystemStore(root)
+		return NewBlobFSStore(root)
 	case StoreKindS3:
 		return nil, fmt.Errorf("artifacts: store kind %q is not implemented yet; use %q", kind, StoreKindFilesystem)
 	case StoreKindAzureBlob:
@@ -88,4 +74,38 @@ func NewStore(kind StoreKind, root string) (Store, error) {
 	default:
 		return nil, fmt.Errorf("artifacts: unknown store kind %q (want %q, %q, or %q)", kind, StoreKindFilesystem, StoreKindS3, StoreKindAzureBlob)
 	}
+}
+
+// ErrInvalidBlobID guards the degenerate case of an empty or illegal id.
+var ErrInvalidBlobID = fmt.Errorf("artifacts: invalid blob id")
+
+// ValidateBlobID checks that id is a legal blob identifier: non-empty, at
+// most 64 characters, drawn from [0-9a-zA-Z-]. Typically a UUID (36 chars,
+// lowercase hex + dashes) issued by the Database service's record allocator.
+func ValidateBlobID(id string) error {
+	if id == "" {
+		return ErrInvalidBlobID
+	}
+	if len(id) > 64 {
+		return fmt.Errorf("%w: %d characters exceed the 64-character limit", ErrInvalidBlobID, len(id))
+	}
+	for _, r := range id {
+		ok := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-'
+		if !ok {
+			return fmt.Errorf("%w: %q contains an illegal character", ErrInvalidBlobID, id)
+		}
+	}
+	return nil
+}
+
+// blobShardPrefix extracts the two-letter shard prefix of a blob id (the
+// first two characters lowercased). Sharding spreads millions of blobs over
+// thousands of directories so enumeration and fsck-scale maintenance stay
+// cheap on any filesystem.
+func blobShardPrefix(id string) string {
+	prefix := id
+	if len(prefix) > 2 {
+		prefix = prefix[:2]
+	}
+	return strings.ToLower(prefix)
 }

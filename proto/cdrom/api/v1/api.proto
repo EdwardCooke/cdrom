@@ -8,7 +8,6 @@ import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 import "cdrom/db/v1/db.proto";
-import "cdrom/artifacts/v1/artifacts.proto";
 
 option go_package = "cdrom/internal/gen/cdrom/api/v1;apiv1";
 
@@ -119,16 +118,17 @@ service API {
 
   // Artifact proxy (called by workers and agents). The API forwards these to
   // the artifacts service so execution targets never talk to it directly.
-  rpc UploadArtifact(stream cdrom.artifacts.v1.ArtifactChunk)
-      returns (cdrom.artifacts.v1.UploadArtifactResponse);
-  rpc DownloadArtifact(cdrom.artifacts.v1.DownloadArtifactRequest)
-      returns (stream cdrom.artifacts.v1.ArtifactChunk);
-  rpc GetArtifact(cdrom.artifacts.v1.GetArtifactRequest)
-      returns (cdrom.artifacts.v1.Artifact);
-  rpc ListArtifacts(cdrom.artifacts.v1.ListArtifactsRequest)
-      returns (cdrom.artifacts.v1.ListArtifactsResponse);
-  rpc DeleteArtifact(cdrom.artifacts.v1.DeleteArtifactRequest)
-      returns (google.protobuf.Empty);
+  //
+  // The CONTRACT is logical FILES: (namespace, name)-addressed, described by
+  // the LogFile view below. Since the F-21.6 storage redesign the physical
+  // store is a dumb blob service keyed by UUID, and the API TRANSLATES each
+  // (namespace, name) to/from the database's storage_object records before
+  // talking to the blob service — targets never learn uids.
+  rpc UploadArtifact(stream LogFileChunk) returns (LogFile);
+  rpc DownloadArtifact(LogFileRef) returns (stream LogFileChunk);
+  rpc GetArtifact(LogFileRef) returns (LogFile);
+  rpc ListArtifacts(ListLogFilesRequest) returns (ListLogFilesResponse);
+  rpc DeleteArtifact(LogFileRef) returns (google.protobuf.Empty);
 
   // Notifications (F-18). A notification step handler (email or webhook) on an
   // execution target renders the step's fields against the step's condition
@@ -151,6 +151,48 @@ service API {
   // every API replica and worker process. When job-token auth is enabled the
   // caller must present a job token scoped to the job.
   rpc ClaimStepOnce(ClaimStepOnceRequest) returns (ClaimStepOnceResponse);
+}
+
+// LogFile is the TARGET-VIEW of a stored file (logical, not physical): its
+// namespace, display name, size, and timestamps. Content hashes and package
+// coordinates are database-side concerns and do not cross this boundary.
+message LogFile {
+  // namespace is the logical scope the file belongs to (a job id for a job's
+  // artifacts/logs, "packages" for registry filings, or a run id).
+  string namespace = 1;
+  // name is the file's display name within the namespace.
+  string name = 2;
+  // size is the file's size in bytes.
+  int64 size = 3;
+  // created_at is when the file was stored.
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// LogFileRef addresses a file in the target view.
+message LogFileRef {
+  string namespace = 1;
+  string name = 2;
+}
+
+// LogFileChunk carries a piece of a file over the proxy. On UPLOADED streams
+// the first chunk carries metadata (namespace and name) and MAY carry data;
+// subsequent chunks carry data. On DOWNLOADED streams the first chunk carries
+// metadata and subsequent chunks carry data.
+message LogFileChunk {
+  // metadata is set on the first chunk of each exchange; empty elsewhere.
+  LogFile metadata = 1;
+  // data is the chunk's bytes.
+  bytes data = 2;
+}
+
+// ListLogFilesRequest lists the files of a namespace ("" = all).
+message ListLogFilesRequest {
+  string namespace = 1;
+}
+
+// ListLogFilesResponse is the result of a ListArtifacts call.
+message ListLogFilesResponse {
+  repeated LogFile files = 1;
 }
 
 message Worker {
@@ -318,6 +360,13 @@ message Job {
   // flag. The API uses it to decide whether to insert an F-13 approval step
   // into the job's spec before it is handed to an execution target.
   cdrom.db.v1.ApprovalPolicy approval = 33;
+  // artifacts is the run's RESOLVED package snapshot (F-21.6): a
+  // spec.artifacts reference name → the stored file name the reference
+  // resolved to when the run started. Denormalized from the job instance by
+  // the API (toAPIJob) and handed to the execution target so the
+  // download_artifact step handler can resolve a reference to the version
+  // the run picked. Empty for a job not part of a run.
+  map<string, string> artifacts = 34;
 }
 
 message JobAssignment {

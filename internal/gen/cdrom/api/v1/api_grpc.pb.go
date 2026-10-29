@@ -7,7 +7,6 @@
 package apiv1
 
 import (
-	v1 "cdrom/internal/gen/cdrom/artifacts/v1"
 	context "context"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -152,11 +151,17 @@ type APIClient interface {
 	NotifyRunStatus(ctx context.Context, in *NotifyRunStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Artifact proxy (called by workers and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
-	UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.ArtifactChunk, v1.UploadArtifactResponse], error)
-	DownloadArtifact(ctx context.Context, in *v1.DownloadArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error)
-	GetArtifact(ctx context.Context, in *v1.GetArtifactRequest, opts ...grpc.CallOption) (*v1.Artifact, error)
-	ListArtifacts(ctx context.Context, in *v1.ListArtifactsRequest, opts ...grpc.CallOption) (*v1.ListArtifactsResponse, error)
-	DeleteArtifact(ctx context.Context, in *v1.DeleteArtifactRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	//
+	// The CONTRACT is logical FILES: (namespace, name)-addressed, described by
+	// the LogFile view below. Since the F-21.6 storage redesign the physical
+	// store is a dumb blob service keyed by UUID, and the API TRANSLATES each
+	// (namespace, name) to/from the database's storage_object records before
+	// talking to the blob service — targets never learn uids.
+	UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[LogFileChunk, LogFile], error)
+	DownloadArtifact(ctx context.Context, in *LogFileRef, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogFileChunk], error)
+	GetArtifact(ctx context.Context, in *LogFileRef, opts ...grpc.CallOption) (*LogFile, error)
+	ListArtifacts(ctx context.Context, in *ListLogFilesRequest, opts ...grpc.CallOption) (*ListLogFilesResponse, error)
+	DeleteArtifact(ctx context.Context, in *LogFileRef, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Notifications (F-18). A notification step handler (email or webhook) on an
 	// execution target renders the step's fields against the step's condition
 	// context and calls one of these RPCs; the API performs the actual send
@@ -370,26 +375,26 @@ func (c *aPIClient) NotifyRunStatus(ctx context.Context, in *NotifyRunStatusRequ
 	return out, nil
 }
 
-func (c *aPIClient) UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.ArtifactChunk, v1.UploadArtifactResponse], error) {
+func (c *aPIClient) UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[LogFileChunk, LogFile], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[2], API_UploadArtifact_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[v1.ArtifactChunk, v1.UploadArtifactResponse]{ClientStream: stream}
+	x := &grpc.GenericClientStream[LogFileChunk, LogFile]{ClientStream: stream}
 	return x, nil
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type API_UploadArtifactClient = grpc.ClientStreamingClient[v1.ArtifactChunk, v1.UploadArtifactResponse]
+type API_UploadArtifactClient = grpc.ClientStreamingClient[LogFileChunk, LogFile]
 
-func (c *aPIClient) DownloadArtifact(ctx context.Context, in *v1.DownloadArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ArtifactChunk], error) {
+func (c *aPIClient) DownloadArtifact(ctx context.Context, in *LogFileRef, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogFileChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &API_ServiceDesc.Streams[3], API_DownloadArtifact_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[v1.DownloadArtifactRequest, v1.ArtifactChunk]{ClientStream: stream}
+	x := &grpc.GenericClientStream[LogFileRef, LogFileChunk]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -400,11 +405,11 @@ func (c *aPIClient) DownloadArtifact(ctx context.Context, in *v1.DownloadArtifac
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type API_DownloadArtifactClient = grpc.ServerStreamingClient[v1.ArtifactChunk]
+type API_DownloadArtifactClient = grpc.ServerStreamingClient[LogFileChunk]
 
-func (c *aPIClient) GetArtifact(ctx context.Context, in *v1.GetArtifactRequest, opts ...grpc.CallOption) (*v1.Artifact, error) {
+func (c *aPIClient) GetArtifact(ctx context.Context, in *LogFileRef, opts ...grpc.CallOption) (*LogFile, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.Artifact)
+	out := new(LogFile)
 	err := c.cc.Invoke(ctx, API_GetArtifact_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -412,9 +417,9 @@ func (c *aPIClient) GetArtifact(ctx context.Context, in *v1.GetArtifactRequest, 
 	return out, nil
 }
 
-func (c *aPIClient) ListArtifacts(ctx context.Context, in *v1.ListArtifactsRequest, opts ...grpc.CallOption) (*v1.ListArtifactsResponse, error) {
+func (c *aPIClient) ListArtifacts(ctx context.Context, in *ListLogFilesRequest, opts ...grpc.CallOption) (*ListLogFilesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(v1.ListArtifactsResponse)
+	out := new(ListLogFilesResponse)
 	err := c.cc.Invoke(ctx, API_ListArtifacts_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -422,7 +427,7 @@ func (c *aPIClient) ListArtifacts(ctx context.Context, in *v1.ListArtifactsReque
 	return out, nil
 }
 
-func (c *aPIClient) DeleteArtifact(ctx context.Context, in *v1.DeleteArtifactRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *aPIClient) DeleteArtifact(ctx context.Context, in *LogFileRef, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, API_DeleteArtifact_FullMethodName, in, out, cOpts...)
@@ -566,11 +571,17 @@ type APIServer interface {
 	NotifyRunStatus(context.Context, *NotifyRunStatusRequest) (*emptypb.Empty, error)
 	// Artifact proxy (called by workers and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
-	UploadArtifact(grpc.ClientStreamingServer[v1.ArtifactChunk, v1.UploadArtifactResponse]) error
-	DownloadArtifact(*v1.DownloadArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error
-	GetArtifact(context.Context, *v1.GetArtifactRequest) (*v1.Artifact, error)
-	ListArtifacts(context.Context, *v1.ListArtifactsRequest) (*v1.ListArtifactsResponse, error)
-	DeleteArtifact(context.Context, *v1.DeleteArtifactRequest) (*emptypb.Empty, error)
+	//
+	// The CONTRACT is logical FILES: (namespace, name)-addressed, described by
+	// the LogFile view below. Since the F-21.6 storage redesign the physical
+	// store is a dumb blob service keyed by UUID, and the API TRANSLATES each
+	// (namespace, name) to/from the database's storage_object records before
+	// talking to the blob service — targets never learn uids.
+	UploadArtifact(grpc.ClientStreamingServer[LogFileChunk, LogFile]) error
+	DownloadArtifact(*LogFileRef, grpc.ServerStreamingServer[LogFileChunk]) error
+	GetArtifact(context.Context, *LogFileRef) (*LogFile, error)
+	ListArtifacts(context.Context, *ListLogFilesRequest) (*ListLogFilesResponse, error)
+	DeleteArtifact(context.Context, *LogFileRef) (*emptypb.Empty, error)
 	// Notifications (F-18). A notification step handler (email or webhook) on an
 	// execution target renders the step's fields against the step's condition
 	// context and calls one of these RPCs; the API performs the actual send
@@ -653,19 +664,19 @@ func (UnimplementedAPIServer) NotifyJobStatus(context.Context, *NotifyJobStatusR
 func (UnimplementedAPIServer) NotifyRunStatus(context.Context, *NotifyRunStatusRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method NotifyRunStatus not implemented")
 }
-func (UnimplementedAPIServer) UploadArtifact(grpc.ClientStreamingServer[v1.ArtifactChunk, v1.UploadArtifactResponse]) error {
+func (UnimplementedAPIServer) UploadArtifact(grpc.ClientStreamingServer[LogFileChunk, LogFile]) error {
 	return status.Error(codes.Unimplemented, "method UploadArtifact not implemented")
 }
-func (UnimplementedAPIServer) DownloadArtifact(*v1.DownloadArtifactRequest, grpc.ServerStreamingServer[v1.ArtifactChunk]) error {
+func (UnimplementedAPIServer) DownloadArtifact(*LogFileRef, grpc.ServerStreamingServer[LogFileChunk]) error {
 	return status.Error(codes.Unimplemented, "method DownloadArtifact not implemented")
 }
-func (UnimplementedAPIServer) GetArtifact(context.Context, *v1.GetArtifactRequest) (*v1.Artifact, error) {
+func (UnimplementedAPIServer) GetArtifact(context.Context, *LogFileRef) (*LogFile, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetArtifact not implemented")
 }
-func (UnimplementedAPIServer) ListArtifacts(context.Context, *v1.ListArtifactsRequest) (*v1.ListArtifactsResponse, error) {
+func (UnimplementedAPIServer) ListArtifacts(context.Context, *ListLogFilesRequest) (*ListLogFilesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListArtifacts not implemented")
 }
-func (UnimplementedAPIServer) DeleteArtifact(context.Context, *v1.DeleteArtifactRequest) (*emptypb.Empty, error) {
+func (UnimplementedAPIServer) DeleteArtifact(context.Context, *LogFileRef) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteArtifact not implemented")
 }
 func (UnimplementedAPIServer) SendEmail(context.Context, *SendEmailRequest) (*SendEmailResponse, error) {
@@ -987,25 +998,25 @@ func _API_NotifyRunStatus_Handler(srv interface{}, ctx context.Context, dec func
 }
 
 func _API_UploadArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(APIServer).UploadArtifact(&grpc.GenericServerStream[v1.ArtifactChunk, v1.UploadArtifactResponse]{ServerStream: stream})
+	return srv.(APIServer).UploadArtifact(&grpc.GenericServerStream[LogFileChunk, LogFile]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type API_UploadArtifactServer = grpc.ClientStreamingServer[v1.ArtifactChunk, v1.UploadArtifactResponse]
+type API_UploadArtifactServer = grpc.ClientStreamingServer[LogFileChunk, LogFile]
 
 func _API_DownloadArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(v1.DownloadArtifactRequest)
+	m := new(LogFileRef)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(APIServer).DownloadArtifact(m, &grpc.GenericServerStream[v1.DownloadArtifactRequest, v1.ArtifactChunk]{ServerStream: stream})
+	return srv.(APIServer).DownloadArtifact(m, &grpc.GenericServerStream[LogFileRef, LogFileChunk]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type API_DownloadArtifactServer = grpc.ServerStreamingServer[v1.ArtifactChunk]
+type API_DownloadArtifactServer = grpc.ServerStreamingServer[LogFileChunk]
 
 func _API_GetArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.GetArtifactRequest)
+	in := new(LogFileRef)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -1017,13 +1028,13 @@ func _API_GetArtifact_Handler(srv interface{}, ctx context.Context, dec func(int
 		FullMethod: API_GetArtifact_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(APIServer).GetArtifact(ctx, req.(*v1.GetArtifactRequest))
+		return srv.(APIServer).GetArtifact(ctx, req.(*LogFileRef))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _API_ListArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.ListArtifactsRequest)
+	in := new(ListLogFilesRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -1035,13 +1046,13 @@ func _API_ListArtifacts_Handler(srv interface{}, ctx context.Context, dec func(i
 		FullMethod: API_ListArtifacts_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(APIServer).ListArtifacts(ctx, req.(*v1.ListArtifactsRequest))
+		return srv.(APIServer).ListArtifacts(ctx, req.(*ListLogFilesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
 func _API_DeleteArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(v1.DeleteArtifactRequest)
+	in := new(LogFileRef)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -1053,7 +1064,7 @@ func _API_DeleteArtifact_Handler(srv interface{}, ctx context.Context, dec func(
 		FullMethod: API_DeleteArtifact_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(APIServer).DeleteArtifact(ctx, req.(*v1.DeleteArtifactRequest))
+		return srv.(APIServer).DeleteArtifact(ctx, req.(*LogFileRef))
 	}
 	return interceptor(ctx, in, info, handler)
 }

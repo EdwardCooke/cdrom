@@ -1,22 +1,26 @@
-// Package artifacts implements the cdrom.artifacts.v1.Artifacts gRPC service:
-// a general-purpose, namespaced file store for artifacts (immutable files)
-// and logs (append-only files).
+// Package artifacts implements the cdrom.artifacts.v1.Artifacts gRPC
+// service: a general-purpose BLOB STORE. It stores and retrieves raw bytes
+// identified exclusively by an opaque id (a UUID assigned by the caller); it
+// knows NOTHING about names, namespaces, packages, or any other attribute of
+// the bytes it holds.
 //
-// Every file lives in a *namespace*: an opaque scope string that groups
-// related files. The service is agnostic about what a namespace means — it is
-// up to the caller. A job's artifacts and logs use the job's id as the
-// namespace, while a deployed release's artifacts might use a release
-// identifier. This keeps the store general enough to hold both job-owned
-// artifacts and deployed/published artifacts.
+// All FILE METADATA lives in the Database service's storage_object records
+// (F-21.6 storage redesign): what a file IS (kind, namespace, display name,
+// size, content hash, package coordinates, counters) is a database fact;
+// WHAT IT CONTAINS is a blob here. Callers translate (namespace, name) <->
+// uid at the API/service boundary and speak uids to this service.
 //
 // The gRPC Server (server.go) handles the streaming/chunking protocol and
 // delegates the actual I/O to a Store (store.go). The default store is the
-// local filesystem (filesystem.go); the store kind is configurable
+// local filesystem (blobfs.go); the store kind is configurable
 // (artifacts_store / CDROM_ARTIFACTS_STORE) so other built-in backends (e.g.
 // S3, Azure Blob) can be added without changing the gRPC surface.
 //
-// Files are stored under a root directory, one subdirectory per namespace:
-// <root>/<namespace>/<name>. Logs are stored under <root>/<namespace>/logs/
-// and are appended to as they grow, so a log can be read while it is still
-// being written (tail) and replayed in full afterwards.
+// Blobs are sharded flat under a root directory:
+//
+//	<root>/blobs/<two hex chars of the id>/<full id>
+//
+// so a million blobs spread over ~1,300 directories stay enumerable. The id
+// is validated strictly ([0-9a-zA-Z-]{1,64}) — typically a UUID — which
+// makes the on-disk placement safe without any escaping.
 package artifacts

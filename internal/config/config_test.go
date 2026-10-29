@@ -312,6 +312,50 @@ func TestAgentNameDefaultAndOverride(t *testing.T) {
 	}
 }
 
+func TestWorkRootDefaultAndOverride(t *testing.T) {
+	// The default work root is empty (the target uses the OS temp dir).
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkRoot != "" {
+		t.Errorf("WorkRoot = %q, want empty (default)", cfg.WorkRoot)
+	}
+
+	// An environment variable overrides the default.
+	t.Setenv("CDROM_WORK_ROOT", "/scratch/disks")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkRoot != "/scratch/disks" {
+		t.Errorf("WorkRoot = %q, want /scratch/disks (env must override the default)", cfg.WorkRoot)
+	}
+
+	// A config file sets it; the env var (higher precedence) still wins.
+	path := filepath.Join(t.TempDir(), "cfg.yaml")
+	yamlDoc := "work_root: /file/root\n"
+	if err := os.WriteFile(path, []byte(yamlDoc), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.WorkRoot != "/scratch/disks" {
+		t.Errorf("WorkRoot = %q, want /scratch/disks (env must override file)", cfg.WorkRoot)
+	}
+	// Without the env var, the file value applies.
+	t.Setenv("CDROM_WORK_ROOT", "")
+	cfg, err = LoadWithFile(path)
+	if err != nil {
+		t.Fatalf("LoadWithFile: %v", err)
+	}
+	if cfg.WorkRoot != "/file/root" {
+		t.Errorf("WorkRoot = %q, want /file/root (file must override the default)", cfg.WorkRoot)
+	}
+}
+
 func TestLoadWithFileMissing(t *testing.T) {
 	if _, err := LoadWithFile(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
 		t.Fatal("LoadWithFile: expected error for missing file")

@@ -196,6 +196,10 @@ const (
 	ActionSourceCredentialCreate = "source-credential.create"
 	ActionSourceCredentialUpdate = "source-credential.update"
 	ActionSourceCredentialDelete = "source-credential.delete"
+	// Package registry actions (F-21.6): publishing a version into the
+	// registry and promoting an artifact between namespaces.
+	ActionPackagePublish = "package.publish"
+	ActionPackagePromote = "package.promote"
 	ActionLogin                  = "auth.login"
 	ActionRegister               = "auth.register"
 	ActionWorkerRegister         = "worker.register"
@@ -239,6 +243,10 @@ const (
 	// (F-21.3): a named credential that authenticates a fetch of a private
 	// source.
 	TargetSourceCredential = "source-credential"
+	// TargetPackage is the target kind of a package registry entry (F-21.6):
+	// a published version ("<name>-<version>.<ext>") or a promotion between
+	// namespaces.
+	TargetPackage = "package"
 )
 
 // Outcomes (F-15).

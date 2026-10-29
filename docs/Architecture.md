@@ -1226,4 +1226,8 @@ on), `CDROM_METRICS_ADDR` (dedicated `/metrics` + `/healthz` port; see
 
 `CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_WORKER_ENVIRONMENTS`
 (comma-separated environment memberships, F-17), `CDROM_WORKER_TAGS`;
-`CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`.
+`CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`; `CDROM_WORK_ROOT` (the base
+directory a worker/agent creates its per-job staged working area under,
+F-21.6; default: the OS temp dir — the target warns at startup when the
+effective root sits on a tmpfs/ramfs mount, since staged files then consume
+memory).

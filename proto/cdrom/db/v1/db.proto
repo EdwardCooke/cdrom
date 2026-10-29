@@ -604,6 +604,56 @@ service Database {
   // (they keep their group string) or the jobs that target it (they still
   // dispatch to the group's workers); it only removes the group's tags.
   rpc DeleteWorkerGroup(DeleteWorkerGroupRequest) returns (google.protobuf.Empty);
+
+  // Storage objects (F-21.6 storage redesign). A storage_object is the
+  // DATABASE'S record of a file held by the artifacts service: its kind,
+  // namespace, display name, size, content hash, package coordinates (when
+  // it is a registry filing), provenance, and activity counters. The
+  // artifacts service itself is a dumb blob store keyed by the record's UID
+  // — it neither knows nor cares what a file is. Two-phase lifecycle:
+  // Allocate reserves a (hidden) record + UID for an inbound upload; Confirm
+  // settles it with the observed size/hash and makes it visible.
+  //
+  // AllocateStorageObject provisions a record for an upcoming upload. The
+  // record is INVISIBLE to listings and to package resolution until it is
+  // Confirmed (a crashed uploader leaves a stale row that pruning sweeps).
+  // Duplicate (namespace, name) among VISIBLE records is rejected
+  // (AlreadyExists); allocating over a HIDDEN duplicate adopts it (returns
+  // the existing record) — recovery for an interrupted upload.
+  rpc AllocateStorageObject(AllocateStorageObjectRequest) returns (StorageObject);
+  // ConfirmStorageObject settles an allocated record with the OBSERVED size
+  // and content hash of the bytes actually stored (the artifacts service
+  // measures them independently of the writer's attestation) and flips the
+  // record to visible. Unknown uids return NotFound.
+  rpc ConfirmStorageObject(ConfirmStorageObjectRequest) returns (StorageObject);
+  // GetStorageObject returns the record for a (namespace, name). Hidden
+  // (unconfirmed) records are invisible here; a miss returns NotFound.
+  rpc GetStorageObject(GetStorageObjectRequest) returns (StorageObject);
+  // ListStorageObjects returns the visible records of a namespace (kinds
+  // filtered when kind is set; "" = all kinds). Namespaces are arbitrary
+  // strings owned by the caller — the database trusts the API's
+  // authentication to scope them.
+  rpc ListStorageObjects(ListStorageObjectsRequest) returns (ListStorageObjectsResponse);
+  // TouchStorageObject records a RETRIEVAL of a record: increments
+  // download_count and stamps last_downloaded_at (best-effort analytics;
+  // never fails a download).
+  rpc TouchStorageObject(TouchStorageObjectRequest) returns (StorageObject);
+  // SyncLogSize updates a log record's size WITHOUT changing its visibility
+  // (logs are grown by the artifacts service's AppendBlob; the API reconciles
+  // the record periodically so consumers see the growing size).
+  rpc SyncLogSize(SyncLogSizeRequest) returns (StorageObject);
+  // DeleteStorageObject removes a record (the caller deletes the blob
+  // SEPARATELY through the artifacts service; orphaned blobs are harmless).
+  rpc DeleteStorageObject(DeleteStorageObjectRequest) returns (google.protobuf.Empty);
+  // ResolvePackageReference resolves ONE spec.artifacts reference against the
+  // registry records (F-21.6): use_latest picks the newest eligible version
+  // BY UPLOAD TIME (release-channel records only, unless allow_pre_release —
+  // further constrained by pre_release_regex when set); a tagged reference
+  // demands that exact version. Eligibility rests on the IS_PRE_RELEASE FLAG
+  // stamped at publish time — never on parsing the version string. Returns
+  // the winning record (whose name is the registry filing name the run's
+  // snapshot pins).
+  rpc ResolvePackageReference(ResolvePackageReferenceRequest) returns (StorageObject);
 }
 
 // Parameter is a named, typed input a pipeline declares (F-10): a name, an
@@ -749,6 +799,34 @@ message SecretSourceRef {
   string key = 3;
 }
 
+// PackageArtifact is one entry of a pipeline's spec.artifacts list (F-21.6):
+// a named reference to a PACKAGE the pipeline consumes. name is how the
+// pipeline refers to the artifact (in a step's params or env); package_name
+// is the package itself (defaulting to name when empty); tag pins the exact
+// version to use (ignored when use_latest is true); allow_pre_release opts
+// into pre-release versions (versions STAMPED pre-release at publish time —
+// the flag is explicit, never guessed from the version string);
+// pre_release_regex, when set alongside allow_pre_release, restricts which
+// pre-release versions are eligible.
+message PackageArtifact {
+  // name is the artifact's reference name (unique within the pipeline).
+  string name = 1;
+  // package_name is the package's name in the registry; empty means "use
+  // name".
+  string package_name = 2;
+  // tag is the exact version to use; unused when use_latest is true.
+  string tag = 3;
+  // use_latest selects the latest version of the package by date (ignoring
+  // tag).
+  bool use_latest = 4;
+  // allow_pre_release opts into pre-release versions (otherwise only
+  // release tags are eligible).
+  bool allow_pre_release = 5;
+  // pre_release_regex, when non-empty (and allow_pre_release is set),
+  // restricts eligibility to pre-release tags matching this regex.
+  string pre_release_regex = 6;
+}
+
 message Pipeline {
   int64 id = 1;
   string name = 2;
@@ -847,6 +925,13 @@ message Pipeline {
   // not halt polling. Present and true means the file's cadence is honored
   // (given the global gate allows it).
   bool periodic_refresh_overrides_allowed = 20;
+  // artifacts are the pipeline's named package references (F-21.6,
+  // spec.artifacts): the packages the pipeline consumes, with their version
+  // resolution settings. When a run is created the database service resolves
+  // each reference against the package registry (the artifacts store's
+  // "packages" namespace) and records the resolution on the run (a per-run
+  // snapshot, like the rest of the spec — F-01/F-11).
+  repeated PackageArtifact artifacts = 21;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -964,6 +1049,11 @@ message CreatePipelineRequest {
   // periodicRefresh override is honored. When absent the flag is left
   // unchanged (defaults to allowed).
   bool periodic_refresh_overrides_allowed = 14;
+  // artifacts are the pipeline's named package references (F-21.6,
+  // spec.artifacts); see Pipeline.artifacts. They are validated (unique,
+  // non-empty names; a compilable pre_release_regex) and persisted alongside
+  // the pipeline.
+  repeated PackageArtifact artifacts = 15;
 }
 
 message GetPipelineRequest {
@@ -1060,6 +1150,16 @@ message UpdatePipelineRequest {
   // (F-21.5.1): the SHA-256 (hex) of source_file — the change detector the
   // next sync compares against. Carried alongside source_file.
   string source_hash = 18;
+  // artifacts, when has_artifacts is true, REPLACES the pipeline's named
+  // package references (F-21.6, spec.artifacts). Removing the references from
+  // the file clears them (an empty list with the flag set).
+  repeated PackageArtifact artifacts = 19;
+  // has_artifacts, when true, directs the update to REPLACE the pipeline's
+  // package references with the request's values (which may be empty —
+  // clearing them). When false (the default) the references are left
+  // unchanged, so a partial update that does not mention them never perturbs
+  // them.
+  bool has_artifacts = 20;
 }
 
 message DeletePipelineRequest {
@@ -1156,6 +1256,14 @@ message PipelineRun {
   // revision, produced this run?" even after the source is repointed or
   // detached.
   string source_file_hash = 18;
+  // artifacts is the run's RESOLVED package snapshot (F-21.6): a
+  // spec.artifacts reference name → the STORED file name the reference
+  // resolved to when the run started ("<package>-<version>.<ext>", looked up
+  // in the package registry). Recorded like the rest of the spec (F-01/F-11)
+  // so a run always uses the version resolved when it started — re-resolving
+  // on a later run can pick up a newer version without changing what a past
+  // run did. Empty for a run whose pipeline declares no spec.artifacts.
+  map<string, string> artifacts = 19;
 }
 
 message CreateRunRequest {
@@ -1330,6 +1438,10 @@ message PipelineVersion {
   // declared at this version (F-21.5.1, spec.periodicRefresh.schedule); see
   // Pipeline.periodic_refresh_schedule.
   string periodic_refresh_schedule = 17;
+  // artifacts are the pipeline's named package references at this version
+  // (F-21.6); see Pipeline.artifacts. Captured in the snapshot so a run bound
+  // to this version resolves the SAME references the version declared.
+  repeated PackageArtifact artifacts = 18;
 }
 
 message ListPipelineVersionsRequest {
@@ -1837,6 +1949,14 @@ message Job {
   // creates one variable per key). Empty means the job has no every-key vault
   // imports.
   repeated VaultImport vault_imports = 41;
+  // artifacts is the run's RESOLVED package snapshot (F-21.6) denormalized
+  // onto the job instance at run creation: a spec.artifacts reference name →
+  // the stored file name the reference resolved to when the run started. The
+  // API hands it to the execution target (apipb.Job.artifacts) so the
+  // download_artifact step handler can resolve a reference to the version the
+  // run picked. Empty for a job not part of a run (or a run whose pipeline
+  // declares no spec.artifacts).
+  map<string, string> artifacts = 42;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -3868,4 +3988,160 @@ message SetPipelineSourceStateRequest {
   // last_error is the last sync's error (set on a sync failure; empty clears
   // it on a success).
   string last_error = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Storage objects (F-21.6 storage redesign)
+// ---------------------------------------------------------------------------
+
+// StorageObject is the database's record of a file held by the artifacts
+// service (a dumb blob store keyed by uid). What a file IS — kind,
+// namespace, display name, size, content hash, package coordinates,
+// provenance, activity — is HERE; the bytes live in the blob.
+message StorageObject {
+  // uid is the record's globally-unique id (a UUID v4 string). It doubles
+  // as the artifacts service's blob key: the bytes of this file sit at
+  // blob(uid).
+  string uid = 1;
+  // kind is the file's kind: "artifact" (immutable, replaced wholesale) or
+  // "log" (grown by appends).
+  string kind = 2;
+  // namespace is the logical scope the file belongs to (a job id for a
+  // job's artifacts/logs, a run id for a run's files, "packages" for the
+  // registry). Free-form; the database is agnostic about its meaning.
+  string namespace = 3;
+  // name is the file's DISPLAY NAME within the namespace (e.g.
+  // "report.zip", "job.log", "coollang-1.0.0.tar.gz"). Together with
+  // namespace it is UNIQUE among visible records.
+  string name = 4;
+  // size is the file's size in bytes (settled at confirm; tracked for logs).
+  int64 size = 5;
+  // content_sha256 is the SHA-256 (lowercase hex) of the file's content,
+  // MEASURED by the artifacts service at store time (writer attestations
+  // are cross-checked against it, never trusted blindly). Empty for logs
+  // (still-growing; hashing them on every append taxes the tail path).
+  string content_sha256 = 6;
+  // is_package marks a registry filing (namespace "packages"): the
+  // package-coordinate fields below are populated for it.
+  bool is_package = 7;
+  // package_name is the package's name (registry filings only).
+  string package_name = 8;
+  // version is the package version (registry filings only).
+  string version = 9;
+  // is_pre_release is the CHANNEL stamp set AT PUBLISH TIME (explicit, from
+  // the publisher's declaration) — never derived from the version string.
+  // Resolution excludes flagged records from the release channel unless
+  // opted in.
+  bool is_pre_release = 10;
+  // uploaded_by is the actor that stored the file (a user id, an api-key
+  // owner, a service account, or "job:<id>" for machine publications).
+  string uploaded_by = 11;
+  // created_at is when the record became visible (confirm time).
+  google.protobuf.Timestamp created_at = 12;
+  // last_downloaded_at is the most recent retrieval (analytics; touched
+  // best-effort).
+  google.protobuf.Timestamp last_downloaded_at = 13;
+  // download_count is the cumulative retrievals (analytics; touched
+  // best-effort).
+  int64 download_count = 14;
+  // extras is a forward-compatible attribute bag (opaque JSON) for metadata
+  // that deserves no column yet.
+  string extras = 15;
+  // confirmed distinguishes SETTLED records (visible to listings and
+  // resolution) from PROVISIONAL allocations awaiting their upload's
+  // confirm. True on every record returned by Get/List/Resolve.
+  bool confirmed = 16;
+}
+
+// AllocateStorageObjectRequest provisions a record for an upcoming upload.
+message AllocateStorageObjectRequest {
+  // kind is the file's kind: "artifact" or "log".
+  string kind = 1;
+  // namespace is the scope the file belongs to.
+  string namespace = 2;
+  // name is the file's display name within the namespace.
+  string name = 3;
+  // uploaded_by is the acting identity (see StorageObject.uploaded_by).
+  string uploaded_by = 4;
+  // Package coordinates, populated when is_package is set:
+  bool is_package = 5;
+  string package_name = 6;
+  string version = 7;
+  // is_pre_release is the publisher's EXPLICIT channel choice (defaults to
+  // false when unspecified).
+  bool is_pre_release = 8;
+  // content_sha256 is the WRITER's attested hash of the bytes it is about
+  // to store (informational at allocation; the confirm step settles the
+  // MEASURED value and mismatches are surfaced to the caller).
+  string content_sha256 = 9;
+}
+
+// ConfirmStorageObjectRequest settles an allocated record.
+message ConfirmStorageObjectRequest {
+  // uid is the record to settle.
+  string uid = 1;
+  // size is the OBSERVED size of the stored bytes (from the artifacts
+  // service's measurement, not the writer).
+  int64 size = 2;
+  // content_sha256 is the OBSERVED hash of the stored bytes (empty for
+  // logs, which are never hashed).
+  string content_sha256 = 3;
+}
+
+// GetStorageObjectRequest fetches a record by (namespace, name).
+message GetStorageObjectRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+// ListStorageObjectsRequest lists the visible records of a namespace.
+message ListStorageObjectsRequest {
+  // namespace of "" lists records of ALL namespaces.
+  string namespace = 1;
+  // kind, when set ("artifact" or "log"), restricts the listing; "" = all.
+  string kind = 2;
+}
+
+// ListStorageObjectsResponse is the result of a ListStorageObjects call.
+message ListStorageObjectsResponse {
+  // objects are the visible records (ordered by created_at desc, name asc).
+  repeated StorageObject objects = 1;
+}
+
+// TouchStorageObjectRequest records a retrieval of a file.
+message TouchStorageObjectRequest {
+  // uid is the record to touch.
+  string uid = 1;
+}
+
+// SyncLogSizeRequest updates a log record's size (visibility-preserving).
+message SyncLogSizeRequest {
+  // uid is the record to update.
+  string uid = 1;
+  // size is the log's CURRENT total size (from the artifacts service).
+  int64 size = 2;
+}
+
+// DeleteStorageObjectRequest removes a record.
+message DeleteStorageObjectRequest {
+  // uid is the record to remove.
+  string uid = 1;
+}
+
+// ResolvePackageReferenceRequest is ONE spec.artifacts reference to resolve
+// against the registry (field meanings mirror PackageArtifact's).
+message ResolvePackageReferenceRequest {
+  // package_name is the package to resolve (REQUIRED here — the caller
+  // folds the declaration's name-defaulting in before resolving).
+  string package_name = 1;
+  // tag is the exact version demanded (unused when use_latest is set).
+  string tag = 2;
+  // use_latest selects the newest eligible version by upload time.
+  bool use_latest = 3;
+  // allow_pre_release opts into pre-release records (those flagged at
+  // publish time).
+  bool allow_pre_release = 4;
+  // pre_release_regex, when set alongside allow_pre_release, restricts
+  // eligibility to pre-release records whose VERSION STRING matches it.
+  string pre_release_regex = 5;
 }

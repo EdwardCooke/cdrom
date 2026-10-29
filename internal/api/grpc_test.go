@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/services/artifacts"
+	databaseservice "cdrom/internal/services/database"
 )
 
 // startArtifactsServer boots a real Artifacts gRPC server on an in-process
@@ -44,13 +46,55 @@ func startArtifactsServer(t *testing.T) artifactspb.ArtifactsClient {
 	return artifactspb.NewArtifactsClient(conn)
 }
 
-// startAPIServer boots a real API gRPC server on an in-process bufconn
-// listener and returns a connected client.
-func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient, hub *EventHub) apipb.APIClient {
+// startDBServer boots a real Database gRPC service (SQLite in a temp dir)
+// on an in-process bufconn listener and returns a connected client. Since
+// the F-21.6 storage redesign the API's artifact/log mediation is record-
+// based, so tests exercising those paths need a REAL database service.
+func startDBServer(t *testing.T) dbpb.DatabaseClient {
 	t.Helper()
+	dir := t.TempDir()
+	dbh, err := databaseservice.Open(databaseservice.Config{
+		Backend:    databaseservice.BackendSQLite,
+		SQLitePath: dir + "/grcp_test.db",
+	}, slog.Default())
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = databaseservice.Close(dbh) })
+	if err := databaseservice.Migrate(dbh, slog.Default()); err != nil {
+		t.Fatalf("database.Migrate: %v", err)
+	}
+	dbSvc := databaseservice.NewServer(dbh)
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	apipb.RegisterAPIServer(srv, NewGRPCServer(nil, artifacts, hub, nil, nil, nil))
+	dbpb.RegisterDatabaseServer(srv, dbSvc)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.DialContext(context.Background(), "bufconn",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("dial db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return dbpb.NewDatabaseClient(conn)
+}
+
+// startAPIServer boots a real API gRPC server on an in-process bufconn
+// listener and returns a connected client. The optional trailing db client
+// supplies the record ledger (required for the translated artifact/log
+// paths; omitted for tests that exercise only the worker-control surface).
+func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient, hub *EventHub, db ...dbpb.DatabaseClient) apipb.APIClient {
+	t.Helper()
+	var dbc dbpb.DatabaseClient
+	if len(db) > 0 {
+		dbc = db[0]
+	}
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	apipb.RegisterAPIServer(srv, NewGRPCServer(dbc, artifacts, hub, nil, nil, nil))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -65,12 +109,14 @@ func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient, hub *Ev
 	return apipb.NewAPIClient(conn)
 }
 
-// readLog streams a job's log from the artifacts service and returns its text.
-func readLog(t *testing.T, client artifactspb.ArtifactsClient, jobID, name string) string {
+// readLog streams a job's log THROUGH THE API (the record-mediated path:
+// the API translates (job, name) to the log's blob uid and streams the
+// blob) and returns its text, failing the test on error.
+func readLog(t *testing.T, client apipb.APIClient, jobID, name string) string {
 	t.Helper()
-	stream, err := client.DownloadLog(context.Background(), &artifactspb.DownloadLogRequest{Namespace: jobID, Name: name})
+	stream, err := client.DownloadArtifact(context.Background(), &apipb.LogFileRef{Namespace: jobID, Name: name})
 	if err != nil {
-		t.Fatalf("DownloadLog %s: %v", name, err)
+		t.Fatalf("DownloadArtifact %s: %v", name, err)
 	}
 	var out []byte
 	for {
@@ -92,11 +138,12 @@ func readLog(t *testing.T, client artifactspb.ArtifactsClient, jobID, name strin
 // event hub as a job_log event.
 func TestStreamJobLogsPersistsAndPublishes(t *testing.T) {
 	artifacts := startArtifactsServer(t)
+	db := startDBServer(t)
 	hub := NewEventHub()
 	events, cancel := hub.Subscribe()
 	defer cancel()
 
-	client := startAPIServer(t, artifacts, hub)
+	client := startAPIServer(t, artifacts, hub, db)
 	ctx := context.Background()
 
 	stream, err := client.StreamJobLogs(ctx)
@@ -133,13 +180,13 @@ func TestStreamJobLogsPersistsAndPublishes(t *testing.T) {
 	}
 
 	// The API persisted one file per step plus the combined job.log.
-	if got := readLog(t, artifacts, "42", "step0.log"); got != "hello world" {
+	if got := readLog(t, client, "42", "step0.log"); got != "hello world" {
 		t.Errorf("step0.log = %q, want %q", got, "hello world")
 	}
-	if got := readLog(t, artifacts, "42", "step1.log"); got != "boom" {
+	if got := readLog(t, client, "42", "step1.log"); got != "boom" {
 		t.Errorf("step1.log = %q, want %q", got, "boom")
 	}
-	if got := readLog(t, artifacts, "42", jobLogName); got != "hello worldboom" {
+	if got := readLog(t, client, "42", jobLogName); got != "hello worldboom" {
 		t.Errorf("job.log = %q, want %q", got, "hello worldboom")
 	}
 
@@ -330,9 +377,9 @@ func TestCancelJobValidation(t *testing.T) {
 	}
 }
 
-// fakeArtifacts wraps a real artifacts client and can make AppendLog fail (to
-// simulate an artifacts-service outage). All other methods delegate to the
-// embedded real client.
+// fakeArtifacts wraps a real artifacts client and can make AppendBlob fail
+// (to simulate an artifacts-service outage). All other methods delegate to
+// the embedded real client.
 type fakeArtifacts struct {
 	artifactspb.ArtifactsClient
 	mu         sync.Mutex
@@ -345,14 +392,14 @@ func (f *fakeArtifacts) setFailAppend(fail bool) {
 	f.failAppend = fail
 }
 
-func (f *fakeArtifacts) AppendLog(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse], error) {
+func (f *fakeArtifacts) AppendBlob(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[artifactspb.BlobChunk, artifactspb.BlobStat], error) {
 	f.mu.Lock()
 	fail := f.failAppend
 	f.mu.Unlock()
 	if fail {
 		return nil, status.Error(codes.Unavailable, "artifacts service unavailable")
 	}
-	return f.ArtifactsClient.AppendLog(ctx, opts...)
+	return f.ArtifactsClient.AppendBlob(ctx, opts...)
 }
 
 // TestHandleLogChunkRidesOutArtifactsOutage verifies that a transient
@@ -367,8 +414,9 @@ func TestHandleLogChunkRidesOutArtifactsOutage(t *testing.T) {
 	t.Cleanup(func() { appendLogAttempts, appendLogRetryDelay = origAttempts, origDelay })
 
 	real := startArtifactsServer(t)
+	db := startDBServer(t)
 	fake := &fakeArtifacts{ArtifactsClient: real}
-	srv := NewGRPCServer(nil, fake, nil, nil, nil, nil)
+	srv := NewGRPCServer(db, fake, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	var received int64
@@ -391,7 +439,8 @@ func TestHandleLogChunkRidesOutArtifactsOutage(t *testing.T) {
 	}
 
 	// The dropped chunk is absent; the pre- and post-outage chunks are present.
-	if got := readLog(t, real, "50", "step0.log"); got != "ok\nback\n" {
+	reader := startAPIServer(t, real, nil, db)
+	if got := readLog(t, reader, "50", "step0.log"); got != "ok\nback\n" {
 		t.Errorf("step0.log = %q, want %q", got, "ok\nback\n")
 	}
 	// Every chunk is counted as received, even the dropped one.

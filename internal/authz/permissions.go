@@ -17,8 +17,8 @@ package authz
 
 // Permission names (F-14). Every operation in the system is a permission; the
 // catalog is namespaced (<area>.can-<action>) and extensible — every feature
-// registers its permissions here (F-26 adds service-accounts.*, F-19 adds
-// artifacts.can-promote, …).
+// registers its permissions here (F-26 adds service-accounts.*, F-21.6 adds
+// packages.can-view/can-publish/can-promote, …).
 const (
 	PermPipelinesView    = "pipelines.can-view"
 	PermPipelinesCreate  = "pipelines.can-create"
@@ -78,6 +78,15 @@ const (
 	// can-manage creates/updates/deletes them.
 	PermSourceCredentialsView   = "source-credentials.can-view"
 	PermSourceCredentialsManage = "source-credentials.can-manage"
+	// Package registry permissions (F-21.6). The package registry (the
+	// artifacts store's reserved "packages" namespace) is platform-wide:
+	// can-view browses/downloads published versions, can-publish uploads a
+	// version (POST /api/packages), can-promote moves an artifact between
+	// namespaces (POST /api/artifacts/promote — the former F-19 operation).
+	// All are denied by default (grant them to a role to enable).
+	PermPackagesView    = "packages.can-view"
+	PermPackagesPublish = "packages.can-publish"
+	PermPackagesPromote = "packages.can-promote"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -121,6 +130,9 @@ var AllPermissions = []string{
 	PermSSHKnownHostsManage,
 	PermSourceCredentialsView,
 	PermSourceCredentialsManage,
+	PermPackagesView,
+	PermPackagesPublish,
+	PermPackagesPromote,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

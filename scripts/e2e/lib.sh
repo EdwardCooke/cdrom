@@ -112,6 +112,10 @@ e2e_boot_stack() {
     if curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1; then
       break
     fi
+    # HEARTBEAT (anti-starvation): a silent readiness wait is a reap risk.
+    if [ $((i % 5)) -eq 0 ]; then
+      echo "   ...waiting for the IdP (iteration $i)"
+    fi
     sleep 0.2
   done
   curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
@@ -159,6 +163,10 @@ e2e_start() {
     if grep -qE "$pattern" "$logfile" 2>/dev/null; then
       return 0
     fi
+    # HEARTBEAT (anti-starvation): a silent readiness wait is a reap risk.
+    if [ $((i % 5)) -eq 0 ]; then
+      echo "   ...waiting for $name (iteration $i)"
+    fi
     sleep 0.2
   done
   echo ">> $name did not become ready in time (pattern: $pattern):" >&2
@@ -187,6 +195,10 @@ e2e_start_sinks() {
       exec 3>&- 2>/dev/null || true
       break
     fi
+    # HEARTBEAT (anti-starvation): a silent readiness wait is a reap risk.
+    if [ $((i % 10)) -eq 0 ]; then
+      echo "   ...waiting for the notification sinks (iteration $i)"
+    fi
     sleep 0.1
   done
 }
@@ -211,15 +223,26 @@ e2e_wait_for() {
 
 # e2e_wait_for_job <jobid> <pattern> <what>
 # Polls the job's combined log (GET /api/jobs/{id}/logs/job.log) until it
-# contains <pattern>. The pattern is matched as a fixed string (grep -F), not
-# a regex, for the same reason as e2e_wait_for. Each request is bounded
-# (--max-time) so a transiently slow API response is retried rather than
-# blocking the test forever.
+# contains <pattern>. The pattern is matched as a FIXED STRING (substring
+# test, not a regex). Each request is bounded (--max-time) so a transiently
+# slow API response is retried rather than blocking the test forever.
+#
+# IMPORTANT: the response is CAPTURED THEN MATCHED — never piped into
+# `grep -q`: under the library's `set -o pipefail`, a `grep -q` that finds
+# its match early exits and SIGPIPEs a still-writing curl, flipping the
+# pipeline's status and killing the script via `set -e` at the very moment
+# the awaited output appears.
 e2e_wait_for_job() {
-  local jobid="$1" pattern="$2" what="$3" i
+  local jobid="$1" pattern="$2" what="$3" i body
   for i in $(seq 1 100); do
-    if curl -s --max-time 5 http://127.0.0.1:8080/api/jobs/${jobid}/logs/job.log | grep -qF -- "$pattern" 2>/dev/null; then
+    body=$(curl -s --max-time 5 "http://127.0.0.1:8080/api/jobs/${jobid}/logs/job.log" || true)
+    if [[ "$body" == *"$pattern"* ]]; then
       return 0
+    fi
+    # HEARTBEAT (anti-starvation): the opening stretch of a wait must never
+    # be silent (tick 1 + every fifth poll).
+    if [ "$i" -eq 1 ] || [ $((i % 5)) -eq 0 ]; then
+      echo "   ...waiting for job $jobid: $what (iteration $i)"
     fi
     sleep 0.2
   done
@@ -244,6 +267,11 @@ e2e_wait_for_status() {
       printf '%s' "$body"
       return 0
     fi
+    # HEARTBEAT (anti-starvation): the opening stretch of a wait must never
+    # be silent (tick 1 + every fifth poll).
+    if [ "$i" -eq 1 ] || [ $((i % 5)) -eq 0 ]; then
+      echo "   ...waiting for job $jobid: $what (iteration $i)" >&2
+    fi
     sleep 0.2
   done
   echo ">> timed out waiting for: $what (status ${status})" >&2
@@ -260,12 +288,34 @@ e2e_wait_for_status() {
 e2e_http_request() {
   local method="$1" url="$2" body="${3:-}"
   local out
+  # Transport errors are SWALLOWED (|| true): under set -e a transient curl
+  # failure would kill the test script mid-way; the CALLER judges the
+  # response (HTTP_CODE will be empty/non-2xx and its check fails cleanly).
   if [ -n "$body" ]; then
     out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url" \
-      -H 'Content-Type: application/json' -d "$body")
+      -H 'Content-Type: application/json' -d "$body" || true)
   else
-    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url")
+    out=$(curl -s -w $'\n%{http_code}' -X "$method" "$url" || true)
   fi
+  HTTP_CODE=$(printf '%s' "$out" | tail -n 1)
+  HTTP_BODY=$(printf '%s' "$out" | sed '$d')
+}
+
+# e2e_binary_post <url> <header-json> <payload-file>
+# Posts a BINARY-SAFE body: the header JSON line + newline + the file's raw
+# bytes, assembled in a temp file and sent with `curl --data-binary @file`.
+# Bash VARIABLES LOSE NUL bytes (command substitution truncates them — a
+# gzip/zip payload piped through a variable is corrupted), so binary payloads
+# must never traverse a shell variable. Sets HTTP_CODE and HTTP_BODY (the
+# response TEXT; binary responses are not expected here).
+e2e_binary_post() {
+  local url="$1" header_json="$2" payload_file="$3"
+  local body_file out
+  body_file=$(mktemp)
+  { printf '%s\n' "$header_json"; cat "$payload_file"; } > "$body_file"
+  out=$(curl -s -w $'\n%{http_code}' -X POST "$url" \
+    -H 'Content-Type: application/json' --data-binary "@$body_file" || true)
+  rm -f "$body_file"
   HTTP_CODE=$(printf '%s' "$out" | tail -n 1)
   HTTP_BODY=$(printf '%s' "$out" | sed '$d')
 }
@@ -296,13 +346,17 @@ e2e_authed_request() {
 # (callers capture the id with $(e2e_submit_job ...)).
 e2e_submit_job() {
   local body="$1" response
+  # Swallow transport errors (|| true): a transient blip must not kill the
+  # script under set -e; the id-parse check below fails cleanly instead.
   response=$(curl -s -X POST http://127.0.0.1:8080/api/jobs \
     -H 'Content-Type: application/json' \
-    -d "$body")
+    -d "$body" || true)
   echo "   $response" >&2
   local id
-  id=$(printf '%s' "$response" | jq -r '.id')
-  [ -n "$id" ] || { echo ">> could not parse job id from response" >&2; exit 1; }
+  # Rescue the jq (|| true): an empty/transient response must fail the CHECK
+  # below, not kill the script via set -e.
+  id=$(printf '%s' "$response" | jq -r '.id' 2>/dev/null || true)
+  [ -n "$id" ] && [ "$id" != "null" ] || { echo ">> could not parse job id from response" >&2; exit 1; }
   printf '%s' "$id"
 }
 

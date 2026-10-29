@@ -1,5 +1,19 @@
-// This file implements the Artifacts gRPC service: it handles the
-// streaming/chunking protocol and delegates the actual I/O to a Store.
+// server.go — the Artifacts gRPC service (F-21.6 storage redesign): a dumb
+// blob store keyed by opaque ids. Streaming/chunking protocol lives HERE;
+// the actual I/O is delegated to a Store (blobfs.go by default).
+//
+// Frame conventions:
+//
+//   - PutBlob / AppendBlob are CLIENT streams. The FIRST chunk must carry
+//     the blob's id (later chunks carry data only; an id-less first chunk is
+//     InvalidArgument). Subsequent oversized chunks are rejected.
+//   - GetBlob is a SERVER stream. The FIRST chunk carries the blob's total
+//     size (so a ranged reader learns the ceiling without a separate stat);
+//     later chunks carry data.
+//
+// Existence predicates (matching the Store): putting/copying to an id that
+// already holds a NON-EMPTY blob fails with AlreadyExists; getting/statting
+// a missing id fails with NotFound; deleting a missing id is a no-op.
 package artifacts
 
 import (
@@ -61,9 +75,9 @@ func (s *Server) recordOp(op string, err error, bytes int64) {
 }
 
 // NewFilesystemServer creates an Artifacts gRPC service backed by a local
-// filesystem store rooted at root.
+// filesystem blob store rooted at root.
 func NewFilesystemServer(root string) (*Server, error) {
-	store, err := NewFilesystemStore(root)
+	store, err := NewBlobFSStore(root)
 	if err != nil {
 		return nil, err
 	}
@@ -71,132 +85,75 @@ func NewFilesystemServer(root string) (*Server, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Artifacts
+// Put / Append (client streams)
 // ---------------------------------------------------------------------------
 
-// UploadArtifact consumes a client stream of chunks. The first chunk must
-// carry metadata (namespace and name); the rest carry data. The data is
-// written to the store as it arrives (streamed, not buffered in memory).
-func (s *Server) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) (err error) {
-	start := time.Now()
-	defer func() {
-		if s.metrics != nil {
-			s.metrics.ObserveDuration("upload", time.Since(start))
-		}
-	}()
-	firstChunk, recvErr := stream.Recv()
-	if recvErr != nil {
-		recvErr = grpcErr(recvErr)
-		s.recordOp("upload", recvErr, 0)
-		return recvErr
-	}
-	metadata := firstChunk.GetMetadata()
-	if metadata == nil || metadata.GetNamespace() == "" || metadata.GetName() == "" {
-		invalidErr := status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
-		s.recordOp("upload", invalidErr, 0)
-		return invalidErr
-	}
-	reader := &streamReader{stream: stream, first: firstChunk}
-	artifact, uploadErr := s.store.UploadArtifact(stream.Context(), metadata.GetNamespace(), metadata.GetName(), reader)
-	if uploadErr != nil {
-		s.recordOp("upload", uploadErr, 0)
-		return uploadErr
-	}
-	s.recordOp("upload", nil, artifact.GetSize())
-	return stream.SendAndClose(&artifactspb.UploadArtifactResponse{Artifact: artifact})
-}
+// framed is the slice of the chunk API firstFrame needs (generics do not
+// expose accessor methods implicitly, so the constraint spells them out).
+type framed interface{ GetId() string }
 
-// DownloadArtifact streams an artifact back: the first chunk carries
-// metadata, subsequent chunks carry data.
-func (s *Server) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) (err error) {
-	start := time.Now()
-	defer func() {
-		if s.metrics != nil {
-			s.metrics.ObserveDuration("download", time.Since(start))
-		}
-	}()
-	namespace, name := req.GetNamespace(), req.GetName()
-	if namespace == "" || name == "" {
-		invalidErr := status.Error(codes.InvalidArgument, "namespace and name are required")
-		s.recordOp("download", invalidErr, 0)
-		return invalidErr
-	}
-	artifact, reader, dlErr := s.store.DownloadArtifact(stream.Context(), namespace, name)
-	if dlErr != nil {
-		s.recordOp("download", dlErr, 0)
-		return dlErr
-	}
-	defer reader.Close()
-	if err := stream.Send(&artifactspb.ArtifactChunk{Metadata: artifact}); err != nil {
-		s.recordOp("download", grpcErr(err), 0)
-		return grpcErr(err)
-	}
-	s.recordOp("download", nil, artifact.GetSize())
-	return streamFromReader(stream, reader)
-}
-
-func (s *Server) GetArtifact(ctx context.Context, req *artifactspb.GetArtifactRequest) (*artifactspb.Artifact, error) {
-	if req.GetNamespace() == "" || req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "namespace and name are required")
-	}
-	return s.store.GetArtifact(ctx, req.GetNamespace(), req.GetName())
-}
-
-func (s *Server) ListArtifacts(ctx context.Context, req *artifactspb.ListArtifactsRequest) (*artifactspb.ListArtifactsResponse, error) {
-	artifacts, err := s.store.ListArtifacts(ctx, req.GetNamespace())
-	s.recordOp("list", err, 0)
+// firstFrame pulls the first chunk off a client stream and validates its id.
+func firstFrame[T framed](recvd func() (T, error)) (T, error) {
+	frame, err := recvd()
 	if err != nil {
-		return nil, err
+		return frame, grpcErr(err)
 	}
-	return &artifactspb.ListArtifactsResponse{Artifacts: artifacts}, nil
+	if frame.GetId() == "" {
+		return frame, status.Error(codes.InvalidArgument, "first chunk must carry the blob id")
+	}
+	if err := ValidateBlobID(frame.GetId()); err != nil {
+		return frame, status.Error(codes.InvalidArgument, err.Error())
+	}
+	return frame, nil
 }
 
-func (s *Server) DeleteArtifact(ctx context.Context, req *artifactspb.DeleteArtifactRequest) (*emptypb.Empty, error) {
-	if req.GetNamespace() == "" || req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "namespace and name are required")
-	}
-	if err := s.store.DeleteArtifact(ctx, req.GetNamespace(), req.GetName()); err != nil {
-		return nil, err
-	}
-	return &emptypb.Empty{}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Logs
-// ---------------------------------------------------------------------------
-
-// AppendLog consumes a client stream of chunks and appends them to a log.
-// The first chunk must carry metadata (namespace and name); the rest carry
-// data. The server returns the updated log's metadata once the stream ends.
-func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) (err error) {
+// PutBlob consumes a client stream of chunks and writes them to the blob at
+// the id carried in the first chunk (streamed, not buffered in memory).
+func (s *Server) PutBlob(stream grpc.ClientStreamingServer[artifactspb.BlobChunk, artifactspb.BlobStat]) (err error) {
 	start := time.Now()
 	defer func() {
 		if s.metrics != nil {
-			s.metrics.ObserveDuration("append_log", time.Since(start))
+			s.metrics.ObserveDuration("put_blob", time.Since(start))
 		}
 	}()
-	firstChunk, recvErr := stream.Recv()
-	if recvErr != nil {
-		recvErr = grpcErr(recvErr)
-		s.recordOp("append_log", recvErr, 0)
-		return recvErr
+	recvd := stream.Recv
+	first, err := firstFrame(recvd)
+	if err != nil {
+		s.recordOp("put_blob", err, 0)
+		return err
 	}
-	metadata := firstChunk.GetMetadata()
-	if metadata == nil || metadata.GetNamespace() == "" || metadata.GetName() == "" {
-		invalidErr := status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
-		s.recordOp("append_log", invalidErr, 0)
-		return invalidErr
+	id := first.GetId()
+	putter := &putStreamer{stream: stream, first: first}
+	stored, putErr := s.store.Put(stream.Context(), id, putter)
+	if putErr != nil {
+		s.recordOp("put_blob", putErr, 0)
+		return putErr
 	}
-	var artifact *artifactspb.Artifact
-	var appended int64
-	if len(firstChunk.GetData()) > 0 {
-		appended += int64(len(firstChunk.GetData()))
-		var appendErr error
-		artifact, appendErr = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), firstChunk.GetData())
-		if appendErr != nil {
-			s.recordOp("append_log", appendErr, 0)
-			return appendErr
+	s.recordOp("put_blob", nil, stored)
+	return stream.SendAndClose(&artifactspb.BlobStat{Size: stored})
+}
+
+// AppendBlob consumes a client stream of chunks and appends them to the blob
+// at the id carried in the first chunk (creating it when absent). Returns
+// the blob's total size after the append.
+func (s *Server) AppendBlob(stream grpc.ClientStreamingServer[artifactspb.BlobChunk, artifactspb.BlobStat]) (err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("append_blob", time.Since(start))
 		}
+	}()
+	recvd := stream.Recv
+	first, err := firstFrame(recvd)
+	if err != nil {
+		s.recordOp("append_blob", err, 0)
+		return err
+	}
+	id := first.GetId()
+	total, err := s.store.Append(stream.Context(), id, first.GetData())
+	if err != nil {
+		s.recordOp("append_blob", err, 0)
+		return err
 	}
 	for {
 		chunk, recvErr := stream.Recv()
@@ -205,107 +162,46 @@ func (s *Server) AppendLog(stream grpc.ClientStreamingServer[artifactspb.Artifac
 		}
 		if recvErr != nil {
 			recvErr = grpcErr(recvErr)
-			s.recordOp("append_log", recvErr, 0)
+			s.recordOp("append_blob", recvErr, 0)
 			return recvErr
 		}
 		if size := len(chunk.GetData()); size > maxChunkSize {
 			tooLargeErr := status.Errorf(codes.InvalidArgument, "chunk of %d bytes exceeds limit of %d", size, maxChunkSize)
-			s.recordOp("append_log", tooLargeErr, 0)
+			s.recordOp("append_blob", tooLargeErr, 0)
 			return tooLargeErr
 		}
 		if len(chunk.GetData()) == 0 {
 			continue
 		}
-		appended += int64(len(chunk.GetData()))
-		var appendErr error
-		artifact, appendErr = s.store.AppendLog(stream.Context(), metadata.GetNamespace(), metadata.GetName(), chunk.GetData())
-		if appendErr != nil {
-			s.recordOp("append_log", appendErr, 0)
-			return appendErr
+		total, err = s.store.Append(stream.Context(), id, chunk.GetData())
+		if err != nil {
+			s.recordOp("append_blob", err, 0)
+			return err
 		}
 	}
-	if artifact == nil {
-		// No data was sent; report the (possibly newly created) log's state.
-		var getErr error
-		artifact, getErr = s.store.GetLog(stream.Context(), metadata.GetNamespace(), metadata.GetName())
-		if getErr != nil {
-			s.recordOp("append_log", getErr, 0)
-			return getErr
-		}
-	}
-	s.recordOp("append_log", nil, appended)
-	return stream.SendAndClose(&artifactspb.UploadArtifactResponse{Artifact: artifact})
+	s.recordOp("append_blob", nil, total)
+	return stream.SendAndClose(&artifactspb.BlobStat{Size: total})
 }
 
-// DownloadLog streams a log back: the first chunk carries metadata,
-// subsequent chunks carry data. Reading a log that is still being written
-// returns the output captured so far. When the request's offset is greater
-// than zero the stream begins at that byte offset (a range read of the log's
-// tail); this is how a consumer that has already read up to a size fetches
-// only the new bytes (F-23 cross-pod near-live logs).
-func (s *Server) DownloadLog(req *artifactspb.DownloadLogRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) (err error) {
-	start := time.Now()
-	defer func() {
-		if s.metrics != nil {
-			s.metrics.ObserveDuration("download", time.Since(start))
-		}
-	}()
-	namespace, name := req.GetNamespace(), req.GetName()
-	if namespace == "" || name == "" {
-		invalidErr := status.Error(codes.InvalidArgument, "namespace and name are required")
-		s.recordOp("download", invalidErr, 0)
-		return invalidErr
-	}
-	artifact, reader, dlErr := s.store.DownloadLog(stream.Context(), namespace, name, req.GetOffset())
-	if dlErr != nil {
-		s.recordOp("download", dlErr, 0)
-		return dlErr
-	}
-	defer reader.Close()
-	if err := stream.Send(&artifactspb.ArtifactChunk{Metadata: artifact}); err != nil {
-		s.recordOp("download", grpcErr(err), 0)
-		return grpcErr(err)
-	}
-	s.recordOp("download", nil, artifact.GetSize())
-	return streamFromReader(stream, reader)
+// putStreamer adapts a client-streaming gRPC stream to an io.Reader for the
+// store's Put. The first chunk (already received and id-validated) is served
+// before subsequent Recv calls; an id-less LATER chunk is a protocol
+// violation (rejected), as is an oversize chunk.
+type putStreamer struct {
+	stream      grpc.ClientStreamingServer[artifactspb.BlobChunk, artifactspb.BlobStat]
+	first       *artifactspb.BlobChunk
+	firstServed bool
+	buf         []byte
 }
 
-func (s *Server) GetLog(ctx context.Context, req *artifactspb.GetLogRequest) (*artifactspb.Artifact, error) {
-	if req.GetNamespace() == "" || req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "namespace and name are required")
-	}
-	return s.store.GetLog(ctx, req.GetNamespace(), req.GetName())
-}
-
-func (s *Server) ListLogs(ctx context.Context, req *artifactspb.ListLogsRequest) (*artifactspb.ListLogsResponse, error) {
-	logs, err := s.store.ListLogs(ctx, req.GetNamespace())
-	if err != nil {
-		return nil, err
-	}
-	return &artifactspb.ListLogsResponse{Logs: logs}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// streamReader adapts a client-streaming gRPC stream to an io.Reader so the
-// store can consume the upload as it arrives (streamed, not buffered). The
-// first chunk (already received) is served before subsequent Recv calls.
-type streamReader struct {
-	stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]
-	first  *artifactspb.ArtifactChunk
-	buf    []byte
-}
-
-func (r *streamReader) Read(p []byte) (int, error) {
-	if len(r.buf) == 0 {
+func (r *putStreamer) Read(p []byte) (int, error) {
+	for len(r.buf) == 0 {
 		chunk, err := r.next()
 		if err != nil {
-			return 0, err
+			return 0, err // io.EOF at the end of the stream
 		}
 		if len(chunk) == 0 {
-			return 0, io.EOF
+			continue // an empty data chunk advances to the next one
 		}
 		r.buf = chunk
 	}
@@ -316,11 +212,10 @@ func (r *streamReader) Read(p []byte) (int, error) {
 
 // next returns the next chunk's data, or (nil, io.EOF) at the end of the
 // stream.
-func (r *streamReader) next() ([]byte, error) {
-	if r.first != nil {
-		chunk := r.first
-		r.first = nil
-		return chunk.GetData(), nil
+func (r *putStreamer) next() ([]byte, error) {
+	if !r.firstServed {
+		r.firstServed = true
+		return r.first.GetData(), nil
 	}
 	chunk, err := r.stream.Recv()
 	if err == io.EOF {
@@ -329,17 +224,100 @@ func (r *streamReader) next() ([]byte, error) {
 	if err != nil {
 		return nil, grpcErr(err)
 	}
+	if chunk.GetId() != "" {
+		return nil, status.Error(codes.InvalidArgument, "blob id may only be carried on the first chunk")
+	}
+	if size := len(chunk.GetData()); size > maxChunkSize {
+		return nil, status.Errorf(codes.InvalidArgument, "chunk of %d bytes exceeds limit of %d", size, maxChunkSize)
+	}
 	return chunk.GetData(), nil
 }
 
-// streamFromReader reads from reader in bounded chunks and sends each as a
-// data chunk on stream.
-func streamFromReader(stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk], reader io.Reader) error {
+// ---------------------------------------------------------------------------
+// Get / Stat (reads)
+// ---------------------------------------------------------------------------
+
+// GetBlob streams a blob's bytes back: the first chunk carries the blob's
+// total size, subsequent chunks carry data. A non-zero offset begins the
+// stream at that byte (range reads power cross-pod log tailing, F-23).
+func (s *Server) GetBlob(req *artifactspb.BlobRef, stream grpc.ServerStreamingServer[artifactspb.BlobChunk]) (err error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("get_blob", time.Since(start))
+		}
+	}()
+	id := req.GetId()
+	offset := req.GetOffset()
+	if offset < 0 {
+		invalidErr := status.Error(codes.InvalidArgument, "offset must not be negative")
+		s.recordOp("get_blob", invalidErr, 0)
+		return invalidErr
+	}
+	size, reader, dlErr := s.store.Get(stream.Context(), id, offset)
+	if dlErr != nil {
+		s.recordOp("get_blob", dlErr, 0)
+		return dlErr
+	}
+	defer reader.Close()
+	if err := stream.Send(&artifactspb.BlobChunk{Size: size}); err != nil {
+		s.recordOp("get_blob", grpcErr(err), 0)
+		return grpcErr(err)
+	}
+	s.recordOp("get_blob", nil, size)
+	return streamChunks(stream, reader)
+}
+
+// StatBlob returns a blob's size (without transferring its bytes).
+func (s *Server) StatBlob(ctx context.Context, req *artifactspb.BlobRef) (*artifactspb.BlobStat, error) {
+	size, err := s.store.Stat(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return &artifactspb.BlobStat{Size: size}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Copy / Delete
+// ---------------------------------------------------------------------------
+
+// CopyBlob replicates one blob to another id SERVER-SIDE (no bytes pass
+// through the caller). Powers promotion (F-21.6/former F-19).
+func (s *Server) CopyBlob(ctx context.Context, req *artifactspb.CopyBlobRequest) (*artifactspb.BlobStat, error) {
+	start := time.Now()
+	defer func() {
+		if s.metrics != nil {
+			s.metrics.ObserveDuration("copy_blob", time.Since(start))
+		}
+	}()
+	copied, err := s.store.Copy(ctx, req.GetSrc(), req.GetDst())
+	s.recordOp("copy_blob", err, copied)
+	if err != nil {
+		return nil, err
+	}
+	return &artifactspb.BlobStat{Size: copied}, nil
+}
+
+// DeleteBlob removes a blob (nothing else). A missing id is a no-op.
+func (s *Server) DeleteBlob(ctx context.Context, req *artifactspb.BlobRef) (*emptypb.Empty, error) {
+	if err := s.store.Delete(ctx, req.GetId()); err != nil {
+		return nil, err
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// streamChunks reads from reader in bounded chunks and sends each as a data
+// chunk on stream.
+func streamChunks(stream grpc.ServerStreamingServer[artifactspb.BlobChunk], reader io.Reader) error {
 	buffer := make([]byte, maxChunkSize)
 	for {
 		read, err := reader.Read(buffer)
 		if read > 0 {
-			if sendErr := stream.Send(&artifactspb.ArtifactChunk{Data: append([]byte(nil), buffer[:read]...)}); sendErr != nil {
+			if sendErr := stream.Send(&artifactspb.BlobChunk{Data: append([]byte(nil), buffer[:read]...)}); sendErr != nil {
 				return grpcErr(sendErr)
 			}
 		}
@@ -352,6 +330,8 @@ func streamFromReader(stream grpc.ServerStreamingServer[artifactspb.ArtifactChun
 	}
 }
 
+// grpcErr normalizes a gRPC/stream error into a status error (EOF mid-frame
+// is unexpected and reported as Internal).
 func grpcErr(err error) error {
 	if err == nil {
 		return nil

@@ -3,6 +3,7 @@ package logstream
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -17,7 +18,9 @@ import (
 	"cdrom/internal/api"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/services/artifacts"
+	databaseservice "cdrom/internal/services/database"
 )
 
 // startArtifactsServer boots a real Artifacts gRPC server on an in-process
@@ -45,13 +48,50 @@ func startArtifactsServer(t *testing.T) artifactspb.ArtifactsClient {
 	return artifactspb.NewArtifactsClient(conn)
 }
 
+// startDBServer boots a real Database gRPC service (SQLite in a temp dir)
+// on an in-process bufconn listener and returns a connected client. Since
+// the F-21.6 storage redesign the API's log persistence is mediated by the
+// database's storage_object records, so the rig needs a REAL database
+// service (a nil db would make every log-establishment fail).
+func startDBServer(t *testing.T) dbpb.DatabaseClient {
+	t.Helper()
+	dir := t.TempDir()
+	dbh, err := databaseservice.Open(databaseservice.Config{
+		Backend:    databaseservice.BackendSQLite,
+		SQLitePath: dir + "/sink_test.db",
+	}, slog.Default())
+	if err != nil {
+		t.Fatalf("database.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = databaseservice.Close(dbh) })
+	if err := databaseservice.Migrate(dbh, slog.Default()); err != nil {
+		t.Fatalf("database.Migrate: %v", err)
+	}
+	dbSvc := databaseservice.NewServer(dbh)
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	dbpb.RegisterDatabaseServer(srv, dbSvc)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.DialContext(context.Background(), "bufconn",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithInsecure(),
+	)
+	if err != nil {
+		t.Fatalf("dial db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return dbpb.NewDatabaseClient(conn)
+}
+
 // startAPIServer boots a real API gRPC server on an in-process bufconn
 // listener and returns a connected client.
-func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient) apipb.APIClient {
+func startAPIServer(t *testing.T, db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient) apipb.APIClient {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	apipb.RegisterAPIServer(srv, api.NewGRPCServer(nil, artifacts, nil, nil, nil, nil))
+	apipb.RegisterAPIServer(srv, api.NewGRPCServer(db, artifacts, nil, nil, nil, nil))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -66,10 +106,11 @@ func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient) apipb.A
 	return apipb.NewAPIClient(conn)
 }
 
-// tryReadLog streams a job's log from the artifacts service and returns its
-// text, or an error if the log does not exist yet.
-func tryReadLog(client artifactspb.ArtifactsClient, jobID, name string) (string, error) {
-	stream, err := client.DownloadLog(context.Background(), &artifactspb.DownloadLogRequest{Namespace: jobID, Name: name})
+// tryReadLog streams a job's log THROUGH THE API (the record-mediated path:
+// the API translates (job, name) to the log's blob uid and streams the
+// blob) and returns its text, or an error if the log does not exist yet.
+func tryReadLog(client apipb.APIClient, jobID, name string) (string, error) {
+	stream, err := client.DownloadArtifact(context.Background(), &apipb.LogFileRef{Namespace: jobID, Name: name})
 	if err != nil {
 		return "", err
 	}
@@ -87,9 +128,9 @@ func tryReadLog(client artifactspb.ArtifactsClient, jobID, name string) (string,
 	return string(out), nil
 }
 
-// readLog streams a job's log from the artifacts service and returns its text,
-// failing the test on error.
-func readLog(t *testing.T, client artifactspb.ArtifactsClient, jobID, name string) string {
+// readLog streams a job's log through the API and returns its text, failing
+// the test on error.
+func readLog(t *testing.T, client apipb.APIClient, jobID, name string) string {
 	t.Helper()
 	got, err := tryReadLog(client, jobID, name)
 	if err != nil {
@@ -98,10 +139,8 @@ func readLog(t *testing.T, client artifactspb.ArtifactsClient, jobID, name strin
 	return got
 }
 
-// waitForLog polls the log until it returns want (the API persists streamed
-// chunks asynchronously, so the log may not be complete right after the sink
-// closes) or the deadline elapses.
-func waitForLog(t *testing.T, client artifactspb.ArtifactsClient, jobID, name, want string) {
+// waitForLog polls the log until it returns want or the deadline elapses.
+func waitForLog(t *testing.T, client apipb.APIClient, jobID, name, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	var last string
@@ -126,8 +165,9 @@ func waitForLog(t *testing.T, client artifactspb.ArtifactsClient, jobID, name, w
 // sink -> API -> artifacts path (F-02).
 func TestSinkStreamsToAPI(t *testing.T) {
 	artifacts := startArtifactsServer(t)
-	apiClient := startAPIServer(t, artifacts)
-	ctx := context.Background()
+	db := startDBServer(t)
+	apiClient := startAPIServer(t, db, artifacts)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	sink, err := NewSink(apiClient, ctx, 7, "", nil)
 	if err != nil {
@@ -137,10 +177,12 @@ func TestSinkStreamsToAPI(t *testing.T) {
 	sink.WriteStepOutput("step0", "stderr", []byte("step0 err\n"))
 	sink.WriteStepOutput("step1", "stdout", []byte("step1 out\n"))
 	sink.Close()
+	// Match the worker lifecycle: the job context is cancelled after Close.
+	cancel()
 
-	waitForLog(t, artifacts, "7", "step0.log", "step0 out\nstep0 err\n")
-	waitForLog(t, artifacts, "7", "step1.log", "step1 out\n")
-	waitForLog(t, artifacts, "7", "job.log", "step0 out\nstep0 err\nstep1 out\n")
+	waitForLog(t, apiClient, "7", "step0.log", "step0 out\nstep0 err\n")
+	waitForLog(t, apiClient, "7", "step1.log", "step1 out\n")
+	waitForLog(t, apiClient, "7", "job.log", "step0 out\nstep0 err\nstep1 out\n")
 }
 
 // TestSinkNilAPI verifies that a sink with a nil API is a no-op (streaming

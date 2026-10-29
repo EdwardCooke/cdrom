@@ -63,6 +63,15 @@ db:
 # record which target ran the job.
 #agent_name: my-host
 
+# Base directory for a target's per-job staged working area (F-21.6; used by
+# the worker and the agent). Jobs' downloads, extractions, and publish
+# assemblies land in <work_root>/cdrom-stage-<random>. Defaults to the OS
+# temp dir. Point it at DISK-BACKED storage when the temp dir is RAM-backed
+# (a container's tmpfs /tmp): the target WARNS at startup when the effective
+# root sits on a tmpfs mount, because staged files then consume memory.
+# Environment: CDROM_WORK_ROOT.
+#work_root: /var/lib/cdrom/work
+
 # Mutual TLS for gRPC communication between services. When ca_file is set,
 # all gRPC traffic uses mTLS; otherwise it is plaintext. Generate a local
 # dev certificate set with `make certs`, then point all three paths at it.

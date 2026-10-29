@@ -74,7 +74,8 @@ func main() {
 	defer apiConn.Close()
 
 	a := agent.New(cfg.AgentName, jobID, agent.Dependencies{
-		API: apipb.NewAPIClient(apiConn),
+		API:      apipb.NewAPIClient(apiConn),
+		WorkRoot: cfg.WorkRoot,
 	}, logger)
 	// Attach the agent's Prometheus metric set (F-20) so it records its job,
 	// steps, in-flight count, and log bytes.

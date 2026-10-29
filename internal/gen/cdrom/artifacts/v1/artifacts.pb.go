@@ -10,7 +10,6 @@ import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
-	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -23,34 +22,32 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type Artifact struct {
+// BlobRef identifies a blob by its id (plus an optional read offset).
+type BlobRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// namespace is the opaque scope the file belongs to (e.g. a job id for a
-	// job's artifacts, or a release identifier for a deployed artifact).
-	Namespace string `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	// name is the file name within the namespace.
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Size          int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
-	ContentType   string                 `protobuf:"bytes,4,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// id is the blob's identifier (a UUID string, hyphens intact).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// offset is the byte offset to begin reading from (GetBlob only; 0 =
+	// from the start).
+	Offset        int64 `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Artifact) Reset() {
-	*x = Artifact{}
+func (x *BlobRef) Reset() {
+	*x = BlobRef{}
 	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Artifact) String() string {
+func (x *BlobRef) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Artifact) ProtoMessage() {}
+func (*BlobRef) ProtoMessage() {}
 
-func (x *Artifact) ProtoReflect() protoreflect.Message {
+func (x *BlobRef) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -62,532 +59,58 @@ func (x *Artifact) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Artifact.ProtoReflect.Descriptor instead.
-func (*Artifact) Descriptor() ([]byte, []int) {
+// Deprecated: Use BlobRef.ProtoReflect.Descriptor instead.
+func (*BlobRef) Descriptor() ([]byte, []int) {
 	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *Artifact) GetNamespace() string {
+func (x *BlobRef) GetId() string {
 	if x != nil {
-		return x.Namespace
+		return x.Id
 	}
 	return ""
 }
 
-func (x *Artifact) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *Artifact) GetSize() int64 {
-	if x != nil {
-		return x.Size
-	}
-	return 0
-}
-
-func (x *Artifact) GetContentType() string {
-	if x != nil {
-		return x.ContentType
-	}
-	return ""
-}
-
-func (x *Artifact) GetCreatedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.CreatedAt
-	}
-	return nil
-}
-
-type ArtifactChunk struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// metadata is set on the first chunk of an upload and on the first chunk
-	// of a download; it is empty on all other chunks.
-	Metadata      *Artifact `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Data          []byte    `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ArtifactChunk) Reset() {
-	*x = ArtifactChunk{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[1]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ArtifactChunk) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ArtifactChunk) ProtoMessage() {}
-
-func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[1]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ArtifactChunk.ProtoReflect.Descriptor instead.
-func (*ArtifactChunk) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *ArtifactChunk) GetMetadata() *Artifact {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-func (x *ArtifactChunk) GetData() []byte {
-	if x != nil {
-		return x.Data
-	}
-	return nil
-}
-
-type UploadArtifactResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Artifact      *Artifact              `protobuf:"bytes,1,opt,name=artifact,proto3" json:"artifact,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *UploadArtifactResponse) Reset() {
-	*x = UploadArtifactResponse{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *UploadArtifactResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*UploadArtifactResponse) ProtoMessage() {}
-
-func (x *UploadArtifactResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use UploadArtifactResponse.ProtoReflect.Descriptor instead.
-func (*UploadArtifactResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *UploadArtifactResponse) GetArtifact() *Artifact {
-	if x != nil {
-		return x.Artifact
-	}
-	return nil
-}
-
-type DownloadArtifactRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DownloadArtifactRequest) Reset() {
-	*x = DownloadArtifactRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DownloadArtifactRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DownloadArtifactRequest) ProtoMessage() {}
-
-func (x *DownloadArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DownloadArtifactRequest.ProtoReflect.Descriptor instead.
-func (*DownloadArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *DownloadArtifactRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *DownloadArtifactRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-type GetArtifactRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GetArtifactRequest) Reset() {
-	*x = GetArtifactRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GetArtifactRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetArtifactRequest) ProtoMessage() {}
-
-func (x *GetArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetArtifactRequest.ProtoReflect.Descriptor instead.
-func (*GetArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *GetArtifactRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *GetArtifactRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-type ListArtifactsRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// namespace of "" lists artifacts of all namespaces.
-	Namespace     string `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListArtifactsRequest) Reset() {
-	*x = ListArtifactsRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListArtifactsRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListArtifactsRequest) ProtoMessage() {}
-
-func (x *ListArtifactsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListArtifactsRequest.ProtoReflect.Descriptor instead.
-func (*ListArtifactsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *ListArtifactsRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-type ListArtifactsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Artifacts     []*Artifact            `protobuf:"bytes,1,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListArtifactsResponse) Reset() {
-	*x = ListArtifactsResponse{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListArtifactsResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListArtifactsResponse) ProtoMessage() {}
-
-func (x *ListArtifactsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListArtifactsResponse.ProtoReflect.Descriptor instead.
-func (*ListArtifactsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *ListArtifactsResponse) GetArtifacts() []*Artifact {
-	if x != nil {
-		return x.Artifacts
-	}
-	return nil
-}
-
-type DeleteArtifactRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DeleteArtifactRequest) Reset() {
-	*x = DeleteArtifactRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DeleteArtifactRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DeleteArtifactRequest) ProtoMessage() {}
-
-func (x *DeleteArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DeleteArtifactRequest.ProtoReflect.Descriptor instead.
-func (*DeleteArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *DeleteArtifactRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *DeleteArtifactRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-// DownloadLogRequest addresses a log file. name is the log file name (e.g.
-// "<step-name>.log" for a step's output, or "job.log" for the combined output of
-// the whole job).
-type DownloadLogRequest struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	Namespace string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name      string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// offset is the byte offset to start reading from (F-23). When 0 (the
-	// default) the whole log is returned. When greater than 0 only the bytes
-	// from offset to the end of the log are returned — this is how an API pod
-	// range-reads the delta of a log that another pod appended to (cross-pod
-	// near-live logs). Reading past the end of the log returns no data.
-	Offset        int64 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DownloadLogRequest) Reset() {
-	*x = DownloadLogRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DownloadLogRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DownloadLogRequest) ProtoMessage() {}
-
-func (x *DownloadLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DownloadLogRequest.ProtoReflect.Descriptor instead.
-func (*DownloadLogRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *DownloadLogRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *DownloadLogRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *DownloadLogRequest) GetOffset() int64 {
+func (x *BlobRef) GetOffset() int64 {
 	if x != nil {
 		return x.Offset
 	}
 	return 0
 }
 
-type GetLogRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GetLogRequest) Reset() {
-	*x = GetLogRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GetLogRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetLogRequest) ProtoMessage() {}
-
-func (x *GetLogRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetLogRequest.ProtoReflect.Descriptor instead.
-func (*GetLogRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *GetLogRequest) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *GetLogRequest) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-type ListLogsRequest struct {
+// BlobChunk carries a piece of a blob. On PUT/APPEND streams the FIRST chunk
+// carries Id (mandatory) and MAY carry data; later chunks carry data only.
+// On GET streams the first chunk carries Size (total bytes at stream start)
+// and subsequent chunks carry data.
+type BlobChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// namespace of "" lists the logs of all namespaces.
-	Namespace     string `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	// size is the blob's total size (carried on the first chunk of a GetBlob
+	// stream; 0 everywhere else).
+	Size int64 `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	// data is the chunk's bytes.
+	Data []byte `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	// id is the blob's identifier (carried on the FIRST chunk of a PutBlob or
+	// AppendBlob stream; empty everywhere else).
+	Id            string `protobuf:"bytes,3,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListLogsRequest) Reset() {
-	*x = ListLogsRequest{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[10]
+func (x *BlobChunk) Reset() {
+	*x = BlobChunk{}
+	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListLogsRequest) String() string {
+func (x *BlobChunk) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListLogsRequest) ProtoMessage() {}
+func (*BlobChunk) ProtoMessage() {}
 
-func (x *ListLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[10]
+func (x *BlobChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -598,113 +121,160 @@ func (x *ListLogsRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListLogsRequest.ProtoReflect.Descriptor instead.
-func (*ListLogsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{10}
+// Deprecated: Use BlobChunk.ProtoReflect.Descriptor instead.
+func (*BlobChunk) Descriptor() ([]byte, []int) {
+	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *ListLogsRequest) GetNamespace() string {
+func (x *BlobChunk) GetSize() int64 {
 	if x != nil {
-		return x.Namespace
+		return x.Size
 	}
-	return ""
+	return 0
 }
 
-type ListLogsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Logs          []*Artifact            `protobuf:"bytes,1,rep,name=logs,proto3" json:"logs,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListLogsResponse) Reset() {
-	*x = ListLogsResponse{}
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListLogsResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListLogsResponse) ProtoMessage() {}
-
-func (x *ListLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[11]
+func (x *BlobChunk) GetData() []byte {
 	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListLogsResponse.ProtoReflect.Descriptor instead.
-func (*ListLogsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *ListLogsResponse) GetLogs() []*Artifact {
-	if x != nil {
-		return x.Logs
+		return x.Data
 	}
 	return nil
+}
+
+func (x *BlobChunk) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// BlobStat is a blob's measured size.
+type BlobStat struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// size is the blob's size in bytes.
+	Size          int64 `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobStat) Reset() {
+	*x = BlobStat{}
+	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobStat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobStat) ProtoMessage() {}
+
+func (x *BlobStat) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobStat.ProtoReflect.Descriptor instead.
+func (*BlobStat) Descriptor() ([]byte, []int) {
+	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *BlobStat) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+// CopyBlobRequest names the source and destination ids of a server-side
+// replication.
+type CopyBlobRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// src is the id of the blob to replicate (must exist).
+	Src string `protobuf:"bytes,1,opt,name=src,proto3" json:"src,omitempty"`
+	// dst is the id to replicate it TO (must not exist yet).
+	Dst           string `protobuf:"bytes,2,opt,name=dst,proto3" json:"dst,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CopyBlobRequest) Reset() {
+	*x = CopyBlobRequest{}
+	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CopyBlobRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CopyBlobRequest) ProtoMessage() {}
+
+func (x *CopyBlobRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_artifacts_v1_artifacts_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CopyBlobRequest.ProtoReflect.Descriptor instead.
+func (*CopyBlobRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *CopyBlobRequest) GetSrc() string {
+	if x != nil {
+		return x.Src
+	}
+	return ""
+}
+
+func (x *CopyBlobRequest) GetDst() string {
+	if x != nil {
+		return x.Dst
+	}
+	return ""
 }
 
 var File_cdrom_artifacts_v1_artifacts_proto protoreflect.FileDescriptor
 
 const file_cdrom_artifacts_v1_artifacts_proto_rawDesc = "" +
 	"\n" +
-	"\"cdrom/artifacts/v1/artifacts.proto\x12\x12cdrom.artifacts.v1\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xae\x01\n" +
-	"\bArtifact\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
-	"\x04size\x18\x03 \x01(\x03R\x04size\x12!\n" +
-	"\fcontent_type\x18\x04 \x01(\tR\vcontentType\x129\n" +
+	"\"cdrom/artifacts/v1/artifacts.proto\x12\x12cdrom.artifacts.v1\x1a\x1bgoogle/protobuf/empty.proto\"1\n" +
+	"\aBlobRef\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06offset\x18\x02 \x01(\x03R\x06offset\"C\n" +
+	"\tBlobChunk\x12\x12\n" +
+	"\x04size\x18\x01 \x01(\x03R\x04size\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\x12\x0e\n" +
+	"\x02id\x18\x03 \x01(\tR\x02id\"\x1e\n" +
+	"\bBlobStat\x12\x12\n" +
+	"\x04size\x18\x01 \x01(\x03R\x04size\"5\n" +
+	"\x0fCopyBlobRequest\x12\x10\n" +
+	"\x03src\x18\x01 \x01(\tR\x03src\x12\x10\n" +
+	"\x03dst\x18\x02 \x01(\tR\x03dst2\xc4\x03\n" +
+	"\tArtifacts\x12H\n" +
+	"\aPutBlob\x12\x1d.cdrom.artifacts.v1.BlobChunk\x1a\x1c.cdrom.artifacts.v1.BlobStat(\x01\x12G\n" +
+	"\aGetBlob\x12\x1b.cdrom.artifacts.v1.BlobRef\x1a\x1d.cdrom.artifacts.v1.BlobChunk0\x01\x12E\n" +
+	"\bStatBlob\x12\x1b.cdrom.artifacts.v1.BlobRef\x1a\x1c.cdrom.artifacts.v1.BlobStat\x12K\n" +
 	"\n" +
-	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"]\n" +
-	"\rArtifactChunk\x128\n" +
-	"\bmetadata\x18\x01 \x01(\v2\x1c.cdrom.artifacts.v1.ArtifactR\bmetadata\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04data\"R\n" +
-	"\x16UploadArtifactResponse\x128\n" +
-	"\bartifact\x18\x01 \x01(\v2\x1c.cdrom.artifacts.v1.ArtifactR\bartifact\"K\n" +
-	"\x17DownloadArtifactRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"F\n" +
-	"\x12GetArtifactRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"4\n" +
-	"\x14ListArtifactsRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\"S\n" +
-	"\x15ListArtifactsResponse\x12:\n" +
-	"\tartifacts\x18\x01 \x03(\v2\x1c.cdrom.artifacts.v1.ArtifactR\tartifacts\"I\n" +
-	"\x15DeleteArtifactRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"^\n" +
-	"\x12DownloadLogRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
-	"\x06offset\x18\x03 \x01(\x03R\x06offset\"A\n" +
-	"\rGetLogRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"/\n" +
-	"\x0fListLogsRequest\x12\x1c\n" +
-	"\tnamespace\x18\x01 \x01(\tR\tnamespace\"D\n" +
-	"\x10ListLogsResponse\x120\n" +
-	"\x04logs\x18\x01 \x03(\v2\x1c.cdrom.artifacts.v1.ArtifactR\x04logs2\xc0\x06\n" +
-	"\tArtifacts\x12a\n" +
-	"\x0eUploadArtifact\x12!.cdrom.artifacts.v1.ArtifactChunk\x1a*.cdrom.artifacts.v1.UploadArtifactResponse(\x01\x12d\n" +
-	"\x10DownloadArtifact\x12+.cdrom.artifacts.v1.DownloadArtifactRequest\x1a!.cdrom.artifacts.v1.ArtifactChunk0\x01\x12S\n" +
-	"\vGetArtifact\x12&.cdrom.artifacts.v1.GetArtifactRequest\x1a\x1c.cdrom.artifacts.v1.Artifact\x12d\n" +
-	"\rListArtifacts\x12(.cdrom.artifacts.v1.ListArtifactsRequest\x1a).cdrom.artifacts.v1.ListArtifactsResponse\x12S\n" +
-	"\x0eDeleteArtifact\x12).cdrom.artifacts.v1.DeleteArtifactRequest\x1a\x16.google.protobuf.Empty\x12\\\n" +
-	"\tAppendLog\x12!.cdrom.artifacts.v1.ArtifactChunk\x1a*.cdrom.artifacts.v1.UploadArtifactResponse(\x01\x12Z\n" +
-	"\vDownloadLog\x12&.cdrom.artifacts.v1.DownloadLogRequest\x1a!.cdrom.artifacts.v1.ArtifactChunk0\x01\x12I\n" +
-	"\x06GetLog\x12!.cdrom.artifacts.v1.GetLogRequest\x1a\x1c.cdrom.artifacts.v1.Artifact\x12U\n" +
-	"\bListLogs\x12#.cdrom.artifacts.v1.ListLogsRequest\x1a$.cdrom.artifacts.v1.ListLogsResponseB3Z1cdrom/internal/gen/cdrom/artifacts/v1;artifactsv1b\x06proto3"
+	"AppendBlob\x12\x1d.cdrom.artifacts.v1.BlobChunk\x1a\x1c.cdrom.artifacts.v1.BlobStat(\x01\x12M\n" +
+	"\bCopyBlob\x12#.cdrom.artifacts.v1.CopyBlobRequest\x1a\x1c.cdrom.artifacts.v1.BlobStat\x12A\n" +
+	"\n" +
+	"DeleteBlob\x12\x1b.cdrom.artifacts.v1.BlobRef\x1a\x16.google.protobuf.EmptyB3Z1cdrom/internal/gen/cdrom/artifacts/v1;artifactsv1b\x06proto3"
 
 var (
 	file_cdrom_artifacts_v1_artifacts_proto_rawDescOnce sync.Once
@@ -718,52 +288,32 @@ func file_cdrom_artifacts_v1_artifacts_proto_rawDescGZIP() []byte {
 	return file_cdrom_artifacts_v1_artifacts_proto_rawDescData
 }
 
-var file_cdrom_artifacts_v1_artifacts_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_cdrom_artifacts_v1_artifacts_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_cdrom_artifacts_v1_artifacts_proto_goTypes = []any{
-	(*Artifact)(nil),                // 0: cdrom.artifacts.v1.Artifact
-	(*ArtifactChunk)(nil),           // 1: cdrom.artifacts.v1.ArtifactChunk
-	(*UploadArtifactResponse)(nil),  // 2: cdrom.artifacts.v1.UploadArtifactResponse
-	(*DownloadArtifactRequest)(nil), // 3: cdrom.artifacts.v1.DownloadArtifactRequest
-	(*GetArtifactRequest)(nil),      // 4: cdrom.artifacts.v1.GetArtifactRequest
-	(*ListArtifactsRequest)(nil),    // 5: cdrom.artifacts.v1.ListArtifactsRequest
-	(*ListArtifactsResponse)(nil),   // 6: cdrom.artifacts.v1.ListArtifactsResponse
-	(*DeleteArtifactRequest)(nil),   // 7: cdrom.artifacts.v1.DeleteArtifactRequest
-	(*DownloadLogRequest)(nil),      // 8: cdrom.artifacts.v1.DownloadLogRequest
-	(*GetLogRequest)(nil),           // 9: cdrom.artifacts.v1.GetLogRequest
-	(*ListLogsRequest)(nil),         // 10: cdrom.artifacts.v1.ListLogsRequest
-	(*ListLogsResponse)(nil),        // 11: cdrom.artifacts.v1.ListLogsResponse
-	(*timestamppb.Timestamp)(nil),   // 12: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),           // 13: google.protobuf.Empty
+	(*BlobRef)(nil),         // 0: cdrom.artifacts.v1.BlobRef
+	(*BlobChunk)(nil),       // 1: cdrom.artifacts.v1.BlobChunk
+	(*BlobStat)(nil),        // 2: cdrom.artifacts.v1.BlobStat
+	(*CopyBlobRequest)(nil), // 3: cdrom.artifacts.v1.CopyBlobRequest
+	(*emptypb.Empty)(nil),   // 4: google.protobuf.Empty
 }
 var file_cdrom_artifacts_v1_artifacts_proto_depIdxs = []int32{
-	12, // 0: cdrom.artifacts.v1.Artifact.created_at:type_name -> google.protobuf.Timestamp
-	0,  // 1: cdrom.artifacts.v1.ArtifactChunk.metadata:type_name -> cdrom.artifacts.v1.Artifact
-	0,  // 2: cdrom.artifacts.v1.UploadArtifactResponse.artifact:type_name -> cdrom.artifacts.v1.Artifact
-	0,  // 3: cdrom.artifacts.v1.ListArtifactsResponse.artifacts:type_name -> cdrom.artifacts.v1.Artifact
-	0,  // 4: cdrom.artifacts.v1.ListLogsResponse.logs:type_name -> cdrom.artifacts.v1.Artifact
-	1,  // 5: cdrom.artifacts.v1.Artifacts.UploadArtifact:input_type -> cdrom.artifacts.v1.ArtifactChunk
-	3,  // 6: cdrom.artifacts.v1.Artifacts.DownloadArtifact:input_type -> cdrom.artifacts.v1.DownloadArtifactRequest
-	4,  // 7: cdrom.artifacts.v1.Artifacts.GetArtifact:input_type -> cdrom.artifacts.v1.GetArtifactRequest
-	5,  // 8: cdrom.artifacts.v1.Artifacts.ListArtifacts:input_type -> cdrom.artifacts.v1.ListArtifactsRequest
-	7,  // 9: cdrom.artifacts.v1.Artifacts.DeleteArtifact:input_type -> cdrom.artifacts.v1.DeleteArtifactRequest
-	1,  // 10: cdrom.artifacts.v1.Artifacts.AppendLog:input_type -> cdrom.artifacts.v1.ArtifactChunk
-	8,  // 11: cdrom.artifacts.v1.Artifacts.DownloadLog:input_type -> cdrom.artifacts.v1.DownloadLogRequest
-	9,  // 12: cdrom.artifacts.v1.Artifacts.GetLog:input_type -> cdrom.artifacts.v1.GetLogRequest
-	10, // 13: cdrom.artifacts.v1.Artifacts.ListLogs:input_type -> cdrom.artifacts.v1.ListLogsRequest
-	2,  // 14: cdrom.artifacts.v1.Artifacts.UploadArtifact:output_type -> cdrom.artifacts.v1.UploadArtifactResponse
-	1,  // 15: cdrom.artifacts.v1.Artifacts.DownloadArtifact:output_type -> cdrom.artifacts.v1.ArtifactChunk
-	0,  // 16: cdrom.artifacts.v1.Artifacts.GetArtifact:output_type -> cdrom.artifacts.v1.Artifact
-	6,  // 17: cdrom.artifacts.v1.Artifacts.ListArtifacts:output_type -> cdrom.artifacts.v1.ListArtifactsResponse
-	13, // 18: cdrom.artifacts.v1.Artifacts.DeleteArtifact:output_type -> google.protobuf.Empty
-	2,  // 19: cdrom.artifacts.v1.Artifacts.AppendLog:output_type -> cdrom.artifacts.v1.UploadArtifactResponse
-	1,  // 20: cdrom.artifacts.v1.Artifacts.DownloadLog:output_type -> cdrom.artifacts.v1.ArtifactChunk
-	0,  // 21: cdrom.artifacts.v1.Artifacts.GetLog:output_type -> cdrom.artifacts.v1.Artifact
-	11, // 22: cdrom.artifacts.v1.Artifacts.ListLogs:output_type -> cdrom.artifacts.v1.ListLogsResponse
-	14, // [14:23] is the sub-list for method output_type
-	5,  // [5:14] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	1, // 0: cdrom.artifacts.v1.Artifacts.PutBlob:input_type -> cdrom.artifacts.v1.BlobChunk
+	0, // 1: cdrom.artifacts.v1.Artifacts.GetBlob:input_type -> cdrom.artifacts.v1.BlobRef
+	0, // 2: cdrom.artifacts.v1.Artifacts.StatBlob:input_type -> cdrom.artifacts.v1.BlobRef
+	1, // 3: cdrom.artifacts.v1.Artifacts.AppendBlob:input_type -> cdrom.artifacts.v1.BlobChunk
+	3, // 4: cdrom.artifacts.v1.Artifacts.CopyBlob:input_type -> cdrom.artifacts.v1.CopyBlobRequest
+	0, // 5: cdrom.artifacts.v1.Artifacts.DeleteBlob:input_type -> cdrom.artifacts.v1.BlobRef
+	2, // 6: cdrom.artifacts.v1.Artifacts.PutBlob:output_type -> cdrom.artifacts.v1.BlobStat
+	1, // 7: cdrom.artifacts.v1.Artifacts.GetBlob:output_type -> cdrom.artifacts.v1.BlobChunk
+	2, // 8: cdrom.artifacts.v1.Artifacts.StatBlob:output_type -> cdrom.artifacts.v1.BlobStat
+	2, // 9: cdrom.artifacts.v1.Artifacts.AppendBlob:output_type -> cdrom.artifacts.v1.BlobStat
+	2, // 10: cdrom.artifacts.v1.Artifacts.CopyBlob:output_type -> cdrom.artifacts.v1.BlobStat
+	4, // 11: cdrom.artifacts.v1.Artifacts.DeleteBlob:output_type -> google.protobuf.Empty
+	6, // [6:12] is the sub-list for method output_type
+	0, // [0:6] is the sub-list for method input_type
+	0, // [0:0] is the sub-list for extension type_name
+	0, // [0:0] is the sub-list for extension extendee
+	0, // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_artifacts_v1_artifacts_proto_init() }
@@ -777,7 +327,7 @@ func file_cdrom_artifacts_v1_artifacts_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_artifacts_v1_artifacts_proto_rawDesc), len(file_cdrom_artifacts_v1_artifacts_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

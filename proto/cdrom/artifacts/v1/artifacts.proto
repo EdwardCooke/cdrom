@@ -3,137 +3,98 @@ syntax = "proto3";
 package cdrom.artifacts.v1;
 
 import "google/protobuf/empty.proto";
-import "google/protobuf/timestamp.proto";
 
 option go_package = "cdrom/internal/gen/cdrom/artifacts/v1;artifactsv1";
 
-// Artifacts is a general-purpose, namespaced file store. It stores and
-// retrieves files of two kinds:
+// Artifacts is a general-purpose BLOB STORE. It stores and retrieves raw
+// bytes identified exclusively by an opaque id (a UUID assigned by the
+// caller); it knows NOTHING about names, namespaces, packages, or any other
+// attribute of the bytes it holds.
 //
-//   - artifacts: immutable files (one per namespace/name); and
-//   - logs: append-only files that grow over time (so a log can be read while
-//     it is still being written and replayed in full afterwards).
+// All FILE METADATA lives in the Database service's storage_object records
+// (F-21.6 storage redesign): what a file IS (its kind, namespace, display
+// name, size, content hash, package coordinates, counters) is a database
+// fact; WHAT IT CONTAINS is a blob here. Callers translate (namespace, name)
+// <-> uid at the API/service boundary and speak uids to this service.
 //
-// Every file lives in a *namespace*: an opaque scope string that groups
-// related files. The service is agnostic about what a namespace means — it is
-// up to the caller. For example, a job's artifacts and logs use the job's id
-// as the namespace, while a deployed release's artifacts might use a release
-// identifier. This keeps the store general enough to hold both job-owned
-// artifacts and deployed/published artifacts.
+// Blobs are immutable once CONFIRMED: PutBlob writes to a freshly allocated
+// id, CopyBlob replicates a confirmed blob to another id, Append grows a log
+// blob, and DeleteBlob removes a blob outright. Nothing here is derivable
+// from the bytes themselves — the store is deliberately dumb so richer
+// metadata can accumulate on the database side without touching the backing
+// medium (filesystem today; S3/Azure Blob tomorrow).
 //
-// Uploads and downloads are streamed so arbitrarily large files do not have to
-// be buffered in memory on either side.
-//
-// Job logs are stored as one file per step (named step-<n>.log) plus a
-// combined file (job.log) that concatenates every step's output in order.
-// Logs are *appended* to as a step progresses, so a log can be read while the
-// job is still running (tail) and replayed in full after it finishes.
+// Uploads and downloads are streamed so arbitrarily large files do not have
+// to be buffered in memory on either side.
 service Artifacts {
-  // UploadArtifact is a client stream. The first chunk must carry metadata
-  // (namespace and name); subsequent chunks carry data. The server returns
-  // the stored Artifact once the stream ends.
-  rpc UploadArtifact(stream ArtifactChunk) returns (UploadArtifactResponse);
+  // PutBlob is a CLIENT stream: the FIRST chunk must carry the id the bytes
+  // belong to (later chunks carry data only); the caller pushes data until
+  // the stream closes. The id must not already hold a NON-EMPTY blob
+  // (double-writing one id fails with AlreadyExists) — ids are allocated
+  // ahead of time by the caller (through the Database service's record
+  // allocator) and each id is written exactly once. Returns the number of
+  // bytes stored.
+  rpc PutBlob(stream BlobChunk) returns (BlobStat);
 
-  // DownloadArtifact is a server stream. The first chunk carries metadata;
-  // all chunks carry data.
-  rpc DownloadArtifact(DownloadArtifactRequest) returns (stream ArtifactChunk);
+  // GetBlob is a SERVER stream of a blob's bytes. When offset is greater
+  // than 0 the stream begins at that byte offset (range reads power
+  // cross-pod log tailing, F-23); reading past the end yields no data. The
+  // first chunk carries the blob's total size.
+  rpc GetBlob(BlobRef) returns (stream BlobChunk);
 
-  rpc GetArtifact(GetArtifactRequest) returns (Artifact);
-  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
-  rpc DeleteArtifact(DeleteArtifactRequest) returns (google.protobuf.Empty);
+  // StatBlob returns a blob's size (without transferring its bytes).
+  rpc StatBlob(BlobRef) returns (BlobStat);
 
-  // AppendLog appends data to a log file. The first chunk must carry metadata
-  // (namespace and name); subsequent chunks carry data. The server returns
-  // the updated Artifact (size, modified time) once the stream ends.
-  // Appending to a log that does not exist creates it.
-  rpc AppendLog(stream ArtifactChunk) returns (UploadArtifactResponse);
+  // AppendBlob is a CLIENT stream: the FIRST chunk must carry the id of a
+  // log blob (creating it when absent) and MAY carry data; subsequent chunks
+  // carry data. Returns the blob's total size after the append.
+  rpc AppendBlob(stream BlobChunk) returns (BlobStat);
 
-  // DownloadLog is a server stream of a log: the first chunk carries metadata,
-  // all chunks carry data. Reading a log that is still being written returns
-  // the output captured so far.
-  rpc DownloadLog(DownloadLogRequest) returns (stream ArtifactChunk);
+  // CopyBlob replicates one blob to another id SERVER-SIDE (no bytes pass
+  // through the caller). The destination id must not hold a non-empty blob
+  // yet. Powers promotion and any intra-store replication. Returns the
+  // copied size.
+  rpc CopyBlob(CopyBlobRequest) returns (BlobStat);
 
-  // GetLog returns the metadata of a log file.
-  rpc GetLog(GetLogRequest) returns (Artifact);
-
-  // ListLogs lists the log files in a namespace.
-  rpc ListLogs(ListLogsRequest) returns (ListLogsResponse);
+  // DeleteBlob removes a blob (nothing else). A missing id is a no-op.
+  rpc DeleteBlob(BlobRef) returns (google.protobuf.Empty);
 }
 
-message Artifact {
-  // namespace is the opaque scope the file belongs to (e.g. a job id for a
-  // job's artifacts, or a release identifier for a deployed artifact).
-  string namespace = 1;
-  // name is the file name within the namespace.
-  string name = 2;
-  int64 size = 3;
-  string content_type = 4;
-  google.protobuf.Timestamp created_at = 5;
+// BlobRef identifies a blob by its id (plus an optional read offset).
+message BlobRef {
+  // id is the blob's identifier (a UUID string, hyphens intact).
+  string id = 1;
+  // offset is the byte offset to begin reading from (GetBlob only; 0 =
+  // from the start).
+  int64 offset = 2;
 }
 
-message ArtifactChunk {
-  // metadata is set on the first chunk of an upload and on the first chunk
-  // of a download; it is empty on all other chunks.
-  Artifact metadata = 1;
+// BlobChunk carries a piece of a blob. On PUT/APPEND streams the FIRST chunk
+// carries Id (mandatory) and MAY carry data; later chunks carry data only.
+// On GET streams the first chunk carries Size (total bytes at stream start)
+// and subsequent chunks carry data.
+message BlobChunk {
+  // size is the blob's total size (carried on the first chunk of a GetBlob
+  // stream; 0 everywhere else).
+  int64 size = 1;
+  // data is the chunk's bytes.
   bytes data = 2;
+  // id is the blob's identifier (carried on the FIRST chunk of a PutBlob or
+  // AppendBlob stream; empty everywhere else).
+  string id = 3;
 }
 
-message UploadArtifactResponse {
-  Artifact artifact = 1;
+// BlobStat is a blob's measured size.
+message BlobStat {
+  // size is the blob's size in bytes.
+  int64 size = 1;
 }
 
-message DownloadArtifactRequest {
-  string namespace = 1;
-  string name = 2;
-}
-
-message GetArtifactRequest {
-  string namespace = 1;
-  string name = 2;
-}
-
-message ListArtifactsRequest {
-  // namespace of "" lists artifacts of all namespaces.
-  string namespace = 1;
-}
-
-message ListArtifactsResponse {
-  repeated Artifact artifacts = 1;
-}
-
-message DeleteArtifactRequest {
-  string namespace = 1;
-  string name = 2;
-}
-
-// ---------------------------------------------------------------------------
-// Logs
-// ---------------------------------------------------------------------------
-
-// DownloadLogRequest addresses a log file. name is the log file name (e.g.
-// "<step-name>.log" for a step's output, or "job.log" for the combined output of
-// the whole job).
-message DownloadLogRequest {
-  string namespace = 1;
-  string name = 2;
-  // offset is the byte offset to start reading from (F-23). When 0 (the
-  // default) the whole log is returned. When greater than 0 only the bytes
-  // from offset to the end of the log are returned — this is how an API pod
-  // range-reads the delta of a log that another pod appended to (cross-pod
-  // near-live logs). Reading past the end of the log returns no data.
-  int64 offset = 3;
-}
-
-message GetLogRequest {
-  string namespace = 1;
-  string name = 2;
-}
-
-message ListLogsRequest {
-  // namespace of "" lists the logs of all namespaces.
-  string namespace = 1;
-}
-
-message ListLogsResponse {
-  repeated Artifact logs = 1;
+// CopyBlobRequest names the source and destination ids of a server-side
+// replication.
+message CopyBlobRequest {
+  // src is the id of the blob to replicate (must exist).
+  string src = 1;
+  // dst is the id to replicate it TO (must not exist yet).
+  string dst = 2;
 }

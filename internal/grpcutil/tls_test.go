@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"cdrom/internal/config"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
@@ -160,12 +162,14 @@ func TestMTLSRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := artifactspb.NewArtifactsClient(conn)
-	resp, err := client.ListArtifacts(context.Background(), &artifactspb.ListArtifactsRequest{Namespace: "job-1"})
-	if err != nil {
-		t.Fatalf("ListArtifacts over mTLS: %v", err)
+	// Smoke call over the mTLS channel: a StatBlob for a nonexistent id must
+	// traverse the secure handshake and come back as a clean NotFound.
+	_, err = client.StatBlob(context.Background(), &artifactspb.BlobRef{Id: "00000000-0000-0000-0000-000000000000"})
+	if err == nil {
+		t.Fatal("StatBlob over mTLS: wanted NotFound, got success")
 	}
-	if len(resp.GetArtifacts()) != 0 {
-		t.Errorf("ListArtifacts artifacts = %d, want 0", len(resp.GetArtifacts()))
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.NotFound {
+		t.Fatalf("StatBlob over mTLS: wanted NotFound, got %v", err)
 	}
 }
 
@@ -202,7 +206,7 @@ func TestMTLSRequiresClientCert(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := artifactspb.NewArtifactsClient(conn)
-	if _, err := client.ListArtifacts(context.Background(), &artifactspb.ListArtifactsRequest{Namespace: "job-1"}); err == nil {
-		t.Fatal("ListArtifacts: expected the mTLS server to reject a client without a certificate")
+	if _, err := client.StatBlob(context.Background(), &artifactspb.BlobRef{Id: "abc-def"}); err == nil {
+		t.Fatal("StatBlob: expected the mTLS server to reject a client without a certificate")
 	}
 }

@@ -82,6 +82,12 @@ func pipelineToDocument(pipeline *dbpb.Pipeline) pipelinefile.Value {
 	if sources := pipeline.GetSecretSources(); len(sources) > 0 {
 		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "secretSources", Value: exportSecretSources(sources)})
 	}
+	// The pipeline's named package references (F-21.6, spec.artifacts):
+	// emitted only when the pipeline actually carries some (a UI-authored
+	// pipeline synthesizes no artifacts block).
+	if arts := pipeline.GetArtifacts(); len(arts) > 0 {
+		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "artifacts", Value: exportPackageArtifacts(arts)})
+	}
 	if jobs := pipeline.GetJobs(); len(jobs) > 0 {
 		spec.Entries = append(spec.Entries, pipelinefile.Entry{Key: "jobs", Value: exportJobs(jobs)})
 	}
@@ -109,6 +115,36 @@ func exportPeriodicRefresh(interval, schedule string) pipelinefile.Value {
 		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "schedule", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: schedule}})
 	}
 	return out
+}
+
+// exportPackageArtifacts builds the spec.artifacts sequence (F-21.6): one
+// entry per reference (name + a package block carrying name, tag,
+// preReleaseRegex, allowPreRelease, useLatest — zeros suppressed).
+func exportPackageArtifacts(arts []*dbpb.PackageArtifact) pipelinefile.Value {
+	seq := pipelinefile.Value{Type: pipelinefile.List}
+	for _, a := range arts {
+		entry := pipelinefile.Value{Type: pipelinefile.Map}
+		entry.Entries = append(entry.Entries, pipelinefile.Entry{Key: "name", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: a.GetName()}})
+		block := pipelinefile.Value{Type: pipelinefile.Map}
+		if pn := a.GetPackageName(); pn != "" {
+			block.Entries = append(block.Entries, pipelinefile.Entry{Key: "name", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: pn}})
+		}
+		if tg := a.GetTag(); tg != "" {
+			block.Entries = append(block.Entries, pipelinefile.Entry{Key: "tag", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: tg}})
+		}
+		if px := a.GetPreReleaseRegex(); px != "" {
+			block.Entries = append(block.Entries, pipelinefile.Entry{Key: "preReleaseRegex", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: px}})
+		}
+		if a.GetAllowPreRelease() {
+			block.Entries = append(block.Entries, pipelinefile.Entry{Key: "allowPreRelease", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: "true"}})
+		}
+		if a.GetUseLatest() {
+			block.Entries = append(block.Entries, pipelinefile.Entry{Key: "useLatest", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: "true"}})
+		}
+		entry.Entries = append(entry.Entries, pipelinefile.Entry{Key: "package", Value: block})
+		seq.Items = append(seq.Items, entry)
+	}
+	return seq
 }
 
 // exportMetadata builds the document's metadata block: the pipeline's name,

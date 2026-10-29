@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -83,6 +85,11 @@ type GRPCServer struct {
 	logger    *slog.Logger
 	hub       *EventHub
 	jobAuth   *JobTokenAuth
+	// resolver translates (namespace, name) to storage_object records and
+	// drives the blob service by uid (F-21.6 storage redesign). Installed via
+	// SetResolver; nil in legacy tests that do not exercise the translated
+	// paths (those fail with Unavailable, mirroring the db-absent posture).
+	resolver *fileResolver
 	// secretStore decrypts a job's stored secret ciphertexts into plaintext
 	// when the API hands the job to an execution target (F-12), and redacts
 	// the plaintext from streamed job logs before they are persisted or fanned
@@ -122,6 +129,15 @@ type GRPCServer struct {
 	// It is nil when the audit log is not configured (or in tests), in which
 	// case no audit events are recorded on the gRPC surface.
 	audit *audit.Recorder
+	// logUids caches, per (jobID|logName), the uid of the log's blob (F-21.6
+	// storage redesign): a job's log stream appends MANY chunks per log file,
+	// so establishing the uid once (ensureLog) spares the hot path a database
+	// round trip per chunk. Entries are evicted when the job reaches a
+	// terminal state (finalizeJobLogs) — a job's logs are sealed at that
+	// point, so caching them forever would leak memory across a fleet's
+	// worth of finished jobs.
+	logUidsMu sync.Mutex
+	logUids   map[string]string
 	// metrics records the API's Prometheus metrics (F-20) at the gRPC surface's
 	// hot spots (job status, log bytes, token minting, secret decryption,
 	// notifications, artifact bytes, worker hub, event-log lag). It is nil
@@ -180,6 +196,12 @@ func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient
 		logCursors:  make(map[string]int64),
 		coalescer:   newLogCoalescer(logCoalesceWindow),
 		published:   make(map[int64]struct{}),
+		logUids:     make(map[string]string),
+		// The (namespace, name) <-> storage_object bridge (F-21.6 storage
+		// redesign), wired from the clients at construction — the SAME
+		// instance family the HTTP face uses (each face builds its own over
+		// the shared clients; both translate identically).
+		resolver: NewFileResolver(db, artifacts),
 	}
 }
 
@@ -190,6 +212,13 @@ func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient
 // server uses.
 func (s *GRPCServer) SetAuthz(e *authz.Engine) {
 	s.authz = e
+}
+
+// SetResolver installs the (namespace, name) <-> storage_object bridge used
+// by every translated artifact/log path (F-21.6 storage redesign). The HTTP
+// face shares the SAME resolver instance (installed via Server.SetResolver).
+func (s *GRPCServer) SetResolver(fr *fileResolver) {
+	s.resolver = fr
 }
 
 // SetMetrics attaches the API's Prometheus metric set (F-20). When left nil
@@ -504,7 +533,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			MaxAttempts: updated.GetMaxAttempts(),
 		})
 		s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
-		s.recordJobStatusMetrics(updated)
+		s.recordJobStatusMetrics(ctx, updated)
 		return toAPIJob(updated), nil
 	}
 	// A report from a named worker for a job that targets a worker group is a
@@ -577,7 +606,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	// Append the status change to the shared event log so other API pods fan
 	// it out to their UI clients (F-23).
 	s.publishJobStatus(ctx, req.GetJobId(), updated.GetStatus(), updated.GetAttempt(), updated.GetMaxAttempts())
-	s.recordJobStatusMetrics(updated)
+	s.recordJobStatusMetrics(ctx, updated)
 	return toAPIJob(updated), nil
 }
 
@@ -764,17 +793,27 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 	// service is down and the retry budget is exhausted) drops the chunk
 	// rather than failing the stream, so an artifacts outage never tears down
 	// a target's log stream.
+	//
+	// DURABILITY DECOUPLEMENT (critical): persistence runs on a DETACHED
+	// context (context.Background), NOT the stream's. A job that finishes in
+	// milliseconds makes the worker CLOSE the stream almost immediately; the
+	// stream's context then cancels, and any persistence still in flight
+	// (establishing the log's record, appending the blob) abandons the
+	// BUFFERED chunks — losing exactly the lines a consumer (the UI, an e2e
+	// assertion) waits for. The persisted log must be complete even when the
+	// producing stream is already gone.
 	if s.artifacts != nil {
+		durCtx := context.Background()
 		stepLogName := stepName + ".log"
 		// Persist the per-step log first. If it cannot be persisted (the
 		// artifacts service is down and the retry budget is exhausted) the
 		// chunk is dropped and the combined job log is skipped too — both
 		// files live in the same (unreachable) store, so retrying the second
 		// would only double the time spent blocked on a down service.
-		if _, err := s.appendLogWithRetry(ctx, jobIDStr, stepLogName, data); err != nil {
+		if _, err := s.appendLogWithRetry(durCtx, jobIDStr, stepLogName, data); err != nil {
 			s.logger.Warn("api: dropping log chunk (artifacts unreachable)",
 				"job", jobID, "step", stepName, "err", err)
-		} else if size, err := s.appendLogWithRetry(ctx, jobIDStr, jobLogName, data); err != nil {
+		} else if size, err := s.appendLogWithRetry(durCtx, jobIDStr, jobLogName, data); err != nil {
 			s.logger.Warn("api: dropping job log chunk (artifacts unreachable)",
 				"job", jobID, "log", jobLogName, "err", err)
 		} else {
@@ -830,28 +869,104 @@ func (s *GRPCServer) appendLogWithRetry(ctx context.Context, jobID, name string,
 	return 0, err
 }
 
-// appendLog appends data to the named log for the job via the artifacts
-// service's AppendLog client stream. A single chunk carries both the log's
-// metadata and the data. It returns the log's total size (in bytes) after the
-// append, which the caller uses to publish a job_log_updated pointer event
-// (F-23): the publisher already knows the size from the AppendLog response, so
-// no extra GetLog metadata call is needed.
+// logUIDFor returns the uid of the blob holding the job's named log,
+// ESTABLISHING it (allocate-kind=log) when the record does not exist yet.
+// Established uids are cached per (jobID|name) so a log stream's BURSTS of
+// chunks cause no per-chunk database round trips (F-21.6 storage redesign).
+// Allocation adopts a sibling pod's provisional record for the same
+// coordinate (stable uid), so racing creators converge on one blob.
+func (s *GRPCServer) logUIDFor(ctx context.Context, jobID, name string) (string, error) {
+	key := jobID + "|" + name
+	s.logUidsMu.Lock()
+	if uid, ok := s.logUids[key]; ok {
+		s.logUidsMu.Unlock()
+		return uid, nil
+	}
+	s.logUidsMu.Unlock()
+	if s.resolver == nil {
+		return "", status.Error(codes.Unavailable, "file resolver is not configured")
+	}
+	rec, err := s.resolver.ensureLog(ctx, jobID, name)
+	if err != nil {
+		return "", err
+	}
+	s.logUidsMu.Lock()
+	s.logUids[key] = rec.GetUid()
+	s.logUidsMu.Unlock()
+	return rec.GetUid(), nil
+}
+
+// appendLog appends data to the named log for the job via the blob service's
+// AppendBlob stream (addressed by the log's uid, F-21.6 storage redesign). It
+// returns the log's total size (in bytes) after the append, which the caller
+// uses to publish a job_log_updated pointer event (F-23): the publisher
+// already knows the size from the AppendBlob response, so no extra stat call
+// is needed. The record's size is reconciled BEST-EFFORT (syncLogSize swallows
+// its own errors — the next append retries, and the size only feeds UI
+// polling, never correctness).
 func (s *GRPCServer) appendLog(ctx context.Context, jobID, name string, data []byte) (int64, error) {
-	stream, err := s.artifacts.AppendLog(ctx)
+	uid, err := s.logUIDFor(ctx, jobID, name)
 	if err != nil {
 		return 0, err
 	}
-	if err := stream.Send(&artifactspb.ArtifactChunk{
-		Metadata: &artifactspb.Artifact{Namespace: jobID, Name: name},
-		Data:     data,
-	}); err != nil {
+	stream, err := s.artifacts.AppendBlob(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if err := stream.Send(&artifactspb.BlobChunk{Id: uid, Data: data}); err != nil {
 		return 0, err
 	}
 	resp, err := stream.CloseAndRecv()
 	if err != nil {
 		return 0, err
 	}
-	return resp.GetArtifact().GetSize(), nil
+	size := resp.GetSize()
+	if s.resolver != nil {
+		s.resolver.syncLogSize(ctx, uid, size)
+	}
+	return size, nil
+}
+
+// finalizeJobLogs seals a job's logs when the job reaches a TERMINAL state
+// (F-21.6 storage redesign): each cached (job, log) uid's record size is
+// reconciled with the blob's FINAL size (the last append's response is the
+// authority, but a belt-and-braces stat here covers the corner where the
+// final chunk was dropped by the retry budget) and the uid CACHE ENTRIES are
+// EVICTED (a terminated job's logs are sealed; caching them forever would
+// leak memory across a fleet's worth of finished jobs). Best-effort: a
+// failure here never affects the status report that triggered it.
+func (s *GRPCServer) finalizeJobLogs(ctx context.Context, jobID int64) {
+	jobIDStr := strconv.FormatInt(jobID, 10)
+	s.logUidsMu.Lock()
+	keys := make([]string, 0)
+	for key := range s.logUids {
+		if strings.HasPrefix(key, jobIDStr+"|") {
+			keys = append(keys, key)
+		}
+	}
+	s.logUidsMu.Unlock()
+	if len(keys) == 0 || s.resolver == nil {
+		return
+	}
+	for _, key := range keys {
+		uid := s.takeLogUID(key)
+		if uid == "" {
+			continue
+		}
+		ref := &artifactspb.BlobRef{Id: uid}
+		if stat, err := s.artifacts.StatBlob(ctx, ref); err == nil {
+			s.resolver.syncLogSize(ctx, uid, stat.GetSize())
+		}
+	}
+}
+
+// takeLogUID pops a cached uid (under the lock) for eviction.
+func (s *GRPCServer) takeLogUID(key string) string {
+	s.logUidsMu.Lock()
+	defer s.logUidsMu.Unlock()
+	uid := s.logUids[key]
+	delete(s.logUids, key)
+	return uid
 }
 
 // jobLogStreamName maps a JobLogStream enum to the short name the UI uses.
@@ -1516,113 +1631,259 @@ func (s *GRPCServer) mintJobToken(ctx context.Context, job *apipb.Job) string {
 // Artifact proxy (forwarded to the artifacts service)
 // ---------------------------------------------------------------------------
 
-// UploadArtifact proxies a client-streaming artifact upload to the artifacts
-// service.
-func (s *GRPCServer) UploadArtifact(stream grpc.ClientStreamingServer[artifactspb.ArtifactChunk, artifactspb.UploadArtifactResponse]) error {
-	// The first chunk carries the namespace; verify the caller's job token is
-	// scoped to it before proxying the upload.
-	first, err := stream.Recv()
-	if err != nil {
-		return err
+// toLogFile renders a storage_object record as the target-facing LogFile
+// view (the logical file contract: namespace, name, size, born-at).
+func toLogFile(rec *dbpb.StorageObject) *apipb.LogFile {
+	return &apipb.LogFile{
+		Namespace: rec.GetNamespace(),
+		Name:      rec.GetName(),
+		Size:      rec.GetSize(),
+		CreatedAt: rec.GetCreatedAt(),
 	}
-	if err := s.checkArtifactToken(stream.Context(), first.GetMetadata().GetNamespace()); err != nil {
-		return err
+}
+
+// pumpUpload relays a target-facing LogFileChunk stream into a blob PutBlob
+// CLIENT stream seeded with the record's uid, measuring the SHA-256 of the
+// relayed bytes AS THEY FLOW (the API is the meter of record — writer
+// attestations are never trusted). It returns the measured hash and the
+// blob-reported stored size.
+func pumpUpload(in grpc.ClientStreamingServer[apipb.LogFileChunk, apipb.LogFile], out grpc.ClientStreamingClient[artifactspb.BlobChunk, artifactspb.BlobStat], first *apipb.LogFileChunk, uid string) (string, int64, error) {
+	h := sha256.New()
+	send := func(f *apipb.LogFileChunk, withID bool) error {
+		ch := &artifactspb.BlobChunk{Data: f.GetData()}
+		if withID {
+			ch.Id = uid
+		}
+		h.Write(f.GetData())
+		return out.Send(ch)
 	}
-	remote, err := s.artifacts.UploadArtifact(stream.Context())
-	if err != nil {
-		return err
+	if err := send(first, true); err != nil {
+		return "", 0, err
 	}
-	var uploaded int64
-	if err := remote.Send(first); err != nil {
-		return err
-	}
-	uploaded += int64(len(first.GetData()))
 	for {
-		chunk, err := stream.Recv()
+		chunk, err := in.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return err
+			return "", 0, err
 		}
-		if err := remote.Send(chunk); err != nil {
-			return err
+		if err := send(chunk, false); err != nil {
+			return "", 0, err
 		}
-		uploaded += int64(len(chunk.GetData()))
 	}
-	resp, err := remote.CloseAndRecv()
+	stat, err := out.CloseAndRecv()
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), stat.GetSize(), nil
+}
+
+// UploadArtifact accepts a client-streaming artifact upload from an execution
+// target and stores it THROUGH THE STORAGE-OBJECT LEDGER (F-21.6 storage
+// redesign): the target's (namespace, name) contract is translated to a
+// record (allocating one) and a blob (PutBlob by uid); the record is then
+// confirmed with the blob-reported size and the API-measured SHA-256. A job
+// may WRITE only into its own (job-id) namespace — the publish_artifact step
+// relies on exactly this; run namespaces ("run:<id>") and the package
+// registry are read-only for jobs (movement between namespaces is the
+// API-side promotion operation).
+func (s *GRPCServer) UploadArtifact(stream grpc.ClientStreamingServer[apipb.LogFileChunk, apipb.LogFile]) (err error) {
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	meta := first.GetMetadata()
+	if meta == nil || meta.GetNamespace() == "" || meta.GetName() == "" {
+		return status.Error(codes.InvalidArgument, "first chunk must carry metadata with namespace and name")
+	}
+	ns, name := meta.GetNamespace(), meta.GetName()
+	if strings.HasPrefix(ns, "run:") {
+		return status.Error(codes.PermissionDenied, "a job cannot upload into a run's namespace")
+	}
+	if ns == "packages" {
+		// The registry is human/CI territory (POST /api/packages); a job
+		// deposits packages into its OWN namespace via publish_artifact.
+		return status.Error(codes.PermissionDenied, "a job cannot upload into the package registry")
+	}
+	if err := s.checkArtifactToken(stream.Context(), ns); err != nil {
+		return err
+	}
+	if s.resolver == nil {
+		return status.Error(codes.Unavailable, "file resolver is not configured")
+	}
+	// Provision the record. Allocation ADOPTS a sibling's provisional record
+	// for the same coordinate (stable uid across interruptions), so a
+	// restarted uploader converges on the same blob.
+	rec, err := s.resolver.allocate(stream.Context(), &dbpb.AllocateStorageObjectRequest{
+		Kind:       "artifact",
+		Namespace:  ns,
+		Name:       name,
+		UploadedBy: "job:" + ns, // a writable namespace is always the job's own id
+	})
+	if err != nil {
+		return err
+	}
+	// Clear any PARTIAL blob a previous interrupted upload left at this uid
+	// (the allocation adopts the sibling's record; the blob may linger
+	// non-empty, and a put to a non-empty id fails) — a no-op when the blob
+	// is absent.
+	_, _ = s.artifacts.DeleteBlob(stream.Context(), &artifactspb.BlobRef{Id: rec.GetUid()})
+	put, err := s.artifacts.PutBlob(stream.Context())
+	if err != nil {
+		return err
+	}
+	sum, size, err := pumpUpload(stream, put, first, rec.GetUid())
+	if err != nil {
+		// Interrupted upload: abandon the partial blob (the record stays
+		// provisional and is reusable via adoption; pruning ages it out).
+		_, _ = s.artifacts.DeleteBlob(stream.Context(), &artifactspb.BlobRef{Id: rec.GetUid()})
+		return err
+	}
+	confirmed, err := s.resolver.confirm(stream.Context(), rec.GetUid(), size, sum)
 	if err != nil {
 		return err
 	}
 	if s.metrics != nil {
-		s.metrics.AddArtifactBytes("upload", "artifact", uploaded)
+		s.metrics.AddArtifactBytes("upload", "artifact", size)
 	}
-	return stream.SendAndClose(resp)
+	return stream.SendAndClose(toLogFile(confirmed))
 }
 
-// DownloadArtifact proxies a server-streaming artifact download from the
-// artifacts service.
-func (s *GRPCServer) DownloadArtifact(req *artifactspb.DownloadArtifactRequest, stream grpc.ServerStreamingServer[artifactspb.ArtifactChunk]) error {
-	if err := s.checkArtifactToken(stream.Context(), req.GetNamespace()); err != nil {
+// DownloadArtifact streams a file back to an execution target. The
+// (namespace, name) contract is translated to the record's blob uid; the
+// blob's HEAD FRAME (total size) is folded into the LogFile metadata so the
+// target sees the TRUE size (exact for still-growing logs). A "run:<id>"
+// pseudo-namespace is substituted with the run's actual store namespace
+// after verifying the caller's job belongs to that run (F-21.6); a numeric
+// namespace is the caller's own job-id namespace. Retrieval is recorded on
+// the record (best-effort analytics).
+func (s *GRPCServer) DownloadArtifact(req *apipb.LogFileRef, stream grpc.ServerStreamingServer[apipb.LogFileChunk]) error {
+	effective, err := s.effectiveArtifactNamespace(stream.Context(), req.GetNamespace())
+	if err != nil {
 		return err
 	}
-	remote, err := s.artifacts.DownloadArtifact(stream.Context(), req)
+	if s.resolver == nil {
+		return status.Error(codes.Unavailable, "file resolver is not configured")
+	}
+	rec, err := s.resolver.getFile(stream.Context(), effective, req.GetName())
 	if err != nil {
+		return err
+	}
+	remote, err := s.artifacts.GetBlob(stream.Context(), &artifactspb.BlobRef{Id: rec.GetUid()})
+	if err != nil {
+		return err
+	}
+	head, err := remote.Recv()
+	if err != nil {
+		return err
+	}
+	view := toLogFile(rec)
+	view.Size = head.GetSize() // the blob's truth (authoritative for logs)
+	if err := stream.Send(&apipb.LogFileChunk{Metadata: view}); err != nil {
 		return err
 	}
 	var downloaded int64
 	for {
 		chunk, err := remote.Recv()
 		if err == io.EOF {
-			if s.metrics != nil {
-				s.metrics.AddArtifactBytes("download", "artifact", downloaded)
-			}
-			return nil
+			break
 		}
 		if err != nil {
 			return err
 		}
-		if err := stream.Send(chunk); err != nil {
+		if err := stream.Send(&apipb.LogFileChunk{Data: chunk.GetData()}); err != nil {
 			return err
 		}
 		downloaded += int64(len(chunk.GetData()))
 	}
+	if s.metrics != nil {
+		s.metrics.AddArtifactBytes("download", "artifact", downloaded)
+	}
+	s.resolver.touch(stream.Context(), rec.GetUid())
+	return nil
 }
 
-// GetArtifact proxies an artifact metadata lookup to the artifacts service.
-func (s *GRPCServer) GetArtifact(ctx context.Context, req *artifactspb.GetArtifactRequest) (*artifactspb.Artifact, error) {
-	if err := s.checkArtifactToken(ctx, req.GetNamespace()); err != nil {
+// GetArtifact returns a file's metadata (translated from its record).
+func (s *GRPCServer) GetArtifact(ctx context.Context, req *apipb.LogFileRef) (*apipb.LogFile, error) {
+	effective, err := s.effectiveArtifactNamespace(ctx, req.GetNamespace())
+	if err != nil {
 		return nil, err
 	}
-	return s.artifacts.GetArtifact(ctx, req)
+	if s.resolver == nil {
+		return nil, status.Error(codes.Unavailable, "file resolver is not configured")
+	}
+	rec, err := s.resolver.getFile(ctx, effective, req.GetName())
+	if err != nil {
+		return nil, err
+	}
+	return toLogFile(rec), nil
 }
 
-// ListArtifacts proxies an artifact listing to the artifacts service. A
-// non-empty namespace is scoped to that namespace's token; an empty namespace
-// lists all artifacts and is not job-scoped.
-func (s *GRPCServer) ListArtifacts(ctx context.Context, req *artifactspb.ListArtifactsRequest) (*artifactspb.ListArtifactsResponse, error) {
-	if req.GetNamespace() != "" {
-		if err := s.checkArtifactToken(ctx, req.GetNamespace()); err != nil {
+// ListArtifacts lists a namespace's files (translated from its records). A
+// non-empty namespace is scoped to that namespace's token; an empty
+// namespace lists all artifacts and is not job-scoped.
+func (s *GRPCServer) ListArtifacts(ctx context.Context, req *apipb.ListLogFilesRequest) (*apipb.ListLogFilesResponse, error) {
+	namespace := req.GetNamespace()
+	effective := namespace
+	if namespace != "" {
+		var err error
+		effective, err = s.effectiveArtifactNamespace(ctx, namespace)
+		if err != nil {
 			return nil, err
 		}
 	}
-	return s.artifacts.ListArtifacts(ctx, req)
-}
-
-// DeleteArtifact proxies an artifact deletion to the artifacts service.
-func (s *GRPCServer) DeleteArtifact(ctx context.Context, req *artifactspb.DeleteArtifactRequest) (*emptypb.Empty, error) {
-	if err := s.checkArtifactToken(ctx, req.GetNamespace()); err != nil {
+	if s.resolver == nil {
+		return nil, status.Error(codes.Unavailable, "file resolver is not configured")
+	}
+	objects, err := s.resolver.listFiles(ctx, effective, "artifact")
+	if err != nil {
 		return nil, err
 	}
-	return s.artifacts.DeleteArtifact(ctx, req)
+	out := &apipb.ListLogFilesResponse{}
+	for _, o := range objects {
+		out.Files = append(out.Files, toLogFile(o))
+	}
+	return out, nil
+}
+
+// DeleteArtifact removes a file (record THEN blob). A job may delete only
+// from its own (job-id) namespace; run namespaces and the package registry
+// are read-only for jobs (F-21.6).
+func (s *GRPCServer) DeleteArtifact(ctx context.Context, req *apipb.LogFileRef) (*emptypb.Empty, error) {
+	ns := req.GetNamespace()
+	if strings.HasPrefix(ns, "run:") {
+		return nil, status.Error(codes.PermissionDenied, "a job cannot delete from a run's namespace")
+	}
+	if ns == "packages" {
+		return nil, status.Error(codes.PermissionDenied, "a job cannot delete from the package registry")
+	}
+	if err := s.checkArtifactToken(ctx, ns); err != nil {
+		return nil, err
+	}
+	if s.resolver == nil {
+		return nil, status.Error(codes.Unavailable, "file resolver is not configured")
+	}
+	if err := s.resolver.delete(ctx, ns, req.GetName()); err != nil {
+		return nil, err
+	}
+	return &emptypb.Empty{}, nil
 }
 
 // checkArtifactToken, when job-token auth is enabled, verifies the caller's
 // job token is scoped to the job that owns the artifact. A job's artifacts
 // and logs use the job's id as the namespace, so the namespace is parsed back
 // to a job id and checked against the token. It is a no-op when job-token
-// auth is disabled or the namespace is empty (not job-scoped). Namespaces
-// that are not numeric job ids cannot be job-token-scoped.
+// auth is disabled or the namespace is empty (not job-scoped).
+//
+// F-21.6 widens READ access to the run's store namespace: a namespace of the
+// form "run:<id>" is substituted with the run's ACTUAL store namespace (the
+// run's id — the database service fetches the run's packages there) and the
+// caller's token is checked against the run's OWNING job (the job that
+// presents the token must belong to that run). Writes (uploads) are never
+// accepted into a run namespace — a job deposits packages into ITS OWN
+// (job-id) namespace via the publish_artifact step, and movement between
+// namespaces is the promotion operation (API-side, user-authenticated).
 func (s *GRPCServer) checkArtifactToken(ctx context.Context, namespace string) error {
 	if !s.jobAuth.Enabled() || namespace == "" {
 		return nil
@@ -1632,6 +1893,70 @@ func (s *GRPCServer) checkArtifactToken(ctx context.Context, namespace string) e
 		return status.Error(codes.InvalidArgument, "invalid artifact namespace")
 	}
 	return s.checkJobToken(ctx, id, false)
+}
+
+// effectiveArtifactNamespace resolves the namespace a proxied artifact call
+// should ADDRESS, enforcing the caller's job-token scope (when job-token
+// auth is enabled):
+//
+//   - an EMPTY namespace (list-all) passes through unchanged;
+//   - the package REGISTRY namespace ("packages") is PUBLIC for reads: any
+//     job with a valid (ACTIVE) token may download published packages. It is
+//     not confusable with a job-id namespace (it is not numeric), so only the
+//     token/activity check applies — no ownership check;
+//   - a NUMERIC namespace is the caller's own job-id namespace (verified
+//     against the token when auth is enabled);
+//   - anything ELSE (including the retired "run:<id>" pseudo-namespace — run
+//     namespaces no longer hold files since the storage redesign; a run's
+//     packages are pinned by the per-run snapshot and read straight from the
+//     registry) is rejected.
+func (s *GRPCServer) effectiveArtifactNamespace(ctx context.Context, namespace string) (string, error) {
+	if namespace == "" {
+		return namespace, nil
+	}
+	// The package REGISTRY namespace (F-21.6) is PUBLIC for reads: any job
+	// with a valid (active) token may download published packages.
+	if namespace == "packages" {
+		if s.jobAuth.Enabled() {
+			token := bearerToken(ctx)
+			if token == "" {
+				return "", status.Error(codes.Unauthenticated, "job token is required")
+			}
+			jobID, verr := s.jobAuth.Verify(ctx, token)
+			if verr != nil {
+				return "", status.Error(codes.Unauthenticated, verr.Error())
+			}
+			if err := s.checkJobActive(ctx, jobID); err != nil {
+				return "", err
+			}
+		}
+		return namespace, nil
+	}
+	id, err := strconv.ParseInt(namespace, 10, 64)
+	if err != nil {
+		return "", status.Errorf(codes.InvalidArgument, "invalid artifact namespace %q (allowed: a job id, or \"packages\")", namespace)
+	}
+	if err := s.checkJobToken(ctx, id, false); err != nil {
+		return "", err
+	}
+	return namespace, nil
+}
+
+// checkJobActive enforces checkJobToken's LIVE-STATUS gate for a job id whose
+// token has ALREADY been verified (avoiding a double verify): the job must be
+// pending or running. A nil db client skips the check (tests parity).
+func (s *GRPCServer) checkJobActive(ctx context.Context, jobID int64) error {
+	if s.db == nil {
+		return nil
+	}
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: jobID})
+	if err != nil {
+		return status.Error(codes.PermissionDenied, "caller's job is unknown")
+	}
+	if jobStatusIsTerminal(job.GetStatus()) {
+		return status.Error(codes.PermissionDenied, "job is no longer running; its token is invalid")
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1681,8 +2006,20 @@ func (s *GRPCServer) updateWorkerMetrics() {
 // recordJobStatusMetrics records a job status transition (F-20) and, when the
 // job reached a terminal state with both a start and finish timestamp, its
 // duration. It is a no-op when metrics are disabled.
-func (s *GRPCServer) recordJobStatusMetrics(job *dbpb.Job) {
-	if s.metrics == nil || job == nil {
+func (s *GRPCServer) recordJobStatusMetrics(ctx context.Context, job *dbpb.Job) {
+	if job == nil {
+		return
+	}
+	// Seal the job's logs when it reaches a terminal state (F-21.6 storage
+	// redesign): reconcile the records' sizes with the blobs' final sizes and
+	// evict the per-(job,log) uid cache (a terminated job's logs are sealed;
+	// caching them forever leaks memory across a fleet's worth of finished
+	// jobs). Independent of metrics (finalization runs even when metrics are
+	// disabled).
+	if jobStatusIsTerminal(job.GetStatus()) {
+		s.finalizeJobLogs(ctx, job.GetId())
+	}
+	if s.metrics == nil {
 		return
 	}
 	status := jobStatusName(job.GetStatus())
@@ -1781,27 +2118,33 @@ func bearerToken(ctx context.Context) string {
 
 func toAPIJob(job *dbpb.Job) *apipb.Job {
 	return &apipb.Job{
-		Id:                  job.GetId(),
-		PipelineId:          job.GetPipelineId(),
-		Name:                job.GetName(),
-		Status:              job.GetStatus(),
-		TargetGroup:         job.GetTargetGroup(),
-		StartedAt:           job.GetStartedAt(),
-		FinishedAt:          job.GetFinishedAt(),
-		Spec:                job.GetSpec(),
-		Attempt:             job.GetAttempt(),
-		MaxAttempts:         job.GetMaxAttempts(),
-		DependsOn:           job.GetDependsOn(),
-		StepResults:         job.GetStepResults(),
-		Outputs:             job.GetOutputs(),
-		IgnoreFailed:        job.GetIgnoreFailed(),
-		FailureMode:         job.GetFailureMode(),
-		StepBarrier:         job.GetStepBarrier(),
-		Key:                 job.GetKey(),
-		TriggerName:         job.GetTriggerName(),
-		TriggerType:         job.GetTriggerType(),
-		UpstreamClaims:      job.GetUpstreamClaims(),
-		RunParams:           job.GetRunParams(),
+		Id:             job.GetId(),
+		PipelineId:     job.GetPipelineId(),
+		Name:           job.GetName(),
+		Status:         job.GetStatus(),
+		TargetGroup:    job.GetTargetGroup(),
+		StartedAt:      job.GetStartedAt(),
+		FinishedAt:     job.GetFinishedAt(),
+		Spec:           job.GetSpec(),
+		Attempt:        job.GetAttempt(),
+		MaxAttempts:    job.GetMaxAttempts(),
+		DependsOn:      job.GetDependsOn(),
+		StepResults:    job.GetStepResults(),
+		Outputs:        job.GetOutputs(),
+		IgnoreFailed:   job.GetIgnoreFailed(),
+		FailureMode:    job.GetFailureMode(),
+		StepBarrier:    job.GetStepBarrier(),
+		Key:            job.GetKey(),
+		TriggerName:    job.GetTriggerName(),
+		TriggerType:    job.GetTriggerType(),
+		UpstreamClaims: job.GetUpstreamClaims(),
+		RunId:          job.GetRunId(),
+		RunParams:      job.GetRunParams(),
+		// The run's resolved package snapshot (F-21.6): reference name →
+		// stored file name. Handed to the execution target so the
+		// download_artifact step handler can resolve a spec.artifacts
+		// reference to the version the run picked.
+		Artifacts:           job.GetArtifacts(),
 		ApprovalMessage:     job.GetApprovalMessage(),
 		ApprovalDecision:    job.GetApprovalDecision(),
 		ApprovalActor:       job.GetApprovalActor(),

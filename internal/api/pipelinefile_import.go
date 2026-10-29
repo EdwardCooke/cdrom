@@ -148,6 +148,21 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 	req.VariableSets = variableSetsToProto(variableSets)
 	req.SecretSources = secretSourcesToProto(secretSources)
 
+	// The pipeline's named package references (F-21.6, spec.artifacts):
+	// compiled + validated (a malformed entry is an actionable error) and
+	// carried to the database service alongside the pipeline. At run
+	// creation the database service resolves each reference against the
+	// package registry and records the per-run snapshot. Presence of the key
+	// (even null/empty) marks the request as mentioning the references, so
+	// an UPDATE replaces them (removing the key from the file clears them).
+	artifactsVal, hasArtifactsKey := doc.Spec.Get("artifacts")
+	artifacts, aErrs := pipelinefile.CompilePackageArtifacts(file, artifactsVal)
+	if len(aErrs) > 0 {
+		return nil, nil, nil, aErrs
+	}
+	req.Artifacts = artifacts
+	req.HasArtifacts = hasArtifactsKey
+
 	// The jobs (a name -> job-spec map): each job's name is its stable key
 	// (F-08), and its deployment options, steps, and variables are mapped onto
 	// the schema.

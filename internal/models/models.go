@@ -179,6 +179,33 @@ type SecretSourceRef struct {
 	Key string `json:"key"`
 }
 
+// PackageArtifact is one entry of a pipeline's spec.artifacts list (F-21.6):
+// a named reference to a PACKAGE the pipeline consumes. Name is how the
+// pipeline refers to the artifact (in a step's params or env); PackageName
+// is the package itself (defaulting to Name when empty); Tag pins the exact
+// version to use (ignored when UseLatest is true); AllowPreRelease opts into
+// pre-release versions (a tag carrying a "-" suffix, e.g. 6.6.6-rc.1);
+// PreReleaseRegex, when set alongside AllowPreRelease, restricts which
+// pre-release tags are eligible.
+type PackageArtifact struct {
+	// Name is the artifact's reference name (unique within the pipeline).
+	Name string `json:"name"`
+	// PackageName is the package's name in the registry; empty means "use
+	// Name".
+	PackageName string `json:"package_name,omitempty"`
+	// Tag is the exact version to use; unused when UseLatest is true.
+	Tag string `json:"tag,omitempty"`
+	// UseLatest selects the latest version of the package by date (ignoring
+	// Tag).
+	UseLatest bool `json:"use_latest"`
+	// AllowPreRelease opts into pre-release versions (otherwise only release
+	// tags are eligible).
+	AllowPreRelease bool `json:"allow_pre_release"`
+	// PreReleaseRegex, when non-empty (and AllowPreRelease is set), restricts
+	// eligibility to pre-release tags matching this regex.
+	PreReleaseRegex string `json:"pre_release_regex,omitempty"`
+}
+
 // Pipeline is a named, ordered definition of work to be executed.
 type Pipeline struct {
 	gorm.Model
@@ -288,6 +315,14 @@ type Pipeline struct {
 	// than a bool with a default tag) sidesteps GORM's zero-value omission:
 	// an explicit false must be writable.
 	PeriodicRefreshOverridesAllowed *bool `gorm:"column:periodic_refresh_overrides_allowed;not null;default:true" json:"periodic_refresh_overrides_allowed,omitempty"`
+	// Artifacts are the pipeline's named package references (F-21.6,
+	// spec.artifacts): the packages the pipeline consumes, with their version
+	// resolution settings. They are stored as a JSON document in a text
+	// column, like Params. When a run is created the database service
+	// resolves each reference against the package registry (the artifacts
+	// store's "packages" namespace) and records the resolution on the run
+	// (a per-run snapshot, like the rest of the spec — F-01/F-11).
+	Artifacts []PackageArtifact `gorm:"type:text;serializer:json" json:"artifacts,omitempty"`
 }
 
 // AllowsPeriodicRefreshOverrides reports whether the pipeline's file-directed
@@ -421,6 +456,11 @@ type PipelineVersion struct {
 	// declared at this version (F-21.5.1); see
 	// Pipeline.PeriodicRefreshSchedule.
 	PeriodicRefreshSchedule string `gorm:"column:periodic_refresh_schedule;size:128" json:"periodic_refresh_schedule,omitempty"`
+	// Artifacts are the pipeline's named package references at this version
+	// (F-21.6); see Pipeline.Artifacts. Captured in the snapshot so a run
+	// bound to this version resolves the SAME references the version
+	// declared.
+	Artifacts []PackageArtifact `gorm:"type:text;serializer:json" json:"artifacts,omitempty"`
 }
 
 // JobDefinitionSnapshot is the declarative form of a job definition as captured
@@ -649,6 +689,15 @@ type PipelineRun struct {
 	// revision, produced this run?" even after the source is repointed or
 	// detached.
 	SourceFileHash string `gorm:"column:source_file_hash;size:64" json:"source_file_hash,omitempty"`
+	// Artifacts is the run's RESOLVED package snapshot (F-21.6): a
+	// spec.artifacts reference name → the stored file name the reference
+	// resolved to when the run started ("<package>-<version>.<ext>", looked
+	// up in the package registry). Recorded like the rest of the spec
+	// (F-01/F-11) so a run always uses the version resolved when it started —
+	// re-resolving on a later run can pick up a newer version without
+	// changing what a past run did. Empty for a run whose pipeline declares
+	// no spec.artifacts.
+	Artifacts map[string]string `gorm:"type:text;serializer:json" json:"artifacts,omitempty"`
 	// StartedAt is when the run started (its first job began); nil until then.
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// FinishedAt is when the run reached a terminal status; nil while the run
@@ -1091,6 +1140,14 @@ type Job struct {
 	// creates one variable per key). Empty means the job has no every-key vault
 	// imports.
 	VaultImports []VaultImport `gorm:"type:text;serializer:json" json:"vault_imports,omitempty"`
+	// Artifacts is the run's RESOLVED package snapshot (F-21.6) denormalized
+	// onto the job instance at run creation: a spec.artifacts reference name →
+	// the stored file name the reference resolved to when the run started. The
+	// API hands it to the execution target so the download_artifact step
+	// handler can resolve a reference to the version the run picked. Empty for
+	// a job not part of a run (or a run whose pipeline declares no
+	// spec.artifacts).
+	Artifacts map[string]string `gorm:"type:text;serializer:json" json:"artifacts,omitempty"`
 	// ApprovalMessage is the (rendered) message an approval gate (F-13) shows
 	// to the user while the job is awaiting approval. It is set by the
 	// execution target when it reports the job awaiting_approval and is
@@ -1947,6 +2004,98 @@ const (
 	TagOwnerWorkerGroup     = "worker_group"
 )
 
+// StorageObject is the database's record of a file held by the artifacts
+// service (F-21.6 storage redesign). The artifacts service is a dumb blob
+// store keyed by the record's UID; what a file IS — its kind, namespace,
+// display name, size, content hash, package coordinates, provenance, and
+// activity counters — is THIS ROW.
+//
+// Lifecycle is two-phase: AllocateStorageObject inserts a PROVISIONAL row
+// (Confirmed=false) reserved for an inbound upload; ConfirmStorageObject
+// settles it (size, measured hash, Confirmed=true, CreatedAt refreshed to
+// the settlement instant). Provisional rows are invisible to Get/List/
+// Resolve; allocating over a (namespace, name) that already HAS a row
+// adopts the provisional one (crash recovery) and conflicts with a settled
+// one (immutability). At most one row ever occupies a (namespace, name) —
+// hence the plain unique index.
+//
+// The model does NOT embed gorm.Model (and so has HARD deletes, no
+// soft-delete column): a soft-deleted row would STILL OCCUPY the unique
+// (namespace, name) index, making a republication of the same name
+// impossible (the Tag model sidestepped the same hazard, F-29). Timestamps
+// are declared explicitly; CreatedAt is the SETTLEMENT instant (refreshed
+// by Confirm), not the allocation time.
+type StorageObject struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// UID is the record's globally-unique id (a UUID v4 string). It doubles
+	// as the artifacts service's blob key: the file's bytes sit at blob(UID).
+	UID string `gorm:"column:uid;size:36;uniqueIndex;not null" json:"uid"`
+	// Kind is the file's kind: "artifact" (immutable) or "log" (grown by
+	// appends). See the StorageObjKind* constants.
+	Kind string `gorm:"size:16;not null;index" json:"kind"`
+	// Namespace is the logical scope the file belongs to (a job id for a
+	// job's artifacts/logs, a run id for a run's files, "packages" for the
+	// registry). Free-form; the database is agnostic about its meaning.
+	Namespace string `gorm:"size:255;not null;uniqueIndex:idx_storage_obj_coord,index:idx_storage_obj_pkg,priority:1" json:"namespace"`
+	// Name is the file's display name within the namespace. Together with
+	// Namespace it is unique (among all rows, provisionals included).
+	Name string `gorm:"size:512;not null;uniqueIndex:idx_storage_obj_coord" json:"name"`
+	// Size is the file's size in bytes (settled at confirm; tracked for
+	// logs as they grow).
+	Size int64 `json:"size"`
+	// ContentSHA256 is the SHA-256 (lowercase hex) of the file's content,
+	// MEASURED by the artifacts service at store time. Empty for logs
+	// (still-growing; hashing them on every append taxes the tail path).
+	ContentSHA256 string `gorm:"column:content_sha256;size:64" json:"content_sha256,omitempty"`
+	// IsPackage marks a registry filing (namespace "packages"): the
+	// package-coordinate fields are populated for it. Indexed jointly with
+	// Namespace for resolution queries.
+	IsPackage bool `gorm:"not null;default:false;index:idx_storage_obj_pkg,priority:2" json:"is_package"`
+	// PackageName is the package's name (registry filings only). Indexed for
+	// resolution.
+	PackageName string `gorm:"column:package_name;size:255;index:idx_storage_obj_pkg_ver" json:"package_name"`
+	// Version is the package version (registry filings only).
+	Version string `gorm:"column:version;size:255;index:idx_storage_obj_pkg_ver,priority:2" json:"version"`
+	// IsPreRelease is the CHANNEL stamp set AT PUBLISH TIME (explicit, from
+	// the publisher's declaration) — never derived from the version string.
+	// Resolution excludes flagged records from the release channel unless
+	// opted in.
+	IsPreRelease bool `gorm:"column:is_pre_release;not null;default:false;index" json:"is_pre_release"`
+	// UploadedBy is the actor that stored the file (a user id, an api-key
+	// owner, a service account, or "job:<id>" for machine publications).
+	UploadedBy string `gorm:"column:uploaded_by;size:255" json:"uploaded_by,omitempty"`
+	// CreatedAt is the record's VISIBILITY instant: for a settled record it
+	// is the settlement time (when the file appeared); for a provisional one
+	// it is merely the reservation time (invisible anyway). Explicit (the
+	// model does not embed gorm.Model — see the type comment).
+	CreatedAt time.Time `json:"created_at"`
+	// UpdatedAt is the last modification of the row (analytic counters, log
+	// size syncs…).
+	UpdatedAt time.Time `json:"updated_at"`
+	// LastDownloadedAt is the most recent retrieval (analytics; touched
+	// best-effort). Zero means never downloaded.
+	LastDownloadedAt time.Time `gorm:"column:last_downloaded_at" json:"last_downloaded_at,omitempty"`
+	// DownloadCount is the cumulative retrievals (analytics; touched
+	// best-effort).
+	DownloadCount int64 `gorm:"column:download_count;not null;default:0" json:"download_count"`
+	// Extras is a forward-compatible attribute bag (opaque JSON) for
+	// metadata that deserves no column yet.
+	Extras string `gorm:"type:text" json:"extras,omitempty"`
+	// Confirmed distinguishes SETTLED records (visible to listings and
+	// resolution) from PROVISIONAL reservations awaiting their upload's
+	// confirm.
+	Confirmed bool `gorm:"not null;default:false;index" json:"confirmed"`
+}
+
+// Kinds of storage object (StorageObject.Kind).
+const (
+	StorageObjKindArtifact = "artifact"
+	StorageObjKindLog      = "log"
+)
+
+// TableName pins the storage object's table name.
+func (StorageObject) TableName() string { return "storage_objects" }
+
 // All lists every model the database service must migrate. Add new entities
 // here so AutoMigrate always sees the complete set.
 func All() []any {
@@ -1980,5 +2129,6 @@ func All() []any {
 		&SourceCredential{},
 		&PipelineSource{},
 		&PipelineSourceState{},
+		&StorageObject{},
 	}
 }

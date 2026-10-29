@@ -134,6 +134,7 @@ func (s *Sink) Close() {
 		select {
 		case <-s.done:
 		case <-time.After(2 * time.Second):
+			s.logger.Warn("logstream: flush timed out", "job", s.jobID, "timeout", 2*time.Second)
 		}
 	})
 }
@@ -166,8 +167,12 @@ func (s *Sink) drain() {
 		}
 		chunk, ok := <-s.queue
 		if !ok {
-			// Queue closed and drained: signal end of stream.
-			_ = stream.CloseSend()
+			// Wait for the API to finish handling all chunks before the job
+			// context is cancelled. CloseSend alone only half-closes the
+			// client side; the server may still be persisting the log data.
+			if _, err := stream.CloseAndRecv(); err != nil {
+				s.logger.Warn("logstream: close failed", "job", s.jobID, "err", err)
+			}
 			return
 		}
 		if err := stream.Send(chunk); err != nil {

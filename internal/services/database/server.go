@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -121,6 +122,8 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		// The per-pipeline admin gate (F-21.5.1): a create always carries the
 		// importer's stated value (present ⇒ honor the file's cadence).
 		PeriodicRefreshOverridesAllowed: ptrBool(req.GetPeriodicRefreshOverridesAllowed()),
+		// The pipeline's named package references (F-21.6, spec.artifacts).
+		Artifacts: packageArtifactsFromProto(req.GetArtifacts()),
 	}
 	if err := validateTriggers(req.GetTriggers()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -135,6 +138,9 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if err := validateSecretSources(req.GetSecretSources()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validatePackageArtifacts(req.GetArtifacts()); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	// The pipeline's job definitions (F-08) are validated as a DAG before
@@ -409,6 +415,17 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 		pipeline.SourceFile = req.GetSourceFile()
 		pipeline.SourceHash = req.GetSourceHash()
 	}
+	// When the requester carries the pipeline's package references (F-21.6 —
+	// a file import or a JSON update mentioning them; flagged by
+	// has_artifacts) they REPLACE the pipeline's existing references (an
+	// empty list clears them). Without the flag the references are left
+	// untouched, so a partial update never perturbs them.
+	if req.GetHasArtifacts() {
+		if err := validatePackageArtifacts(req.GetArtifacts()); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		pipeline.Artifacts = packageArtifactsFromProto(req.GetArtifacts())
+	}
 	// When job definitions are supplied (F-08) they replace the pipeline's
 	// existing job definitions: the old definitions are removed and the new
 	// ones created, and the resulting DAG is validated for cycles and unknown
@@ -645,7 +662,7 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 		// The version the run's job instances are created from (F-11): the
 		// specific version requested (a re-run of an old run reproduces that
 		// version's definition), or 0 for the pipeline's current definitions.
-		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run, int(req.GetPipelineVersion()))
+		createdRun, instances, err := s.createRunAndInstances(ctx, tx, &pipeline, run, int(req.GetPipelineVersion()))
 		if err != nil {
 			return err
 		}
@@ -713,6 +730,13 @@ type runDefinition struct {
 	// at run creation the referenced sets' variables are merged with the job's
 	// inline variables and denormalized onto the job instance.
 	variableSets []models.VariableSet
+	// artifacts are the pipeline's named package references (F-21.6,
+	// spec.artifacts): the pipeline's Artifacts for the current version, or
+	// the snapshot's for a specific version. At run creation each reference
+	// is resolved against the package registry and the resolution is recorded
+	// on the run (a per-run snapshot) and denormalized onto every job
+	// instance.
+	artifacts []models.PackageArtifact
 	// secretSources are the pipeline's named secret sources (F-21.1.3 / F-12):
 	// the pipeline's SecretSources for the current version, or the snapshot's
 	// for a specific version. A job's sourced variables reference a source by
@@ -742,7 +766,7 @@ type runDefinition struct {
 //
 // The run row is created first so the job instances can reference it. The
 // caller is responsible for committing (or rolling back) the transaction.
-func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, run *models.PipelineRun, requestedVersion int) (*models.PipelineRun, []models.Job, error) {
+func (s *Server) createRunAndInstances(ctx context.Context, tx *gorm.DB, pipeline *models.Pipeline, run *models.PipelineRun, requestedVersion int) (*models.PipelineRun, []models.Job, error) {
 	// Kickoff provenance (F-21.5.1): a run of an externally-sourced pipeline
 	// snaps the source's location and revision onto the run row, so "which
 	// file, at which revision, produced this run?" stays answerable even
@@ -779,6 +803,32 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 	// target can interpolate them into the job's spec (env, command, workdir)
 	// before the job runs.
 	runParams := runParamsFor(def.params, run.Params)
+	// The run's resolved package snapshot (F-21.6): each of the definition's
+	// spec.artifacts references is resolved AGAINST THE REGISTRY RECORDS NOW
+	// (inside the run-creation transaction, so the snapshot commits atomically
+	// with the run row). The snapshot maps reference name -> the winning
+	// filing's DISPLAY NAME in the registry namespace — a run's jobs download
+	// straight from the registry by that name (filed names are immutable, so
+	// the pin is permanent; no per-run copying). A resolution failure ABORTS
+	// run creation (a run is never created that cannot deliver its declared
+	// packages).
+	var artifactSnap map[string]string
+	if len(def.artifacts) > 0 {
+		artifactSnap, err = s.resolveRunPackages(tx, def.artifacts)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Record the snapshot on the run row (persisted with the run — a run
+		// always uses the version resolved when it started, F-01/F-11). The
+		// run row was INSERTed above (before its id was known), so the snapshot
+		// is persisted with a targeted UPDATE (a struct Updates so the JSON
+		// serializer applies).
+		run.Artifacts = artifactSnap
+		if err := tx.Model(&models.PipelineRun{}).Where("id = ?", run.ID).
+			Updates(&models.PipelineRun{Artifacts: artifactSnap}).Error; err != nil {
+			return nil, nil, err
+		}
+	}
 	// The run's concurrency keys are templatable (F-16): the pipeline's keys
 	// and each job's own keys (from its spec) are rendered as Go templates
 	// against the run's parameters and identity before they are denormalized
@@ -834,6 +884,11 @@ func (s *Server) createRunAndInstances(tx *gorm.DB, pipeline *models.Pipeline, r
 			// the instance (a snapshot, like the variables) so the API can
 			// expand each into one variable per vault key at dispatch.
 			VaultImports: jobDef.VaultImports,
+			// The run's resolved package snapshot (F-21.6) is denormalized
+			// onto the instance so the API can hand it to the execution
+			// target (the download_artifact step handler resolves a reference
+			// to the version the run picked).
+			Artifacts: artifactSnap,
 		}
 		if jobDef.Spec.Retry != nil {
 			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
@@ -949,7 +1004,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 				defs[i].Tags = byOwner[defs[i].ID]
 			}
 		}
-		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineTags: pipeline.Tags, variableSets: pipeline.VariableSets, secretSources: pipeline.SecretSources}, nil
+		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineTags: pipeline.Tags, variableSets: pipeline.VariableSets, secretSources: pipeline.SecretSources, artifacts: pipeline.Artifacts}, nil
 	}
 	// A run against a specific version: use that version's snapshot.
 	var version models.PipelineVersion
@@ -980,7 +1035,7 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		})
 		needsByIndex[i] = snapshot.Needs
 	}
-	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, pipelineTags: version.Tags, variableSets: version.VariableSets, secretSources: version.SecretSources, needsByIndex: needsByIndex}, nil
+	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, pipelineTags: version.Tags, variableSets: version.VariableSets, secretSources: version.SecretSources, artifacts: version.Artifacts, needsByIndex: needsByIndex}, nil
 }
 
 // jobConcurrencyKeys returns a job's effective concurrency keys (F-16): the
@@ -1104,7 +1159,7 @@ func (s *Server) TriggerRun(ctx context.Context, req *dbpb.TriggerRunRequest) (*
 			Params:          req.GetParams(),
 			UpstreamClaims:  upstreamClaimsFromStruct(req.GetUpstreamClaims()),
 		}
-		createdRun, instances, err := s.createRunAndInstances(tx, &pipeline, run, 0)
+		createdRun, instances, err := s.createRunAndInstances(ctx, tx, &pipeline, run, 0)
 		if err != nil {
 			return err
 		}
@@ -4733,6 +4788,73 @@ func validateSecretSources(srcs []*dbpb.SecretSource) error {
 	return nil
 }
 
+// packageArtifactsFromProto converts a list of proto package references
+// (F-21.6) into the model's form. An empty list yields nil.
+func packageArtifactsFromProto(refs []*dbpb.PackageArtifact) []models.PackageArtifact {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]models.PackageArtifact, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, models.PackageArtifact{
+			Name:            r.GetName(),
+			PackageName:     r.GetPackageName(),
+			Tag:             r.GetTag(),
+			UseLatest:       r.GetUseLatest(),
+			AllowPreRelease: r.GetAllowPreRelease(),
+			PreReleaseRegex: r.GetPreReleaseRegex(),
+		})
+	}
+	return out
+}
+
+// packageArtifactsToProto converts the model's package references (F-21.6)
+// into a list of proto references. An empty slice yields nil.
+func packageArtifactsToProto(refs []models.PackageArtifact) []*dbpb.PackageArtifact {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.PackageArtifact, 0, len(refs))
+	for i := range refs {
+		out = append(out, &dbpb.PackageArtifact{
+			Name:            refs[i].Name,
+			PackageName:     refs[i].PackageName,
+			Tag:             refs[i].Tag,
+			UseLatest:       refs[i].UseLatest,
+			AllowPreRelease: refs[i].AllowPreRelease,
+			PreReleaseRegex: refs[i].PreReleaseRegex,
+		})
+	}
+	return out
+}
+
+// validatePackageArtifacts validates a list of package references (F-21.6):
+// each reference has a non-empty, unique name; a reference that pins a
+// version (use_latest false) names a non-empty tag; and a pre_release_regex
+// (when set) COMPILES (defense in depth — the compiler catches it at import,
+// but a JSON-schema create bypasses the compiler).
+func validatePackageArtifacts(refs []*dbpb.PackageArtifact) error {
+	seen := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		if r.GetName() == "" {
+			return fmt.Errorf("a package reference has an empty name")
+		}
+		if seen[r.GetName()] {
+			return fmt.Errorf("duplicate package reference name %q", r.GetName())
+		}
+		seen[r.GetName()] = true
+		if !r.GetUseLatest() && r.GetTag() == "" {
+			return fmt.Errorf("package reference %q pins a version (use_latest is false) but names no tag", r.GetName())
+		}
+		if r.GetPreReleaseRegex() != "" {
+			if _, err := regexp.Compile("(?:" + r.GetPreReleaseRegex() + ")"); err != nil {
+				return fmt.Errorf("package reference %q: pre_release_regex %q does not compile: %v", r.GetName(), r.GetPreReleaseRegex(), err)
+			}
+		}
+	}
+	return nil
+}
+
 // jobDefinitionsFromProto converts a list of proto job definitions into the
 // model's job definitions (F-08). A definition's name defaults to its key when
 // empty, and its failure mode defaults to FailureModeAll. The definition's
@@ -4904,6 +5026,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		PeriodicRefreshInterval:         pipeline.PeriodicRefreshInterval,
 		PeriodicRefreshSchedule:         pipeline.PeriodicRefreshSchedule,
 		PeriodicRefreshOverridesAllowed: pipeline.AllowsPeriodicRefreshOverrides(),
+		Artifacts:                       packageArtifactsToProto(pipeline.Artifacts),
 	}
 }
 
@@ -4930,6 +5053,7 @@ func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 		SecretSources:           secretSourcesToProto(v.SecretSources),
 		PeriodicRefreshInterval: v.PeriodicRefreshInterval,
 		PeriodicRefreshSchedule: v.PeriodicRefreshSchedule,
+		Artifacts:               packageArtifactsToProto(v.Artifacts),
 	}
 }
 
@@ -4989,6 +5113,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		SecretSources:           pipeline.SecretSources,
 		PeriodicRefreshInterval: pipeline.PeriodicRefreshInterval,
 		PeriodicRefreshSchedule: pipeline.PeriodicRefreshSchedule,
+		Artifacts:               pipeline.Artifacts,
 	}
 }
 
@@ -5042,6 +5167,7 @@ func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 		SourceReference: run.SourceReference,
 		SourceVersion:   run.SourceVersion,
 		SourceFileHash:  run.SourceFileHash,
+		Artifacts:       run.Artifacts,
 	}
 	if run.Pipeline != nil {
 		// The pipeline's name (F-09): the scheduler's event loop matches a
@@ -5095,6 +5221,7 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		Tags:                job.Tags,
 		Variables:           variablesToProto(job.Variables),
 		VaultImports:        vaultImportsToProto(job.VaultImports),
+		Artifacts:           job.Artifacts,
 	}
 	if job.ConcurrencyAdmittedAt != nil {
 		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)
@@ -5666,10 +5793,16 @@ func runStatusName(status dbpb.RunStatus) string {
 	}
 }
 
-// grpcErr maps storage errors onto gRPC status codes.
+// grpcErr maps storage errors onto gRPC status codes. An error that is ALREADY
+// a gRPC status (deliberately coded by the callee) passes through UNCHANGED —
+// its code is the callee's intent (e.g. an InvalidArgument raised deep in a
+// transaction must not flatten to Internal).
 func grpcErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	if st, ok := status.FromError(err); ok {
+		return st.Err()
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return status.Error(codes.NotFound, "record not found")

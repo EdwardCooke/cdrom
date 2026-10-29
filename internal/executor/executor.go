@@ -179,7 +179,23 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			reportStepStatus(ctx, stepName, StepStatusFailed, err.Error(), nil)
 			return err
 		}
-		stepToRun = withEnv(step, map[string]string{StepOutputDirEnv: outDir})
+		stageExtra := map[string]string{StepOutputDirEnv: outDir}
+		// The job's staged working area (F-21.6), when provisioned by the
+		// execution target (via ContextWithStageArea), is exported to EVERY
+		// step as StageAreaEnv: the default home for downloaded/extracted/
+		// published packages — and addressable from any step (a shell step
+		// that builds a tree before a publish_artifact step relies on it).
+		// The target creates the directory once, at job start.
+		if sa := StageAreaFromContext(ctx); sa != nil && sa.Func != nil {
+			stageDir, serr := sa.Func()
+			if serr != nil {
+				err := fmt.Errorf("executor: step %q: create stage area: %w", stepName, serr)
+				reportStepStatus(ctx, stepName, StepStatusFailed, err.Error(), nil)
+				return err
+			}
+			stageExtra[StageAreaEnv] = stageDir
+		}
+		stepToRun = withEnv(step, stageExtra)
 		// Carry the step's condition context (F-06) into the handler's context
 		// so a step handler (the approval handler, F-13) can render a template
 		// (e.g. an approval message) against the same data a step's condition
@@ -265,6 +281,25 @@ const TypeEmail = "email"
 // step's URL. The built-in handler (internal/stephandlers) registers itself
 // under this name.
 const TypeWebhook = "webhook"
+
+// TypeDownloadArtifact is the step type of the built-in artifact-download
+// handler (F-21.6): a step of this type copies a named artifact from the
+// run's store namespace onto the target. The built-in handler
+// (internal/stephandlers) registers itself under this name.
+const TypeDownloadArtifact = "download_artifact"
+
+// TypeExtract is the step type of the built-in archive-extraction handler
+// (F-21.6): a step of this type unpacks a tar / gzipped tar / zip archive
+// into a destination directory. The built-in handler (internal/stephandlers)
+// registers itself under this name.
+const TypeExtract = "extract"
+
+// TypePublishArtifact is the step type of the built-in artifact-publishing
+// handler (F-21.6): a step of this type collects the files matched by
+// multiline glob patterns into a zip and uploads it to the job's own
+// artifact namespace. The built-in handler (internal/stephandlers)
+// registers itself under this name.
+const TypePublishArtifact = "publish_artifact"
 
 // LogSink receives a job's step output (stdout/stderr) as it is produced, so
 // an execution target can stream it to the API in near-real-time (F-02). A
@@ -547,6 +582,97 @@ func NotifierFromContext(ctx context.Context) Notifier {
 	return notifier
 }
 
+// ArtifactTransfer lets a step handler move files to and from the artifacts
+// store through the API (F-21.6): the execution target (worker or agent)
+// implements it by calling the API's artifact-proxy RPCs (DownloadArtifact /
+// UploadArtifact), presenting the job's own token. The built-in
+// "download_artifact" and "publish_artifact" handlers obtain the transfer
+// from the context (via ArtifactTransferFromContext).
+//
+// Namespace addressing: a namespace is either a RAW store namespace (passed
+// through as-is — the job's own id, for uploads) or a logical "run:<id>"
+// pseudo-namespace (the API substitutes the run's store namespace for
+// downloads). Targets never learn the run's namespace themselves; the API
+// owns the mapping (it is the only component that can).
+//
+// Implementations must be safe for concurrent use. Both methods are called
+// with the step's context (already bounded by the step's per-step timeout,
+// when set) and must return promptly when that context is done.
+type ArtifactTransfer interface {
+	// DownloadArtifact copies the file named name in namespace onto the
+	// target at dest (parents created; an existing file is replaced). It
+	// returns the number of bytes transferred.
+	DownloadArtifact(ctx context.Context, namespace, name, dest string) (int64, error)
+	// UploadArtifact streams the file at src into the store as name in
+	// namespace. It returns the number of bytes transferred.
+	UploadArtifact(ctx context.Context, namespace, name, src string) (int64, error)
+	// GetArtifact reports whether the file named name exists in namespace
+	// (a metadata round trip). The download_artifact handler uses it to probe
+	// its resolution candidates in preference order (F-21.6).
+	GetArtifact(ctx context.Context, namespace, name string) error
+}
+
+type artifactTransferKey struct{}
+
+// ContextWithArtifactTransfer returns a context that carries transfer, so
+// step handlers can move files to/from the artifacts store. A nil transfer
+// returns ctx unchanged.
+func ContextWithArtifactTransfer(ctx context.Context, transfer ArtifactTransfer) context.Context {
+	if transfer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, artifactTransferKey{}, transfer)
+}
+
+// ArtifactTransferFromContext returns the ArtifactTransfer carried by ctx, or
+// nil when none is set. Step handlers call this to download or upload
+// artifacts.
+func ArtifactTransferFromContext(ctx context.Context) ArtifactTransfer {
+	transfer, _ := ctx.Value(artifactTransferKey{}).(ArtifactTransfer)
+	return transfer
+}
+
+// StageAreaEnv is the environment variable the executor sets on every step
+// when the execution target provisions a stage area (F-21.6): it names the
+// job's staged working directory — the default home for downloaded and
+// extracted packages and the default scan root for published ones. Ordinary
+// jobs (no stage-dependent step) never see it.
+const StageAreaEnv = "CDROM_STAGE_DIR"
+
+// StageArea is the execution target's lazy provisioner for the job's staged
+// working area (F-21.6). Func creates the directory on first use (typically
+// os.MkdirTemp under the OS temp dir) and returns its absolute path; the
+// executor invokes it once per job (memoized by the target) and exports the
+// result to every step via StageAreaEnv. Clean, when non-nil, is invoked by
+// the target once the job reaches a terminal state (best-effort removal).
+type StageArea struct {
+	// Func creates (or recalls) the stage directory. It must be safe to call
+	// from multiple steps and must memoize internally.
+	Func func() (string, error)
+	// Clean removes the stage directory (best-effort; errors are logged, not
+	// returned). Called once, after the job terminates.
+	Clean func()
+}
+
+type stageAreaKey struct{}
+
+// ContextWithStageArea returns a context that carries area, so the executor
+// can export the job's staged working area to its steps. A nil area returns
+// ctx unchanged.
+func ContextWithStageArea(ctx context.Context, area *StageArea) context.Context {
+	if area == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, stageAreaKey{}, area)
+}
+
+// StageAreaFromContext returns the StageArea carried by ctx, or nil when none
+// is set.
+func StageAreaFromContext(ctx context.Context) *StageArea {
+	area, _ := ctx.Value(stageAreaKey{}).(*StageArea)
+	return area
+}
+
 // OnceClaimer lets the executor enforce a step's `once` field (F-01): a step
 // with `once` set runs on at most one target of a job that fans out to a
 // worker group. The execution target (worker or agent) implements it by
@@ -732,6 +858,13 @@ type RunInfo struct {
 	// TriggerName is the name of the trigger that started the run; empty for a
 	// manual run or a job not part of a run.
 	TriggerName string
+	// Artifacts is the run's resolved-artifact snapshot (F-21.6): a
+	// spec.artifacts reference name → the STORED file name the reference
+	// resolved to when the run started (the per-run snapshot, like the rest
+	// of the spec — F-01/F-11). Denormalized from the run onto the job by the
+	// API and handed to the target with the job. Empty for a job not part of
+	// a run (or a run whose pipeline declares no spec.artifacts).
+	Artifacts map[string]string
 }
 
 type runInfoKey struct{}
@@ -741,7 +874,7 @@ type runInfoKey struct{}
 // parameters and secrets. A RunInfo that carries no parameters, no secrets,
 // and no run identity returns ctx unchanged.
 func ContextWithRunInfo(ctx context.Context, run RunInfo) context.Context {
-	if len(run.Params) == 0 && len(run.Secrets) == 0 && run.ID == 0 && run.PipelineID == 0 && run.Trigger == "" && run.TriggerName == "" {
+	if len(run.Params) == 0 && len(run.Secrets) == 0 && run.ID == 0 && run.PipelineID == 0 && run.Trigger == "" && run.TriggerName == "" && len(run.Artifacts) == 0 {
 		return ctx
 	}
 	return context.WithValue(ctx, runInfoKey{}, run)
@@ -929,12 +1062,20 @@ func interpolateStep(step *dbpb.JobStep, data map[string]any) (*dbpb.JobStep, er
 		params := make(map[string]*dbpb.ParamValue, len(step.GetParams()))
 		stepType := step.GetType()
 		for k, v := range step.GetParams() {
-			// The approval handler's message (F-13) and the notification
+			// The approval handler's message (F-13), the notification
 			// handlers' fields (F-18: email's to/cc/bcc/subject/body,
-			// webhook's url/headers/body) are rendered lazily against the
-			// step's condition context (which has prior steps' outputs and
-			// upstream jobs); they are not rendered here.
-			if stepType == TypeEmail || stepType == TypeWebhook || (stepType == TypeApproval && k == "message") {
+			// webhook's url/headers/body), the download_artifact / extract
+			// handlers' fields (F-21.6: they routinely name files produced
+			// by PRIOR steps, so they render against the step's condition
+			// context), and publish_artifact's patterns (F-21.6: glob
+			// patterns contain "[" bracket expressions that must not be
+			// mistaken for template actions) are rendered lazily; they are
+			// not rendered here. publish_artifact's root/fileName stay
+			// eager (F-10 run-parameter interpolation).
+			if stepType == TypeEmail || stepType == TypeWebhook || stepType == TypeDownloadArtifact ||
+				stepType == TypeExtract ||
+				(stepType == TypePublishArtifact && k == "patterns") ||
+				(stepType == TypeApproval && k == "message") {
 				params[k] = v
 				continue
 			}

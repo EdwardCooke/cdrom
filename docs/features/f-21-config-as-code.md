@@ -18,7 +18,7 @@ acceptance criteria, and design decisions for each piece.
 | **F-21.3** Source credentials | [f-21.3](f-21.3-source-credentials.md) | `SourceCredential` model (DB-stored, prefix-matched, F-12-encrypted) + credential matching + API CRUD — overview; decomposed into F-21.3.1…F-21.3.3 | F-12 |
 | **F-21.4** Reusable units & imports | [f-21.4](f-21.4-reusable-units-imports.md) | Cross-file imports (`importFrom` / `import` / `ref`), the `Step`/`VariableSet`/`Job` file kinds, step reuse across environments | 21.1, 21.2 |
 | **F-21.5** Externally-sourced pipelines | [f-21.5](f-21.5-externally-sourced-pipelines.md) | `PipelineSource`/`State` models, stored YAML+hash, the sync routine + 3 refresh triggers, source API | 21.1, 21.2, 21.3 |
-| **F-21.6** Artifact package references | [f-21.6](f-21.6-artifact-package-references.md) | `spec.artifacts` version resolution + fetch-into-store for a run (per-run snapshot) | 21.1 |
+| **F-21.6** Artifact packages | [f-21.6](f-21.6-artifact-package-references.md) | `spec.artifacts` resolution + fetch-into-store, the `download_artifact`/`extract`/`publish_artifact` step handlers + job stage area, job-bound zip publishing (multiline globs, `-` negation), the registry publish endpoint + `packages` registry, and promotion (absorbs F-19) | 21.1 |
 | **F-21.7** `tags` → `labels` rename | [f-21.7](f-21.7-tags-to-labels-rename.md) | The `tags`→`labels` rename (F-29 concept) + `metadata.annotations` | — |
 
 **Suggested build order:** F-21.1 → (F-21.2 ∥ F-21.3) → F-21.4 → F-21.5;

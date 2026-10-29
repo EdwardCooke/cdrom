@@ -30,8 +30,9 @@ func startServer(t *testing.T) dbpb.DatabaseClient {
 
 // startServerDB is startServer, but also returns the underlying *gorm.DB so a
 // test can assert directly on the persisted rows (e.g. the normalized Tag
-// table, F-29).
-func startServerDB(t *testing.T) (dbpb.DatabaseClient, *gorm.DB) {
+// table, F-29). Options mutate the SERVER before it is registered (e.g. to
+// wire the artifacts client for F-21.6 package resolution).
+func startServerDB(t *testing.T, opts ...func(*Server)) (dbpb.DatabaseClient, *gorm.DB) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -54,7 +55,11 @@ func startServerDB(t *testing.T) (dbpb.DatabaseClient, *gorm.DB) {
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	dbpb.RegisterDatabaseServer(srv, NewServer(db))
+	server := NewServer(db)
+	for _, opt := range opts {
+		opt(server)
+	}
+	dbpb.RegisterDatabaseServer(srv, server)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 

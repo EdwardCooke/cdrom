@@ -18,13 +18,17 @@ import (
 // key is present the step uses the default handler (shell) and the remaining
 // keys are its params. This set must stay in sync with the built-in step
 // handlers (internal/stephandlers): shell, token_exchange, approval, email,
-// and webhook.
+// webhook, and the artifact handlers (F-21.6: download_artifact, extract,
+// publish_artifact).
 var KnownStepTypes = []string{
 	"shell", // the default handler
 	"token_exchange",
 	"approval",
 	"email",
 	"webhook",
+	"download_artifact",
+	"extract",
+	"publish_artifact",
 }
 
 // isKnownStepType reports whether name names a known step handler type.

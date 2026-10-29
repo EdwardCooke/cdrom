@@ -29,6 +29,10 @@ import (
 // the API service.
 type Dependencies struct {
 	API apipb.APIClient
+	// WorkRoot is the base directory the worker's staged working area
+	// (F-21.6) is created under; empty means the OS temp dir. Carried from
+	// the worker's config (work_root / CDROM_WORK_ROOT).
+	WorkRoot string
 }
 
 // Worker is a long-lived worker process.
@@ -65,6 +69,9 @@ func New(name, group string, environments []string, tags map[string]string, deps
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// Advise (warn) once at startup when the staged-working-area root is
+	// RAM-backed (F-21.6): staged files would consume memory.
+	target.WarnTmpfsWorkRoot(deps.WorkRoot, logger)
 	return &Worker{
 		name:         name,
 		group:        group,
@@ -350,6 +357,7 @@ func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
 		Token:      token,
 		Metrics:    w.metrics,
 		Logger:     w.logger,
+		WorkRoot:   w.deps.WorkRoot,
 	}
 	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
 		tc.StepBarrier = newStepBarrier(w.deps.API, w.name, job.GetId(), token, w.logger, 0)

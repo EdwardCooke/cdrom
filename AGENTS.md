@@ -90,9 +90,18 @@ run did. Both targets run the spec through the shared `internal/executor`
 Built-in handlers (`internal/stephandlers`): **`shell`** (default),
 **`token_exchange`**, **`approval`** (F-13), **`email`** and **`webhook`**
 (F-18 — the target renders the fields and calls the API's `SendEmail`/
-`SendWebhook` RPCs; the API does the actual send). New types register via
-`executor.RegisterStepType(name, handler)`; worker and agent blank-import
-`internal/stephandlers` so built-ins register first — the future plugin seam.
+`SendWebhook` RPCs; the API does the actual send), and the artifact handlers
+(F-21.6): **`download_artifact`** (copies a named artifact onto the target —
+four-tier resolution: run snapshot → run namespace → job namespace → the
+public `packages` registry), **`extract`** (untar / gunzip-tar / unzip,
+std-lib only, magic-byte detection, path-slip + symlink refusals), and
+**`publish_artifact`** (multiline glob collection — `**` recursion via the
+vendored, patched `filepathx`, `-`-negated exclusions — zipped with structure
+preserved, entry names sanitized for Windows compatibility with
+collision-counter disambiguation, uploaded into the job's own namespace).
+New types register via `executor.RegisterStepType(name, handler)`; worker and
+agent blank-import `internal/stephandlers` so built-ins register first — the
+future plugin seam.
 
 **Shell contract** (`shell` handler reads `command`, `args`, `shell` from
 `params`):
@@ -202,9 +211,9 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 | F-16 | Concurrency control & queueing (regex-rule limits; concurrency keys) | [f-16](docs/features/f-16-concurrency-queueing.md) |
 | F-17 | Environments & deployment targets (policy-bearing targets) | [f-17](docs/features/f-17-environments.md) |
 | F-18 | Notifications (`email`/`webhook` step handlers; API-side send) | [f-18](docs/features/f-18-notifications.md) |
-| F-19 | Artifact promotion *(planned)* | [f-19](docs/features/f-19-artifact-promotion.md) |
+| ~~F-19~~ | ~~Artifact promotion~~ — **absorbed into F-21.6** (publishing + promotion ride with artifact packages) | [f-19](docs/features/f-19-artifact-promotion.md) |
 | F-20 | Observability & metrics (Prometheus; DORA indicators) | [f-20](docs/features/f-20-observability.md) |
-| F-21 | Config as code (F-21.1…F-21.7; F-21.1–F-21.5 done, F-21.6/F-21.7 planned) | [f-21](docs/features/f-21-config-as-code.md) |
+| F-21 | Config as code (F-21.1…F-21.7; F-21.1–F-21.6 done, F-21.7 planned) | [f-21](docs/features/f-21-config-as-code.md) |
 | F-22 | Post-deploy verification & rollback *(planned)* | [f-22](docs/features/f-22-verification-rollback.md) |
 | F-23 | High availability (event log, hybrid dispatch, leader election) | [f-23](docs/features/f-23-high-availability.md) · [HA design](docs/HighAvailability.md) |
 | F-24 | Username/password authentication (login/register proxied to IdP) | [f-24](docs/features/f-24-username-password-auth.md) |
@@ -340,7 +349,9 @@ env vars; every binary accepts `--config-file <path>`, see
 Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH` / `CDROM_DB_POSTGRES_DSN`,
 `CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_WORKER_{NAME,GROUP,ENVIRONMENTS,TAGS}`,
-`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
+`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_WORK_ROOT` (worker/agent staged-working-area
+base dir, F-21.6; default OS temp dir — the target warns at startup when it
+resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
 (OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping),
 `CDROM_IDP_*`, `CDROM_GRPC_AUTH_*` (job-token auth), `CDROM_SECRETS_{KIND,KEY}`,
 `CDROM_PIPELINE_SOURCE_*` (F-21.2/F-21.5), `CDROM_AUDIT_*` (F-15),

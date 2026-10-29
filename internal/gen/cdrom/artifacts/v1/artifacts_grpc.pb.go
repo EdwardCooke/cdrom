@@ -20,66 +20,65 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Artifacts_UploadArtifact_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/UploadArtifact"
-	Artifacts_DownloadArtifact_FullMethodName = "/cdrom.artifacts.v1.Artifacts/DownloadArtifact"
-	Artifacts_GetArtifact_FullMethodName      = "/cdrom.artifacts.v1.Artifacts/GetArtifact"
-	Artifacts_ListArtifacts_FullMethodName    = "/cdrom.artifacts.v1.Artifacts/ListArtifacts"
-	Artifacts_DeleteArtifact_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/DeleteArtifact"
-	Artifacts_AppendLog_FullMethodName        = "/cdrom.artifacts.v1.Artifacts/AppendLog"
-	Artifacts_DownloadLog_FullMethodName      = "/cdrom.artifacts.v1.Artifacts/DownloadLog"
-	Artifacts_GetLog_FullMethodName           = "/cdrom.artifacts.v1.Artifacts/GetLog"
-	Artifacts_ListLogs_FullMethodName         = "/cdrom.artifacts.v1.Artifacts/ListLogs"
+	Artifacts_PutBlob_FullMethodName    = "/cdrom.artifacts.v1.Artifacts/PutBlob"
+	Artifacts_GetBlob_FullMethodName    = "/cdrom.artifacts.v1.Artifacts/GetBlob"
+	Artifacts_StatBlob_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/StatBlob"
+	Artifacts_AppendBlob_FullMethodName = "/cdrom.artifacts.v1.Artifacts/AppendBlob"
+	Artifacts_CopyBlob_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/CopyBlob"
+	Artifacts_DeleteBlob_FullMethodName = "/cdrom.artifacts.v1.Artifacts/DeleteBlob"
 )
 
 // ArtifactsClient is the client API for Artifacts service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Artifacts is a general-purpose, namespaced file store. It stores and
-// retrieves files of two kinds:
+// Artifacts is a general-purpose BLOB STORE. It stores and retrieves raw
+// bytes identified exclusively by an opaque id (a UUID assigned by the
+// caller); it knows NOTHING about names, namespaces, packages, or any other
+// attribute of the bytes it holds.
 //
-//   - artifacts: immutable files (one per namespace/name); and
-//   - logs: append-only files that grow over time (so a log can be read while
-//     it is still being written and replayed in full afterwards).
+// All FILE METADATA lives in the Database service's storage_object records
+// (F-21.6 storage redesign): what a file IS (its kind, namespace, display
+// name, size, content hash, package coordinates, counters) is a database
+// fact; WHAT IT CONTAINS is a blob here. Callers translate (namespace, name)
+// <-> uid at the API/service boundary and speak uids to this service.
 //
-// Every file lives in a *namespace*: an opaque scope string that groups
-// related files. The service is agnostic about what a namespace means — it is
-// up to the caller. For example, a job's artifacts and logs use the job's id
-// as the namespace, while a deployed release's artifacts might use a release
-// identifier. This keeps the store general enough to hold both job-owned
-// artifacts and deployed/published artifacts.
+// Blobs are immutable once CONFIRMED: PutBlob writes to a freshly allocated
+// id, CopyBlob replicates a confirmed blob to another id, Append grows a log
+// blob, and DeleteBlob removes a blob outright. Nothing here is derivable
+// from the bytes themselves — the store is deliberately dumb so richer
+// metadata can accumulate on the database side without touching the backing
+// medium (filesystem today; S3/Azure Blob tomorrow).
 //
-// Uploads and downloads are streamed so arbitrarily large files do not have to
-// be buffered in memory on either side.
-//
-// Job logs are stored as one file per step (named step-<n>.log) plus a
-// combined file (job.log) that concatenates every step's output in order.
-// Logs are *appended* to as a step progresses, so a log can be read while the
-// job is still running (tail) and replayed in full after it finishes.
+// Uploads and downloads are streamed so arbitrarily large files do not have
+// to be buffered in memory on either side.
 type ArtifactsClient interface {
-	// UploadArtifact is a client stream. The first chunk must carry metadata
-	// (namespace and name); subsequent chunks carry data. The server returns
-	// the stored Artifact once the stream ends.
-	UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error)
-	// DownloadArtifact is a server stream. The first chunk carries metadata;
-	// all chunks carry data.
-	DownloadArtifact(ctx context.Context, in *DownloadArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error)
-	GetArtifact(ctx context.Context, in *GetArtifactRequest, opts ...grpc.CallOption) (*Artifact, error)
-	ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (*ListArtifactsResponse, error)
-	DeleteArtifact(ctx context.Context, in *DeleteArtifactRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// AppendLog appends data to a log file. The first chunk must carry metadata
-	// (namespace and name); subsequent chunks carry data. The server returns
-	// the updated Artifact (size, modified time) once the stream ends.
-	// Appending to a log that does not exist creates it.
-	AppendLog(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error)
-	// DownloadLog is a server stream of a log: the first chunk carries metadata,
-	// all chunks carry data. Reading a log that is still being written returns
-	// the output captured so far.
-	DownloadLog(ctx context.Context, in *DownloadLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error)
-	// GetLog returns the metadata of a log file.
-	GetLog(ctx context.Context, in *GetLogRequest, opts ...grpc.CallOption) (*Artifact, error)
-	// ListLogs lists the log files in a namespace.
-	ListLogs(ctx context.Context, in *ListLogsRequest, opts ...grpc.CallOption) (*ListLogsResponse, error)
+	// PutBlob is a CLIENT stream: the FIRST chunk must carry the id the bytes
+	// belong to (later chunks carry data only); the caller pushes data until
+	// the stream closes. The id must not already hold a NON-EMPTY blob
+	// (double-writing one id fails with AlreadyExists) — ids are allocated
+	// ahead of time by the caller (through the Database service's record
+	// allocator) and each id is written exactly once. Returns the number of
+	// bytes stored.
+	PutBlob(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[BlobChunk, BlobStat], error)
+	// GetBlob is a SERVER stream of a blob's bytes. When offset is greater
+	// than 0 the stream begins at that byte offset (range reads power
+	// cross-pod log tailing, F-23); reading past the end yields no data. The
+	// first chunk carries the blob's total size.
+	GetBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BlobChunk], error)
+	// StatBlob returns a blob's size (without transferring its bytes).
+	StatBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (*BlobStat, error)
+	// AppendBlob is a CLIENT stream: the FIRST chunk must carry the id of a
+	// log blob (creating it when absent) and MAY carry data; subsequent chunks
+	// carry data. Returns the blob's total size after the append.
+	AppendBlob(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[BlobChunk, BlobStat], error)
+	// CopyBlob replicates one blob to another id SERVER-SIDE (no bytes pass
+	// through the caller). The destination id must not hold a non-empty blob
+	// yet. Powers promotion and any intra-store replication. Returns the
+	// copied size.
+	CopyBlob(ctx context.Context, in *CopyBlobRequest, opts ...grpc.CallOption) (*BlobStat, error)
+	// DeleteBlob removes a blob (nothing else). A missing id is a no-op.
+	DeleteBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type artifactsClient struct {
@@ -90,26 +89,26 @@ func NewArtifactsClient(cc grpc.ClientConnInterface) ArtifactsClient {
 	return &artifactsClient{cc}
 }
 
-func (c *artifactsClient) UploadArtifact(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error) {
+func (c *artifactsClient) PutBlob(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[BlobChunk, BlobStat], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[0], Artifacts_UploadArtifact_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[0], Artifacts_PutBlob_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[ArtifactChunk, UploadArtifactResponse]{ClientStream: stream}
+	x := &grpc.GenericClientStream[BlobChunk, BlobStat]{ClientStream: stream}
 	return x, nil
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_UploadArtifactClient = grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse]
+type Artifacts_PutBlobClient = grpc.ClientStreamingClient[BlobChunk, BlobStat]
 
-func (c *artifactsClient) DownloadArtifact(ctx context.Context, in *DownloadArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error) {
+func (c *artifactsClient) GetBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BlobChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[1], Artifacts_DownloadArtifact_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[1], Artifacts_GetBlob_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[DownloadArtifactRequest, ArtifactChunk]{ClientStream: stream}
+	x := &grpc.GenericClientStream[BlobRef, BlobChunk]{ClientStream: stream}
 	if err := x.ClientStream.SendMsg(in); err != nil {
 		return nil, err
 	}
@@ -120,84 +119,45 @@ func (c *artifactsClient) DownloadArtifact(ctx context.Context, in *DownloadArti
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_DownloadArtifactClient = grpc.ServerStreamingClient[ArtifactChunk]
+type Artifacts_GetBlobClient = grpc.ServerStreamingClient[BlobChunk]
 
-func (c *artifactsClient) GetArtifact(ctx context.Context, in *GetArtifactRequest, opts ...grpc.CallOption) (*Artifact, error) {
+func (c *artifactsClient) StatBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (*BlobStat, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Artifact)
-	err := c.cc.Invoke(ctx, Artifacts_GetArtifact_FullMethodName, in, out, cOpts...)
+	out := new(BlobStat)
+	err := c.cc.Invoke(ctx, Artifacts_StatBlob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *artifactsClient) ListArtifacts(ctx context.Context, in *ListArtifactsRequest, opts ...grpc.CallOption) (*ListArtifactsResponse, error) {
+func (c *artifactsClient) AppendBlob(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[BlobChunk, BlobStat], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListArtifactsResponse)
-	err := c.cc.Invoke(ctx, Artifacts_ListArtifacts_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[2], Artifacts_AppendBlob_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[BlobChunk, BlobStat]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Artifacts_AppendBlobClient = grpc.ClientStreamingClient[BlobChunk, BlobStat]
+
+func (c *artifactsClient) CopyBlob(ctx context.Context, in *CopyBlobRequest, opts ...grpc.CallOption) (*BlobStat, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BlobStat)
+	err := c.cc.Invoke(ctx, Artifacts_CopyBlob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *artifactsClient) DeleteArtifact(ctx context.Context, in *DeleteArtifactRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *artifactsClient) DeleteBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Artifacts_DeleteArtifact_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *artifactsClient) AppendLog(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[2], Artifacts_AppendLog_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[ArtifactChunk, UploadArtifactResponse]{ClientStream: stream}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_AppendLogClient = grpc.ClientStreamingClient[ArtifactChunk, UploadArtifactResponse]
-
-func (c *artifactsClient) DownloadLog(ctx context.Context, in *DownloadLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Artifacts_ServiceDesc.Streams[3], Artifacts_DownloadLog_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[DownloadLogRequest, ArtifactChunk]{ClientStream: stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_DownloadLogClient = grpc.ServerStreamingClient[ArtifactChunk]
-
-func (c *artifactsClient) GetLog(ctx context.Context, in *GetLogRequest, opts ...grpc.CallOption) (*Artifact, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Artifact)
-	err := c.cc.Invoke(ctx, Artifacts_GetLog_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *artifactsClient) ListLogs(ctx context.Context, in *ListLogsRequest, opts ...grpc.CallOption) (*ListLogsResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListLogsResponse)
-	err := c.cc.Invoke(ctx, Artifacts_ListLogs_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Artifacts_DeleteBlob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -208,51 +168,53 @@ func (c *artifactsClient) ListLogs(ctx context.Context, in *ListLogsRequest, opt
 // All implementations must embed UnimplementedArtifactsServer
 // for forward compatibility.
 //
-// Artifacts is a general-purpose, namespaced file store. It stores and
-// retrieves files of two kinds:
+// Artifacts is a general-purpose BLOB STORE. It stores and retrieves raw
+// bytes identified exclusively by an opaque id (a UUID assigned by the
+// caller); it knows NOTHING about names, namespaces, packages, or any other
+// attribute of the bytes it holds.
 //
-//   - artifacts: immutable files (one per namespace/name); and
-//   - logs: append-only files that grow over time (so a log can be read while
-//     it is still being written and replayed in full afterwards).
+// All FILE METADATA lives in the Database service's storage_object records
+// (F-21.6 storage redesign): what a file IS (its kind, namespace, display
+// name, size, content hash, package coordinates, counters) is a database
+// fact; WHAT IT CONTAINS is a blob here. Callers translate (namespace, name)
+// <-> uid at the API/service boundary and speak uids to this service.
 //
-// Every file lives in a *namespace*: an opaque scope string that groups
-// related files. The service is agnostic about what a namespace means — it is
-// up to the caller. For example, a job's artifacts and logs use the job's id
-// as the namespace, while a deployed release's artifacts might use a release
-// identifier. This keeps the store general enough to hold both job-owned
-// artifacts and deployed/published artifacts.
+// Blobs are immutable once CONFIRMED: PutBlob writes to a freshly allocated
+// id, CopyBlob replicates a confirmed blob to another id, Append grows a log
+// blob, and DeleteBlob removes a blob outright. Nothing here is derivable
+// from the bytes themselves — the store is deliberately dumb so richer
+// metadata can accumulate on the database side without touching the backing
+// medium (filesystem today; S3/Azure Blob tomorrow).
 //
-// Uploads and downloads are streamed so arbitrarily large files do not have to
-// be buffered in memory on either side.
-//
-// Job logs are stored as one file per step (named step-<n>.log) plus a
-// combined file (job.log) that concatenates every step's output in order.
-// Logs are *appended* to as a step progresses, so a log can be read while the
-// job is still running (tail) and replayed in full after it finishes.
+// Uploads and downloads are streamed so arbitrarily large files do not have
+// to be buffered in memory on either side.
 type ArtifactsServer interface {
-	// UploadArtifact is a client stream. The first chunk must carry metadata
-	// (namespace and name); subsequent chunks carry data. The server returns
-	// the stored Artifact once the stream ends.
-	UploadArtifact(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error
-	// DownloadArtifact is a server stream. The first chunk carries metadata;
-	// all chunks carry data.
-	DownloadArtifact(*DownloadArtifactRequest, grpc.ServerStreamingServer[ArtifactChunk]) error
-	GetArtifact(context.Context, *GetArtifactRequest) (*Artifact, error)
-	ListArtifacts(context.Context, *ListArtifactsRequest) (*ListArtifactsResponse, error)
-	DeleteArtifact(context.Context, *DeleteArtifactRequest) (*emptypb.Empty, error)
-	// AppendLog appends data to a log file. The first chunk must carry metadata
-	// (namespace and name); subsequent chunks carry data. The server returns
-	// the updated Artifact (size, modified time) once the stream ends.
-	// Appending to a log that does not exist creates it.
-	AppendLog(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error
-	// DownloadLog is a server stream of a log: the first chunk carries metadata,
-	// all chunks carry data. Reading a log that is still being written returns
-	// the output captured so far.
-	DownloadLog(*DownloadLogRequest, grpc.ServerStreamingServer[ArtifactChunk]) error
-	// GetLog returns the metadata of a log file.
-	GetLog(context.Context, *GetLogRequest) (*Artifact, error)
-	// ListLogs lists the log files in a namespace.
-	ListLogs(context.Context, *ListLogsRequest) (*ListLogsResponse, error)
+	// PutBlob is a CLIENT stream: the FIRST chunk must carry the id the bytes
+	// belong to (later chunks carry data only); the caller pushes data until
+	// the stream closes. The id must not already hold a NON-EMPTY blob
+	// (double-writing one id fails with AlreadyExists) — ids are allocated
+	// ahead of time by the caller (through the Database service's record
+	// allocator) and each id is written exactly once. Returns the number of
+	// bytes stored.
+	PutBlob(grpc.ClientStreamingServer[BlobChunk, BlobStat]) error
+	// GetBlob is a SERVER stream of a blob's bytes. When offset is greater
+	// than 0 the stream begins at that byte offset (range reads power
+	// cross-pod log tailing, F-23); reading past the end yields no data. The
+	// first chunk carries the blob's total size.
+	GetBlob(*BlobRef, grpc.ServerStreamingServer[BlobChunk]) error
+	// StatBlob returns a blob's size (without transferring its bytes).
+	StatBlob(context.Context, *BlobRef) (*BlobStat, error)
+	// AppendBlob is a CLIENT stream: the FIRST chunk must carry the id of a
+	// log blob (creating it when absent) and MAY carry data; subsequent chunks
+	// carry data. Returns the blob's total size after the append.
+	AppendBlob(grpc.ClientStreamingServer[BlobChunk, BlobStat]) error
+	// CopyBlob replicates one blob to another id SERVER-SIDE (no bytes pass
+	// through the caller). The destination id must not hold a non-empty blob
+	// yet. Powers promotion and any intra-store replication. Returns the
+	// copied size.
+	CopyBlob(context.Context, *CopyBlobRequest) (*BlobStat, error)
+	// DeleteBlob removes a blob (nothing else). A missing id is a no-op.
+	DeleteBlob(context.Context, *BlobRef) (*emptypb.Empty, error)
 	mustEmbedUnimplementedArtifactsServer()
 }
 
@@ -263,32 +225,23 @@ type ArtifactsServer interface {
 // pointer dereference when methods are called.
 type UnimplementedArtifactsServer struct{}
 
-func (UnimplementedArtifactsServer) UploadArtifact(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error {
-	return status.Error(codes.Unimplemented, "method UploadArtifact not implemented")
+func (UnimplementedArtifactsServer) PutBlob(grpc.ClientStreamingServer[BlobChunk, BlobStat]) error {
+	return status.Error(codes.Unimplemented, "method PutBlob not implemented")
 }
-func (UnimplementedArtifactsServer) DownloadArtifact(*DownloadArtifactRequest, grpc.ServerStreamingServer[ArtifactChunk]) error {
-	return status.Error(codes.Unimplemented, "method DownloadArtifact not implemented")
+func (UnimplementedArtifactsServer) GetBlob(*BlobRef, grpc.ServerStreamingServer[BlobChunk]) error {
+	return status.Error(codes.Unimplemented, "method GetBlob not implemented")
 }
-func (UnimplementedArtifactsServer) GetArtifact(context.Context, *GetArtifactRequest) (*Artifact, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetArtifact not implemented")
+func (UnimplementedArtifactsServer) StatBlob(context.Context, *BlobRef) (*BlobStat, error) {
+	return nil, status.Error(codes.Unimplemented, "method StatBlob not implemented")
 }
-func (UnimplementedArtifactsServer) ListArtifacts(context.Context, *ListArtifactsRequest) (*ListArtifactsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListArtifacts not implemented")
+func (UnimplementedArtifactsServer) AppendBlob(grpc.ClientStreamingServer[BlobChunk, BlobStat]) error {
+	return status.Error(codes.Unimplemented, "method AppendBlob not implemented")
 }
-func (UnimplementedArtifactsServer) DeleteArtifact(context.Context, *DeleteArtifactRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteArtifact not implemented")
+func (UnimplementedArtifactsServer) CopyBlob(context.Context, *CopyBlobRequest) (*BlobStat, error) {
+	return nil, status.Error(codes.Unimplemented, "method CopyBlob not implemented")
 }
-func (UnimplementedArtifactsServer) AppendLog(grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]) error {
-	return status.Error(codes.Unimplemented, "method AppendLog not implemented")
-}
-func (UnimplementedArtifactsServer) DownloadLog(*DownloadLogRequest, grpc.ServerStreamingServer[ArtifactChunk]) error {
-	return status.Error(codes.Unimplemented, "method DownloadLog not implemented")
-}
-func (UnimplementedArtifactsServer) GetLog(context.Context, *GetLogRequest) (*Artifact, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetLog not implemented")
-}
-func (UnimplementedArtifactsServer) ListLogs(context.Context, *ListLogsRequest) (*ListLogsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListLogs not implemented")
+func (UnimplementedArtifactsServer) DeleteBlob(context.Context, *BlobRef) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteBlob not implemented")
 }
 func (UnimplementedArtifactsServer) mustEmbedUnimplementedArtifactsServer() {}
 func (UnimplementedArtifactsServer) testEmbeddedByValue()                   {}
@@ -311,128 +264,81 @@ func RegisterArtifactsServer(s grpc.ServiceRegistrar, srv ArtifactsServer) {
 	s.RegisterService(&Artifacts_ServiceDesc, srv)
 }
 
-func _Artifacts_UploadArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(ArtifactsServer).UploadArtifact(&grpc.GenericServerStream[ArtifactChunk, UploadArtifactResponse]{ServerStream: stream})
+func _Artifacts_PutBlob_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ArtifactsServer).PutBlob(&grpc.GenericServerStream[BlobChunk, BlobStat]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_UploadArtifactServer = grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]
+type Artifacts_PutBlobServer = grpc.ClientStreamingServer[BlobChunk, BlobStat]
 
-func _Artifacts_DownloadArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(DownloadArtifactRequest)
+func _Artifacts_GetBlob_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(BlobRef)
 	if err := stream.RecvMsg(m); err != nil {
 		return err
 	}
-	return srv.(ArtifactsServer).DownloadArtifact(m, &grpc.GenericServerStream[DownloadArtifactRequest, ArtifactChunk]{ServerStream: stream})
+	return srv.(ArtifactsServer).GetBlob(m, &grpc.GenericServerStream[BlobRef, BlobChunk]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_DownloadArtifactServer = grpc.ServerStreamingServer[ArtifactChunk]
+type Artifacts_GetBlobServer = grpc.ServerStreamingServer[BlobChunk]
 
-func _Artifacts_GetArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetArtifactRequest)
+func _Artifacts_StatBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BlobRef)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ArtifactsServer).GetArtifact(ctx, in)
+		return srv.(ArtifactsServer).StatBlob(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Artifacts_GetArtifact_FullMethodName,
+		FullMethod: Artifacts_StatBlob_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ArtifactsServer).GetArtifact(ctx, req.(*GetArtifactRequest))
+		return srv.(ArtifactsServer).StatBlob(ctx, req.(*BlobRef))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Artifacts_ListArtifacts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListArtifactsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ArtifactsServer).ListArtifacts(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Artifacts_ListArtifacts_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ArtifactsServer).ListArtifacts(ctx, req.(*ListArtifactsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Artifacts_DeleteArtifact_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteArtifactRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ArtifactsServer).DeleteArtifact(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Artifacts_DeleteArtifact_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ArtifactsServer).DeleteArtifact(ctx, req.(*DeleteArtifactRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Artifacts_AppendLog_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(ArtifactsServer).AppendLog(&grpc.GenericServerStream[ArtifactChunk, UploadArtifactResponse]{ServerStream: stream})
+func _Artifacts_AppendBlob_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ArtifactsServer).AppendBlob(&grpc.GenericServerStream[BlobChunk, BlobStat]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_AppendLogServer = grpc.ClientStreamingServer[ArtifactChunk, UploadArtifactResponse]
+type Artifacts_AppendBlobServer = grpc.ClientStreamingServer[BlobChunk, BlobStat]
 
-func _Artifacts_DownloadLog_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(DownloadLogRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(ArtifactsServer).DownloadLog(m, &grpc.GenericServerStream[DownloadLogRequest, ArtifactChunk]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type Artifacts_DownloadLogServer = grpc.ServerStreamingServer[ArtifactChunk]
-
-func _Artifacts_GetLog_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetLogRequest)
+func _Artifacts_CopyBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CopyBlobRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ArtifactsServer).GetLog(ctx, in)
+		return srv.(ArtifactsServer).CopyBlob(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Artifacts_GetLog_FullMethodName,
+		FullMethod: Artifacts_CopyBlob_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ArtifactsServer).GetLog(ctx, req.(*GetLogRequest))
+		return srv.(ArtifactsServer).CopyBlob(ctx, req.(*CopyBlobRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Artifacts_ListLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListLogsRequest)
+func _Artifacts_DeleteBlob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BlobRef)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ArtifactsServer).ListLogs(ctx, in)
+		return srv.(ArtifactsServer).DeleteBlob(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Artifacts_ListLogs_FullMethodName,
+		FullMethod: Artifacts_DeleteBlob_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ArtifactsServer).ListLogs(ctx, req.(*ListLogsRequest))
+		return srv.(ArtifactsServer).DeleteBlob(ctx, req.(*BlobRef))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -445,46 +351,33 @@ var Artifacts_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*ArtifactsServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "GetArtifact",
-			Handler:    _Artifacts_GetArtifact_Handler,
+			MethodName: "StatBlob",
+			Handler:    _Artifacts_StatBlob_Handler,
 		},
 		{
-			MethodName: "ListArtifacts",
-			Handler:    _Artifacts_ListArtifacts_Handler,
+			MethodName: "CopyBlob",
+			Handler:    _Artifacts_CopyBlob_Handler,
 		},
 		{
-			MethodName: "DeleteArtifact",
-			Handler:    _Artifacts_DeleteArtifact_Handler,
-		},
-		{
-			MethodName: "GetLog",
-			Handler:    _Artifacts_GetLog_Handler,
-		},
-		{
-			MethodName: "ListLogs",
-			Handler:    _Artifacts_ListLogs_Handler,
+			MethodName: "DeleteBlob",
+			Handler:    _Artifacts_DeleteBlob_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "UploadArtifact",
-			Handler:       _Artifacts_UploadArtifact_Handler,
+			StreamName:    "PutBlob",
+			Handler:       _Artifacts_PutBlob_Handler,
 			ClientStreams: true,
 		},
 		{
-			StreamName:    "DownloadArtifact",
-			Handler:       _Artifacts_DownloadArtifact_Handler,
+			StreamName:    "GetBlob",
+			Handler:       _Artifacts_GetBlob_Handler,
 			ServerStreams: true,
 		},
 		{
-			StreamName:    "AppendLog",
-			Handler:       _Artifacts_AppendLog_Handler,
+			StreamName:    "AppendBlob",
+			Handler:       _Artifacts_AppendBlob_Handler,
 			ClientStreams: true,
-		},
-		{
-			StreamName:    "DownloadLog",
-			Handler:       _Artifacts_DownloadLog_Handler,
-			ServerStreams: true,
 		},
 	},
 	Metadata: "cdrom/artifacts/v1/artifacts.proto",

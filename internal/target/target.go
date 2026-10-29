@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"cdrom/internal/approval"
+	"cdrom/internal/artifacttransfer"
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -38,6 +39,10 @@ type Context struct {
 	// bytes it streams to the API. Nil when the target records no metrics.
 	Metrics *metrics.WorkerMetrics
 	Logger  *slog.Logger
+	// WorkRoot is the base directory the job's staged working area (F-21.6)
+	// is created under; empty means the OS temp dir. Supplied by the worker /
+	// agent from their config (work_root / CDROM_WORK_ROOT).
+	WorkRoot string
 }
 
 // RunJob executes job's spec through the shared executor, building the
@@ -94,7 +99,16 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 		PipelineID:  job.GetPipelineId(),
 		Trigger:     job.GetTriggerType(),
 		TriggerName: job.GetTriggerName(),
+		// The run's resolved-artifact snapshot (F-21.6): reference name →
+		// stored file name, denormalized from the run onto the job by the
+		// API. Lets the download_artifact handler resolve a spec.artifacts
+		// reference to the version the run picked.
+		Artifacts: job.GetArtifacts(),
 	})
+	// A step handler (the built-in "download_artifact" and "publish_artifact"
+	// handlers, F-21.6) moves files to/from the artifacts store THROUGH THE
+	// API (the topology rule), presenting the job's own token.
+	ctx = executor.ContextWithArtifactTransfer(ctx, artifacttransfer.New(tc.API, job.GetId(), tc.Token))
 	// A step handler (the built-in "token_exchange" handler) can request a new
 	// job token for a different audience (e.g. an outside resource the job
 	// needs to call) while the job runs; the exchanger calls the API's
@@ -123,6 +137,14 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	if job.GetStepBarrier() && job.GetTargetGroup() != "" && tc.StepBarrier != nil {
 		ctx = executor.ContextWithStepBarrier(ctx, tc.StepBarrier)
 	}
+	// The job's staged working area (F-21.6): lazily created on first use,
+	// exported to every step as CDROM_STAGE_DIR, removed best-effort once the
+	// job finishes. Rooted at the target's WORK ROOT (config work_root /
+	// CDROM_WORK_ROOT; empty = the OS temp dir) so operators can steer staged
+	// files AWAY from RAM-backed mounts.
+	sa := newStageArea(tc.WorkRoot, logger)
+	ctx = executor.ContextWithStageArea(ctx, &executor.StageArea{Func: sa.Dir, Clean: sa.Clean})
+	defer sa.Clean()
 	return executor.Execute(ctx, job.GetSpec(), logger)
 }
 

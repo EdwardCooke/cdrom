@@ -88,10 +88,11 @@ log "   $RETRY_FINAL"
 # --- verify a finished job can be re-run for a fresh execution (F-04) -------
 # Re-run the successful shell job: it is reset to pending with a fresh attempt
 # (attempt back to 1) and re-dispatched, so the worker runs it again. Count
-# the step-1 output lines in the job's persisted log before and after to prove
-# a second execution happened.
+# the step-1 output lines in the job's persisted log (over the API — the
+# store's on-disk layout is an implementation detail) before and after to
+# prove a second execution happened.
 log ">> re-running the shell job"
-STEP1_BEFORE=$(grep -c 'step1: plain command' "$WORK/artifacts/${SHELL_JOB_ID}/logs/job.log" || true)
+STEP1_BEFORE=$(curl -s "http://127.0.0.1:8080/api/jobs/$SHELL_JOB_ID/logs/job.log" | grep -c 'step1: plain command' || true)
 RERUN_RESPONSE=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$SHELL_JOB_ID/rerun")
 log "   $RERUN_RESPONSE"
 RERUN_JOB_ID=$(printf '%s' "$RERUN_RESPONSE" | jq -r '.id')
@@ -99,13 +100,13 @@ RERUN_JOB_ID=$(printf '%s' "$RERUN_RESPONSE" | jq -r '.id')
 # Wait for the worker to execute the job a second time (one more step-1 line).
 log ">> waiting for the re-run to execute"
 for i in $(seq 1 100); do
-  STEP1_NOW=$(grep -c 'step1: plain command' "$WORK/artifacts/${RERUN_JOB_ID}/logs/job.log" || true)
+  STEP1_NOW=$(curl -s "http://127.0.0.1:8080/api/jobs/$RERUN_JOB_ID/logs/job.log" | grep -c 'step1: plain command' || true)
   if [ "${STEP1_NOW:-0}" -gt "${STEP1_BEFORE:-0}" ]; then
     break
   fi
   sleep 0.2
 done
-STEP1_AFTER=$(grep -c 'step1: plain command' "$WORK/artifacts/${RERUN_JOB_ID}/logs/job.log" || true)
+STEP1_AFTER=$(curl -s "http://127.0.0.1:8080/api/jobs/$RERUN_JOB_ID/logs/job.log" | grep -c 'step1: plain command' || true)
 [ "${STEP1_AFTER:-0}" -gt "${STEP1_BEFORE:-0}" ] \
   || { echo ">> re-run did not produce a fresh execution" >&2; exit 1; }
 

@@ -2,7 +2,16 @@
 
 
 > Phase 4 — Delivery & observability · [Feature index](../Features.md)
-
+>
+> ⚠️ **SUPERSEDED — ABSORBED INTO [F-21.6](f-21.6-artifact-package-references.md).**
+> Packaging (getting a build product to the jobs that consume it) and
+> promotion (moving it between environments/runs) are two halves of one
+> capability, so F-19 is retired as a standalone feature. Its scope — the
+> checksummed, streamed copy between namespaces, `POST /api/artifacts/promote`,
+> byte-identity verified, authorized (F-14) and audited (F-15) — is carried by
+> F-21.6's "Promotion (former F-19)" subsection, and its acceptance criteria
+> live in F-21.6's checklist. Kept here for traceability only; do not schedule
+> or implement it separately.
 
 **What.** Promote an artifact produced in one run/environment to another
 environment (e.g. the build artifact from staging is what prod deploys), so

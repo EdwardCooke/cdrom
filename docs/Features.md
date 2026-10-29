@@ -92,7 +92,7 @@ tool.
 | ID | Feature | Status | Spec |
 |----|---------|--------|------|
 | F-18 | Notifications | done | [F-18](features/f-18-notifications.md) |
-| F-19 | Artifact promotion | planned | [F-19](features/f-19-artifact-promotion.md) |
+| ~~F-19~~ | ~~Artifact promotion~~ — **absorbed into F-21.6** (publishing + promotion ride with artifact packages) | absorbed | [F-19](features/f-19-artifact-promotion.md) |
 | F-20 | Observability & metrics | planned | [F-20](features/f-20-observability.md) |
 | F-21 | Config as code (overview + file-format reference; decomposed into F-21.1…F-21.7) | planned | [F-21](features/f-21-config-as-code.md) |
 | F-21.1 | File format & compiler (overview + file-format reference; decomposed into F-21.1.1…F-21.1.4) | planned | [F-21.1](features/f-21.1-file-format-compiler.md) |
@@ -121,7 +121,7 @@ tool.
 | F-21.5.1 | Source model & storage (`PipelineSource`/`State`, `periodicRefresh` policy + admin override gate on `Pipeline`, stored YAML+hash, kickoff provenance fields on the run row, source CRUD, `GET …/source`) | done | [F-21.5.1](features/f-21.5.1-source-model-storage.md) |
 | F-21.5.2 | The sync routine (fetch → hash → compare → recompile if changed; credential selection; serialization) | done | [F-21.5.2](features/f-21.5.2-sync-routine.md) |
 | F-21.5.3 | Refresh triggers (periodic loop at the effective cadence — file `spec.periodicRefresh` (interval/cron) when the admin gate allows it, else the 2-min system default — refresh-on-run + kickoff provenance, manual refresh) | done | [F-21.5.3](features/f-21.5.3-refresh-triggers.md) |
-| F-21.6 | Artifact package references (`spec.artifacts` version resolution + fetch) | planned | [F-21.6](features/f-21.6-artifact-package-references.md) |
+| F-21.6 | Artifact packages (`spec.artifacts` resolution + per-run snapshot pin; `download_artifact`/`extract`/`publish_artifact` step handlers; job stage area under a configurable work root; job-bound zip publishing via multiline globs; registry publish endpoint with explicit prerelease flag; promotes F-19's promotion op as a server-side blob copy) | done | [F-21.6](features/f-21.6-artifact-package-references.md) |
 | F-21.7 | `tags` → `labels` rename (+ `metadata.annotations`) | planned | [F-21.7](features/f-21.7-tags-to-labels-rename.md) |
 | F-22 | Post-deploy verification & rollback | planned | [F-22](features/f-22-verification-rollback.md) |
 
@@ -166,8 +166,9 @@ First-class labeling and organization of the platform's resources.
 
 The phases are ordered so each builds on the last. A pragmatic first cut:
 
-1. **F-18 → F-20 → F-21 → F-22 → F-19** — notifications, observability,
-   config-as-code, verification/rollback, artifact promotion.
+1. **F-18 → F-20 → F-21 → F-22** — notifications, observability,
+   config-as-code (artifact publishing/promotion arrives inside F-21.6),
+   verification/rollback.
 1. **F-13 → F-14 → F-27** — approval groups (named approver sets an
     `approval` step references instead of individual users; membership
     resolved at decision time; optional role references and N-of-M quorum).
@@ -200,7 +201,7 @@ Tick each feature off as it lands.
 - [x] F-16 Concurrency control & queueing
 - [x] F-17 Environments & deployment targets
 - [x] F-18 Notifications
-- [ ] F-19 Artifact promotion
+- [x] F-19 Artifact promotion (absorbed into F-21.6 — done there)
 - [x] F-20 Observability & metrics
 - [ ] F-21 Config as code (overview; see F-21.1…F-21.7)
 - [x] F-21.1 File format & compiler (overview; see F-21.1.1…F-21.1.4)
@@ -229,7 +230,7 @@ Tick each feature off as it lands.
 - [x] F-21.5.1 Source model & storage
 - [x] F-21.5.2 The sync routine
 - [x] F-21.5.3 Refresh triggers
-- [ ] F-21.6 Artifact package references
+- [x] F-21.6 Artifact packages (references + consumption handlers)
 - [ ] F-21.7 `tags` → `labels` rename
 - [ ] F-22 Post-deploy verification & rollback
 - [x] F-23 High-availability control plane

@@ -423,14 +423,25 @@ func (s *GRPCServer) handleLogUpdated(ctx context.Context, p *logUpdatedPayload)
 	if p.Size <= cursor {
 		return // no new data
 	}
-	stream, err := s.artifacts.DownloadLog(ctx, &artifactspb.DownloadLogRequest{
-		Namespace: jobIDStr,
-		Name:      p.Log,
-		Offset:    cursor,
-	})
+	// Translate the (job, log) coordinate to the log's blob uid (F-21.6
+	// storage redesign): the RANGE READ is then a plain GetBlob at the
+	// cursor. A missing record (the job's logs were cleaned up) drops the
+	// tail, as before.
+	if s.resolver == nil {
+		return
+	}
+	rec, err := s.resolver.getFile(ctx, jobIDStr, p.Log)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
-			// The log file is gone (job cleaned up); drop the tail.
+			return // the log file is gone (job cleaned up); drop the tail.
+		}
+		s.logger.Warn("api: resolve log record", "job", p.JobID, "log", p.Log, "err", err)
+		return
+	}
+	stream, err := s.artifacts.GetBlob(ctx, &artifactspb.BlobRef{Id: rec.GetUid(), Offset: cursor})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			// The blob is gone (job cleaned up); drop the tail.
 			return
 		}
 		s.logger.Warn("api: range read log", "job", p.JobID, "log", p.Log, "err", err)
