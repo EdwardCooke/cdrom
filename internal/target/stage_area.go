@@ -8,9 +8,9 @@
 //
 // The area is unique per job INSTANCE AND PER TARGET: fan-out workers each
 // stage their own copy (there is no cross-worker sharing), and the directory
-// sits under the CONFIGURED WORK ROOT (MkdirTemp-style) so concurrent jobs
-// never contend. The work root defaults to the OS temp dir; operators point
-// it at disk-backed storage (config work_root / CDROM_WORK_ROOT) when the
+// sits under the CONFIGURED WORKER ROOT (MkdirTemp-style) so concurrent jobs
+// never contend. The worker root defaults to the OS temp dir; operators point
+// it at disk-backed storage (config worker_root / CDROM_WORKER_ROOT) when the
 // temp dir is RAM-backed.
 package target
 
@@ -25,18 +25,18 @@ import (
 type stageArea struct {
 	mu     sync.Mutex
 	dir    string
-	root   string // the work root the stage dir is created under ("" = os.TempDir)
+	root   string // the worker root the stage dir is created under ("" = os.TempDir)
 	logger *slog.Logger
 }
 
 // newStageArea builds the lazy provisioner the target hangs on the
-// executor's context (executor.ContextWithStageArea). workRoot is the base
+// executor's context (executor.ContextWithStageArea). workerRoot is the base
 // directory stage dirs are created under ("" = the OS temp dir).
-func newStageArea(workRoot string, logger *slog.Logger) *stageArea {
+func newStageArea(workerRoot string, logger *slog.Logger) *stageArea {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &stageArea{root: workRoot, logger: logger}
+	return &stageArea{root: workerRoot, logger: logger}
 }
 
 // Dir creates (on first call) and returns the stage directory. Safe for
@@ -64,24 +64,24 @@ func (s *stageArea) Dir() (string, error) {
 	return dir, nil
 }
 
-// WarnTmpfsWorkRoot logs a WARNING when the effective work root (workRoot, or
+// WarnTmpfsWorkerRoot logs a WARNING when the effective worker root (workerRoot, or
 // the OS temp dir when it is empty) resides on a RAM-backed (tmpfs/ramfs)
 // mount: staged files then consume MEMORY, and a large extraction or
 // download can starve the host. Detection is best-effort and LINUX-ONLY
 // (other platforms report false — see tmpfs_stub.go); a missing or
 // unreadable mounts table is likewise non-alarming. Called ONCE at target
 // startup (worker/agent construction), not per job.
-func WarnTmpfsWorkRoot(workRoot string, logger *slog.Logger) {
+func WarnTmpfsWorkerRoot(workerRoot string, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	root := workRoot
+	root := workerRoot
 	if root == "" {
 		root = os.TempDir()
 	}
 	root = filepath.Clean(root)
-	if workRootIsTmpfs(root) {
-		logger.Warn("target: the staged-working-area root is on a RAM-backed (tmpfs) mount — staged files consume MEMORY and can starve the host; point work_root / CDROM_WORK_ROOT at disk-backed storage",
+	if workerRootIsTmpfs(root) {
+		logger.Warn("target: the staged-working-area root is on a RAM-backed (tmpfs) mount — staged files consume MEMORY and can starve the host; point worker_root / CDROM_WORKER_ROOT at disk-backed storage",
 			"root", root)
 	}
 }

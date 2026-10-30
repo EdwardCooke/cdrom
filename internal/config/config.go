@@ -155,15 +155,15 @@ type Config struct {
 	// job's status so the API can record which target ran the job.
 	AgentName string
 
-	// WorkRoot is the base directory a target creates its per-job STAGED
+	// WorkerRoot is the base directory a target creates its per-job STAGED
 	// WORKING AREA under (F-21.6): downloads, extractions, and publish
-	// assemblies land in <work_root>/cdrom-stage-<random>. Empty (the
+	// assemblies land in <worker_root>/cdrom-stage-<random>. Empty (the
 	// default) means the OS temp dir (os.TempDir). Point it at DISK-BACKED
 	// storage in deployments: the target warns at startup when the effective
 	// base resolves to a tmpfs mount (staged files then consume MEMORY and
-	// can starve the host). Set via the config file's work_root or the
-	// CDROM_WORK_ROOT env var. Only the worker and agent binaries use it.
-	WorkRoot string
+	// can starve the host). Set via the config file's worker_root or the
+	// CDROM_WORKER_ROOT env var. Only the worker and agent binaries use it.
+	WorkerRoot string
 
 	// TLS configures mutual TLS for gRPC communication between services.
 	// When CAFile is set, all gRPC connections use mTLS; otherwise they
@@ -829,11 +829,11 @@ func LoadWithFile(file string) (*Config, error) {
 		WorkerEnvironments:             []string{},
 		WorkerLabels:                     map[string]string{},
 		AgentName:                      defaultAgentName(),
-		// WorkRoot defaults to empty: the target uses the OS temp dir for its
+		// WorkerRoot defaults to empty: the target uses the OS temp dir for its
 		// staged working area (F-21.6). Operators on memory-constrained hosts
-		// (containers with tmpfs /tmp) set work_root / CDROM_WORK_ROOT to a
+		// (containers with tmpfs /tmp) set worker_root / CDROM_WORKER_ROOT to a
 		// disk-backed path.
-		WorkRoot: "",
+		WorkerRoot: "",
 		DB: database.Config{
 			Backend:     database.BackendSQLite,
 			SQLitePath:  "cdrom.db",
@@ -944,9 +944,9 @@ type fileConfig struct {
 	WorkerLabels         *map[string]string `yaml:"worker_labels"`
 	AgentJobID         *string            `yaml:"agent_job_id"`
 	AgentName          *string            `yaml:"agent_name"`
-	// WorkRoot is the base directory for a target's staged working area
-	// (F-21.6); empty means the OS temp dir. Env: CDROM_WORK_ROOT.
-	WorkRoot *string `yaml:"work_root"`
+	// WorkerRoot is the base directory for a target's staged working area
+	// (F-21.6); empty means the OS temp dir. Env: CDROM_WORKER_ROOT.
+	WorkerRoot *string `yaml:"worker_root"`
 	DB       *struct {
 		Backend     *string `yaml:"backend"`
 		SQLitePath  *string `yaml:"sqlite_path"`
@@ -1108,8 +1108,8 @@ func applyFile(cfg *Config, path string) error {
 	if f.AgentName != nil {
 		cfg.AgentName = *f.AgentName
 	}
-	if f.WorkRoot != nil {
-		cfg.WorkRoot = *f.WorkRoot
+	if f.WorkerRoot != nil {
+		cfg.WorkerRoot = *f.WorkerRoot
 	}
 	if f.DB != nil {
 		if f.DB.Backend != nil {
@@ -1389,7 +1389,7 @@ func applyEnv(cfg *Config) {
 	}
 	cfg.AgentJobID = envOr("CDROM_AGENT_JOB_ID", cfg.AgentJobID)
 	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
-	cfg.WorkRoot = envOr("CDROM_WORK_ROOT", cfg.WorkRoot)
+	cfg.WorkerRoot = envOr("CDROM_WORKER_ROOT", cfg.WorkerRoot)
 	cfg.DB.Backend = database.Backend(envOr("CDROM_DB_BACKEND", string(cfg.DB.Backend)))
 	cfg.DB.SQLitePath = envOr("CDROM_DB_SQLITE_PATH", cfg.DB.SQLitePath)
 	cfg.DB.PostgresDSN = envOr("CDROM_DB_POSTGRES_DSN", cfg.DB.PostgresDSN)

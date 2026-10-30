@@ -312,29 +312,29 @@ func TestAgentNameDefaultAndOverride(t *testing.T) {
 	}
 }
 
-func TestWorkRootDefaultAndOverride(t *testing.T) {
-	// The default work root is empty (the target uses the OS temp dir).
+func TestWorkerRootDefaultAndOverride(t *testing.T) {
+	// The default worker root is empty (the target uses the OS temp dir).
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.WorkRoot != "" {
-		t.Errorf("WorkRoot = %q, want empty (default)", cfg.WorkRoot)
+	if cfg.WorkerRoot != "" {
+		t.Errorf("WorkerRoot = %q, want empty (default)", cfg.WorkerRoot)
 	}
 
 	// An environment variable overrides the default.
-	t.Setenv("CDROM_WORK_ROOT", "/scratch/disks")
+	t.Setenv("CDROM_WORKER_ROOT", "/scratch/disks")
 	cfg, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.WorkRoot != "/scratch/disks" {
-		t.Errorf("WorkRoot = %q, want /scratch/disks (env must override the default)", cfg.WorkRoot)
+	if cfg.WorkerRoot != "/scratch/disks" {
+		t.Errorf("WorkerRoot = %q, want /scratch/disks (env must override the default)", cfg.WorkerRoot)
 	}
 
 	// A config file sets it; the env var (higher precedence) still wins.
 	path := filepath.Join(t.TempDir(), "cfg.yaml")
-	yamlDoc := "work_root: /file/root\n"
+	yamlDoc := "worker_root: /file/root\n"
 	if err := os.WriteFile(path, []byte(yamlDoc), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -342,17 +342,17 @@ func TestWorkRootDefaultAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadWithFile: %v", err)
 	}
-	if cfg.WorkRoot != "/scratch/disks" {
-		t.Errorf("WorkRoot = %q, want /scratch/disks (env must override file)", cfg.WorkRoot)
+	if cfg.WorkerRoot != "/scratch/disks" {
+		t.Errorf("WorkerRoot = %q, want /scratch/disks (env must override file)", cfg.WorkerRoot)
 	}
 	// Without the env var, the file value applies.
-	t.Setenv("CDROM_WORK_ROOT", "")
+	t.Setenv("CDROM_WORKER_ROOT", "")
 	cfg, err = LoadWithFile(path)
 	if err != nil {
 		t.Fatalf("LoadWithFile: %v", err)
 	}
-	if cfg.WorkRoot != "/file/root" {
-		t.Errorf("WorkRoot = %q, want /file/root (file must override the default)", cfg.WorkRoot)
+	if cfg.WorkerRoot != "/file/root" {
+		t.Errorf("WorkerRoot = %q, want /file/root (file must override the default)", cfg.WorkerRoot)
 	}
 }
 

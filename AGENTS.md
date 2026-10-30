@@ -355,7 +355,7 @@ env vars; every binary accepts `--config-file <path>`, see
 Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH` / `CDROM_DB_POSTGRES_DSN`,
 `CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_WORKER_{NAME,GROUP,ENVIRONMENTS,LABELS}`,
-`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_WORK_ROOT` (worker/agent staged-working-area
+`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_WORKER_ROOT` (worker/agent staged-working-area
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
 resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
 (OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping),

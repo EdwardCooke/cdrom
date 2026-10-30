@@ -39,10 +39,10 @@ type Context struct {
 	// bytes it streams to the API. Nil when the target records no metrics.
 	Metrics *metrics.WorkerMetrics
 	Logger  *slog.Logger
-	// WorkRoot is the base directory the job's staged working area (F-21.6)
+	// WorkerRoot is the base directory the job's staged working area (F-21.6)
 	// is created under; empty means the OS temp dir. Supplied by the worker /
-	// agent from their config (work_root / CDROM_WORK_ROOT).
-	WorkRoot string
+	// agent from their config (worker_root / CDROM_WORKER_ROOT).
+	WorkerRoot string
 }
 
 // RunJob executes job's spec through the shared executor, building the
@@ -139,10 +139,10 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	}
 	// The job's staged working area (F-21.6): lazily created on first use,
 	// exported to every step as CDROM_STAGE_DIR, removed best-effort once the
-	// job finishes. Rooted at the target's WORK ROOT (config work_root /
-	// CDROM_WORK_ROOT; empty = the OS temp dir) so operators can steer staged
+	// job finishes. Rooted at the target's WORKER ROOT (config worker_root /
+	// CDROM_WORKER_ROOT; empty = the OS temp dir) so operators can steer staged
 	// files AWAY from RAM-backed mounts.
-	sa := newStageArea(tc.WorkRoot, logger)
+	sa := newStageArea(tc.WorkerRoot, logger)
 	ctx = executor.ContextWithStageArea(ctx, &executor.StageArea{Func: sa.Dir, Clean: sa.Clean})
 	defer sa.Clean()
 	return executor.Execute(ctx, job.GetSpec(), logger)

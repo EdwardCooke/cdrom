@@ -75,7 +75,7 @@ func main() {
 
 	a := agent.New(cfg.AgentName, jobID, agent.Dependencies{
 		API:      apipb.NewAPIClient(apiConn),
-		WorkRoot: cfg.WorkRoot,
+		WorkerRoot: cfg.WorkerRoot,
 	}, logger)
 	// Attach the agent's Prometheus metric set (F-20) so it records its job,
 	// steps, in-flight count, and log bytes.

@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// workRootIsTmpfs reports whether path lies on a RAM-backed (tmpfs/ramfs)
+// workerRootIsTmpfs reports whether path lies on a RAM-backed (tmpfs/ramfs)
 // mount, consulting /proc/mounts. A missing or unreadable mounts table
 // yields false — the warning is advisory, never alarming.
-func workRootIsTmpfs(path string) bool {
+func workerRootIsTmpfs(path string) bool {
 	data, err := os.ReadFile("/proc/mounts")
 	if err != nil {
 		return false
@@ -22,7 +22,7 @@ func workRootIsTmpfs(path string) bool {
 // among the mount POINTS that enclose path, the DEEPEST decides (mounts
 // nest: a disk bind-mount under a tmpfs / is disk-backed). Kernel octal
 // escapes in mount points ("\040" space, "\011" tab, "\012" newline, "\134"
-// backslash) are undone. Factored out of workRootIsTmpfs for testability.
+// backslash) are undone. Factored out of workerRootIsTmpfs for testability.
 func mountsIndicateTmpfs(doc, path string) bool {
 	bestLen := -1
 	bestTmpfs := false

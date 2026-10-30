@@ -36,10 +36,10 @@ var agentCancelPollInterval = 2 * time.Second
 // the API service.
 type Dependencies struct {
 	API apipb.APIClient
-	// WorkRoot is the base directory the agent's staged working area
+	// WorkerRoot is the base directory the agent's staged working area
 	// (F-21.6) is created under; empty means the OS temp dir. Carried from
-	// the agent's config (work_root / CDROM_WORK_ROOT).
-	WorkRoot string
+	// the agent's config (worker_root / CDROM_WORKER_ROOT).
+	WorkerRoot string
 }
 
 // Agent is an ephemeral job executor.
@@ -65,7 +65,7 @@ func New(name string, jobID int64, deps Dependencies, logger *slog.Logger) *Agen
 	}
 	// Advise (warn) once at startup when the staged-working-area root is
 	// RAM-backed (F-21.6): staged files would consume memory.
-	target.WarnTmpfsWorkRoot(deps.WorkRoot, logger)
+	target.WarnTmpfsWorkerRoot(deps.WorkerRoot, logger)
 	return &Agent{name: name, jobID: jobID, deps: deps, logger: logger}
 }
 
@@ -98,7 +98,7 @@ func (a *Agent) Run(ctx context.Context) (dbpb.JobStatus, error) {
 		Token:      a.token,
 		Metrics:    a.metrics,
 		Logger:     a.logger,
-		WorkRoot:   a.deps.WorkRoot,
+		WorkerRoot:   a.deps.WorkerRoot,
 	}
 
 	// The agent runs exactly one job, so it is in flight for the whole run.

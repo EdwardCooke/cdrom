@@ -65,7 +65,7 @@ func main() {
 
 	w := worker.New(cfg.WorkerName, cfg.WorkerGroup, cfg.WorkerEnvironments, cfg.WorkerLabels, worker.Dependencies{
 		API:      apipb.NewAPIClient(apiConn),
-		WorkRoot: cfg.WorkRoot,
+		WorkerRoot: cfg.WorkerRoot,
 	}, logger)
 	// Attach the worker's Prometheus metric set (F-20) so it records its jobs,
 	// steps, in-flight count, watch state, polls, and heartbeat failures.
