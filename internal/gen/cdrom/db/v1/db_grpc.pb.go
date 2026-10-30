@@ -708,10 +708,10 @@ type DatabaseClient interface {
 	ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*ProceedJobResponse, error)
 	// Worker groups (F-29). A worker group is a named group of long-lived
 	// workers (a job's target_group names it; a worker's group names it). It is
-	// a first-class, taggable row: its tags are combined onto the runs of the
+	// a first-class, labelable row: its labels are combined onto the runs of the
 	// jobs that target it. The row is metadata-only — it does not change
 	// dispatch (which still keys off the worker's declared group string) — so a
-	// group that has no row simply contributes no tags.
+	// group that has no row simply contributes no labels.
 	//
 	// CreateWorkerGroup adds a worker group. It rejects an empty name and a
 	// name that collides with an existing group (it is idempotent on name: a
@@ -723,13 +723,13 @@ type DatabaseClient interface {
 	// ListWorkerGroups returns every worker group, optionally filtered by name
 	// prefix.
 	ListWorkerGroups(ctx context.Context, in *ListWorkerGroupsRequest, opts ...grpc.CallOption) (*ListWorkerGroupsResponse, error)
-	// UpdateWorkerGroup edits a worker group's description and/or tags. A
+	// UpdateWorkerGroup edits a worker group's description and/or labels. A
 	// missing group returns NotFound.
 	UpdateWorkerGroup(ctx context.Context, in *UpdateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
 	// DeleteWorkerGroup removes a worker group. A missing group returns
 	// NotFound. Deleting a group does not affect the workers that belong to it
 	// (they keep their group string) or the jobs that target it (they still
-	// dispatch to the group's workers); it only removes the group's tags.
+	// dispatch to the group's workers); it only removes the group's labels.
 	DeleteWorkerGroup(ctx context.Context, in *DeleteWorkerGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Storage objects (F-21.6 storage redesign). A storage_object is the
 	// DATABASE'S record of a file held by the artifacts service: its kind,
@@ -2664,10 +2664,10 @@ type DatabaseServer interface {
 	ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error)
 	// Worker groups (F-29). A worker group is a named group of long-lived
 	// workers (a job's target_group names it; a worker's group names it). It is
-	// a first-class, taggable row: its tags are combined onto the runs of the
+	// a first-class, labelable row: its labels are combined onto the runs of the
 	// jobs that target it. The row is metadata-only — it does not change
 	// dispatch (which still keys off the worker's declared group string) — so a
-	// group that has no row simply contributes no tags.
+	// group that has no row simply contributes no labels.
 	//
 	// CreateWorkerGroup adds a worker group. It rejects an empty name and a
 	// name that collides with an existing group (it is idempotent on name: a
@@ -2679,13 +2679,13 @@ type DatabaseServer interface {
 	// ListWorkerGroups returns every worker group, optionally filtered by name
 	// prefix.
 	ListWorkerGroups(context.Context, *ListWorkerGroupsRequest) (*ListWorkerGroupsResponse, error)
-	// UpdateWorkerGroup edits a worker group's description and/or tags. A
+	// UpdateWorkerGroup edits a worker group's description and/or labels. A
 	// missing group returns NotFound.
 	UpdateWorkerGroup(context.Context, *UpdateWorkerGroupRequest) (*WorkerGroup, error)
 	// DeleteWorkerGroup removes a worker group. A missing group returns
 	// NotFound. Deleting a group does not affect the workers that belong to it
 	// (they keep their group string) or the jobs that target it (they still
-	// dispatch to the group's workers); it only removes the group's tags.
+	// dispatch to the group's workers); it only removes the group's labels.
 	DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error)
 	// Storage objects (F-21.6 storage redesign). A storage_object is the
 	// DATABASE'S record of a file held by the artifacts service: its kind,

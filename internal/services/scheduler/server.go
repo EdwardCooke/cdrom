@@ -620,7 +620,7 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		ApprovalActor:    job.GetApprovalActor(),
 		ApprovalReason:   job.GetApprovalReason(),
 		Environment:      job.GetEnvironment(),
-		Tags:             job.GetTags(),
+		Labels:             job.GetLabels(),
 	}
 }
 

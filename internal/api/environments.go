@@ -42,11 +42,11 @@ type environmentRequest struct {
 	// Automation is the environment's automation policy: "automatic", "manual",
 	// or "" (no policy — the job's own setting decides).
 	Automation string `json:"automation,omitempty"`
-	// Tags are the environment's tags (F-29): a set of key/value pairs that
-	// label the environment. They are combined with the tags of a run's other
+	// Labels are the environment's labels (F-29): a set of key/value pairs that
+	// label the environment. They are combined with the labels of a run's other
 	// resources (pipeline, job, worker group, worker) onto the run's job
 	// instances.
-	Tags map[string]string `json:"tags,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // listEnvironments lists every environment (F-17), optionally filtered by name
@@ -88,7 +88,7 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 		TargetGroup:      req.TargetGroup,
 		RequiresApproval: req.RequiresApproval,
 		Automation:       automationFromName(req.Automation),
-		Tags:             req.Tags,
+		Labels:             req.Labels,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -148,7 +148,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 		TargetGroup:      req.TargetGroup,
 		RequiresApproval: req.RequiresApproval,
 		Automation:       automationFromName(req.Automation),
-		Tags:             req.Tags,
+		Labels:             req.Labels,
 	})
 	if err != nil {
 		grpcError(w, err)

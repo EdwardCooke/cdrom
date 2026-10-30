@@ -14,11 +14,11 @@ import (
 // ---------------------------------------------------------------------------
 //
 // A worker group is a named group of long-lived workers (a job's target_group
-// names it; a worker's group names it). It is a first-class, taggable row: its
-// tags are combined onto the runs of the jobs that target it. The row is
+// names it; a worker's group names it). It is a first-class, labelable row: its
+// labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
 // worker's declared group string) — so a group that has no row simply
-// contributes no tags and jobs targeting it still run on its workers.
+// contributes no labels and jobs targeting it still run on its workers.
 //
 // Worker groups are stored in the database (the WorkerGroup table, owned by
 // the Database service) and managed through these endpoints, so the UI can
@@ -31,10 +31,10 @@ import (
 type workerGroupRequest struct {
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
-	// Tags are the group's tags (F-29): a set of key/value pairs that label
+	// Labels are the group's labels (F-29): a set of key/value pairs that label
 	// the group. When present on an update they replace the group's existing
-	// tags; when absent the group's tags are left unchanged.
-	Tags map[string]string `json:"tags,omitempty"`
+	// labels; when absent the group's labels are left unchanged.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // listWorkerGroups lists every worker group (F-29), optionally filtered by name
@@ -73,7 +73,7 @@ func (s *Server) createWorkerGroup(w http.ResponseWriter, r *http.Request) {
 	group, err := s.clients.Database.CreateWorkerGroup(r.Context(), &dbpb.CreateWorkerGroupRequest{
 		Name:        req.Name,
 		Description: req.Description,
-		Tags:        req.Tags,
+		Labels:        req.Labels,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -109,7 +109,7 @@ func (s *Server) getWorkerGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, group)
 }
 
-// updateWorkerGroup edits a worker group's description and/or tags (F-29). It
+// updateWorkerGroup edits a worker group's description and/or labels (F-29). It
 // requires worker-groups.can-manage. On success it records an audit event.
 func (s *Server) updateWorkerGroup(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermWorkerGroupsManage, authz.Resource{}) {
@@ -128,7 +128,7 @@ func (s *Server) updateWorkerGroup(w http.ResponseWriter, r *http.Request) {
 	group, err := s.clients.Database.UpdateWorkerGroup(r.Context(), &dbpb.UpdateWorkerGroupRequest{
 		Name:        name,
 		Description: req.Description,
-		Tags:        req.Tags,
+		Labels:        req.Labels,
 	})
 	if err != nil {
 		grpcError(w, err)
@@ -147,7 +147,7 @@ func (s *Server) updateWorkerGroup(w http.ResponseWriter, r *http.Request) {
 
 // deleteWorkerGroup removes a worker group (F-29). It requires
 // worker-groups.can-manage. Deleting a group does not affect the workers that
-// belong to it or the jobs that target it; it only removes the group's tags.
+// belong to it or the jobs that target it; it only removes the group's labels.
 // On success it records an audit event.
 func (s *Server) deleteWorkerGroup(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermWorkerGroupsManage, authz.Resource{}) {
@@ -178,6 +178,6 @@ func auditWorkerGroupValue(group *dbpb.WorkerGroup) string {
 	return auditJSON(map[string]any{
 		"name":        group.GetName(),
 		"description": group.GetDescription(),
-		"tags":        group.GetTags(),
+		"labels":        group.GetLabels(),
 	})
 }

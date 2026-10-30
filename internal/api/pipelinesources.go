@@ -519,7 +519,8 @@ func (s *Server) reimportPipelineFile(ctx context.Context, pipelineID int64, nam
 		Triggers:        triggersToProto(req.Triggers),
 		Params:          pipelineParamsToProto(req.Params),
 		ConcurrencyKeys: req.ConcurrencyKeys,
-		Tags:            req.Tags,
+		Labels:          req.Labels,
+		Annotations:     req.Annotations,
 		VariableSets:    variableSets,
 		SecretSources:   secretSources,
 		// The file's periodic-refresh policy (may be ABSENT — a file that

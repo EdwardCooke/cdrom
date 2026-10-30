@@ -148,15 +148,19 @@ func exportPackageArtifacts(arts []*dbpb.PackageArtifact) pipelinefile.Value {
 }
 
 // exportMetadata builds the document's metadata block: the pipeline's name,
-// its description (when set), and its labels (F-29).
+// its description (when set), its labels (F-29), and its free-form
+// annotations (F-21.7, UI-search-only).
 func exportMetadata(pipeline *dbpb.Pipeline) pipelinefile.Value {
 	meta := pipelinefile.Value{Type: pipelinefile.Map}
 	meta.Entries = append(meta.Entries, pipelinefile.Entry{Key: "name", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: pipeline.GetName()}})
 	if pipeline.GetDescription() != "" {
 		meta.Entries = append(meta.Entries, pipelinefile.Entry{Key: "description", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: pipeline.GetDescription()}})
 	}
-	if labels := pipeline.GetTags(); len(labels) > 0 {
+	if labels := pipeline.GetLabels(); len(labels) > 0 {
 		meta.Entries = append(meta.Entries, pipelinefile.Entry{Key: "labels", Value: stringMapValue(labels)})
+	}
+	if ann := pipeline.GetAnnotations(); len(ann) > 0 {
+		meta.Entries = append(meta.Entries, pipelinefile.Entry{Key: "annotations", Value: stringMapValue(ann)})
 	}
 	return meta
 }
@@ -196,7 +200,7 @@ func exportJob(job *dbpb.JobDefinition) pipelinefile.Value {
 	if a := approvalPolicyExportName(job.GetApproval()); a != "" {
 		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "approval", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: a}})
 	}
-	if labels := job.GetTags(); len(labels) > 0 {
+	if labels := job.GetLabels(); len(labels) > 0 {
 		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "labels", Value: stringMapValue(labels)})
 	}
 	// The job's execution spec fields (steps, timeout, retry, failure mode,

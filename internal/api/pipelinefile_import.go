@@ -115,7 +115,11 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 	req := &pipelineRequest{
 		Name:        doc.Metadata.Name,
 		Description: doc.Metadata.Description,
-		Tags:        doc.Metadata.Labels,
+		Labels:      doc.Metadata.Labels,
+		// The file's free-form annotations (F-21.7, metadata.annotations):
+		// stored on the pipeline for UI searchability (they never affect
+		// behavior).
+		Annotations: doc.Metadata.Annotations,
 	}
 	// The file-declared periodic-refresh policy (F-21.5.1,
 	// spec.periodicRefresh): compiled + validated (a malformed duration or
@@ -227,7 +231,7 @@ func pipelineFileJob(file, name string, value pipelinefile.Value, shared map[str
 	}
 	// The job's labels (F-29).
 	if labels, ok := value.StringMap("labels"); ok {
-		job.Tags = labels
+		job.Labels = labels
 	}
 
 	// The job's steps: compiled against the pipeline's shared steps (a ref or

@@ -167,7 +167,13 @@ declared value.
   on `(key,value)`) on pipelines, jobs, environments, worker groups, and
   workers. A run snapshots the combined labels of its context
   (`worker > worker group > environment > job > pipeline` on collisions).
-  Worker groups are first-class rows managed via
+  Workers declare theirs via `CDROM_WORKER_LABELS` (config `worker_labels`).
+  Pipelines and runs are searchable by label with the repeated
+  `label=key=value` query param (`GET /api/pipelines?label=k=v`,
+  `GET /api/pipelines/{id}/runs?label=k=v`). The file format's
+  `metadata.annotations` (F-21.7) are free-form key/value pairs stored on the
+  pipeline for UI searchability only — they never affect behavior. Worker
+  groups are first-class rows managed via
   `GET/POST/PUT/DELETE /api/worker-groups[/{name}]`.
 
 ### Logging & metrics
@@ -213,7 +219,7 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 | F-18 | Notifications (`email`/`webhook` step handlers; API-side send) | [f-18](docs/features/f-18-notifications.md) |
 | ~~F-19~~ | ~~Artifact promotion~~ — **absorbed into F-21.6** (publishing + promotion ride with artifact packages) | [f-19](docs/features/f-19-artifact-promotion.md) |
 | F-20 | Observability & metrics (Prometheus; DORA indicators) | [f-20](docs/features/f-20-observability.md) |
-| F-21 | Config as code (F-21.1…F-21.7; F-21.1–F-21.6 done, F-21.7 planned) | [f-21](docs/features/f-21-config-as-code.md) |
+| F-21 | Config as code (F-21.1…F-21.7, all done) | [f-21](docs/features/f-21-config-as-code.md) |
 | F-22 | Post-deploy verification & rollback *(planned)* | [f-22](docs/features/f-22-verification-rollback.md) |
 | F-23 | High availability (event log, hybrid dispatch, leader election) | [f-23](docs/features/f-23-high-availability.md) · [HA design](docs/HighAvailability.md) |
 | F-24 | Username/password authentication (login/register proxied to IdP) | [f-24](docs/features/f-24-username-password-auth.md) |
@@ -348,7 +354,7 @@ env vars; every binary accepts `--config-file <path>`, see
 
 Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH` / `CDROM_DB_POSTGRES_DSN`,
-`CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_WORKER_{NAME,GROUP,ENVIRONMENTS,TAGS}`,
+`CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_WORKER_{NAME,GROUP,ENVIRONMENTS,LABELS}`,
 `CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_WORK_ROOT` (worker/agent staged-working-area
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
 resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`

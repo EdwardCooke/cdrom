@@ -367,14 +367,14 @@ type Worker struct {
 	// targeting an environment is dispatched to the live workers that
 	// registered it. Empty means the worker is reachable only by its group.
 	Environments []string `protobuf:"bytes,5,rep,name=environments,proto3" json:"environments,omitempty"`
-	// tags are the worker's tags (F-29): a set of key/value pairs that label
+	// labels are the worker's labels (F-29): a set of key/value pairs that label
 	// the worker. A worker declares them at registration (configurable, like
 	// its environments, F-17); re-registration updates them. When a job is
-	// dispatched to the worker, the worker's tags are merged into the job's
-	// execution's tag set (the worker's tags win on a key collision). They are
+	// dispatched to the worker, the worker's labels are merged into the job's
+	// execution's label set (the worker's labels win on a key collision). They are
 	// metadata (they never gate, route, or serialize work). Empty means the
-	// worker has no tags.
-	Tags          map[string]string `protobuf:"bytes,6,rep,name=tags,proto3" json:"tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// worker has no labels.
+	Labels        map[string]string `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -444,9 +444,9 @@ func (x *Worker) GetEnvironments() []string {
 	return nil
 }
 
-func (x *Worker) GetTags() map[string]string {
+func (x *Worker) GetLabels() map[string]string {
 	if x != nil {
-		return x.Tags
+		return x.Labels
 	}
 	return nil
 }
@@ -460,10 +460,10 @@ type RegisterWorkerRequest struct {
 	// (F-17); the worker declares them at registration (configurable, multiple).
 	// Re-registration (e.g. after a restart) updates the membership.
 	Environments []string `protobuf:"bytes,4,rep,name=environments,proto3" json:"environments,omitempty"`
-	// tags are the worker's tags (F-29); the worker declares them at
+	// labels are the worker's labels (F-29); the worker declares them at
 	// registration (configurable, like its environments, F-17). Re-registration
 	// (e.g. after a restart) updates them.
-	Tags          map[string]string `protobuf:"bytes,5,rep,name=tags,proto3" json:"tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Labels        map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -526,9 +526,9 @@ func (x *RegisterWorkerRequest) GetEnvironments() []string {
 	return nil
 }
 
-func (x *RegisterWorkerRequest) GetTags() map[string]string {
+func (x *RegisterWorkerRequest) GetLabels() map[string]string {
 	if x != nil {
-		return x.Tags
+		return x.Labels
 	}
 	return nil
 }
@@ -3067,25 +3067,25 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x13ListLogFilesRequest\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\"C\n" +
 	"\x14ListLogFilesResponse\x12+\n" +
-	"\x05files\x18\x01 \x03(\v2\x15.cdrom.api.v1.LogFileR\x05files\"\x9b\x02\n" +
+	"\x05files\x18\x01 \x03(\v2\x15.cdrom.api.v1.LogFileR\x05files\"\xa3\x02\n" +
 	"\x06Worker\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x03 \x01(\tR\aaddress\x12<\n" +
 	"\flast_seen_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastSeenAt\x12\"\n" +
-	"\fenvironments\x18\x05 \x03(\tR\fenvironments\x122\n" +
-	"\x04tags\x18\x06 \x03(\v2\x1e.cdrom.api.v1.Worker.TagsEntryR\x04tags\x1a7\n" +
-	"\tTagsEntry\x12\x10\n" +
+	"\fenvironments\x18\x05 \x03(\tR\fenvironments\x128\n" +
+	"\x06labels\x18\x06 \x03(\v2 .cdrom.api.v1.Worker.LabelsEntryR\x06labels\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfb\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x02\n" +
 	"\x15RegisterWorkerRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x03 \x01(\tR\aaddress\x12\"\n" +
-	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12A\n" +
-	"\x04tags\x18\x05 \x03(\v2-.cdrom.api.v1.RegisterWorkerRequest.TagsEntryR\x04tags\x1a7\n" +
-	"\tTagsEntry\x12\x10\n" +
+	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12G\n" +
+	"\x06labels\x18\x05 \x03(\v2/.cdrom.api.v1.RegisterWorkerRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"-\n" +
 	"\x17DeregisterWorkerRequest\x12\x12\n" +
@@ -3364,8 +3364,8 @@ var file_cdrom_api_v1_api_proto_goTypes = []any{
 	(*SendWebhookResponse)(nil),         // 41: cdrom.api.v1.SendWebhookResponse
 	(*ClaimStepOnceRequest)(nil),        // 42: cdrom.api.v1.ClaimStepOnceRequest
 	(*ClaimStepOnceResponse)(nil),       // 43: cdrom.api.v1.ClaimStepOnceResponse
-	nil,                                 // 44: cdrom.api.v1.Worker.TagsEntry
-	nil,                                 // 45: cdrom.api.v1.RegisterWorkerRequest.TagsEntry
+	nil,                                 // 44: cdrom.api.v1.Worker.LabelsEntry
+	nil,                                 // 45: cdrom.api.v1.RegisterWorkerRequest.LabelsEntry
 	nil,                                 // 46: cdrom.api.v1.Job.OutputsEntry
 	nil,                                 // 47: cdrom.api.v1.Job.RunParamsEntry
 	nil,                                 // 48: cdrom.api.v1.Job.SecretsEntry
@@ -3388,8 +3388,8 @@ var file_cdrom_api_v1_api_proto_depIdxs = []int32{
 	1,  // 1: cdrom.api.v1.LogFileChunk.metadata:type_name -> cdrom.api.v1.LogFile
 	1,  // 2: cdrom.api.v1.ListLogFilesResponse.files:type_name -> cdrom.api.v1.LogFile
 	51, // 3: cdrom.api.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
-	44, // 4: cdrom.api.v1.Worker.tags:type_name -> cdrom.api.v1.Worker.TagsEntry
-	45, // 5: cdrom.api.v1.RegisterWorkerRequest.tags:type_name -> cdrom.api.v1.RegisterWorkerRequest.TagsEntry
+	44, // 4: cdrom.api.v1.Worker.labels:type_name -> cdrom.api.v1.Worker.LabelsEntry
+	45, // 5: cdrom.api.v1.RegisterWorkerRequest.labels:type_name -> cdrom.api.v1.RegisterWorkerRequest.LabelsEntry
 	52, // 6: cdrom.api.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
 	51, // 7: cdrom.api.v1.Job.started_at:type_name -> google.protobuf.Timestamp
 	51, // 8: cdrom.api.v1.Job.finished_at:type_name -> google.protobuf.Timestamp

@@ -62,9 +62,9 @@ const (
 	PermEnvironmentsManage = "environments.can-manage"
 	PermRunsProceed        = "runs.can-proceed"
 	// Worker-group management permissions (F-29). Worker groups (named groups
-	// of long-lived workers that carry tags) are platform-wide: can-view reads
-	// a group and its tags, can-manage creates/updates/deletes a group and its
-	// tags.
+	// of long-lived workers that carry labels) are platform-wide: can-view reads
+	// a group and its labels, can-manage creates/updates/deletes a group and its
+	// labels.
 	PermWorkerGroupsView   = "worker-groups.can-view"
 	PermWorkerGroupsManage = "worker-groups.can-manage"
 	// SSH known-host management permissions (F-21.2.4.1). The runtime-managed

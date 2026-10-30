@@ -164,9 +164,9 @@ type liveWorker struct {
 	// that targets an environment is dispatched to the live workers that
 	// registered it.
 	environments []string
-	// tags are the worker's tags (F-29); a job dispatched to the worker merges
-	// them into the job's execution's tag set.
-	tags     map[string]string
+	// labels are the worker's labels (F-29); a job dispatched to the worker merges
+	// them into the job's execution's label set.
+	labels     map[string]string
 	address  string
 	lastSeen time.Time
 }
@@ -242,7 +242,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		Group:        req.GetGroup(),
 		Address:      req.GetAddress(),
 		Environments: req.GetEnvironments(),
-		Tags:         req.GetTags(),
+		Labels:         req.GetLabels(),
 	})
 	if err != nil {
 		return nil, err
@@ -260,7 +260,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		name:         registered.GetName(),
 		group:        registered.GetGroup(),
 		environments: registered.GetEnvironments(),
-		tags:         registered.GetTags(),
+		labels:         registered.GetLabels(),
 		address:      registered.GetAddress(),
 		lastSeen:     time.Now(),
 	}
@@ -282,7 +282,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		Group:        registered.GetGroup(),
 		Address:      registered.GetAddress(),
 		Environments: registered.GetEnvironments(),
-		Tags:         registered.GetTags(),
+		Labels:         registered.GetLabels(),
 		LastSeenAt:   registered.GetLastSeenAt(),
 	}, nil
 }

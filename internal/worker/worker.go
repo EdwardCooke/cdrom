@@ -42,9 +42,9 @@ type Worker struct {
 	// environments are the environments the worker belongs to (F-17); a job
 	// that targets one of them is dispatched to this worker.
 	environments []string
-	// tags are the worker's tags (F-29); a job dispatched to the worker merges
-	// them into the job's execution's tag set.
-	tags   map[string]string
+	// labels are the worker's labels (F-29); a job dispatched to the worker merges
+	// them into the job's execution's label set.
+	labels   map[string]string
 	deps   Dependencies
 	logger *slog.Logger
 	// metrics is the worker's metric set (F-20); nil when metrics are
@@ -63,9 +63,9 @@ type Worker struct {
 // New creates a worker with the given identity and service dependencies.
 // environments are the environments the worker belongs to (F-17); they are
 // declared at registration and used to route environment jobs to this worker.
-// tags are the worker's tags (F-29); they are declared at registration and
-// merged into the tag set of the jobs the worker runs.
-func New(name, group string, environments []string, tags map[string]string, deps Dependencies, logger *slog.Logger) *Worker {
+// labels are the worker's labels (F-29); they are declared at registration and
+// merged into the label set of the jobs the worker runs.
+func New(name, group string, environments []string, labels map[string]string, deps Dependencies, logger *slog.Logger) *Worker {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -76,7 +76,7 @@ func New(name, group string, environments []string, tags map[string]string, deps
 		name:         name,
 		group:        group,
 		environments: environments,
-		tags:         tags,
+		labels:         labels,
 		deps:         deps,
 		logger:       logger,
 		sem:          make(chan struct{}, 1),
@@ -98,11 +98,11 @@ func (w *Worker) Run(ctx context.Context) error {
 		Group:        w.group,
 		Address:      w.name,
 		Environments: w.environments,
-		Tags:         w.tags,
+		Labels:         w.labels,
 	}); err != nil {
 		return fmt.Errorf("worker: register: %w", err)
 	}
-	w.logger.Info("worker: registered", "name", w.name, "group", w.group, "environments", w.environments, "tags", w.tags)
+	w.logger.Info("worker: registered", "name", w.name, "group", w.group, "environments", w.environments, "labels", w.labels)
 
 	defer func() {
 		if _, err := w.deps.API.DeregisterWorker(context.WithoutCancel(ctx), &apipb.DeregisterWorkerRequest{Name: w.name}); err != nil {

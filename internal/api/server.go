@@ -313,7 +313,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/environments/{name}", s.updateEnvironment)
 	mux.HandleFunc("DELETE /api/environments/{name}", s.deleteEnvironment)
 	// Worker groups (F-29): named groups of long-lived workers that carry
-	// tags. They are stored in the database and managed here, so the UI can
+	// labels. They are stored in the database and managed here, so the UI can
 	// label a group at runtime without a redeployment. Viewing requires
 	// worker-groups.can-view; create/update/delete require
 	// worker-groups.can-manage.
@@ -480,10 +480,14 @@ type pipelineRequest struct {
 	// pipeline that shares a key. A job's effective key set is the union of the
 	// pipeline's keys and the job's own keys.
 	ConcurrencyKeys []string `json:"concurrencyKeys,omitempty"`
-	// Tags are the pipeline's tags (F-29): a set of key/value pairs that label
-	// the pipeline. They are combined with the tags of a run's other resources
+	// Labels are the pipeline's labels (F-29): a set of key/value pairs that label
+	// the pipeline. They are combined with the labels of a run's other resources
 	// (job, environment, worker group, worker) onto the run's job instances.
-	Tags map[string]string `json:"tags,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
+	// Annotations are the pipeline's free-form key/value pairs (F-21.7,
+	// metadata.annotations): used only for UI searchability — they never
+	// affect behavior.
+	Annotations map[string]string `json:"annotations,omitempty"`
 	// VariableSets are the pipeline's named variable sets (F-21.1.3). They are
 	// populated only by the file-format import path (decodePipelineRequest); a
 	// JSON body carries no variable sets.
@@ -673,11 +677,11 @@ type pipelineJobRequest struct {
 	// file-format import path (decodePipelineRequest); a JSON body carries no
 	// vault imports.
 	VaultImports []*dbpb.VaultImport `json:"-"`
-	// Tags are the job's tags (F-29): a set of key/value pairs that label the
-	// job. They are combined with the tags of the run's other resources
+	// Labels are the job's labels (F-29): a set of key/value pairs that label the
+	// job. They are combined with the labels of the run's other resources
 	// (pipeline, environment, worker group, worker) onto the run's job
 	// instances.
-	Tags map[string]string `json:"tags,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
@@ -712,7 +716,8 @@ func (s *Server) createPipeline(w http.ResponseWriter, r *http.Request) {
 		Params:          pipelineParamsToProto(req.Params),
 		Secrets:         secrets,
 		ConcurrencyKeys: req.ConcurrencyKeys,
-		Tags:            req.Tags,
+		Labels:          req.Labels,
+		Annotations:     req.Annotations,
 		VariableSets:    req.VariableSets,
 		SecretSources:   req.SecretSources,
 		// The pipeline's named package references (F-21.6, spec.artifacts); a
@@ -799,7 +804,8 @@ func (s *Server) updatePipeline(w http.ResponseWriter, r *http.Request) {
 		Params:          pipelineParamsToProto(req.Params),
 		Secrets:         secrets,
 		ConcurrencyKeys: req.ConcurrencyKeys,
-		Tags:            req.Tags,
+		Labels:          req.Labels,
+		Annotations:     req.Annotations,
 		VariableSets:    req.VariableSets,
 		SecretSources:   req.SecretSources,
 		// The pipeline's named package references (F-21.6): replaced only
@@ -995,7 +1001,7 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 			TargetGroup:  targetGroup,
 			Needs:        job.Needs,
 			Spec:         spec,
-			Tags:         job.Tags,
+			Labels:         job.Labels,
 			Environment:  job.Environment,
 			Automation:   automationFromName(job.Automation),
 			Approval:     approvalPolicyFromName(job.Approval),
@@ -1040,15 +1046,15 @@ func (s *Server) listPipelines(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{}) {
 		return
 	}
-	// A tag filter (F-29) is given as repeated tag=key=value query params
-	// (e.g. ?tag=team=backend&tag=cost=1234); a pipeline is returned only when
-	// it carries every one of the given tags.
-	tags, err := tagFilterFromQuery(r)
+	// A label filter (F-29) is given as repeated label=key=value query params
+	// (e.g. ?label=team=backend&label=cost=1234); a pipeline is returned only
+	// when it carries every one of the given labels.
+	labels, err := labelFilterFromQuery(r)
 	if err != nil {
-		httpError(w, http.StatusBadRequest, "invalid tag filter: %v", err)
+		httpError(w, http.StatusBadRequest, "invalid label filter: %v", err)
 		return
 	}
-	response, err := s.clients.Database.ListPipelines(r.Context(), &dbpb.ListPipelinesRequest{Tags: tags})
+	response, err := s.clients.Database.ListPipelines(r.Context(), &dbpb.ListPipelinesRequest{Labels: labels})
 	if err != nil {
 		grpcError(w, err)
 		return
@@ -1135,15 +1141,15 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermPipelinesView, authz.Resource{PipelineID: pipelineID}) {
 		return
 	}
-	// A tag filter (F-29) is given as repeated tag=key=value query params
-	// (e.g. ?tag=team=backend); a run is returned only when one of its job
-	// instances carries every one of the given tags.
-	tags, err := tagFilterFromQuery(r)
+	// A label filter (F-29) is given as repeated label=key=value query params
+	// (e.g. ?label=team=backend); a run is returned only when one of its job
+	// instances carries every one of the given labels.
+	labels, err := labelFilterFromQuery(r)
 	if err != nil {
-		httpError(w, http.StatusBadRequest, "invalid tag filter: %v", err)
+		httpError(w, http.StatusBadRequest, "invalid label filter: %v", err)
 		return
 	}
-	response, err := s.clients.Database.ListRuns(r.Context(), &dbpb.ListRunsRequest{PipelineId: pipelineID, Tags: tags})
+	response, err := s.clients.Database.ListRuns(r.Context(), &dbpb.ListRunsRequest{PipelineId: pipelineID, Labels: labels})
 	if err != nil {
 		grpcError(w, err)
 		return
@@ -1151,24 +1157,25 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nonNil(response.GetRuns()))
 }
 
-// tagFilterFromQuery parses the repeated tag=key=value query params of a list
-// request (F-29) into a tag map. Each value must be of the form key=value
-// (the first '=' separates the key from the value, so a value may itself
-// contain '='). An empty or absent filter yields a nil map (no filtering).
-func tagFilterFromQuery(r *http.Request) (map[string]string, error) {
-	params := r.URL.Query()["tag"]
+// labelFilterFromQuery parses the repeated label=key=value query params of a
+// list request (F-29) into a label map. Each value must be of the form
+// key=value (the first '=' separates the key from the value, so a value may
+// itself contain '='). An empty or absent filter yields a nil map (no
+// filtering).
+func labelFilterFromQuery(r *http.Request) (map[string]string, error) {
+	params := r.URL.Query()["label"]
 	if len(params) == 0 {
 		return nil, nil
 	}
-	tags := make(map[string]string, len(params))
+	labels := make(map[string]string, len(params))
 	for _, p := range params {
 		key, value, ok := strings.Cut(p, "=")
 		if !ok || key == "" {
 			return nil, fmt.Errorf("%q is not of the form key=value", p)
 		}
-		tags[key] = value
+		labels[key] = value
 	}
-	return tags, nil
+	return labels, nil
 }
 
 // getRun fetches a single run (F-07).

@@ -581,10 +581,10 @@ service Database {
 
   // Worker groups (F-29). A worker group is a named group of long-lived
   // workers (a job's target_group names it; a worker's group names it). It is
-  // a first-class, taggable row: its tags are combined onto the runs of the
+  // a first-class, labelable row: its labels are combined onto the runs of the
   // jobs that target it. The row is metadata-only — it does not change
   // dispatch (which still keys off the worker's declared group string) — so a
-  // group that has no row simply contributes no tags.
+  // group that has no row simply contributes no labels.
   //
   // CreateWorkerGroup adds a worker group. It rejects an empty name and a
   // name that collides with an existing group (it is idempotent on name: a
@@ -596,13 +596,13 @@ service Database {
   // ListWorkerGroups returns every worker group, optionally filtered by name
   // prefix.
   rpc ListWorkerGroups(ListWorkerGroupsRequest) returns (ListWorkerGroupsResponse);
-  // UpdateWorkerGroup edits a worker group's description and/or tags. A
+  // UpdateWorkerGroup edits a worker group's description and/or labels. A
   // missing group returns NotFound.
   rpc UpdateWorkerGroup(UpdateWorkerGroupRequest) returns (WorkerGroup);
   // DeleteWorkerGroup removes a worker group. A missing group returns
   // NotFound. Deleting a group does not affect the workers that belong to it
   // (they keep their group string) or the jobs that target it (they still
-  // dispatch to the group's workers); it only removes the group's tags.
+  // dispatch to the group's workers); it only removes the group's labels.
   rpc DeleteWorkerGroup(DeleteWorkerGroupRequest) returns (google.protobuf.Empty);
 
   // Storage objects (F-21.6 storage redesign). A storage_object is the
@@ -820,10 +820,10 @@ message PackageArtifact {
   // tag).
   bool use_latest = 4;
   // allow_pre_release opts into pre-release versions (otherwise only
-  // release tags are eligible).
+  // release labels are eligible).
   bool allow_pre_release = 5;
   // pre_release_regex, when non-empty (and allow_pre_release is set),
-  // restricts eligibility to pre-release tags matching this regex.
+  // restricts eligibility to pre-release labels matching this regex.
   string pre_release_regex = 6;
 }
 
@@ -872,12 +872,12 @@ message Pipeline {
   // keys and the job's own keys (see JobSpec.concurrency_keys). Empty means
   // the pipeline holds no concurrency keys.
   repeated string concurrency_keys = 12;
-  // tags are the pipeline's tags (F-29): a set of key/value pairs that label
+  // labels are the pipeline's labels (F-29): a set of key/value pairs that label
   // the pipeline. They are metadata (they never gate, route, or serialize
-  // work) and are combined with the tags of a run's other resources (job,
+  // work) and are combined with the labels of a run's other resources (job,
   // environment, worker group, worker) onto the run's job instances. Empty
-  // means the pipeline has no tags.
-  map<string, string> tags = 13;
+  // means the pipeline has no labels.
+  map<string, string> labels = 13;
   // variable_sets are the pipeline's named variable sets (F-21.1.3): each is
   // an inline variables map (a name -> value map; a value is a plain string,
   // an encrypted builtin F-12 ciphertext, or a reference to a named
@@ -932,6 +932,10 @@ message Pipeline {
   // "packages" namespace) and records the resolution on the run (a per-run
   // snapshot, like the rest of the spec — F-01/F-11).
   repeated PackageArtifact artifacts = 21;
+  // annotations are the pipeline's free-form key/value pairs (F-21.7,
+  // metadata.annotations): used only for UI searchability — they never affect
+  // behavior (distinct from labels, which are combined onto a job run, F-29).
+  map<string, string> annotations = 22;
 }
 
 // Trigger is a way to start a pipeline run other than a manual click (F-09).
@@ -1027,9 +1031,9 @@ message CreatePipelineRequest {
   // concurrency_keys are the pipeline's concurrency keys (F-16); see
   // Pipeline.concurrency_keys. They are persisted alongside the pipeline.
   repeated string concurrency_keys = 8;
-  // tags are the pipeline's tags (F-29); see Pipeline.tags. They are persisted
+  // labels are the pipeline's labels (F-29); see Pipeline.labels. They are persisted
   // alongside the pipeline.
-  map<string, string> tags = 9;
+  map<string, string> labels = 9;
   // variable_sets are the pipeline's named variable sets (F-21.1.3); see
   // Pipeline.variable_sets. They are persisted alongside the pipeline.
   repeated VariableSet variable_sets = 10;
@@ -1054,6 +1058,10 @@ message CreatePipelineRequest {
   // non-empty names; a compilable pre_release_regex) and persisted alongside
   // the pipeline.
   repeated PackageArtifact artifacts = 15;
+  // annotations are the pipeline's free-form key/value pairs (F-21.7,
+  // metadata.annotations); see Pipeline.annotations. They are persisted
+  // alongside the pipeline.
+  map<string, string> annotations = 16;
 }
 
 message GetPipelineRequest {
@@ -1066,12 +1074,13 @@ message ListPipelinesRequest {
   // scheduler's cron and event loops use it to fetch only the pipelines they
   // act on. When UNSPECIFIED, all pipelines are returned.
   TriggerType trigger_type = 1;
-  // tags, when non-empty, restricts the result to pipelines that carry every
-  // one of the given key/value tags (F-29): a pipeline matches when it has a
-  // tag row for each key with the corresponding value. This is what makes a
-  // pipeline searchable by tag (the tags are stored normalized in the Tag
-  // table, not as a JSON column). When empty, all pipelines are returned.
-  map<string, string> tags = 2;
+  // labels, when non-empty, restricts the result to pipelines that carry every
+  // one of the given key/value labels (F-29): a pipeline matches when it has a
+  // label row for each key with the corresponding value. This is what makes a
+  // pipeline searchable by label (the labels are stored normalized in the
+  // Label table, not as a JSON column). When empty, all pipelines are
+  // returned.
+  map<string, string> labels = 2;
 }
 
 message ListPipelinesResponse {
@@ -1111,9 +1120,9 @@ message UpdatePipelineRequest {
   // concurrency_keys, when present, replaces the pipeline's concurrency keys
   // (F-16). When absent the pipeline's concurrency keys are left unchanged.
   repeated string concurrency_keys = 9;
-  // tags, when present, replaces the pipeline's tags (F-29). When absent the
-  // pipeline's tags are left unchanged.
-  map<string, string> tags = 10;
+  // labels, when present, replaces the pipeline's labels (F-29). When absent the
+  // pipeline's labels are left unchanged.
+  map<string, string> labels = 10;
   // variable_sets, when present, replaces the pipeline's named variable sets
   // (F-21.1.3). When absent the pipeline's variable sets are left unchanged.
   repeated VariableSet variable_sets = 11;
@@ -1160,6 +1169,9 @@ message UpdatePipelineRequest {
   // unchanged, so a partial update that does not mention them never perturbs
   // them.
   bool has_artifacts = 20;
+  // annotations, when present, replaces the pipeline's annotations (F-21.7).
+  // When absent the pipeline's annotations are left unchanged.
+  map<string, string> annotations = 21;
 }
 
 message DeletePipelineRequest {
@@ -1352,14 +1364,14 @@ message ListRunsRequest {
   // time (a run that has not finished is excluded). The scheduler's event
   // trigger loop (F-09) uses it to bound its scan to recently-finished runs.
   google.protobuf.Timestamp finished_after = 3;
-  // tags, when non-empty, restricts the result to runs whose job instances
-  // carry every one of the given key/value tags (F-29): a run matches when at
-  // least one of its job instances has a tag row for each key with the
-  // corresponding value. A run's tags are the combined tags stored on its job
-  // instances (the pipeline + job + environment + worker group + worker tags
+  // labels, when non-empty, restricts the result to runs whose job instances
+  // carry every one of the given key/value labels (F-29): a run matches when at
+  // least one of its job instances has a label row for each key with the
+  // corresponding value. A run's labels are the combined labels stored on its job
+  // instances (the pipeline + job + environment + worker group + worker labels
   // combined when the run was created), so this is what makes a run
   // searchable by tag. When empty, all runs are returned.
-  map<string, string> tags = 4;
+  map<string, string> labels = 4;
 }
 
 message ListRunsResponse {
@@ -1414,10 +1426,10 @@ message PipelineVersion {
   // so a run bound to this version is gated by the keys that were active when
   // it started.
   repeated string concurrency_keys = 12;
-  // tags are the pipeline's tags at this version (F-29); see
-  // Pipeline.tags. They are captured in the snapshot so a run bound to this
-  // version combines the tags that were active when it started.
-  map<string, string> tags = 13;
+  // labels are the pipeline's labels at this version (F-29); see
+  // Pipeline.labels. They are captured in the snapshot so a run bound to this
+  // version combines the labels that were active when it started.
+  map<string, string> labels = 13;
   // variable_sets are the pipeline's named variable sets at this version
   // (F-21.1.3); see Pipeline.variable_sets. They are captured in the snapshot
   // so a run bound to this version merges the sets that were active when it
@@ -1919,15 +1931,15 @@ message Job {
   // UNSPECIFIED means the job defers to the environment's requires_approval
   // flag.
   ApprovalPolicy approval = 38;
-  // tags are the job's combined tags (F-29): the union of the tags of every
+  // labels are the job's combined labels (F-29): the union of the labels of every
   // resource in the job's context — its pipeline, the job itself, the
   // environment it targets (if any), and the worker group it targets (if
   // any) — with the more specific source winning on a key collision. They
   // are computed when the job instance is created and stored as a snapshot:
-  // relabeling a resource later does not change the tags recorded on a past
+  // relabeling a resource later does not change the labels recorded on a past
   // run. They are metadata (they never gate, route, or serialize work). Empty
-  // means the job has no tags.
-  map<string, string> tags = 39;
+  // means the job has no labels.
+  map<string, string> labels = 39;
   // variables are the job's effective variables (F-21.1.3): the union of the
   // job's inline variables and the variables of the variable sets it
   // references, with the job's inline variables winning on a key collision.
@@ -2001,11 +2013,11 @@ message JobDefinition {
   // approval is the job's override of its environment's approval policy
   // (F-17); UNSPECIFIED means the job defers to the environment's flag.
   ApprovalPolicy approval = 9;
-  // tags are the job's tags (F-29): a set of key/value pairs that label the
-  // job. They are combined with the tags of the run's other resources
+  // labels are the job's labels (F-29): a set of key/value pairs that label the
+  // job. They are combined with the labels of the run's other resources
   // (pipeline, environment, worker group, worker) onto the run's job
-  // instances. Empty means the job has no tags.
-  map<string, string> tags = 10;
+  // instances. Empty means the job has no labels.
+  map<string, string> labels = 10;
   // variables are the job's effective variables (F-21.1.3): the union of the
   // job's inline variables and the variables of the variable sets it
   // references (declared under the pipeline's spec.variableSets), with the
@@ -2182,13 +2194,13 @@ message JobExecution {
   repeated StepResult step_results = 10;
   // outputs are the named values this worker's run produced (F-06).
   map<string, string> outputs = 11;
-  // tags are this worker's execution's combined tags (F-29): the job
-  // instance's base tag set (pipeline + job + environment + worker group)
-  // merged with the tags of the worker that ran this execution (the worker's
-  // tags win on a key collision). They are set when the worker starts the
+  // labels are this worker's execution's combined labels (F-29): the job
+  // instance's base label set (pipeline + job + environment + worker group)
+  // merged with the labels of the worker that ran this execution (the worker's
+  // labels win on a key collision). They are set when the worker starts the
   // execution (StartJobExecution), so a fan-out job's each-worker execution
-  // carries that worker's own tags. Empty means the execution has no tags.
-  map<string, string> tags = 12;
+  // carries that worker's own labels. Empty means the execution has no labels.
+  map<string, string> labels = 12;
 }
 
 // StartJobExecutionRequest asks the database to record that the calling
@@ -2520,14 +2532,14 @@ message Worker {
   // targeting an environment is dispatched to the live workers that
   // registered it. Empty means the worker is reachable only by its group.
   repeated string environments = 6;
-  // tags are the worker's tags (F-29): a set of key/value pairs that label
+  // labels are the worker's labels (F-29): a set of key/value pairs that label
   // the worker. A worker declares them at registration (configurable, like
   // its environments, F-17); re-registration updates them. When a job is
-  // dispatched to the worker, the worker's tags are merged into the job's
-  // execution's tag set (the worker's tags win on a key collision). They are
+  // dispatched to the worker, the worker's labels are merged into the job's
+  // execution's label set (the worker's labels win on a key collision). They are
   // metadata (they never gate, route, or serialize work). Empty means the
-  // worker has no tags.
-  map<string, string> tags = 7;
+  // worker has no labels.
+  map<string, string> labels = 7;
 }
 
 message RegisterWorkerRequest {
@@ -2538,10 +2550,10 @@ message RegisterWorkerRequest {
   // (F-17); the worker declares them at registration (configurable, multiple).
   // Re-registration (e.g. after a restart) updates the membership.
   repeated string environments = 4;
-  // tags are the worker's tags (F-29); the worker declares them at
+  // labels are the worker's labels (F-29); the worker declares them at
   // registration (configurable, like its environments, F-17). Re-registration
   // (e.g. after a restart) updates them.
-  map<string, string> tags = 5;
+  map<string, string> labels = 5;
 }
 
 message GetWorkerRequest {
@@ -2600,14 +2612,14 @@ message Environment {
   Automation automation = 6;
   google.protobuf.Timestamp created_at = 7;
   google.protobuf.Timestamp updated_at = 8;
-  // tags are the environment's tags (F-29): a set of key/value pairs that
+  // labels are the environment's labels (F-29): a set of key/value pairs that
   // label the environment. They are managed through the API (the
   // POST/PUT /api/environments[/{name}] body) and stored in the database. When
-  // a job targets the environment, the environment's tags are combined with
-  // the tags of the run's other resources onto the run's job instances. They
+  // a job targets the environment, the environment's labels are combined with
+  // the labels of the run's other resources onto the run's job instances. They
   // are metadata (they never gate, route, or serialize work). Empty means the
-  // environment has no tags.
-  map<string, string> tags = 9;
+  // environment has no labels.
+  map<string, string> labels = 9;
 }
 
 message CreateEnvironmentRequest {
@@ -2616,9 +2628,9 @@ message CreateEnvironmentRequest {
   string target_group = 3;
   bool requires_approval = 4;
   Automation automation = 5;
-  // tags are the environment's tags (F-29); see Environment.tags. They are
+  // labels are the environment's labels (F-29); see Environment.labels. They are
   // persisted alongside the environment.
-  map<string, string> tags = 6;
+  map<string, string> labels = 6;
 }
 
 message GetEnvironmentRequest {
@@ -2640,9 +2652,9 @@ message UpdateEnvironmentRequest {
   string target_group = 3;
   bool requires_approval = 4;
   Automation automation = 5;
-  // tags, when present, replaces the environment's tags (F-29). When absent
-  // the environment's tags are left unchanged.
-  map<string, string> tags = 6;
+  // labels, when present, replaces the environment's labels (F-29). When absent
+  // the environment's labels are left unchanged.
+  map<string, string> labels = 6;
 }
 
 message DeleteEnvironmentRequest {
@@ -2673,11 +2685,11 @@ message ProceedJobResponse {
 
 // WorkerGroup is a named group of long-lived workers (F-29). A worker group is
 // the unit a job targets (a job's target_group names it) and the unit a worker
-// belongs to (a worker's group names it). It is a first-class, taggable row:
-// its tags are combined onto the runs of the jobs that target it. The row is
+// belongs to (a worker's group names it). It is a first-class, labelable row:
+// its labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
 // worker's declared group string) — so a group that has no row simply
-// contributes no tags and jobs targeting it still run on its workers.
+// contributes no labels and jobs targeting it still run on its workers.
 message WorkerGroup {
   int64 id = 1;
   // name is the group's unique name (e.g. "build", "prod-fleet"); it is the
@@ -2685,13 +2697,13 @@ message WorkerGroup {
   string name = 2;
   // description is a human-readable description of the group.
   string description = 3;
-  // tags are the group's tags (F-29): a set of key/value pairs that label the
+  // labels are the group's labels (F-29): a set of key/value pairs that label the
   // group. They are managed through the API (the PUT /api/worker-groups/{name}
   // body) and stored in the database. When a job targets the group, the
-  // group's tags are combined with the tags of the run's other resources onto
+  // group's labels are combined with the labels of the run's other resources onto
   // the run's job instances. They are metadata (they never gate, route, or
-  // serialize work). Empty means the group has no tags.
-  map<string, string> tags = 4;
+  // serialize work). Empty means the group has no labels.
+  map<string, string> labels = 4;
   google.protobuf.Timestamp created_at = 5;
   google.protobuf.Timestamp updated_at = 6;
 }
@@ -2699,8 +2711,8 @@ message WorkerGroup {
 message CreateWorkerGroupRequest {
   string name = 1;
   string description = 2;
-  // tags are the group's tags (F-29); see WorkerGroup.tags.
-  map<string, string> tags = 3;
+  // labels are the group's labels (F-29); see WorkerGroup.labels.
+  map<string, string> labels = 3;
 }
 
 message GetWorkerGroupRequest {
@@ -2719,9 +2731,9 @@ message ListWorkerGroupsResponse {
 message UpdateWorkerGroupRequest {
   string name = 1;
   string description = 2;
-  // tags, when present, replaces the group's tags (F-29). When absent the
-  // group's tags are left unchanged.
-  map<string, string> tags = 3;
+  // labels, when present, replaces the group's labels (F-29). When absent the
+  // group's labels are left unchanged.
+  map<string, string> labels = 3;
 }
 
 message DeleteWorkerGroupRequest {

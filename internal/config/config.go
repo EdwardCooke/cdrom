@@ -139,13 +139,13 @@ type Config struct {
 	// to the live workers registered for it.
 	WorkerEnvironments []string
 
-	// WorkerTags are the worker's tags (F-29): a set of key/value pairs that
+	// WorkerLabels are the worker's labels (F-29): a set of key/value pairs that
 	// label the worker. A worker declares them at registration (configurable,
 	// like its environments, F-17); a job dispatched to the worker merges them
-	// into the job's execution's tag set. They are set via the config file's
-	// worker_tags or the CDROM_WORKER_TAGS env var (a comma-separated list of
+	// into the job's execution's label set. They are set via the config file's
+	// worker_tags or the CDROM_WORKER_LABELS env var (a comma-separated list of
 	// key=value pairs).
-	WorkerTags map[string]string
+	WorkerLabels map[string]string
 
 	// AgentJobID is the job an ephemeral agent was spawned to execute.
 	AgentJobID string
@@ -827,7 +827,7 @@ func LoadWithFile(file string) (*Config, error) {
 		WorkerName:                     "worker-1",
 		WorkerGroup:                    "default",
 		WorkerEnvironments:             []string{},
-		WorkerTags:                     map[string]string{},
+		WorkerLabels:                     map[string]string{},
 		AgentName:                      defaultAgentName(),
 		// WorkRoot defaults to empty: the target uses the OS temp dir for its
 		// staged working area (F-21.6). Operators on memory-constrained hosts
@@ -941,7 +941,7 @@ type fileConfig struct {
 	WorkerName         *string            `yaml:"worker_name"`
 	WorkerGroup        *string            `yaml:"worker_group"`
 	WorkerEnvironments *[]string          `yaml:"worker_environments"`
-	WorkerTags         *map[string]string `yaml:"worker_tags"`
+	WorkerLabels         *map[string]string `yaml:"worker_labels"`
 	AgentJobID         *string            `yaml:"agent_job_id"`
 	AgentName          *string            `yaml:"agent_name"`
 	// WorkRoot is the base directory for a target's staged working area
@@ -1099,8 +1099,8 @@ func applyFile(cfg *Config, path string) error {
 	if f.WorkerEnvironments != nil {
 		cfg.WorkerEnvironments = *f.WorkerEnvironments
 	}
-	if f.WorkerTags != nil {
-		cfg.WorkerTags = *f.WorkerTags
+	if f.WorkerLabels != nil {
+		cfg.WorkerLabels = *f.WorkerLabels
 	}
 	if f.AgentJobID != nil {
 		cfg.AgentJobID = *f.AgentJobID
@@ -1384,8 +1384,8 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("CDROM_WORKER_ENVIRONMENTS"); v != "" {
 		cfg.WorkerEnvironments = splitAndTrim(v)
 	}
-	if v := os.Getenv("CDROM_WORKER_TAGS"); v != "" {
-		cfg.WorkerTags = parseTags(v)
+	if v := os.Getenv("CDROM_WORKER_LABELS"); v != "" {
+		cfg.WorkerLabels = parseLabels(v)
 	}
 	cfg.AgentJobID = envOr("CDROM_AGENT_JOB_ID", cfg.AgentJobID)
 	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
@@ -1583,10 +1583,10 @@ func splitAndTrim(s string) []string {
 	return out
 }
 
-// parseTags parses a comma-separated list of "key=value" pairs (the
-// CDROM_WORKER_TAGS env var) into a key -> value map (F-29). Entries without
+// parseLabels parses a comma-separated list of "key=value" pairs (the
+// CDROM_WORKER_LABELS env var) into a key -> value map (F-29). Entries without
 // an "=" are treated as a key with an empty value.
-func parseTags(s string) map[string]string {
+func parseLabels(s string) map[string]string {
 	out := map[string]string{}
 	for _, pair := range strings.Split(s, ",") {
 		pair = strings.TrimSpace(pair)

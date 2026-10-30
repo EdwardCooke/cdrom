@@ -122,7 +122,7 @@ tool.
 | F-21.5.2 | The sync routine (fetch → hash → compare → recompile if changed; credential selection; serialization) | done | [F-21.5.2](features/f-21.5.2-sync-routine.md) |
 | F-21.5.3 | Refresh triggers (periodic loop at the effective cadence — file `spec.periodicRefresh` (interval/cron) when the admin gate allows it, else the 2-min system default — refresh-on-run + kickoff provenance, manual refresh) | done | [F-21.5.3](features/f-21.5.3-refresh-triggers.md) |
 | F-21.6 | Artifact packages (`spec.artifacts` resolution + per-run snapshot pin; `download_artifact`/`extract`/`publish_artifact` step handlers; job stage area under a configurable work root; job-bound zip publishing via multiline globs; registry publish endpoint with explicit prerelease flag; promotes F-19's promotion op as a server-side blob copy) | done | [F-21.6](features/f-21.6-artifact-package-references.md) |
-| F-21.7 | `tags` → `labels` rename (+ `metadata.annotations`) | planned | [F-21.7](features/f-21.7-tags-to-labels-rename.md) |
+| F-21.7 | `tags` → `labels` rename (+ `metadata.annotations`) | done | [F-21.7](features/f-21.7-tags-to-labels-rename.md) |
 | F-22 | Post-deploy verification & rollback | planned | [F-22](features/f-22-verification-rollback.md) |
 
 ### Phase 5 — High availability
@@ -231,7 +231,7 @@ Tick each feature off as it lands.
 - [x] F-21.5.2 The sync routine
 - [x] F-21.5.3 Refresh triggers
 - [x] F-21.6 Artifact packages (references + consumption handlers)
-- [ ] F-21.7 `tags` → `labels` rename
+- [x] F-21.7 `tags` → `labels` rename
 - [ ] F-22 Post-deploy verification & rollback
 - [x] F-23 High-availability control plane
 - [x] F-24 Username/password authentication

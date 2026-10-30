@@ -126,14 +126,14 @@ message Job {
   // environment is the name of the environment this job targets (F-17); empty
   // means the job targets its raw target_group.
   string environment = 23;
-  // tags are the job's combined tags (F-29): the union of the tags of every
+  // labels are the job's combined labels (F-29): the union of the labels of every
   // resource in the job's context — its pipeline, the job itself, the
   // environment it targets (if any), and the worker group it targets (if
   // any) — with the more specific source winning on a key collision. They are
   // computed when the job instance is created and stored as a snapshot. They
   // are metadata (they never gate, route, or serialize work). Empty means the
-  // job has no tags.
-  map<string, string> tags = 24;
+  // job has no labels.
+  map<string, string> labels = 24;
 }
 
 message SubmitJobRequest {

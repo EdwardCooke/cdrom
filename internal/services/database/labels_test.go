@@ -10,14 +10,14 @@ import (
 	"cdrom/internal/models"
 )
 
-// tagRows returns the raw Tag rows for the given owner type and id, so a test
-// can assert that tags are stored normalized in the Tag table (F-29) rather
+// labelRows returns the raw Tag rows for the given owner type and id, so a test
+// can assert that labels are stored normalized in the Label table (F-29) rather
 // than as a JSON column on the parent row.
-func tagRows(t *testing.T, db *gorm.DB, ownerType string, ownerID uint) map[string]string {
+func labelRows(t *testing.T, db *gorm.DB, ownerType string, ownerID uint) map[string]string {
 	t.Helper()
-	var rows []models.Tag
+	var rows []models.Label
 	if err := db.Where("owner_type = ? AND owner_id = ?", ownerType, ownerID).Find(&rows).Error; err != nil {
-		t.Fatalf("query Tag table: %v", err)
+		t.Fatalf("query Label table: %v", err)
 	}
 	out := make(map[string]string, len(rows))
 	for _, r := range rows {
@@ -26,83 +26,90 @@ func tagRows(t *testing.T, db *gorm.DB, ownerType string, ownerID uint) map[stri
 	return out
 }
 
-// TestTagsStoredNormalized verifies that a resource's tags are persisted as
-// one row per key/value pair in the Tag table (F-29) — not as a JSON document
-// on the parent row — so they can be searched by key and/or value. It checks
-// the pipeline, a job definition, an environment, a worker group, and a
-// worker.
-func TestTagsStoredNormalized(t *testing.T) {
+// TestLabelsStoredNormalized verifies that a resource's labels are persisted
+// as one row per key/value pair in the Label table (F-29) — not as a JSON
+// document on the parent row — so they can be searched by key and/or value.
+// It checks the pipeline, a job definition, an environment, a worker group,
+// and a worker.
+func TestLabelsStoredNormalized(t *testing.T) {
 	client, db := startServerDB(t)
 	ctx := context.Background()
 
-	// A worker group with tags.
+	// A worker group with labels.
 	if _, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{
 		Name: "pool",
-		Tags: map[string]string{"team": "platform"},
+		Labels: map[string]string{"team": "platform"},
 	}); err != nil {
 		t.Fatalf("CreateWorkerGroup: %v", err)
 	}
-	// An environment with tags.
+	// An environment with labels.
 	env, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
 		Name: "staging",
-		Tags: map[string]string{"release": "train-2026-10"},
+		Labels: map[string]string{"release": "train-2026-10"},
 	})
 	if err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	// A worker with tags.
+	// A worker with labels.
 	if _, err := client.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{
 		Name:  "w1",
 		Group: "pool",
-		Tags:  map[string]string{"rack": "7"},
+		Labels:  map[string]string{"rack": "7"},
 	}); err != nil {
 		t.Fatalf("RegisterWorker: %v", err)
 	}
-	// A pipeline with tags and a job with its own tags.
+	// A pipeline with labels and a job with its own labels.
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
 		Name: "build",
-		Tags: map[string]string{"cost": "1234"},
+		Labels: map[string]string{"cost": "1234"},
+		// Free-form annotations (F-21.7): stored on the pipeline row (a JSON
+		// column, unlike the normalized Label table) for UI searchability.
+		Annotations: map[string]string{"owner": "platform-team"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:  "compile",
 			Name: "compile",
-			Tags: map[string]string{"stage": "build"},
+			Labels: map[string]string{"stage": "build"},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("CreatePipeline: %v", err)
 	}
+	// The annotations round-trip on the create response.
+	if pipeline.GetAnnotations()["owner"] != "platform-team" {
+		t.Errorf("pipeline annotations = %v, want {owner:platform-team}", pipeline.GetAnnotations())
+	}
 
-	// The pipeline's tags are one row per pair in the Tag table.
-	if got := tagRows(t, db, models.TagOwnerPipeline, uint(pipeline.GetId())); len(got) != 1 || got["cost"] != "1234" {
-		t.Errorf("pipeline tag rows = %v, want {cost:1234}", got)
+	// The pipeline's labels are one row per pair in the Label table.
+	if got := labelRows(t, db, models.LabelOwnerPipeline, uint(pipeline.GetId())); len(got) != 1 || got["cost"] != "1234" {
+		t.Errorf("pipeline label rows = %v, want {cost:1234}", got)
 	}
-	// The environment's tags.
-	if got := tagRows(t, db, models.TagOwnerEnvironment, uint(env.GetId())); len(got) != 1 || got["release"] != "train-2026-10" {
-		t.Errorf("environment tag rows = %v, want {release:train-2026-10}", got)
+	// The environment's labels.
+	if got := labelRows(t, db, models.LabelOwnerEnvironment, uint(env.GetId())); len(got) != 1 || got["release"] != "train-2026-10" {
+		t.Errorf("environment label rows = %v, want {release:train-2026-10}", got)
 	}
-	// The worker's tags.
+	// The worker's labels.
 	var worker models.Worker
 	if err := db.Where("name = ?", "w1").First(&worker).Error; err != nil {
 		t.Fatalf("load worker: %v", err)
 	}
-	if got := tagRows(t, db, models.TagOwnerWorker, worker.ID); len(got) != 1 || got["rack"] != "7" {
-		t.Errorf("worker tag rows = %v, want {rack:7}", got)
+	if got := labelRows(t, db, models.LabelOwnerWorker, worker.ID); len(got) != 1 || got["rack"] != "7" {
+		t.Errorf("worker label rows = %v, want {rack:7}", got)
 	}
-	// The worker group's tags.
+	// The worker group's labels.
 	var group models.WorkerGroup
 	if err := db.Where("name = ?", "pool").First(&group).Error; err != nil {
 		t.Fatalf("load group: %v", err)
 	}
-	if got := tagRows(t, db, models.TagOwnerWorkerGroup, group.ID); len(got) != 1 || got["team"] != "platform" {
-		t.Errorf("worker group tag rows = %v, want {team:platform}", got)
+	if got := labelRows(t, db, models.LabelOwnerWorkerGroup, group.ID); len(got) != 1 || got["team"] != "platform" {
+		t.Errorf("worker group label rows = %v, want {team:platform}", got)
 	}
-	// The job definition's tags.
+	// The job definition's labels.
 	var def models.Job
 	if err := db.Where("pipeline_id = ? AND run_id IS NULL", uint(pipeline.GetId())).First(&def).Error; err != nil {
 		t.Fatalf("load job definition: %v", err)
 	}
-	if got := tagRows(t, db, models.TagOwnerJob, def.ID); len(got) != 1 || got["stage"] != "build" {
-		t.Errorf("job definition tag rows = %v, want {stage:build}", got)
+	if got := labelRows(t, db, models.LabelOwnerJob, def.ID); len(got) != 1 || got["stage"] != "build" {
+		t.Errorf("job definition label rows = %v, want {stage:build}", got)
 	}
 }
 
@@ -113,11 +120,11 @@ func TestWorkerGroupCRUD(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// Create a group with tags.
+	// Create a group with labels.
 	created, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{
 		Name:        "prod-fleet",
 		Description: "production workers",
-		Tags:        map[string]string{"team": "platform", "region": "eu-west"},
+		Labels:        map[string]string{"team": "platform", "region": "eu-west"},
 	})
 	if err != nil {
 		t.Fatalf("CreateWorkerGroup: %v", err)
@@ -125,17 +132,17 @@ func TestWorkerGroupCRUD(t *testing.T) {
 	if created.GetName() != "prod-fleet" {
 		t.Errorf("name = %q, want %q", created.GetName(), "prod-fleet")
 	}
-	if got := created.GetTags()["team"]; got != "platform" {
-		t.Errorf("tags[team] = %q, want %q", got, "platform")
+	if got := created.GetLabels()["team"]; got != "platform" {
+		t.Errorf("labels[team] = %q, want %q", got, "platform")
 	}
 
 	// A create for an existing group is a no-op (returns the existing row).
-	again, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{Name: "prod-fleet", Tags: map[string]string{"x": "y"}})
+	again, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{Name: "prod-fleet", Labels: map[string]string{"x": "y"}})
 	if err != nil {
 		t.Fatalf("CreateWorkerGroup (existing): %v", err)
 	}
-	if _, ok := again.GetTags()["x"]; ok {
-		t.Errorf("existing group tags were replaced on create: %v", again.GetTags())
+	if _, ok := again.GetLabels()["x"]; ok {
+		t.Errorf("existing group labels were replaced on create: %v", again.GetLabels())
 	}
 
 	// Get the group.
@@ -147,19 +154,19 @@ func TestWorkerGroupCRUD(t *testing.T) {
 		t.Errorf("description = %q, want %q", got.GetDescription(), "production workers")
 	}
 
-	// Update the group's tags.
+	// Update the group's labels.
 	updated, err := client.UpdateWorkerGroup(ctx, &dbpb.UpdateWorkerGroupRequest{
 		Name: "prod-fleet",
-		Tags: map[string]string{"team": "backend"},
+		Labels: map[string]string{"team": "backend"},
 	})
 	if err != nil {
 		t.Fatalf("UpdateWorkerGroup: %v", err)
 	}
-	if updated.GetTags()["team"] != "backend" {
-		t.Errorf("updated tags[team] = %q, want %q", updated.GetTags()["team"], "backend")
+	if updated.GetLabels()["team"] != "backend" {
+		t.Errorf("updated labels[team] = %q, want %q", updated.GetLabels()["team"], "backend")
 	}
-	if _, ok := updated.GetTags()["region"]; ok {
-		t.Errorf("update replaced the whole tag set; region should be gone: %v", updated.GetTags())
+	if _, ok := updated.GetLabels()["region"]; ok {
+		t.Errorf("update replaced the whole label set; region should be gone: %v", updated.GetLabels())
 	}
 
 	// List groups.
@@ -180,70 +187,70 @@ func TestWorkerGroupCRUD(t *testing.T) {
 	}
 }
 
-// TestEnvironmentTags verifies that an environment's tags are settable through
+// TestEnvironmentLabels verifies that an environment's labels are settable through
 // the create/update RPCs and are returned on get (F-29).
-func TestEnvironmentTags(t *testing.T) {
+func TestEnvironmentLabels(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
 	env, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
 		Name: "prod",
-		Tags: map[string]string{"release": "train-2026-10"},
+		Labels: map[string]string{"release": "train-2026-10"},
 	})
 	if err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	if env.GetTags()["release"] != "train-2026-10" {
-		t.Errorf("env tags[release] = %q, want %q", env.GetTags()["release"], "train-2026-10")
+	if env.GetLabels()["release"] != "train-2026-10" {
+		t.Errorf("env labels[release] = %q, want %q", env.GetLabels()["release"], "train-2026-10")
 	}
 
 	updated, err := client.UpdateEnvironment(ctx, &dbpb.UpdateEnvironmentRequest{
 		Name: "prod",
-		Tags: map[string]string{"release": "train-2026-11"},
+		Labels: map[string]string{"release": "train-2026-11"},
 	})
 	if err != nil {
 		t.Fatalf("UpdateEnvironment: %v", err)
 	}
-	if updated.GetTags()["release"] != "train-2026-11" {
-		t.Errorf("updated env tags[release] = %q, want %q", updated.GetTags()["release"], "train-2026-11")
+	if updated.GetLabels()["release"] != "train-2026-11" {
+		t.Errorf("updated env labels[release] = %q, want %q", updated.GetLabels()["release"], "train-2026-11")
 	}
 }
 
 // TestRunTagCombining verifies that when a run is created, each job instance's
-// stored tags are the union of the tags of the pipeline, the job, the
+// stored labels are the union of the labels of the pipeline, the job, the
 // environment it targets, and the worker group it targets, with the more
 // specific source winning on a key collision (F-29).
-func TestRunTagCombining(t *testing.T) {
+func TestRunLabelCombining(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// A worker group with tags.
+	// A worker group with labels.
 	if _, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{
 		Name: "linux-pool",
-		Tags: map[string]string{"team": "platform", "rack": "1"},
+		Labels: map[string]string{"team": "platform", "rack": "1"},
 	}); err != nil {
 		t.Fatalf("CreateWorkerGroup: %v", err)
 	}
-	// An environment with tags.
+	// An environment with labels.
 	if _, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
 		Name: "staging",
-		Tags: map[string]string{"team": "platform", "release": "train-2026-10"},
+		Labels: map[string]string{"team": "platform", "release": "train-2026-10"},
 	}); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 
-	// A pipeline with tags and a job that targets the environment and group,
-	// with its own tags. The job's tags override the pipeline's on a
-	// collision; the environment's and group's tags override the job's.
+	// A pipeline with labels and a job that targets the environment and group,
+	// with its own labels. The job's labels override the pipeline's on a
+	// collision; the environment's and group's labels override the job's.
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
 		Name: "build",
-		Tags: map[string]string{"team": "platform", "cost": "1234"},
+		Labels: map[string]string{"team": "platform", "cost": "1234"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:         "compile",
 			Name:        "compile",
 			TargetGroup: "linux-pool",
 			Environment: "staging",
-			Tags:        map[string]string{"team": "backend", "stage": "build"},
+			Labels:        map[string]string{"team": "backend", "stage": "build"},
 		}},
 	})
 	if err != nil {
@@ -259,7 +266,7 @@ func TestRunTagCombining(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
-	// Fetch the run's job instance and check its combined tags.
+	// Fetch the run's job instance and check its combined labels.
 	jobs, err := client.ListJobs(ctx, &dbpb.ListJobsRequest{PipelineId: pipeline.GetId()})
 	if err != nil {
 		t.Fatalf("ListJobs: %v", err)
@@ -276,58 +283,58 @@ func TestRunTagCombining(t *testing.T) {
 	if instance == nil {
 		t.Fatalf("no run instance found in %v", jobs.GetJobs())
 	}
-	tags := instance.GetTags()
+	labels := instance.GetLabels()
 	// team: pipeline=platform, job=backend, environment=platform, group=platform
 	// -> most specific (group) wins: platform.
-	if tags["team"] != "platform" {
-		t.Errorf("tags[team] = %q, want %q", tags["team"], "platform")
+	if labels["team"] != "platform" {
+		t.Errorf("labels[team] = %q, want %q", labels["team"], "platform")
 	}
 	// cost: only the pipeline sets it.
-	if tags["cost"] != "1234" {
-		t.Errorf("tags[cost] = %q, want %q", tags["cost"], "1234")
+	if labels["cost"] != "1234" {
+		t.Errorf("labels[cost] = %q, want %q", labels["cost"], "1234")
 	}
 	// stage: only the job sets it.
-	if tags["stage"] != "build" {
-		t.Errorf("tags[stage] = %q, want %q", tags["stage"], "build")
+	if labels["stage"] != "build" {
+		t.Errorf("labels[stage] = %q, want %q", labels["stage"], "build")
 	}
 	// release: only the environment sets it.
-	if tags["release"] != "train-2026-10" {
-		t.Errorf("tags[release] = %q, want %q", tags["release"], "train-2026-10")
+	if labels["release"] != "train-2026-10" {
+		t.Errorf("labels[release] = %q, want %q", labels["release"], "train-2026-10")
 	}
 	// rack: only the worker group sets it.
-	if tags["rack"] != "1" {
-		t.Errorf("tags[rack] = %q, want %q", tags["rack"], "1")
+	if labels["rack"] != "1" {
+		t.Errorf("labels[rack] = %q, want %q", labels["rack"], "1")
 	}
 }
 
 // TestRunTagCombiningPrecedence verifies the key-collision precedence
 // (worker group > environment > job > pipeline) with a key set by every
 // source (F-29).
-func TestRunTagCombiningPrecedence(t *testing.T) {
+func TestRunLabelCombiningPrecedence(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
 	if _, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{
 		Name: "pool",
-		Tags: map[string]string{"k": "group"},
+		Labels: map[string]string{"k": "group"},
 	}); err != nil {
 		t.Fatalf("CreateWorkerGroup: %v", err)
 	}
 	if _, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
 		Name: "env",
-		Tags: map[string]string{"k": "environment"},
+		Labels: map[string]string{"k": "environment"},
 	}); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
 		Name: "p",
-		Tags: map[string]string{"k": "pipeline"},
+		Labels: map[string]string{"k": "pipeline"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:         "j",
 			Name:        "j",
 			TargetGroup: "pool",
 			Environment: "env",
-			Tags:        map[string]string{"k": "job"},
+			Labels:        map[string]string{"k": "job"},
 		}},
 	})
 	if err != nil {
@@ -351,37 +358,37 @@ func TestRunTagCombiningPrecedence(t *testing.T) {
 		t.Fatalf("no run instance found")
 	}
 	// The worker group is the most specific static source, so its value wins.
-	if got := instance.GetTags()["k"]; got != "group" {
-		t.Errorf("tags[k] = %q, want %q (group > environment > job > pipeline)", got, "group")
+	if got := instance.GetLabels()["k"]; got != "group" {
+		t.Errorf("labels[k] = %q, want %q (group > environment > job > pipeline)", got, "group")
 	}
 }
 
-// TestStartJobExecutionMergesWorkerTags verifies that when a worker starts a
-// job execution, the execution's tags are the job instance's base tag set
-// merged with the worker's tags (the worker's tags win on a collision) (F-29).
-func TestStartJobExecutionMergesWorkerTags(t *testing.T) {
+// TestStartJobExecutionMergesWorkerLabels verifies that when a worker starts a
+// job execution, the execution's labels are the job instance's base label set
+// merged with the worker's labels (the worker's labels win on a collision) (F-29).
+func TestStartJobExecutionMergesWorkerLabels(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// A worker group (so the job has a base tag set from the group).
+	// A worker group (so the job has a base label set from the group).
 	if _, err := client.CreateWorkerGroup(ctx, &dbpb.CreateWorkerGroupRequest{
 		Name: "pool",
-		Tags: map[string]string{"team": "platform"},
+		Labels: map[string]string{"team": "platform"},
 	}); err != nil {
 		t.Fatalf("CreateWorkerGroup: %v", err)
 	}
-	// A worker in the group, with its own tags.
+	// A worker in the group, with its own labels.
 	if _, err := client.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{
 		Name:  "w1",
 		Group: "pool",
-		Tags:  map[string]string{"rack": "7", "team": "backend"},
+		Labels:  map[string]string{"rack": "7", "team": "backend"},
 	}); err != nil {
 		t.Fatalf("RegisterWorker: %v", err)
 	}
 
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
 		Name: "p",
-		Tags: map[string]string{"cost": "1234"},
+		Labels: map[string]string{"cost": "1234"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:         "j",
 			Name:        "j",
@@ -420,17 +427,17 @@ func TestStartJobExecutionMergesWorkerTags(t *testing.T) {
 	if !resp.GetStarted() {
 		t.Fatalf("StartJobExecution: started = false, want true")
 	}
-	tags := resp.GetExecution().GetTags()
+	labels := resp.GetExecution().GetLabels()
 	// cost: from the pipeline (base set).
-	if tags["cost"] != "1234" {
-		t.Errorf("tags[cost] = %q, want %q", tags["cost"], "1234")
+	if labels["cost"] != "1234" {
+		t.Errorf("labels[cost] = %q, want %q", labels["cost"], "1234")
 	}
 	// team: base set has platform (group); the worker's team=backend wins.
-	if tags["team"] != "backend" {
-		t.Errorf("tags[team] = %q, want %q (worker wins)", tags["team"], "backend")
+	if labels["team"] != "backend" {
+		t.Errorf("labels[team] = %q, want %q (worker wins)", labels["team"], "backend")
 	}
 	// rack: only the worker sets it.
-	if tags["rack"] != "7" {
-		t.Errorf("tags[rack] = %q, want %q", tags["rack"], "7")
+	if labels["rack"] != "7" {
+		t.Errorf("labels[rack] = %q, want %q", labels["rack"], "7")
 	}
 }

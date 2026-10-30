@@ -16,7 +16,7 @@
 #   08-apikeys.sh     API keys (F-25)
 #   09-concurrency.sh concurrency keys (F-16)
 #   10-notifications.sh notifications (F-18)
-#   11-tagging.sh       tags on pipelines/jobs/groups combined onto a run and searchable by tag (F-29)
+#   11-labeling.sh      labels on pipelines/jobs/groups combined onto a run and searchable by label (F-29)
 #   12-metrics.sh       every component's dedicated metrics port serves /metrics + /healthz with data (F-20)
 #   13-source-fetcher.sh the source-fetcher (F-21.2) fetches a file by reference (file/http/git),
 #                        rooted file reads + traversal rejection, credential headers, git refetch
@@ -162,7 +162,7 @@ run_test 07-audit.sh
 run_test 08-apikeys.sh
 run_test 09-concurrency.sh
 run_test 10-notifications.sh
-run_test 11-tagging.sh
+run_test 11-labeling.sh
 run_test 12-metrics.sh
 run_test 13-source-fetcher.sh
 run_test 14-source-credentials.sh

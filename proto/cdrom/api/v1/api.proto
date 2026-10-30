@@ -206,14 +206,14 @@ message Worker {
   // targeting an environment is dispatched to the live workers that
   // registered it. Empty means the worker is reachable only by its group.
   repeated string environments = 5;
-  // tags are the worker's tags (F-29): a set of key/value pairs that label
+  // labels are the worker's labels (F-29): a set of key/value pairs that label
   // the worker. A worker declares them at registration (configurable, like
   // its environments, F-17); re-registration updates them. When a job is
-  // dispatched to the worker, the worker's tags are merged into the job's
-  // execution's tag set (the worker's tags win on a key collision). They are
+  // dispatched to the worker, the worker's labels are merged into the job's
+  // execution's label set (the worker's labels win on a key collision). They are
   // metadata (they never gate, route, or serialize work). Empty means the
-  // worker has no tags.
-  map<string, string> tags = 6;
+  // worker has no labels.
+  map<string, string> labels = 6;
 }
 
 message RegisterWorkerRequest {
@@ -224,10 +224,10 @@ message RegisterWorkerRequest {
   // (F-17); the worker declares them at registration (configurable, multiple).
   // Re-registration (e.g. after a restart) updates the membership.
   repeated string environments = 4;
-  // tags are the worker's tags (F-29); the worker declares them at
+  // labels are the worker's labels (F-29); the worker declares them at
   // registration (configurable, like its environments, F-17). Re-registration
   // (e.g. after a restart) updates them.
-  map<string, string> tags = 5;
+  map<string, string> labels = 5;
 }
 
 message DeregisterWorkerRequest {

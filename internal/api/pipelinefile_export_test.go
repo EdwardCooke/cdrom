@@ -25,7 +25,10 @@ func TestExportPipelineRoundTrip(t *testing.T) {
 	original := &dbpb.Pipeline{
 		Name:        "deploy",
 		Description: "a round-trip pipeline",
-		Tags:        map[string]string{"team": "platform"},
+		Labels:      map[string]string{"team": "platform"},
+		// Free-form annotations (F-21.7): UI-search-only, but they must
+		// survive the export → re-import round trip.
+		Annotations: map[string]string{"owner": "platform-team", "review": "required"},
 		FailureMode: dbpb.FailureMode_FAILURE_MODE_BEST_EFFORT,
 		ConcurrencyKeys: []string{
 			"global-lock",
@@ -71,7 +74,7 @@ func TestExportPipelineRoundTrip(t *testing.T) {
 				Environment: "prod",
 				Automation:  dbpb.Automation_AUTOMATION_MANUAL,
 				Approval:    dbpb.ApprovalPolicy_APPROVAL_POLICY_REQUIRED,
-				Tags:        map[string]string{"team": "platform"},
+				Labels:        map[string]string{"team": "platform"},
 				Variables: []*dbpb.Variable{
 					{Name: "region", Shape: dbpb.VariableShape_VARIABLE_PLAIN, Plain: "eu-west-1"},
 					{Name: "db_password", Shape: dbpb.VariableShape_VARIABLE_ENCRYPTED, Encrypted: "enc-1"},
@@ -111,7 +114,8 @@ func TestExportPipelineRoundTrip(t *testing.T) {
 	reimported := &dbpb.Pipeline{
 		Name:            req.Name,
 		Description:     req.Description,
-		Tags:            req.Tags,
+		Labels:          req.Labels,
+		Annotations:     req.Annotations,
 		FailureMode:     failureModeFromName(req.FailureMode),
 		ConcurrencyKeys: req.ConcurrencyKeys,
 		Params:          pipelineParamsToProto(req.Params),
@@ -125,6 +129,10 @@ func TestExportPipelineRoundTrip(t *testing.T) {
 	want := canonicalizePipeline(original)
 	if !deepEqualCanonical(want, got) {
 		t.Errorf("round-trip mismatch:\nwant: %s\ngot:  %s", canonicalString(want), canonicalString(got))
+	}
+	// The annotations (F-21.7) must survive the round trip verbatim.
+	if reimported.Annotations["owner"] != "platform-team" || reimported.Annotations["review"] != "required" {
+		t.Errorf("annotations lost in round trip: got %v", reimported.Annotations)
 	}
 }
 
@@ -185,7 +193,7 @@ type canonicalJob struct {
 	Environment string
 	Automation  string
 	Approval    string
-	Tags        map[string]string
+	Labels        map[string]string
 	Variables   map[string]canonicalVariable
 	Spec        canonicalSpec
 }
@@ -220,7 +228,8 @@ type canonicalSource struct {
 type canonicalPipeline struct {
 	Name            string
 	Description     string
-	Tags            map[string]string
+	Labels          map[string]string
+	Annotations     map[string]string
 	FailureMode     string
 	ConcurrencyKeys []string
 	Params          map[string]canonicalParamDecl
@@ -238,7 +247,8 @@ func canonicalizePipeline(p *dbpb.Pipeline) canonicalPipeline {
 	out := canonicalPipeline{
 		Name:            p.GetName(),
 		Description:     p.GetDescription(),
-		Tags:            p.GetTags(),
+		Labels:          p.GetLabels(),
+		Annotations:     p.GetAnnotations(),
 		FailureMode:     failureModeExportName(p.GetFailureMode()),
 		ConcurrencyKeys: sortedStrings(p.GetConcurrencyKeys()),
 		Params:          map[string]canonicalParamDecl{},
@@ -287,7 +297,7 @@ func canonicalizeJob(job *dbpb.JobDefinition) canonicalJob {
 		Environment: job.GetEnvironment(),
 		Automation:  automationName(job.GetAutomation()),
 		Approval:    approvalPolicyExportName(job.GetApproval()),
-		Tags:        job.GetTags(),
+		Labels:        job.GetLabels(),
 		Variables:   map[string]canonicalVariable{},
 	}
 	for _, v := range job.GetVariables() {
