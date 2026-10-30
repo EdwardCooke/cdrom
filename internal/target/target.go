@@ -124,6 +124,11 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	// fields against the step's condition context and asks the API to send,
 	// presenting the job's own token.
 	ctx = executor.ContextWithNotifier(ctx, notify.NewNotifier(tc.API, job.GetId(), tc.Token))
+	// A step handler (the built-in "rollback" handler, F-22) can initiate a
+	// RESUMPTION of the job's own pipeline: the target renders the step's
+	// fields and asks the API to spawn the resumption run (guarded server-side:
+	// containment, no re-arm, cooldown), presenting the job's own token.
+	ctx = executor.ContextWithRestorer(ctx, notify.NewRestorer(tc.API, job.GetId(), tc.Token))
 	// A step's "once" field (F-01) runs the step on at most one target of a
 	// fan-out job: the target claims a durable slot (job id + step name +
 	// attempt) through the API before running it, and a target that does not

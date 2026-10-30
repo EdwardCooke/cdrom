@@ -366,6 +366,11 @@ func main() {
 	// certificate.
 	grpcServer.SetEmailConfig(cfg.Email)
 	grpcServer.SetWebhookConfig(cfg.Webhook)
+	// Restoration (F-22): the gRPC surface mediates the ARMed rollback door
+	// (a rollback step handler's InitiateRestore) — it needs the scheduler
+	// client to spawn resumption runs and the rollback config (cooldown).
+	grpcServer.SetSchedulerClient(clients.Scheduler)
+	grpcServer.SetRollbackConfig(cfg.Rollback)
 	webhookClient, err := webhook.NewClient(cfg.TLS)
 	if err != nil {
 		logger.Error("webhook: http client", "err", err)

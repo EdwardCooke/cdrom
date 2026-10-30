@@ -44,6 +44,34 @@ service Database {
   rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
   rpc GetRun(GetRunRequest) returns (PipelineRun);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  // PreviousSuccessfulRun returns the LATEST run of a pipeline whose status is
+  // SUCEEDED and which is not rollback-origin (restores_run_id = 0) (F-22):
+  // the anchor a resumption restores TO. Rolling back to the run that JUST
+  // failed would step sideways instead of back, so rollback-origin runs are
+  // ineligible anchors. Returns NotFound when the pipeline has no such run
+  // (nothing to restore to — e.g. the first-ever deploy).
+  rpc PreviousSuccessfulRun(PreviousSuccessfulRunRequest) returns (PipelineRun);
+  // LatestRollbackRun returns the MOST RECENT rollback-origin run of a
+  // pipeline (trigger "rollback") (F-22): the API's restoration cooldown
+  // compares its start time against now-cooldown to suppress a flapping
+  // pipeline. Returns NotFound when the pipeline has no rollback-origin run.
+  rpc LatestRollbackRun(LatestRollbackRunRequest) returns (PipelineRun);
+  // RestartRun spawns a RESUMPTION run (F-22): a new run bound to the anchor
+  // run's snapshot that re-executes the portion of the anchor's DAG DOWNSTREAM
+  // OF the cut point and carries over everything UPSTREAM of it. Atomically,
+  // in one transaction, it clones the anchor run's job rows VERBATIM (spec,
+  // params, secrets, variables, resolved artifacts, pre-rendered concurrency
+  // keys, combined labels — inheriting NOTHING from the pipeline definition
+  // or the world of today): the ancestor closure of the cut point (strict
+  // parents/grandparents) becomes terminal carry-over jobs replicating the
+  // anchor's real outcomes (succeeded OR skipped, with outputs and step
+  // results copied), and the cut point plus its descendants become fresh
+  // pending jobs (attempt reset) that flow through the normal dispatch path.
+  // from_job_key names the cut point by the anchor's stable job key (F-08);
+  // it must exist among the anchor's jobs (NotFound otherwise). The anchor
+  // must be a succeeded run (FailedPrecondition otherwise). The new run is
+  // marked rollback-origin (trigger "rollback", restores_run_id = anchor).
+  rpc RestartRun(RestartRunRequest) returns (RestartRunResponse);
   // UpdateRun applies a partial update to a run: a status of
   // RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps
   // leave the corresponding field unchanged. The scheduler's run-status loop
@@ -1276,6 +1304,53 @@ message PipelineRun {
   // on a later run can pick up a newer version without changing what a past
   // run did. Empty for a run whose pipeline declares no spec.artifacts.
   map<string, string> artifacts = 19;
+  // restores_run_id is the ANCHOR run this run restores (F-22): nonzero when
+  // this run was spawned by a resumption (RestartRun), pointing at the
+  // previous successful run whose snapshot it re-executes (the suffix of its
+  // DAG, downstream of the cut point). 0 for an ordinary run. Together with
+  // the run's trigger ("rollback") it marks a run as rollback-origin: such
+  // runs are excluded from anchor selection (a rollback never rolls back to a
+  // rollback) and are exempt from a manual environment's proceed hold (F-22).
+  int64 restores_run_id = 20;
+}
+
+// PreviousSuccessfulRunRequest names the pipeline whose latest successful,
+// non-rollback-origin run is requested (F-22).
+message PreviousSuccessfulRunRequest {
+  // pipeline_id is the pipeline to look up.
+  int64 pipeline_id = 1;
+}
+
+// LatestRollbackRunRequest names the pipeline whose most recent rollback-origin
+// run is requested (F-22).
+message LatestRollbackRunRequest {
+  // pipeline_id is the pipeline to look up.
+  int64 pipeline_id = 1;
+}
+
+// RestartRunRequest names the anchor run and the cut point of a resumption
+// (F-22).
+message RestartRunRequest {
+  // anchor_run_id is the run to restore FROM: it must be a succeeded run (of
+  // any pipeline); its job rows are the source of the clone.
+  int64 anchor_run_id = 1;
+  // from_job_key is the CUT POINT, named by the anchor's stable job key
+  // (F-08): this job and everything downstream of it re-execute fresh; its
+  // strict ancestors are carried over as terminal clones. It must exist among
+  // the anchor's jobs (NotFound otherwise).
+  string from_job_key = 2;
+}
+
+// RestartRunResponse is the newly-spawned resumption run (F-22) and its job
+// instances: the carry-over prefix (terminal, CarriedOver) and the fresh
+// suffix (pending). The CALLER (the scheduler) drives the suffix instances
+// through the normal dispatch path, exactly like CreateRun.
+message RestartRunResponse {
+  // run is the newly-created resumption run (rollback-origin: trigger
+  // "rollback", restores_run_id = the anchor).
+  PipelineRun run = 1;
+  // jobs are the run's job instances (carry-over prefix and fresh suffix).
+  repeated Job jobs = 2;
 }
 
 message CreateRunRequest {
@@ -1584,6 +1659,33 @@ message UpstreamJob {
   JobStatus status = 3;
   // outputs are the named values the upstream job produced (F-06).
   map<string, string> outputs = 4;
+  // key is the dependency's STABLE KEY (F-08) — the name a step's condition
+  // references it by (F-22: {{ .deps.<key>.status }}). Populated from the
+  // job's dependency observations when the API hands the job to a target;
+  // empty for legacy upstream entries addressed by display name only.
+  string key = 5;
+}
+
+// DependencyObservation is the TERMINAL outcome of one of a job's
+// dependencies (F-22), captured by the scheduler's dependency resolver when
+// it RELEASES the job (all dependencies terminal) and persisted on the job
+// row. A job's depends_on is cleared on release, so without this capture the
+// outcomes would be unrecoverable at dispatch time; the API hands these
+// observations to the execution target (as UpstreamJob entries with keys,
+// preferring them over a live depends_on scan) so a BRANCH job's (F-22) step
+// conditions can route on {{ .deps.<key>.status }} /
+// {{ .deps.<key>.outputs.<name> }}. Capturing the REAL statuses (a failed
+// dependency stays failed) is what distinguishes branch routing from
+// ignore_failed masking (F-06).
+message DependencyObservation {
+  // key is the dependency's stable key (F-08).
+  string key = 1;
+  // status is the dependency's terminal status (F-22: succeeded, failed,
+  // timed_out, skipped — never cancelled, which halts a branch job).
+  JobStatus status = 2;
+  // outputs are the dependency's published outputs (F-06), copied verbatim
+  // so a branch job's conditions/steps can template against them.
+  map<string, string> outputs = 3;
 }
 
 // ParamValue is a single value in a step's params map. A value is either a
@@ -1753,6 +1855,18 @@ message JobSpec {
   // (see Pipeline.concurrency_keys). Empty means the job holds no concurrency
   // keys.
   repeated string concurrency_keys = 7;
+  // branch, when true, makes the job REACT to its dependencies' outcomes
+  // instead of being skipped by them (F-22): a dependency that FAILS, TIMES
+  // OUT, or is SKIPPED no longer reflexively skips the job — the job is
+  // released (once every dependency is terminal) and its step CONDITIONS
+  // route on the real outcomes via {{ .deps.<key>.status }} /
+  // {{ .deps.<key>.outputs.<name> }}. A CANCELLED dependency still skips the
+  // job (aborting a lineage is not revivable). Contrast with ignore_failed
+  // (F-06), which is SET BY THE DEPENDENCY and MASKS its failure everywhere;
+  // branch is set by THIS job and PRESERVES the dependency's true status.
+  // Denormalized from the spec onto the job instance at run creation so the
+  // scheduler's dependency resolver can read it without decoding the spec.
+  bool branch = 8;
 }
 
 message Job {
@@ -1969,6 +2083,35 @@ message Job {
   // run picked. Empty for a job not part of a run (or a run whose pipeline
   // declares no spec.artifacts).
   map<string, string> artifacts = 42;
+  // branch is the job's branch flag (F-22), denormalized from the spec's
+  // branch field when the job instance was created. When true the scheduler's
+  // dependency resolver releases the job (letting its conditions route on the
+  // dependencies' real outcomes) instead of skipping it when a dependency
+  // fails, times out, or is skipped; a cancelled dependency still skips it.
+  bool branch = 43;
+  // dependency_observations are the terminal outcomes of this job's
+  // dependencies (F-22), captured by the scheduler's dependency resolver when
+  // it releases the job and persisted here. Empty until the job is released
+  // (or skipped, in which case the resolver captures nothing — the job never
+  // runs). The API prefers these over a live depends_on scan when populating
+  // the job's upstream_jobs for a target, because depends_on is CLEARED on
+  // release and the observations are the only durable record of HOW the
+  // dependencies ended. Entries carry the dependency's stable key (F-08);
+  // the target exposes them as {{ .deps.<key>.status }} /
+  // {{ .deps.<key>.outputs.<name> }} in step conditions.
+  repeated DependencyObservation dependency_observations = 44;
+  // carried_over marks a job that is a CARRY-OVER clone in a resumption run
+  // (F-22): it replicates the terminal outcome of the anchor run's ancestor
+  // of the cut point (born terminal — succeeded or skipped — with the
+  // anchor's outputs, step results, and timestamps copied) rather than having
+  // executed in this run. False for every ordinary job and for the fresh
+  // suffix of a resumption.
+  bool carried_over = 45;
+  // restores_job_id is the id of the ANCHOR job this job replicates (F-22);
+  // 0 for an ordinary job. Set on every job of a resumption run (both the
+  // carry-over prefix and the fresh suffix), pointing at the corresponding
+  // job of the anchor run the resumption restores.
+  int64 restores_job_id = 46;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -2101,6 +2244,15 @@ message UpdateJobRequest {
   // target when it reports the job awaiting_approval. Absent/empty leaves the
   // previously recorded message unchanged.
   string approval_message = 8;
+  // dependency_observations REPLACE the job's recorded dependency outcomes
+  // (F-22); absent/empty leaves the previously recorded observations
+  // unchanged. The scheduler's dependency resolver sets them atomically with
+  // clear_depends_on when it RELEASES the job: because depends_on is cleared
+  // on release, the observations are the only durable record of how the
+  // dependencies terminated, and the API hands them to the execution target
+  // (as UpstreamJob entries with keys) so a branch job's conditions can route
+  // on {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}.
+  repeated DependencyObservation dependency_observations = 9;
 }
 
 message ReapJobRequest {

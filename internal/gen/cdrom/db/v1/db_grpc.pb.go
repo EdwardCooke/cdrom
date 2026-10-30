@@ -29,6 +29,9 @@ const (
 	Database_CreateRun_FullMethodName                      = "/cdrom.db.v1.Database/CreateRun"
 	Database_GetRun_FullMethodName                         = "/cdrom.db.v1.Database/GetRun"
 	Database_ListRuns_FullMethodName                       = "/cdrom.db.v1.Database/ListRuns"
+	Database_PreviousSuccessfulRun_FullMethodName          = "/cdrom.db.v1.Database/PreviousSuccessfulRun"
+	Database_LatestRollbackRun_FullMethodName              = "/cdrom.db.v1.Database/LatestRollbackRun"
+	Database_RestartRun_FullMethodName                     = "/cdrom.db.v1.Database/RestartRun"
 	Database_UpdateRun_FullMethodName                      = "/cdrom.db.v1.Database/UpdateRun"
 	Database_ListPipelineVersions_FullMethodName           = "/cdrom.db.v1.Database/ListPipelineVersions"
 	Database_GetPipelineVersion_FullMethodName             = "/cdrom.db.v1.Database/GetPipelineVersion"
@@ -192,6 +195,34 @@ type DatabaseClient interface {
 	CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*CreateRunResponse, error)
 	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*PipelineRun, error)
 	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
+	// PreviousSuccessfulRun returns the LATEST run of a pipeline whose status is
+	// SUCEEDED and which is not rollback-origin (restores_run_id = 0) (F-22):
+	// the anchor a resumption restores TO. Rolling back to the run that JUST
+	// failed would step sideways instead of back, so rollback-origin runs are
+	// ineligible anchors. Returns NotFound when the pipeline has no such run
+	// (nothing to restore to — e.g. the first-ever deploy).
+	PreviousSuccessfulRun(ctx context.Context, in *PreviousSuccessfulRunRequest, opts ...grpc.CallOption) (*PipelineRun, error)
+	// LatestRollbackRun returns the MOST RECENT rollback-origin run of a
+	// pipeline (trigger "rollback") (F-22): the API's restoration cooldown
+	// compares its start time against now-cooldown to suppress a flapping
+	// pipeline. Returns NotFound when the pipeline has no rollback-origin run.
+	LatestRollbackRun(ctx context.Context, in *LatestRollbackRunRequest, opts ...grpc.CallOption) (*PipelineRun, error)
+	// RestartRun spawns a RESUMPTION run (F-22): a new run bound to the anchor
+	// run's snapshot that re-executes the portion of the anchor's DAG DOWNSTREAM
+	// OF the cut point and carries over everything UPSTREAM of it. Atomically,
+	// in one transaction, it clones the anchor run's job rows VERBATIM (spec,
+	// params, secrets, variables, resolved artifacts, pre-rendered concurrency
+	// keys, combined labels — inheriting NOTHING from the pipeline definition
+	// or the world of today): the ancestor closure of the cut point (strict
+	// parents/grandparents) becomes terminal carry-over jobs replicating the
+	// anchor's real outcomes (succeeded OR skipped, with outputs and step
+	// results copied), and the cut point plus its descendants become fresh
+	// pending jobs (attempt reset) that flow through the normal dispatch path.
+	// from_job_key names the cut point by the anchor's stable job key (F-08);
+	// it must exist among the anchor's jobs (NotFound otherwise). The anchor
+	// must be a succeeded run (FailedPrecondition otherwise). The new run is
+	// marked rollback-origin (trigger "rollback", restores_run_id = anchor).
+	RestartRun(ctx context.Context, in *RestartRunRequest, opts ...grpc.CallOption) (*RestartRunResponse, error)
 	// UpdateRun applies a partial update to a run: a status of
 	// RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps
 	// leave the corresponding field unchanged. The scheduler's run-status loop
@@ -874,6 +905,36 @@ func (c *databaseClient) ListRuns(ctx context.Context, in *ListRunsRequest, opts
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListRunsResponse)
 	err := c.cc.Invoke(ctx, Database_ListRuns_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PreviousSuccessfulRun(ctx context.Context, in *PreviousSuccessfulRunRequest, opts ...grpc.CallOption) (*PipelineRun, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineRun)
+	err := c.cc.Invoke(ctx, Database_PreviousSuccessfulRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) LatestRollbackRun(ctx context.Context, in *LatestRollbackRunRequest, opts ...grpc.CallOption) (*PipelineRun, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipelineRun)
+	err := c.cc.Invoke(ctx, Database_LatestRollbackRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RestartRun(ctx context.Context, in *RestartRunRequest, opts ...grpc.CallOption) (*RestartRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RestartRunResponse)
+	err := c.cc.Invoke(ctx, Database_RestartRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2148,6 +2209,34 @@ type DatabaseServer interface {
 	CreateRun(context.Context, *CreateRunRequest) (*CreateRunResponse, error)
 	GetRun(context.Context, *GetRunRequest) (*PipelineRun, error)
 	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
+	// PreviousSuccessfulRun returns the LATEST run of a pipeline whose status is
+	// SUCEEDED and which is not rollback-origin (restores_run_id = 0) (F-22):
+	// the anchor a resumption restores TO. Rolling back to the run that JUST
+	// failed would step sideways instead of back, so rollback-origin runs are
+	// ineligible anchors. Returns NotFound when the pipeline has no such run
+	// (nothing to restore to — e.g. the first-ever deploy).
+	PreviousSuccessfulRun(context.Context, *PreviousSuccessfulRunRequest) (*PipelineRun, error)
+	// LatestRollbackRun returns the MOST RECENT rollback-origin run of a
+	// pipeline (trigger "rollback") (F-22): the API's restoration cooldown
+	// compares its start time against now-cooldown to suppress a flapping
+	// pipeline. Returns NotFound when the pipeline has no rollback-origin run.
+	LatestRollbackRun(context.Context, *LatestRollbackRunRequest) (*PipelineRun, error)
+	// RestartRun spawns a RESUMPTION run (F-22): a new run bound to the anchor
+	// run's snapshot that re-executes the portion of the anchor's DAG DOWNSTREAM
+	// OF the cut point and carries over everything UPSTREAM of it. Atomically,
+	// in one transaction, it clones the anchor run's job rows VERBATIM (spec,
+	// params, secrets, variables, resolved artifacts, pre-rendered concurrency
+	// keys, combined labels — inheriting NOTHING from the pipeline definition
+	// or the world of today): the ancestor closure of the cut point (strict
+	// parents/grandparents) becomes terminal carry-over jobs replicating the
+	// anchor's real outcomes (succeeded OR skipped, with outputs and step
+	// results copied), and the cut point plus its descendants become fresh
+	// pending jobs (attempt reset) that flow through the normal dispatch path.
+	// from_job_key names the cut point by the anchor's stable job key (F-08);
+	// it must exist among the anchor's jobs (NotFound otherwise). The anchor
+	// must be a succeeded run (FailedPrecondition otherwise). The new run is
+	// marked rollback-origin (trigger "rollback", restores_run_id = anchor).
+	RestartRun(context.Context, *RestartRunRequest) (*RestartRunResponse, error)
 	// UpdateRun applies a partial update to a run: a status of
 	// RUN_STATUS_UNSPECIFIED leaves the status unchanged, and nil timestamps
 	// leave the corresponding field unchanged. The scheduler's run-status loop
@@ -2773,6 +2862,15 @@ func (UnimplementedDatabaseServer) GetRun(context.Context, *GetRunRequest) (*Pip
 func (UnimplementedDatabaseServer) ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListRuns not implemented")
 }
+func (UnimplementedDatabaseServer) PreviousSuccessfulRun(context.Context, *PreviousSuccessfulRunRequest) (*PipelineRun, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreviousSuccessfulRun not implemented")
+}
+func (UnimplementedDatabaseServer) LatestRollbackRun(context.Context, *LatestRollbackRunRequest) (*PipelineRun, error) {
+	return nil, status.Error(codes.Unimplemented, "method LatestRollbackRun not implemented")
+}
+func (UnimplementedDatabaseServer) RestartRun(context.Context, *RestartRunRequest) (*RestartRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestartRun not implemented")
+}
 func (UnimplementedDatabaseServer) UpdateRun(context.Context, *UpdateRunRequest) (*PipelineRun, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateRun not implemented")
 }
@@ -3321,6 +3419,60 @@ func _Database_ListRuns_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).ListRuns(ctx, req.(*ListRunsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PreviousSuccessfulRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreviousSuccessfulRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PreviousSuccessfulRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PreviousSuccessfulRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PreviousSuccessfulRun(ctx, req.(*PreviousSuccessfulRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_LatestRollbackRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LatestRollbackRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).LatestRollbackRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_LatestRollbackRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).LatestRollbackRun(ctx, req.(*LatestRollbackRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RestartRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestartRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RestartRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RestartRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RestartRun(ctx, req.(*RestartRunRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -5581,6 +5733,18 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListRuns",
 			Handler:    _Database_ListRuns_Handler,
+		},
+		{
+			MethodName: "PreviousSuccessfulRun",
+			Handler:    _Database_PreviousSuccessfulRun_Handler,
+		},
+		{
+			MethodName: "LatestRollbackRun",
+			Handler:    _Database_LatestRollbackRun_Handler,
+		},
+		{
+			MethodName: "RestartRun",
+			Handler:    _Database_RestartRun_Handler,
 		},
 		{
 			MethodName: "UpdateRun",

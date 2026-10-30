@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"gopkg.in/yaml.v3"
@@ -244,6 +245,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/pipelines/{id}/runs", s.createRun)
 	mux.HandleFunc("GET /api/pipelines/{id}/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
+	// Restoration (F-22): the MANUAL door — a user re-executes the suffix of
+	// the pipeline's latest successful run from a named cut point.
+	mux.HandleFunc("POST /api/pipelines/{id}/restart", s.restartPipeline)
 
 	// Pipeline versions (F-11): each change to a pipeline produces a new
 	// version; a run is bound to the version that was active when it started.
@@ -1001,7 +1005,7 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 			TargetGroup:  targetGroup,
 			Needs:        job.Needs,
 			Spec:         spec,
-			Labels:         job.Labels,
+			Labels:       job.Labels,
 			Environment:  job.Environment,
 			Automation:   automationFromName(job.Automation),
 			Approval:     approvalPolicyFromName(job.Approval),
@@ -1130,6 +1134,81 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	})
 	s.publish(Event{Type: EventRunStatus, RunID: run.GetId(), Status: runStatusName(run.GetStatus())})
 	writeJSON(w, http.StatusCreated, run)
+}
+
+// restartRequest is the body of POST /api/pipelines/{id}/restart (F-22):
+// FromJob is the CUT POINT, named by the anchor run's stable job key (F-08) —
+// this job and everything downstream of it re-execute fresh; its strict
+// ancestors are carried over as terminal clones.
+type restartRequest struct {
+	FromJob string `json:"from_job"`
+}
+
+// restartPipeline is the MANUAL door into restoration (F-22): it spawns a
+// resumption of the pipeline's latest successful, non-rollback-origin run
+// (the ANCHOR) from the requested cut point. Unlike the armed door (a
+// rollback step handler's API mediation), the manual door BYPASSES the no-
+// re-arm and cooldown guards — an operator may legitimately cascade a
+// rollback (rewinding a rollback's own anchor) and may override a flapping
+// pipeline; every initiation is audited with the operator's identity. It
+// retains the anchor-existence and cut-point validations (both surface as
+// clear errors).
+func (s *Server) restartPipeline(w http.ResponseWriter, r *http.Request) {
+	pipelineID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if !s.requirePermission(w, r, authz.PermRunsRestore, authz.Resource{PipelineID: pipelineID}) {
+		return
+	}
+	var req restartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
+		return
+	}
+	if req.FromJob == "" {
+		httpError(w, http.StatusBadRequest, "from_job is required")
+		return
+	}
+	// The anchor: the latest successful, NON-ROLLBACK-ORIGIN run of the
+	// pipeline (Database.PreviousSuccessfulRun). NotFound → nothing to restore
+	// to (e.g. the first-ever deploy).
+	anchor, err := s.clients.Database.PreviousSuccessfulRun(r.Context(), &dbpb.PreviousSuccessfulRunRequest{PipelineId: pipelineID})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			httpError(w, http.StatusConflict, "no successful run to restore to")
+			return
+		}
+		grpcError(w, err)
+		return
+	}
+	spawned, err := s.clients.Scheduler.RestartRun(r.Context(), &schedpb.RestartRunRequest{
+		AnchorRunId: anchor.GetId(),
+		FromJobKey:  req.FromJob,
+	})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			httpError(w, http.StatusBadRequest, "cut point %q not found among the jobs of run #%d", req.FromJob, anchor.GetId())
+			return
+		}
+		grpcError(w, err)
+		return
+	}
+	actor := auth.UserFromContext(r.Context()).Subject
+	if actor == "" {
+		actor = "anonymous"
+	}
+	s.recordAudit(r, audit.Event{
+		Action:     audit.ActionRunRestore,
+		TargetKind: audit.TargetRun,
+		TargetID:   strconv.FormatInt(spawned.GetId(), 10),
+		PipelineID: pipelineID,
+		RunID:      spawned.GetId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"door": "manual", "anchor_run": anchor.GetId(), "from_job": req.FromJob, "actor": actor}),
+	})
+	s.publish(Event{Type: EventRunStatus, RunID: spawned.GetId(), Status: runStatusName(spawned.GetStatus())})
+	writeJSON(w, http.StatusCreated, spawned)
 }
 
 // listRuns lists a pipeline's runs (F-07), most recent first.
@@ -1483,6 +1562,11 @@ type jobSpecRequest struct {
 	// ConcurrencyKeys are the job's concurrency keys (F-16): named, global
 	// locks that serialize this job against other jobs that share a key.
 	ConcurrencyKeys []string `json:"concurrency_keys,omitempty"`
+	// Branch, when true, makes the job react to its dependencies' outcomes
+	// (F-22) instead of being skipped when one fails: the job is released
+	// (once every dependency is terminal) and its step conditions route on
+	// the real outcomes via {{ .deps.<key>.status }}.
+	Branch bool `json:"branch,omitempty"`
 }
 
 // retryPolicyRequest is the JSON form of a job's retry policy (F-04).
@@ -1498,13 +1582,14 @@ type retryPolicyRequest struct {
 // scheduler. It returns nil when the spec is absent and has no steps, no job
 // level timeout, no retry policy, and no concurrency keys.
 func (r *jobSpecRequest) toProtoSpec() (*dbpb.JobSpec, error) {
-	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil && len(r.ConcurrencyKeys) == 0 && r.FailureMode == "" && !r.StepBarrier) {
+	if r == nil || (len(r.Steps) == 0 && r.Timeout == "" && r.Retry == nil && len(r.ConcurrencyKeys) == 0 && r.FailureMode == "" && !r.StepBarrier && !r.Branch) {
 		return nil, nil
 	}
 	spec := &dbpb.JobSpec{}
 	spec.ConcurrencyKeys = r.ConcurrencyKeys
 	spec.FailureMode = failureModeFromName(r.FailureMode)
 	spec.StepBarrier = r.StepBarrier
+	spec.Branch = r.Branch
 	if r.Timeout != "" {
 		duration, err := time.ParseDuration(r.Timeout)
 		if err != nil {

@@ -356,6 +356,46 @@ func (s *Server) CreateRun(ctx context.Context, req *schedpb.CreateRunRequest) (
 	return run, nil
 }
 
+// RestartRun spawns a RESUMPTION run (F-22): it asks the Database service to
+// clone the anchor run's job rows (atomically, in one transaction — the
+// ancestor closure of the cut point becomes terminal carry-over jobs
+// replicating the anchor's real outcomes, the cut point and its descendants
+// become fresh pending jobs bound to the anchor's verbatim snapshot) and then
+// drives the FRESH suffix exactly like CreateRun: a suffix job with
+// dependencies is left pending for the dependency resolver (which sees the
+// terminal carry-over clones and releases it), and a suffix root flows to the
+// admission gate. The carry-over prefix is terminal at birth and is never
+// driven. The new run is rollback-origin (trigger "rollback",
+// restores_run_id = the anchor): it is excluded from anchor selection and is
+// exempt from a manual environment's proceed hold (see
+// shouldHoldForProceed).
+func (s *Server) RestartRun(ctx context.Context, req *schedpb.RestartRunRequest) (*schedpb.Run, error) {
+	if req.GetAnchorRunId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "anchor_run_id is required")
+	}
+	if req.GetFromJobKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "from_job_key is required")
+	}
+	created, err := s.db.RestartRun(ctx, &dbpb.RestartRunRequest{
+		AnchorRunId: req.GetAnchorRunId(),
+		FromJobKey:  req.GetFromJobKey(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	run := toProtoRun(created.GetRun())
+	for _, job := range created.GetJobs() {
+		// Drive only the fresh suffix (pending clones): the carry-over prefix
+		// is terminal at birth and must not be dispatched or re-admitted.
+		if job.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+			continue
+		}
+		s.dispatchRunInstance(ctx, job)
+	}
+	s.logger.Info("scheduler: resumption run created", "run", run.GetId(), "anchor", req.GetAnchorRunId(), "from_job", req.GetFromJobKey(), "jobs", len(created.GetJobs()))
+	return run, nil
+}
+
 // TriggerRun starts a run of a pipeline from a trigger (F-09): it atomically
 // claims the trigger's fire window (Database.TriggerRun, so a trigger can
 // never fire twice for the same window) and, when this call created the run,
@@ -495,7 +535,17 @@ func (s *Server) dispatchJob(ctx context.Context, job *dbpb.Job) {
 // configured); when neither the environment nor the job sets a policy the job
 // is automatic (it proceeds on its own). A job that targets no environment is
 // never held.
+//
+// Rollback-origin jobs are ALSO never held (F-22): the manual hold is an
+// autonomy gate ("nothing deploys here unprompted"), and initiating a
+// resumption IS the prompt — re-holding would strand an unattended automatic
+// rollback (and would prevent the branch from reaching the approval gate,
+// which is still honored at hand-off). The job's denormalized TriggerType
+// ("rollback") marks the origin; ordinary runs are unaffected.
 func (s *Server) shouldHoldForProceed(ctx context.Context, job *dbpb.Job) bool {
+	if job.GetTriggerType() == "rollback" {
+		return false
+	}
 	envName := job.GetEnvironment()
 	if envName == "" {
 		return false
@@ -620,7 +670,11 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		ApprovalActor:    job.GetApprovalActor(),
 		ApprovalReason:   job.GetApprovalReason(),
 		Environment:      job.GetEnvironment(),
-		Labels:             job.GetLabels(),
+		Labels:           job.GetLabels(),
+		// CarriedOver (F-22): marks a carry-over clone in a resumption run so
+		// the UI (and the API's job views) can render the assumed prefix
+		// distinctly from freshly-executed jobs.
+		CarriedOver: job.GetCarriedOver(),
 	}
 }
 
@@ -639,5 +693,6 @@ func toProtoRun(run *dbpb.PipelineRun) *schedpb.Run {
 		TriggerName:     run.GetTriggerName(),
 		SourceRunId:     run.GetSourceRunId(),
 		PipelineVersion: run.GetPipelineVersion(),
+		RestoresRunId:   run.GetRestoresRunId(),
 	}
 }

@@ -123,7 +123,7 @@ tool.
 | F-21.5.3 | Refresh triggers (periodic loop at the effective cadence — file `spec.periodicRefresh` (interval/cron) when the admin gate allows it, else the 2-min system default — refresh-on-run + kickoff provenance, manual refresh) | done | [F-21.5.3](features/f-21.5.3-refresh-triggers.md) |
 | F-21.6 | Artifact packages (`spec.artifacts` resolution + per-run snapshot pin; `download_artifact`/`extract`/`publish_artifact` step handlers; job stage area under a configurable worker root; job-bound zip publishing via multiline globs; registry publish endpoint with explicit prerelease flag; promotes F-19's promotion op as a server-side blob copy) | done | [F-21.6](features/f-21.6-artifact-package-references.md) |
 | F-21.7 | `tags` → `labels` rename (+ `metadata.annotations`) | done | [F-21.7](features/f-21.7-tags-to-labels-rename.md) |
-| F-22 | Post-deploy verification & rollback | planned | [F-22](features/f-22-verification-rollback.md) |
+| F-22 | Post-deploy verification & rollback (`branch` jobs observing dependency outcomes via `.deps.<key>.*`; `probe` health-check step; `rollback` step initiating a resumption run that carries over the cut point's strict-ancestor prefix and re-executes the rest from the anchor's verbatim snapshot; armed (job-mediated) and manual (operator) doors with depth≤1/no-re-arm and flap cooldown; `POST /api/pipelines/{id}/restart`) | done | [F-22](features/f-22-verification-rollback.md) |
 
 ### Phase 5 — High availability
 
@@ -203,7 +203,7 @@ Tick each feature off as it lands.
 - [x] F-18 Notifications
 - [x] F-19 Artifact promotion (absorbed into F-21.6 — done there)
 - [x] F-20 Observability & metrics
-- [ ] F-21 Config as code (overview; see F-21.1…F-21.7)
+- [x] F-21 Config as code (overview; see F-21.1…F-21.7)
 - [x] F-21.1 File format & compiler (overview; see F-21.1.1…F-21.1.4)
 - [x] F-21.1.1 Manifest envelope & compiler skeleton
 - [x] F-21.1.2 Step spec shape & name-based step referencing
@@ -232,7 +232,7 @@ Tick each feature off as it lands.
 - [x] F-21.5.3 Refresh triggers
 - [x] F-21.6 Artifact packages (references + consumption handlers)
 - [x] F-21.7 `tags` → `labels` rename
-- [ ] F-22 Post-deploy verification & rollback
+- [x] F-22 Post-deploy verification & rollback
 - [x] F-23 High-availability control plane
 - [x] F-24 Username/password authentication
 - [x] F-25 API keys

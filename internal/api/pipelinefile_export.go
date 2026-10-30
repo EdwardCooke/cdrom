@@ -248,6 +248,9 @@ func exportJobSpec(spec *dbpb.JobSpec) pipelinefile.Value {
 	if spec.GetIgnoreFailed() {
 		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "ignoreFailed", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: "true"}})
 	}
+	if spec.GetBranch() {
+		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "branch", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: "true"}})
+	}
 	return out
 }
 

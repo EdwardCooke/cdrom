@@ -151,6 +151,25 @@ service API {
   // every API replica and worker process. When job-token auth is enabled the
   // caller must present a job token scoped to the job.
   rpc ClaimStepOnce(ClaimStepOnceRequest) returns (ClaimStepOnceResponse);
+
+  // Restoration (F-22). A rollback step handler on an execution target calls
+  // InitiateRestore to spawn a resumption of ITS OWN pipeline: the API
+  // validates the job token (establishing the caller's run → pipeline),
+  // applies the server-side guards (rollbacks do not re-arm — a
+  // rollback-origin caller is refused; a cooldown suppresses flapping
+  // pipelines), finds the anchor (the latest successful, non-rollback-origin
+  // run of the caller's pipeline via the Database service), and asks the
+  // scheduler to RestartRun from the requested cut point. The target never
+  // chooses the anchor: containment to the caller's own pipeline is a
+  // property of the mediation, not of the request. When job-token auth is
+  // enabled the caller must present a job token scoped to the job.
+  rpc InitiateRestore(InitiateRestoreRequest) returns (InitiateRestoreResponse);
+  // GetRun is a lightweight read of a run's CURRENT status (F-22): the
+  // rollback step handler polls it (while waiting on the resumption it
+  // initiated) to learn the resumption's verdict. It wraps the Database
+  // service's GetRun. When job-token auth is enabled the caller must present
+  // a job token scoped to the job.
+  rpc GetRun(GetRunRequest) returns (cdrom.db.v1.PipelineRun);
 }
 
 // LogFile is the TARGET-VIEW of a stored file (logical, not physical): its
@@ -367,6 +386,22 @@ message Job {
   // download_artifact step handler can resolve a reference to the version
   // the run picked. Empty for a job not part of a run.
   map<string, string> artifacts = 34;
+  // dependency_observations are the terminal outcomes of this job's
+  // dependencies (F-22), captured by the scheduler's dependency resolver at
+  // release time and persisted on the job row. Prefilled by the API (toAPIJob)
+  // and handed to the execution target: upstreamJobsFor turns them into
+  // upstream_jobs entries (WITH KEYS) so a branch job's step conditions can
+  // route on {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}.
+  // Empty for a job the resolver has not yet released (falls back to a live
+  // depends_on scan) and for a job with no dependencies.
+  repeated cdrom.db.v1.DependencyObservation dependency_observations = 35;
+  // branch is the job's branch flag (F-22), denormalized from the spec when
+  // the job instance was created. Informational on the target view (the
+  // scheduling decision is the scheduler's); the UI may render it.
+  bool branch = 36;
+  // carried_over marks a terminal job cloned from the anchor run during a
+  // resumption (F-22), so clients can distinguish it from the fresh suffix.
+  bool carried_over = 37;
 }
 
 message JobAssignment {
@@ -724,4 +759,39 @@ message ClaimStepOnceResponse {
   // slot was already claimed by another target in the same attempt: the caller
   // skips the step.
   bool claimed = 1;
+}
+
+// InitiateRestoreRequest is the request for the API's InitiateRestore RPC
+// (F-22): the rollback step handler's ask to spawn a resumption of the
+// caller's own pipeline.
+message InitiateRestoreRequest {
+  // job_id is the job the calling step belongs to. The API validates the
+  // presenter's job token against it and DERIVES the pipeline from the job —
+  // the anchor is always the caller's own pipeline's latest successful,
+  // non-rollback-origin run (containment is a property of the mediation).
+  int64 job_id = 1;
+  // from_job is the CUT POINT, named by the anchor's stable job key (F-08):
+  // this job and everything downstream of it re-execute fresh; its strict
+  // ancestors are carried over as terminal clones. It must exist among the
+  // anchor's jobs (NotFound otherwise).
+  string from_job = 2;
+}
+
+// InitiateRestoreResponse is the result of an InitiateRestore call (F-22).
+message InitiateRestoreResponse {
+  // run_id is the id of the newly-spawned resumption run (rollback-origin:
+  // trigger "rollback", restores_run_id = the anchor).
+  int64 run_id = 1;
+  // anchor_run_id is the run the resumption restores (the anchor).
+  int64 anchor_run_id = 2;
+}
+
+// GetRunRequest is the request for the API's GetRun RPC (F-22): a lightweight
+// read of a run's current status, polled by the rollback step handler while
+// it waits on the resumption it initiated.
+message GetRunRequest {
+  // run_id is the run to read.
+  int64 run_id = 1;
+  // job_id is the job the caller belongs to (job-token scoping, F-22).
+  int64 job_id = 2;
 }

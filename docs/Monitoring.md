@@ -72,7 +72,11 @@ heap, GC, CPU, file descriptors) comes for free.
   `cdrom_api_job_duration_seconds`, `cdrom_api_ws_clients`, `cdrom_api_workers`,
   `cdrom_api_event_log_lag`, `cdrom_api_artifact_bytes_total`,
   `cdrom_api_log_stream_bytes_total`, `cdrom_api_tokens_minted_total`,
-  `cdrom_api_secrets_decrypted_total`, `cdrom_api_notifications_total`.
+  `cdrom_api_secrets_decrypted_total`, `cdrom_api_notifications_total`,
+  `cdrom_api_restorations_total{door,result}` (F-22: resumption initiations
+  by door — `armed` (job-mediated) / `manual` (operator) — and outcome). Probe
+  steps surface through the worker's generic step counters
+  (`cdrom_worker_steps_total{step_type="probe"}`).
 - **Scheduler** — `cdrom_scheduler_dispatches_total{outcome}`,
   `cdrom_scheduler_admission_checks_total` / `cdrom_scheduler_admission_duration_seconds`,
   `cdrom_scheduler_queue_wait_seconds{group}`, `cdrom_scheduler_runs_total{status,trigger,environment}`,

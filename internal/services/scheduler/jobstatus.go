@@ -176,6 +176,30 @@ func (s *Server) processJob(ctx context.Context, db jobStatusDB, publisher jobSt
 	update := &dbpb.UpdateJobRequest{Id: job.GetId(), Status: jobStatusToProto(derived)}
 	if isTerminalJobStatus(derived) && job.GetFinishedAt() == nil {
 		update.FinishedAt = timestamppb.Now()
+		// MERGE THE EXECUTIONS' OUTPUTS ONTO THE JOB ROW (F-06): for group
+		// jobs the targets report their outputs to their EXECUTIONS (fan-out),
+		// and this loop is the only place that writes the job row's terminal
+		// state — so the job row would otherwise never carry its outputs, and
+		// downstream consumers (the UI's job views, F-22's dependency
+		// observations, a resumption's carry-over clones) could not read
+		// them. Union the terminal executions' outputs (a later worker
+		// overrides an earlier one on a name collision, mirroring the
+		// per-job aggregation). Written exactly once: only at the terminal
+		// transition.
+		merged := map[string]string{}
+		for _, exe := range latest {
+			switch exe.GetStatus() {
+			case dbpb.JobStatus_JOB_STATUS_SUCCEEDED, dbpb.JobStatus_JOB_STATUS_FAILED,
+				dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_TIMED_OUT,
+				dbpb.JobStatus_JOB_STATUS_SKIPPED:
+				for k, v := range exe.GetOutputs() {
+					merged[k] = v
+				}
+			}
+		}
+		if len(merged) > 0 {
+			update.Outputs = merged
+		}
 	}
 	if _, err := db.UpdateJob(ctx, update); err != nil {
 		s.logger.Warn("scheduler: job-status update job", "job", job.GetId(), "err", err)

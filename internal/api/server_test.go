@@ -53,6 +53,10 @@ type fakeScheduler struct {
 	triggered *schedpb.TriggerRunRequest
 	job       *schedpb.Job
 	run       *schedpb.Run
+	// Restoration (F-22): the last RestartRun request and an error to return
+	// (e.g. a bad cut point surfacing as NotFound).
+	lastRestart *schedpb.RestartRunRequest
+	restartErr  error
 }
 
 func (f *fakeScheduler) SubmitJob(ctx context.Context, in *schedpb.SubmitJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
@@ -104,6 +108,17 @@ func (f *fakeScheduler) ProceedRun(ctx context.Context, in *schedpb.ProceedRunRe
 
 func (f *fakeScheduler) ProceedJob(ctx context.Context, in *schedpb.ProceedJobRequest, opts ...grpc.CallOption) (*schedpb.Job, error) {
 	return f.job, nil
+}
+
+func (f *fakeScheduler) RestartRun(ctx context.Context, in *schedpb.RestartRunRequest, opts ...grpc.CallOption) (*schedpb.Run, error) {
+	f.lastRestart = in
+	if f.restartErr != nil {
+		return nil, f.restartErr
+	}
+	if f.run != nil {
+		return f.run, nil
+	}
+	return &schedpb.Run{Id: 1, PipelineId: 0, Status: dbpb.RunStatus_RUN_STATUS_PENDING, Trigger: "rollback"}, nil
 }
 
 // TestSubmitJobWithSpec posts a job with a multi-step execution spec and

@@ -87,6 +87,12 @@ const (
 	PermPackagesView    = "packages.can-view"
 	PermPackagesPublish = "packages.can-publish"
 	PermPackagesPromote = "packages.can-promote"
+	// Restoration permission (F-22): initiating a RESUMPTION of a pipeline —
+	// spawning a run that re-executes the suffix of the pipeline's latest
+	// successful run from a named cut point (POST /api/pipelines/{id}/restart,
+	// and the armed rollback step handler's API mediation). Pipeline-scoped,
+	// denied by default (grant it to a role to enable manual restoration).
+	PermRunsRestore = "runs.can-restore"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -133,6 +139,7 @@ var AllPermissions = []string{
 	PermPackagesView,
 	PermPackagesPublish,
 	PermPackagesPromote,
+	PermRunsRestore,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a
@@ -160,7 +167,7 @@ func IsKnownPermission(p string) bool {
 func isResourceScoped(p string) bool {
 	switch p {
 	case PermPipelinesView, PermPipelinesEdit, PermPipelinesDelete,
-		PermRunsTrigger, PermRunsCancel,
+		PermRunsTrigger, PermRunsCancel, PermRunsRestore,
 		PermJobsApprove, PermJobsReject,
 		PermSecretsView, PermSecretsManage:
 		return true

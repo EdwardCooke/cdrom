@@ -181,6 +181,7 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 			}
 			def.IgnoreFailed = def.Spec.IgnoreFailed
 			def.StepBarrier = def.Spec.StepBarrier
+			def.Branch = def.Spec.Branch
 			def.FailureMode = def.Spec.FailureMode
 			if def.FailureMode == "" {
 				def.FailureMode = pipeline.FailureMode
@@ -464,14 +465,18 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 					return err
 				}
 			}
-			// The old job definitions' labels (F-29) are removed with the
+			// The old job DEFINITIONS' labels (F-29) are removed with the
 			// definitions: capture their ids before the delete so their Tag
-			// rows can be cleaned up.
+			// rows can be cleaned up. CRITICAL SCOPE: the delete is limited to
+			// DEFINITIONS (run_id IS NULL) — a job row with a run_id is a PAST
+			// RUN INSTANCE (F-07/F-11), and editing a pipeline must never
+			// erase what a past run did (nor the jobs a resumption (F-22)
+			// clones from).
 			var oldJobIDs []uint
-			if err := tx.Model(&models.Job{}).Where("pipeline_id = ?", pipeline.ID).Pluck("id", &oldJobIDs).Error; err != nil {
+			if err := tx.Model(&models.Job{}).Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Pluck("id", &oldJobIDs).Error; err != nil {
 				return err
 			}
-			if err := tx.Where("pipeline_id = ?", pipeline.ID).Delete(&models.Job{}).Error; err != nil {
+			if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Delete(&models.Job{}).Error; err != nil {
 				return err
 			}
 			if len(oldJobIDs) > 0 {
@@ -490,6 +495,7 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 				}
 				def.IgnoreFailed = def.Spec.IgnoreFailed
 				def.StepBarrier = def.Spec.StepBarrier
+				def.Branch = def.Spec.Branch
 				def.FailureMode = def.Spec.FailureMode
 				if def.FailureMode == "" {
 					def.FailureMode = pipeline.FailureMode
@@ -683,6 +689,289 @@ func (s *Server) CreateRun(ctx context.Context, req *dbpb.CreateRunRequest) (*db
 	})
 	if err != nil {
 		return nil, grpcErr(err)
+	}
+	return response, nil
+}
+
+// PreviousSuccessfulRun returns the LATEST run of a pipeline whose status is
+// succeeded and which is not rollback-origin (restores_run_id IS NULL) (F-22):
+// the anchor a resumption restores TO. A rollback-origin run is excluded so a
+// rollback never rolls back to a rollback (stepping sideways instead of back).
+// NotFound when the pipeline has no such run (nothing to restore to — e.g.
+// the first-ever deploy).
+func (s *Server) PreviousSuccessfulRun(ctx context.Context, req *dbpb.PreviousSuccessfulRunRequest) (*dbpb.PipelineRun, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	var run models.PipelineRun
+	err := s.db.WithContext(ctx).
+		Where("pipeline_id = ? AND status = ? AND restores_run_id IS NULL", req.GetPipelineId(), models.RunStatusSucceeded).
+		Order("id DESC").
+		First(&run).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound,
+				fmt.Sprintf("pipeline %d has no successful run to restore to", req.GetPipelineId()))
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoRun(&run), nil
+}
+
+// LatestRollbackRun returns the MOST RECENT rollback-origin run of a pipeline
+// (trigger "rollback") (F-22): the API's restoration cooldown compares its
+// start time against now−cooldown to suppress a flapping pipeline. NotFound
+// when the pipeline has no rollback-origin run.
+func (s *Server) LatestRollbackRun(ctx context.Context, req *dbpb.LatestRollbackRunRequest) (*dbpb.PipelineRun, error) {
+	if req.GetPipelineId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "pipeline_id is required")
+	}
+	var run models.PipelineRun
+	err := s.db.WithContext(ctx).
+		Where("pipeline_id = ? AND trigger = ?", req.GetPipelineId(), "rollback").
+		Order("id DESC").
+		First(&run).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound,
+				fmt.Sprintf("pipeline %d has no rollback run", req.GetPipelineId()))
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoRun(&run), nil
+}
+
+// RestartRun spawns a RESUMPTION run (F-22): a new run bound to the anchor
+// run's SNAPSHOT that re-executes the portion of the anchor's DAG downstream
+// of the cut point and carries over everything upstream of it. Inside one
+// transaction it clones the anchor run's job rows VERBATIM (spec, params,
+// secrets, variables, resolved artifacts, pre-rendered concurrency keys,
+// combined labels — inheriting nothing from the pipeline definition or the
+// world of today):
+//
+//   - the STRICT ancestor closure of the cut point (walked up the anchor's
+//     depends_on edges) becomes terminal CARRY-OVER clones replicating the
+//     anchor's real outcomes (succeeded OR skipped, with outputs, step
+//     results, attempts, and timestamps copied);
+//   - the cut point and its descendants become FRESH pending clones (attempt
+//     reset, lifecycle/transient state cleared) that flow through the normal
+//     dispatch path (the caller drives them).
+//
+// Every clone records restores_job_id (the anchor job it replicates); the new
+// run records restores_run_id (the anchor) and trigger "rollback" (making it
+// rollback-origin: excluded from anchor selection and exempt from a manual
+// environment's proceed hold). The cut point is named by the anchor's stable
+// job key (F-08) and must exist among the anchor's jobs (NotFound otherwise);
+// the anchor must be a succeeded run (FailedPrecondition otherwise).
+func (s *Server) RestartRun(ctx context.Context, req *dbpb.RestartRunRequest) (*dbpb.RestartRunResponse, error) {
+	anchorID := uint(req.GetAnchorRunId())
+	if anchorID == 0 {
+		return nil, status.Error(codes.InvalidArgument, "anchor_run_id is required")
+	}
+	if req.GetFromJobKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "from_job_key is required")
+	}
+	var anchor models.PipelineRun
+	if err := s.db.WithContext(ctx).First(&anchor, anchorID).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if anchor.Status != models.RunStatusSucceeded {
+		return nil, status.Error(codes.FailedPrecondition,
+			fmt.Sprintf("anchor run %d is not succeeded (it is %s); only a successful run can be restored", anchorID, anchor.Status))
+	}
+	var anchorJobs []models.Job
+	if err := s.db.WithContext(ctx).Where("run_id = ?", anchorID).Order("id").Find(&anchorJobs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if len(anchorJobs) == 0 {
+		return nil, status.Error(codes.FailedPrecondition, fmt.Sprintf("anchor run %d has no jobs", anchorID))
+	}
+	anchorsByID := make(map[uint]*models.Job, len(anchorJobs))
+	anchorsByKey := make(map[string]uint, len(anchorJobs))
+	for i := range anchorJobs {
+		anchorsByID[anchorJobs[i].ID] = &anchorJobs[i]
+		if anchorJobs[i].Key != "" {
+			anchorsByKey[anchorJobs[i].Key] = anchorJobs[i].ID
+		}
+	}
+	// The cut point, located by its STABLE KEY (F-08) among the ANCHOR's jobs
+	// (renamed/removed jobs since the anchor fail loud rather than drifting).
+	var cutPoint *models.Job
+	for i := range anchorJobs {
+		if anchorJobs[i].Key == req.GetFromJobKey() {
+			cutPoint = &anchorJobs[i]
+			break
+		}
+	}
+	if cutPoint == nil {
+		return nil, status.Error(codes.NotFound,
+			fmt.Sprintf("cut point %q not found among the jobs of run #%d", req.GetFromJobKey(), anchorID))
+	}
+	// Parent edges (child -> parents), restricted to the anchor's own job set.
+	// The dependency resolver clears DependsOn when it releases a job, so a
+	// completed anchor's durable edges are normally in DependencyObservations.
+	parents := make(map[uint][]uint, len(anchorJobs))
+	for _, j := range anchorJobs {
+		seen := make(map[uint]struct{}, len(j.DependsOn)+len(j.DependencyObservations))
+		addParent := func(id uint) {
+			if _, ok := anchorsByID[id]; !ok {
+				return
+			}
+			if _, ok := seen[id]; ok {
+				return
+			}
+			seen[id] = struct{}{}
+			parents[j.ID] = append(parents[j.ID], id)
+		}
+		for _, pid := range j.DependsOn {
+			addParent(pid)
+		}
+		for _, observation := range j.DependencyObservations {
+			if pid, ok := anchorsByKey[observation.Key]; ok {
+				addParent(pid)
+			}
+		}
+	}
+	// The STRICT ancestor closure of the cut point (iterated walk up the
+	// parent edges): these jobs are carried over; the cut point itself and
+	// everything downstream of it re-execute fresh.
+	closure := make(map[uint]bool)
+	stack := parents[cutPoint.ID]
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if closure[id] {
+			continue
+		}
+		closure[id] = true
+		stack = append(stack, parents[id]...)
+	}
+
+	// The new run: bound to the anchor's version (F-11), carrying the anchor's
+	// concrete params, resolved artifact snapshot, and source provenance — and
+	// marked rollback-origin (trigger "rollback", restores_run_id = anchor).
+	anchorPipelineID := anchor.PipelineID
+	newRun := &models.PipelineRun{
+		PipelineID:      anchor.PipelineID,
+		PipelineVersion: anchor.PipelineVersion,
+		Status:          models.RunStatusPending,
+		Trigger:         "rollback",
+		Params:          anchor.Params,
+		SourceKind:      anchor.SourceKind,
+		SourceReference: anchor.SourceReference,
+		SourceVersion:   anchor.SourceVersion,
+		SourceFileHash:  anchor.SourceFileHash,
+		Artifacts:       anchor.Artifacts,
+		RestoresRunID:   &anchorID,
+	}
+
+	response := &dbpb.RestartRunResponse{}
+	oldToNew := make(map[uint]uint, len(anchorJobs))
+	cloneOrig := make(map[uint]uint, len(anchorJobs)) // new id -> anchor id
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(newRun).Error; err != nil {
+			return err
+		}
+		// Phase 1: clone every anchor job (depends_on unmapped yet).
+		for ai := range anchorJobs {
+			aj := &anchorJobs[ai]
+			nj := *aj // value copy: snapshot fields (spec, params, secrets, …) transfer verbatim
+			// Identity/lifecycle reset.
+			nj.ID = 0
+			nj.CreatedAt = time.Time{}
+			nj.UpdatedAt = time.Time{}
+			nj.DeletedAt = gorm.DeletedAt{}
+			nj.RunID = &newRun.ID
+			nj.PipelineID = &anchorPipelineID
+			nj.DependsOn = nil // remapped in phase 2
+			nj.ConcurrencyAdmitted = false
+			nj.ConcurrencyAdmittedAt = nil
+			nj.ApprovalMessage = ""
+			nj.ApprovalRequestedAt = nil
+			nj.ApprovalDecision = ""
+			nj.ApprovalActor = ""
+			nj.ApprovalDecidedAt = nil
+			nj.ApprovalReason = ""
+			// Origin identity: the clone speaks for the NEW run, not the
+			// anchor — trigger type/name and upstream claims are overwritten
+			// with the resumption's (the API stamps them onto the job token,
+			// and the scheduler's manual-hold bypass keys off TriggerType).
+			nj.TriggerType = "rollback"
+			nj.TriggerName = ""
+			nj.UpstreamClaims = nil
+			aid := aj.ID
+			nj.RestoresJobID = &aid
+			if closure[aid] {
+				// CARRY-OVER PREFIX (the strict ancestors of the cut point):
+				// replicate the anchor's real terminal outcome — status
+				// (succeeded OR skipped), attempt, timestamps, outputs, and
+				// step results — so the resumption plays out the anchor's
+				// graph physics exactly (a skipped feeder stays skipped).
+				nj.Status = aj.Status
+				nj.Attempt = aj.Attempt
+				nj.StartedAt = aj.StartedAt
+				nj.FinishedAt = aj.FinishedAt
+				nj.StepResults = aj.StepResults
+				nj.Outputs = aj.Outputs
+				nj.CarriedOver = true
+			} else {
+				// FRESH SUFFIX (the cut point and everything downstream of it):
+				// pending, first attempt, no prior results — it flows through
+				// the normal dispatch path.
+				nj.Status = models.JobStatusPending
+				nj.Attempt = 1
+				nj.StartedAt = nil
+				nj.FinishedAt = nil
+				nj.StepResults = nil
+				nj.Outputs = nil
+				nj.DependencyObservations = nil
+				nj.CarriedOver = false
+			}
+			if err := tx.Create(&nj).Error; err != nil {
+				return err
+			}
+			oldToNew[aj.ID] = nj.ID
+			cloneOrig[nj.ID] = aj.ID
+			// Combined labels (F-29): re-write the anchor job's COMBINED
+			// SNAPSHOT under the new id (not recomputed from live resources —
+			// the resumption trusts nothing from the world of today).
+			if lbl := loadLabels(tx, models.LabelOwnerJob, aj.ID); len(lbl) > 0 {
+				nj.Labels = lbl
+				if err := replaceLabels(tx, models.LabelOwnerJob, nj.ID, lbl); err != nil {
+					return err
+				}
+			}
+		}
+		// Phase 2: remap every clone's depends_on to the NEW instance ids (a
+		// run's internal dependencies reference the run's own instances, F-06).
+		for newID, origID := range cloneOrig {
+			if len(parents[origID]) == 0 {
+				continue
+			}
+			deps := make([]uint, 0, len(parents[origID]))
+			for _, pid := range parents[origID] {
+				if nid, ok := oldToNew[pid]; ok {
+					deps = append(deps, nid)
+				}
+			}
+			if err := tx.Model(&models.Job{}).Where("id = ?", newID).
+				Select("DependsOn").Updates(&models.Job{DependsOn: deps}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	response.Run = toProtoRun(newRun)
+	for _, aj := range anchorJobs {
+		var clone models.Job
+		if err := s.db.WithContext(ctx).First(&clone, oldToNew[aj.ID]).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+		clone.Labels = loadLabels(s.db.WithContext(ctx), models.LabelOwnerJob, clone.ID)
+		response.Jobs = append(response.Jobs, toProtoJob(&clone))
 	}
 	return response, nil
 }
@@ -903,6 +1192,11 @@ func (s *Server) createRunAndInstances(ctx context.Context, tx *gorm.DB, pipelin
 			job.MaxAttempts = jobDef.Spec.Retry.MaxAttempts
 		}
 		job.IgnoreFailed = jobDef.Spec.IgnoreFailed
+		// The instance's branch flag (F-22) is denormalized from its
+		// definition's spec so the scheduler's dependency resolver can read it
+		// from the job alone (whether a failed dependency releases the job for
+		// its conditions to route on, or skips it).
+		job.Branch = jobDef.Spec.Branch
 		// The instance's concurrency keys (F-16) are the union of the
 		// pipeline's keys and the job's own keys (from its spec), each rendered
 		// against the run's parameters and identity (above / below), and
@@ -1426,6 +1720,11 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	// scheduler's dependency resolver can treat a failed job with the flag set
 	// as satisfied without re-reading the spec (F-06).
 	job.IgnoreFailed = spec.IgnoreFailed
+	// The job's branch flag (F-22) is denormalized from the spec so the
+	// scheduler's dependency resolver can read it from the job alone (whether
+	// a failed dependency releases the job for its conditions to route on, or
+	// skips it).
+	job.Branch = spec.Branch
 	// The job's step-barrier flag is denormalized from the spec so the
 	// execution target can tell from the job alone whether to synchronize its
 	// workers at step boundaries.
@@ -1650,12 +1949,34 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 	// Select rather than the map-based Update: the value is nil either way,
 	// but a map-based Update would not run the field's serializer for a
 	// non-nil DependsOn if this were ever reused for that.
-	if req.GetClearDependsOn() {
+	//
+	// dependency_observations (F-22) travel with clear_depends_on: the
+	// resolver captures the dependencies' terminal outcomes at the SAME
+	// moment it clears depends_on (because the clearance destroys the only
+	// record of which jobs were depended upon). Both fields are written in
+	// ONE selective update (a single variadic Select — chaining Select calls
+	// REPLACES the field list, so the last one would win and the other write
+	// would be silently dropped).
+	if req.GetClearDependsOn() || len(req.GetDependencyObservations()) > 0 {
+		fields := []string{}
+		patch := &models.Job{}
+		if req.GetClearDependsOn() {
+			patch.DependsOn = nil
+			fields = append(fields, "DependsOn")
+		}
+		if obs := req.GetDependencyObservations(); len(obs) > 0 {
+			converted, err := dependencyObservationsFromProto(obs)
+			if err != nil {
+				return nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+			patch.DependencyObservations = converted
+			fields = append(fields, "DependencyObservations")
+		}
 		if err := s.db.WithContext(ctx).
 			Model(&models.Job{}).
 			Where("id = ?", req.GetId()).
-			Select("DependsOn").
-			Updates(&models.Job{DependsOn: nil}).Error; err != nil {
+			Select(fields).
+			Updates(patch).Error; err != nil {
 			return nil, grpcErr(err)
 		}
 	}
@@ -1966,6 +2287,26 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if isTerminalJobStatus(job.Status) {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
+	// A job still HOLDING DEPENDENCIES (depends_on non-empty) is owned by the
+	// scheduler's dependency resolver (F-06/F-08), not by the pull path: the
+	// resolver releases it (clearing depends_on and, for a branch job,
+	// capturing the dependencies' terminal observations, F-22) exactly once,
+	// and only then may a worker start it. Rejecting the start here is the
+	// AUTHORITATIVE guard against a worker stealing a held job from the pull
+	// path (ListPendingByGroup offers every pending job in the group; without
+	// this gate a worker could start a job whose dependencies have not been
+	// adjudicated — running it with stale/absent upstream data).
+	if len(job.DependsOn) > 0 {
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
+	}
+	// A job with NO run BUT a pipeline (run_id IS NULL, pipeline_id set) is a
+	// PIPELINE DEFINITION row (F-08: definitions are stored as Job rows),
+	// never a run instance: definitions are not started. (A standalone job —
+	// no run AND no pipeline — is a legitimate work item and is NOT rejected
+	// here.)
+	if job.RunID == nil && job.PipelineID != nil {
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
+	}
 	if job.Environment != "" {
 		// The job targets an environment (F-17): only a worker that belongs to
 		// the environment (intersected with the environment's target group when
@@ -2001,7 +2342,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		Attempt:    job.Attempt,
 		Status:     models.JobStatusRunning,
 		StartedAt:  &startedAt,
-		Labels:       executionLabels,
+		Labels:     executionLabels,
 	}
 	if err := db.Create(execution).Error; err != nil {
 		return nil, grpcErr(err)
@@ -2680,7 +3021,7 @@ func toProtoEnvironment(env *models.Environment) *dbpb.Environment {
 		Automation:       automationToProto(env.Automation),
 		CreatedAt:        timestamppb.New(env.CreatedAt),
 		UpdatedAt:        timestamppb.New(env.UpdatedAt),
-		Labels:             env.Labels,
+		Labels:           env.Labels,
 	}
 	return proto
 }
@@ -5027,7 +5368,7 @@ func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
 		Version:                         int32(pipeline.Version),
 		Secrets:                         secretsToProto(pipeline.Secrets),
 		ConcurrencyKeys:                 pipeline.ConcurrencyKeys,
-		Labels:                           pipeline.Labels,
+		Labels:                          pipeline.Labels,
 		Annotations:                     pipeline.Annotations,
 		VariableSets:                    variableSetsToProto(pipeline.VariableSets),
 		SecretSources:                   secretSourcesToProto(pipeline.SecretSources),
@@ -5058,7 +5399,7 @@ func toProtoPipelineVersion(v *models.PipelineVersion) *dbpb.PipelineVersion {
 		CreatedAt:               timestamppb.New(v.CreatedAt),
 		Secrets:                 secretsToProto(v.Secrets),
 		ConcurrencyKeys:         v.ConcurrencyKeys,
-		Labels:                    v.Labels,
+		Labels:                  v.Labels,
 		VariableSets:            variableSetsToProto(v.VariableSets),
 		SecretSources:           secretSourcesToProto(v.SecretSources),
 		PeriodicRefreshInterval: v.PeriodicRefreshInterval,
@@ -5078,7 +5419,7 @@ func jobDefinitionsToProto(snapshots []models.JobDefinitionSnapshot) []*dbpb.Job
 			TargetGroup:  snapshots[i].TargetGroup,
 			Needs:        snapshots[i].Needs,
 			Spec:         specToProto(snapshots[i].Spec),
-			Labels:         snapshots[i].Labels,
+			Labels:       snapshots[i].Labels,
 			Variables:    variablesToProto(snapshots[i].Variables),
 			VaultImports: vaultImportsToProto(snapshots[i].VaultImports),
 		})
@@ -5102,7 +5443,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 			TargetGroup:  defs[i].TargetGroup,
 			Needs:        needsFromDependsOn(defs[i].DependsOn, keyMap),
 			Spec:         defs[i].Spec,
-			Labels:         defs[i].Labels,
+			Labels:       defs[i].Labels,
 			Variables:    defs[i].Variables,
 			VaultImports: defs[i].VaultImports,
 		})
@@ -5118,7 +5459,7 @@ func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *mode
 		Params:                  pipeline.Params,
 		Secrets:                 pipeline.Secrets,
 		ConcurrencyKeys:         pipeline.ConcurrencyKeys,
-		Labels:                    pipeline.Labels,
+		Labels:                  pipeline.Labels,
 		VariableSets:            pipeline.VariableSets,
 		SecretSources:           pipeline.SecretSources,
 		PeriodicRefreshInterval: pipeline.PeriodicRefreshInterval,
@@ -5193,45 +5534,51 @@ func toProtoRun(run *models.PipelineRun) *dbpb.PipelineRun {
 	if run.SourceRunID != nil {
 		proto.SourceRunId = int64(*run.SourceRunID)
 	}
+	if run.RestoresRunID != nil {
+		proto.RestoresRunId = int64(*run.RestoresRunID)
+	}
 	return proto
 }
 
 func toProtoJob(job *models.Job) *dbpb.Job {
 	proto := &dbpb.Job{
-		Id:                  int64(job.ID),
-		Name:                job.Name,
-		Status:              jobStatusToProto(job.Status),
-		TargetGroup:         job.TargetGroup,
-		CreatedAt:           timestamppb.New(job.CreatedAt),
-		UpdatedAt:           timestamppb.New(job.UpdatedAt),
-		Spec:                specToProto(job.Spec),
-		Attempt:             int32(job.Attempt),
-		MaxAttempts:         int32(job.MaxAttempts),
-		DependsOn:           dependsOnToProto(job.DependsOn),
-		StepResults:         stepResultsToProto(job.StepResults),
-		Outputs:             job.Outputs,
-		IgnoreFailed:        job.IgnoreFailed,
-		FailureMode:         failureModeToProto(job.FailureMode),
-		StepBarrier:         job.StepBarrier,
-		Key:                 job.Key,
-		TriggerName:         job.TriggerName,
-		TriggerType:         job.TriggerType,
-		UpstreamClaims:      upstreamClaimsToStruct(job.UpstreamClaims),
-		RunParams:           job.RunParams,
-		Secrets:             secretsToProto(job.Secrets),
-		ApprovalMessage:     job.ApprovalMessage,
-		ApprovalDecision:    job.ApprovalDecision,
-		ApprovalActor:       job.ApprovalActor,
-		ApprovalReason:      job.ApprovalReason,
-		ConcurrencyKeys:     job.ConcurrencyKeys,
-		ConcurrencyAdmitted: job.ConcurrencyAdmitted,
-		Environment:         job.Environment,
-		Automation:          automationToProto(job.Automation),
-		Approval:            approvalPolicyToProto(job.Approval),
-		Labels:                job.Labels,
-		Variables:           variablesToProto(job.Variables),
-		VaultImports:        vaultImportsToProto(job.VaultImports),
-		Artifacts:           job.Artifacts,
+		Id:                     int64(job.ID),
+		Name:                   job.Name,
+		Status:                 jobStatusToProto(job.Status),
+		TargetGroup:            job.TargetGroup,
+		CreatedAt:              timestamppb.New(job.CreatedAt),
+		UpdatedAt:              timestamppb.New(job.UpdatedAt),
+		Spec:                   specToProto(job.Spec),
+		Attempt:                int32(job.Attempt),
+		MaxAttempts:            int32(job.MaxAttempts),
+		DependsOn:              dependsOnToProto(job.DependsOn),
+		StepResults:            stepResultsToProto(job.StepResults),
+		Outputs:                job.Outputs,
+		IgnoreFailed:           job.IgnoreFailed,
+		FailureMode:            failureModeToProto(job.FailureMode),
+		StepBarrier:            job.StepBarrier,
+		Key:                    job.Key,
+		TriggerName:            job.TriggerName,
+		TriggerType:            job.TriggerType,
+		UpstreamClaims:         upstreamClaimsToStruct(job.UpstreamClaims),
+		RunParams:              job.RunParams,
+		Secrets:                secretsToProto(job.Secrets),
+		ApprovalMessage:        job.ApprovalMessage,
+		ApprovalDecision:       job.ApprovalDecision,
+		ApprovalActor:          job.ApprovalActor,
+		ApprovalReason:         job.ApprovalReason,
+		ConcurrencyKeys:        job.ConcurrencyKeys,
+		ConcurrencyAdmitted:    job.ConcurrencyAdmitted,
+		Environment:            job.Environment,
+		Automation:             automationToProto(job.Automation),
+		Approval:               approvalPolicyToProto(job.Approval),
+		Labels:                 job.Labels,
+		Variables:              variablesToProto(job.Variables),
+		VaultImports:           vaultImportsToProto(job.VaultImports),
+		Artifacts:              job.Artifacts,
+		Branch:                 job.Branch,
+		DependencyObservations: dependencyObservationsToProto(job.DependencyObservations),
+		CarriedOver:            job.CarriedOver,
 	}
 	if job.ConcurrencyAdmittedAt != nil {
 		proto.ConcurrencyAdmittedAt = timestamppb.New(*job.ConcurrencyAdmittedAt)
@@ -5254,7 +5601,48 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 	if job.ApprovalDecidedAt != nil {
 		proto.ApprovalDecidedAt = timestamppb.New(*job.ApprovalDecidedAt)
 	}
+	if job.RestoresJobID != nil {
+		proto.RestoresJobId = int64(*job.RestoresJobID)
+	}
 	return proto
+}
+
+// dependencyObservationsToProto converts the model's dependency observations
+// (F-22) into their proto form. An empty list yields nil.
+func dependencyObservationsToProto(obs []models.DependencyObservation) []*dbpb.DependencyObservation {
+	if len(obs) == 0 {
+		return nil
+	}
+	out := make([]*dbpb.DependencyObservation, len(obs))
+	for i, o := range obs {
+		out[i] = &dbpb.DependencyObservation{
+			Key:     o.Key,
+			Status:  jobStatusToProto(o.Status),
+			Outputs: o.Outputs,
+		}
+	}
+	return out
+}
+
+// dependencyObservationsFromProto converts a list of proto dependency
+// observations (F-22) into the model's form. An empty list yields nil.
+func dependencyObservationsFromProto(obs []*dbpb.DependencyObservation) ([]models.DependencyObservation, error) {
+	if len(obs) == 0 {
+		return nil, nil
+	}
+	out := make([]models.DependencyObservation, len(obs))
+	for i, o := range obs {
+		status, err := jobStatusFromProto(o.GetStatus())
+		if err != nil {
+			return nil, err
+		}
+		out[i] = models.DependencyObservation{
+			Key:     o.GetKey(),
+			Status:  status,
+			Outputs: o.GetOutputs(),
+		}
+	}
+	return out, nil
 }
 
 // dependsOnFromProto converts a list of proto job ids into the model's
@@ -5372,6 +5760,7 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 		FailureMode:     failureModeFromProto(spec.GetFailureMode()),
 		StepBarrier:     spec.GetStepBarrier(),
 		ConcurrencyKeys: spec.GetConcurrencyKeys(),
+		Branch:          spec.GetBranch(),
 	}
 }
 
@@ -5379,7 +5768,7 @@ func specFromProto(spec *dbpb.JobSpec) models.JobSpec {
 // no steps, no timeout, and no retry policy yields a nil proto (so it
 // round-trips to an empty spec).
 func specToProto(spec models.JobSpec) *dbpb.JobSpec {
-	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil && spec.FailureMode == "" && !spec.StepBarrier && len(spec.ConcurrencyKeys) == 0 {
+	if len(spec.Steps) == 0 && spec.Timeout == 0 && spec.Retry == nil && spec.FailureMode == "" && !spec.StepBarrier && !spec.Branch && len(spec.ConcurrencyKeys) == 0 {
 		return nil
 	}
 	steps := make([]*dbpb.JobStep, 0, len(spec.Steps))
@@ -5403,6 +5792,7 @@ func specToProto(spec models.JobSpec) *dbpb.JobSpec {
 		FailureMode:     failureModeToProto(spec.FailureMode),
 		StepBarrier:     spec.StepBarrier,
 		ConcurrencyKeys: spec.ConcurrencyKeys,
+		Branch:          spec.Branch,
 	}
 }
 
@@ -5531,7 +5921,7 @@ func toProtoJobExecution(execution *models.JobExecution) *dbpb.JobExecution {
 		Status:      jobStatusToProto(execution.Status),
 		StepResults: stepResultsToProto(execution.StepResults),
 		Outputs:     execution.Outputs,
-		Labels:        execution.Labels,
+		Labels:      execution.Labels,
 	}
 	if execution.StartedAt != nil {
 		proto.StartedAt = timestamppb.New(*execution.StartedAt)

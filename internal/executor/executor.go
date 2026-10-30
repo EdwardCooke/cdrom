@@ -301,6 +301,20 @@ const TypeExtract = "extract"
 // registers itself under this name.
 const TypePublishArtifact = "publish_artifact"
 
+// TypeProbe is the step type of the built-in health-probe handler (F-22): a
+// step of this type polls an HTTP(S) URL from the execution target until it
+// responds with an accepted status (verification) or a deadline expires
+// (failure). The built-in handler (internal/stephandlers) registers itself
+// under this name.
+const TypeProbe = "probe"
+
+// TypeRollback is the step type of the built-in rollback handler (F-22): a
+// step of this type asks the API to spawn a resumption of the job's own
+// pipeline (restoring the suffix of the latest successful run from a named
+// cut point) and optionally waits on its verdict. The built-in handler
+// (internal/stephandlers) registers itself under this name.
+const TypeRollback = "rollback"
+
 // LogSink receives a job's step output (stdout/stderr) as it is produced, so
 // an execution target can stream it to the API in near-real-time (F-02). A
 // target that wants to stream output sets a sink in the context (via
@@ -580,6 +594,47 @@ func ContextWithNotifier(ctx context.Context, notifier Notifier) context.Context
 func NotifierFromContext(ctx context.Context) Notifier {
 	notifier, _ := ctx.Value(notifierKey{}).(Notifier)
 	return notifier
+}
+
+// Restorer lets a step handler initiate a RESUMPTION of the job's own
+// pipeline (F-22): the rollback step handler renders its params and asks the
+// API to spawn a resumption run (anchored at the latest successful,
+// non-rollback-origin run of the job's pipeline), then optionally waits on
+// its verdict. The API applies the server-side guards (containment to the
+// caller's own pipeline, no re-arm for rollback-origin callers, cooldown).
+// The execution target (worker or agent) implements it by calling the API's
+// InitiateRestore / GetRun RPCs, presenting the job's own token.
+//
+// Implementations must be safe for concurrent use. Methods are called with
+// the step's context (already bounded by the step's per-step timeout, when
+// set) and must return promptly when that context is done.
+type Restorer interface {
+	// InitiateRestore asks the API to spawn a resumption of the job's own
+	// pipeline, cutting at fromJob (a stable job key, F-08). It returns the
+	// new resumption run's id.
+	InitiateRestore(ctx context.Context, fromJob string) (runID int64, err error)
+	// RunStatus reports a run's current status (the polling aid for a
+	// rollback step that waits on its resumption's verdict).
+	RunStatus(ctx context.Context, runID int64) (statusStr string, err error)
+}
+
+type restorerKey struct{}
+
+// ContextWithRestorer attaches a Restorer to the context for a job's step
+// handlers. A nil restorer attaches nothing (the rollback step reports that
+// restoration is unsupported by this execution target).
+func ContextWithRestorer(ctx context.Context, restorer Restorer) context.Context {
+	if restorer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, restorerKey{}, restorer)
+}
+
+// RestorerFromContext retrieves the Restorer attached by
+// ContextWithRestorer, or nil when none is set.
+func RestorerFromContext(ctx context.Context) Restorer {
+	r, _ := ctx.Value(restorerKey{}).(Restorer)
+	return r
 }
 
 // ArtifactTransfer lets a step handler move files to and from the artifacts
@@ -896,17 +951,45 @@ func RunInfoFromContext(ctx context.Context) RunInfo {
 // structured keys are set after the env so they win over any same-named env
 // var.
 func conditionContext(step *dbpb.JobStep, priorSteps map[string]StepConditionInfo, upstreamJobs []*dbpb.UpstreamJob, identity JobIdentity, run RunInfo) map[string]any {
-	data := make(map[string]any, len(step.GetEnv())+6)
+	data := make(map[string]any, len(step.GetEnv())+7)
 	for k, v := range step.GetEnv() {
 		data[k] = v
 	}
 	data["steps"] = priorSteps
 	data["jobs"] = toUpstreamJobInfos(upstreamJobs)
+	// deps indexes the SAME upstream jobs by their STABLE KEYS (F-22): the
+	// entries the API populated from the job's dependency observations carry
+	// keys, so a branch job's condition routes on {{ .deps.<key>.status }} /
+	// {{ .deps.<key>.outputs.<name> }}. Legacy entries (a live depends_on
+	// scan) carry no key and fall back to the display name.
+	if deps := toDependencyInfos(upstreamJobs); len(deps) > 0 {
+		data["deps"] = deps
+	}
 	data["job"] = identity
 	data["params"] = run.Params
 	data["secrets"] = run.Secrets
 	data["run"] = run
 	return data
+}
+
+// toDependencyInfos indexes the upstream jobs by their stable keys (F-22),
+// falling back to the display name for entries that carry no key.
+func toDependencyInfos(jobs []*dbpb.UpstreamJob) map[string]UpstreamJobInfo {
+	out := make(map[string]UpstreamJobInfo, len(jobs))
+	for _, job := range jobs {
+		info := UpstreamJobInfo{
+			ID:      job.GetId(),
+			Name:    job.GetName(),
+			Status:  jobStatusName(job.GetStatus()),
+			Outputs: job.GetOutputs(),
+		}
+		k := job.GetKey()
+		if k == "" {
+			k = job.GetName()
+		}
+		out[k] = info
+	}
+	return out
 }
 
 // toUpstreamJobInfos converts the proto upstream jobs into their
@@ -1067,13 +1150,17 @@ func interpolateStep(step *dbpb.JobStep, data map[string]any) (*dbpb.JobStep, er
 			// webhook's url/headers/body), the download_artifact / extract
 			// handlers' fields (F-21.6: they routinely name files produced
 			// by PRIOR steps, so they render against the step's condition
-			// context), and publish_artifact's patterns (F-21.6: glob
-			// patterns contain "[" bracket expressions that must not be
-			// mistaken for template actions) are rendered lazily; they are
-			// not rendered here. publish_artifact's root/fileName stay
-			// eager (F-10 run-parameter interpolation).
+			// context), the probe handler's fields (F-22: a probed URL may
+			// cite a prior step's output, e.g. a dynamically allocated
+			// ingress host), the rollback handler's fields (F-22: the
+			// cut point may cite a run parameter), and publish_artifact's
+			// patterns (F-21.6: glob patterns contain "[" bracket
+			// expressions that must not be mistaken for template actions)
+			// are rendered lazily; they are not rendered here.
+			// publish_artifact's root/fileName stay eager (F-10
+			// run-parameter interpolation).
 			if stepType == TypeEmail || stepType == TypeWebhook || stepType == TypeDownloadArtifact ||
-				stepType == TypeExtract ||
+				stepType == TypeExtract || stepType == TypeProbe || stepType == TypeRollback ||
 				(stepType == TypePublishArtifact && k == "patterns") ||
 				(stepType == TypeApproval && k == "message") {
 				params[k] = v

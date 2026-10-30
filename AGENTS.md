@@ -86,11 +86,19 @@ type needs no schema change. The spec is a **per-run snapshot** on the `Job`
 row (GORM `serializer:json`), so editing a pipeline never changes what a past
 run did. Both targets run the spec through the shared `internal/executor`
 (steps in order; fail on the first errored step; no spec = no-op success).
+A job's `branch` flag (F-22) makes the dependency resolver RELEASE it —
+rather than skip it — when a dependency fails/times out/is skipped, letting
+its step conditions observe the dependency's real status and outputs via
+`.deps.<key>.status` / `.deps.<key>.outputs.<name>` (captured in the job's
+`dependency_observations` at release).
 
 Built-in handlers (`internal/stephandlers`): **`shell`** (default),
 **`token_exchange`**, **`approval`** (F-13), **`email`** and **`webhook`**
 (F-18 — the target renders the fields and calls the API's `SendEmail`/
-`SendWebhook` RPCs; the API does the actual send), and the artifact handlers
+`SendWebhook` RPCs; the API does the actual send), **`probe`** and
+**`rollback`** (F-22 — the target polls a URL until success/deadline with
+classified connect-vs-status failures, and mediates a resumption run through
+the API's `InitiateRestore`), and the artifact handlers
 (F-21.6): **`download_artifact`** (copies a named artifact onto the target —
 four-tier resolution: run snapshot → run namespace → job namespace → the
 public `packages` registry), **`extract`** (untar / gunzip-tar / unzip,
@@ -220,7 +228,7 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 | ~~F-19~~ | ~~Artifact promotion~~ — **absorbed into F-21.6** (publishing + promotion ride with artifact packages) | [f-19](docs/features/f-19-artifact-promotion.md) |
 | F-20 | Observability & metrics (Prometheus; DORA indicators) | [f-20](docs/features/f-20-observability.md) |
 | F-21 | Config as code (F-21.1…F-21.7, all done) | [f-21](docs/features/f-21-config-as-code.md) |
-| F-22 | Post-deploy verification & rollback *(planned)* | [f-22](docs/features/f-22-verification-rollback.md) |
+| F-22 | Post-deploy verification & rollback (`branch` jobs, `probe`/`rollback` steps, resumption runs) | [f-22](docs/features/f-22-verification-rollback.md) |
 | F-23 | High availability (event log, hybrid dispatch, leader election) | [f-23](docs/features/f-23-high-availability.md) · [HA design](docs/HighAvailability.md) |
 | F-24 | Username/password authentication (login/register proxied to IdP) | [f-24](docs/features/f-24-username-password-auth.md) |
 | F-25 | API keys (`cdrom-`+64-char; per-pipeline scope; rotate/reset) | [f-25](docs/features/f-25-api-keys.md) |

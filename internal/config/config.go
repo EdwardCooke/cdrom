@@ -230,6 +230,12 @@ type Config struct {
 	// request. Only the API uses it; other binaries ignore it.
 	Webhook WebhookConfig
 
+	// Rollback configures the API's restoration (rollback) guards (F-22): the
+	// COOLDOWN spacing between two rollback-origin initiations of the same
+	// pipeline (suppression of a flapping pipeline). Only the API uses it; other
+	// binaries ignore it.
+	Rollback RollbackConfig
+
 	// Metrics configures the component's Prometheus metrics endpoint (F-20).
 	// Every binary serves /metrics and /healthz on a dedicated metrics port
 	// (separate from its service ports) so a deployment can firewall the
@@ -432,6 +438,31 @@ func (w WebhookConfig) EffectiveTimeoutMax() time.Duration {
 		return defaultWebhookTimeoutMax
 	}
 	return w.TimeoutMax
+}
+
+// RollbackConfig configures the API's restoration (rollback) guards (F-22).
+type RollbackConfig struct {
+	// Cooldown is the minimum SPACING between two rollback-origin initiations
+	// of the same pipeline: a resumption started within Cooldown of the most
+	// recent one is refused (suppressing a FLAPPING pipeline — a permanently-
+	// broken environment that would otherwise bounce between the bad release
+	// and its rollback endlessly). Derived, not stored: the API compares the
+	// newest rollback-origin run's start time against now-COOLDOWN. Defaults
+	// to 5m when zero.
+	Cooldown time.Duration
+}
+
+// defaultRollbackCooldown is the default spacing between rollback-origin
+// initiations of a pipeline.
+const defaultRollbackCooldown = 5 * time.Minute
+
+// EffectiveCooldown returns the configured rollback cooldown, or the default
+// (5m) when zero.
+func (r RollbackConfig) EffectiveCooldown() time.Duration {
+	if r.Cooldown <= 0 {
+		return defaultRollbackCooldown
+	}
+	return r.Cooldown
 }
 
 // AuthConfig configures OIDC authentication for the API's HTTP surface (the
@@ -827,7 +858,7 @@ func LoadWithFile(file string) (*Config, error) {
 		WorkerName:                     "worker-1",
 		WorkerGroup:                    "default",
 		WorkerEnvironments:             []string{},
-		WorkerLabels:                     map[string]string{},
+		WorkerLabels:                   map[string]string{},
 		AgentName:                      defaultAgentName(),
 		// WorkerRoot defaults to empty: the target uses the OS temp dir for its
 		// staged working area (F-21.6). Operators on memory-constrained hosts
@@ -880,6 +911,9 @@ func LoadWithFile(file string) (*Config, error) {
 			Timeout:    defaultWebhookTimeout,
 			TimeoutMax: defaultWebhookTimeoutMax,
 		},
+		// Rollback (F-22) defaults to a 5-minute cooling-off between two
+		// rollback-origin initiations of the same pipeline.
+		Rollback: RollbackConfig{Cooldown: defaultRollbackCooldown},
 		// Metrics (F-20) is enabled by default: every binary serves /metrics
 		// and /healthz on its dedicated metrics port. Set enabled: false (or
 		// CDROM_METRICS_ENABLED=false) to disable the endpoint and recording.
@@ -941,13 +975,13 @@ type fileConfig struct {
 	WorkerName         *string            `yaml:"worker_name"`
 	WorkerGroup        *string            `yaml:"worker_group"`
 	WorkerEnvironments *[]string          `yaml:"worker_environments"`
-	WorkerLabels         *map[string]string `yaml:"worker_labels"`
+	WorkerLabels       *map[string]string `yaml:"worker_labels"`
 	AgentJobID         *string            `yaml:"agent_job_id"`
 	AgentName          *string            `yaml:"agent_name"`
 	// WorkerRoot is the base directory for a target's staged working area
 	// (F-21.6); empty means the OS temp dir. Env: CDROM_WORKER_ROOT.
 	WorkerRoot *string `yaml:"worker_root"`
-	DB       *struct {
+	DB         *struct {
 		Backend     *string `yaml:"backend"`
 		SQLitePath  *string `yaml:"sqlite_path"`
 		PostgresDSN *string `yaml:"postgres_dsn"`
@@ -1023,6 +1057,9 @@ type fileConfig struct {
 		Timeout    *string `yaml:"timeout"`
 		TimeoutMax *string `yaml:"timeout_max"`
 	} `yaml:"webhook"`
+	Rollback *struct {
+		Cooldown *string `yaml:"cooldown"`
+	} `yaml:"rollback"`
 	Metrics *struct {
 		Enabled *bool   `yaml:"enabled"`
 		Addr    *string `yaml:"addr"`
@@ -1335,6 +1372,15 @@ func applyFile(cfg *Config, path string) error {
 			}
 		}
 	}
+	if f.Rollback != nil {
+		if f.Rollback.Cooldown != nil {
+			if d, err := time.ParseDuration(*f.Rollback.Cooldown); err == nil {
+				cfg.Rollback.Cooldown = d
+			} else {
+				return fmt.Errorf("config: parse rollback.cooldown %q: %w", *f.Rollback.Cooldown, err)
+			}
+		}
+	}
 	if f.Metrics != nil {
 		if f.Metrics.Enabled != nil {
 			cfg.Metrics.Enabled = *f.Metrics.Enabled
@@ -1523,6 +1569,11 @@ func applyEnv(cfg *Config) {
 	if v := envOr("CDROM_WEBHOOK_TIMEOUT_MAX", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.Webhook.TimeoutMax = d
+		}
+	}
+	if v := envOr("CDROM_ROLLBACK_COOLDOWN", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Rollback.Cooldown = d
 		}
 	}
 	// Metrics (F-20): the dedicated metrics endpoint. Enabled by default; the

@@ -29,6 +29,7 @@ const (
 	Scheduler_ProceedJob_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/ProceedJob"
 	Scheduler_CreateRun_FullMethodName       = "/cdrom.scheduler.v1.Scheduler/CreateRun"
 	Scheduler_TriggerRun_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/TriggerRun"
+	Scheduler_RestartRun_FullMethodName      = "/cdrom.scheduler.v1.Scheduler/RestartRun"
 )
 
 // SchedulerClient is the client API for Scheduler service.
@@ -94,6 +95,16 @@ type SchedulerClient interface {
 	// run, drives its job instances exactly like CreateRun. The API's webhook
 	// endpoint and the scheduler's cron and event loops call it.
 	TriggerRun(ctx context.Context, in *TriggerRunRequest, opts ...grpc.CallOption) (*Run, error)
+	// RestartRun spawns a RESUMPTION run (F-22): it asks the Database service to
+	// clone the anchor run's job rows (atomically, in one transaction) — the
+	// ancestor closure of the cut point becomes terminal carry-over jobs
+	// replicating the anchor's real outcomes, the cut point and its descendants
+	// become fresh pending jobs bound to the anchor's verbatim snapshot — and
+	// then drives the fresh suffix exactly like CreateRun (through the
+	// dependency resolver and admission gate; the carry-over prefix is terminal
+	// at birth and is never driven). The new run is marked rollback-origin
+	// (trigger "rollback", restores_run_id = the anchor).
+	RestartRun(ctx context.Context, in *RestartRunRequest, opts ...grpc.CallOption) (*Run, error)
 }
 
 type schedulerClient struct {
@@ -204,6 +215,16 @@ func (c *schedulerClient) TriggerRun(ctx context.Context, in *TriggerRunRequest,
 	return out, nil
 }
 
+func (c *schedulerClient) RestartRun(ctx context.Context, in *RestartRunRequest, opts ...grpc.CallOption) (*Run, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Run)
+	err := c.cc.Invoke(ctx, Scheduler_RestartRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SchedulerServer is the server API for Scheduler service.
 // All implementations must embed UnimplementedSchedulerServer
 // for forward compatibility.
@@ -267,6 +288,16 @@ type SchedulerServer interface {
 	// run, drives its job instances exactly like CreateRun. The API's webhook
 	// endpoint and the scheduler's cron and event loops call it.
 	TriggerRun(context.Context, *TriggerRunRequest) (*Run, error)
+	// RestartRun spawns a RESUMPTION run (F-22): it asks the Database service to
+	// clone the anchor run's job rows (atomically, in one transaction) — the
+	// ancestor closure of the cut point becomes terminal carry-over jobs
+	// replicating the anchor's real outcomes, the cut point and its descendants
+	// become fresh pending jobs bound to the anchor's verbatim snapshot — and
+	// then drives the fresh suffix exactly like CreateRun (through the
+	// dependency resolver and admission gate; the carry-over prefix is terminal
+	// at birth and is never driven). The new run is marked rollback-origin
+	// (trigger "rollback", restores_run_id = the anchor).
+	RestartRun(context.Context, *RestartRunRequest) (*Run, error)
 	mustEmbedUnimplementedSchedulerServer()
 }
 
@@ -306,6 +337,9 @@ func (UnimplementedSchedulerServer) CreateRun(context.Context, *CreateRunRequest
 }
 func (UnimplementedSchedulerServer) TriggerRun(context.Context, *TriggerRunRequest) (*Run, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerRun not implemented")
+}
+func (UnimplementedSchedulerServer) RestartRun(context.Context, *RestartRunRequest) (*Run, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestartRun not implemented")
 }
 func (UnimplementedSchedulerServer) mustEmbedUnimplementedSchedulerServer() {}
 func (UnimplementedSchedulerServer) testEmbeddedByValue()                   {}
@@ -508,6 +542,24 @@ func _Scheduler_TriggerRun_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Scheduler_RestartRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestartRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SchedulerServer).RestartRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Scheduler_RestartRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SchedulerServer).RestartRun(ctx, req.(*RestartRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Scheduler_ServiceDesc is the grpc.ServiceDesc for Scheduler service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -554,6 +606,10 @@ var Scheduler_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TriggerRun",
 			Handler:    _Scheduler_TriggerRun_Handler,
+		},
+		{
+			MethodName: "RestartRun",
+			Handler:    _Scheduler_RestartRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

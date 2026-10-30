@@ -85,6 +85,11 @@ type APIMetrics struct {
 	// (F-21.5.3 / F-23), 0 otherwise — parity with the scheduler's leader
 	// metric; a stuck 0 on every pod means nobody is polling.
 	LeaderState prometheus.Gauge
+	// Restorations counts resumption (rollback) initiations (F-22) by door
+	// (armed — a rollback step handler's mediation — / manual — a user's
+	// restart endpoint) and result (initiated, cooldown, no_anchor, rearmed,
+	// invalid_cut_point, error).
+	Restorations *prometheus.CounterVec
 }
 
 // NewAPIMetrics builds the API metric set, registering its collectors with
@@ -162,12 +167,17 @@ func NewAPIMetrics(reg prometheus.Registerer) *APIMetrics {
 			Name: Prefix + "_api_leader_state",
 			Help: "1 while this pod holds the source-refresh leader lease (F-21.5.3), 0 otherwise.",
 		}),
+		Restorations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: Prefix + "_api_restorations_total",
+			Help: "Resumption (rollback) initiations (F-22), by door and result.",
+		}, []string{"door", "result"}),
 	}
 	reg.MustRegister(
 		m.HTTPRequests, m.HTTPDuration, m.AuthFailures, m.WSClients, m.Workers,
 		m.EventLogLag, m.JobStatus, m.JobDuration, m.ArtifactBytes,
 		m.LogStreamBytes, m.TokensMinted, m.SecretsDecrypted, m.Notifications,
 		m.SourceSyncs, m.SourceSyncDuration, m.SourceSyncInFlight, m.LeaderState,
+		m.Restorations,
 	)
 	return m
 }
@@ -361,6 +371,16 @@ func (m *APIMetrics) AddSecretsDecrypted(n int) {
 
 // RecordNotification counts an email/webhook send (kind: email / webhook;
 // outcome: sent / failed).
+// RecordRestoration counts a resumption (rollback) initiation (F-22) by door
+// (armed / manual) and result (initiated / cooldown / no_anchor / rearmed /
+// invalid_cut_point / error).
+func (m *APIMetrics) RecordRestoration(door, result string) {
+	if m == nil {
+		return
+	}
+	m.Restorations.WithLabelValues(door, result).Inc()
+}
+
 func (m *APIMetrics) RecordNotification(kind, outcome string) {
 	if m == nil {
 		return

@@ -262,6 +262,12 @@ func pipelineFileJob(file, name string, value pipelinefile.Value, shared map[str
 	if ig, ok := value.AsBoolField("ignoreFailed"); ok {
 		spec.IgnoreFailed = ig
 	}
+	// The job's branch flag (F-22): when true the job reacts to its
+	// dependencies' outcomes (routing on them via conditions) instead of
+	// being skipped when one fails.
+	if br, ok := value.AsBoolField("branch"); ok {
+		spec.Branch = br
+	}
 	if retryVal, ok := value.Get("retry"); ok {
 		spec.Retry = pipelineFileRetry(retryVal)
 	}

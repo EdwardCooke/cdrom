@@ -179,6 +179,12 @@ const (
 	// ActionRunProceed is a user's explicit proceed call that releases a run
 	// (or job) held by a `manual` environment (F-17).
 	ActionRunProceed = "run.proceed"
+	// ActionRunRestore is the initiation of a RESUMPTION of a pipeline (F-22):
+	// spawning a run that re-executes the suffix of the pipeline's latest
+	// successful run from a named cut point. Recorded for BOTH the manual door
+	// (a user's POST /api/pipelines/{id}/restart) and the ARMed door (a
+	// rollback step handler's API mediation, actor "job:<id>").
+	ActionRunRestore = "run.restore"
 	// ActionWorkerGroup* are the worker-group management actions (F-29):
 	// creating, updating, or deleting a worker group (a named group of
 	// long-lived workers that carries tags).
@@ -198,12 +204,12 @@ const (
 	ActionSourceCredentialDelete = "source-credential.delete"
 	// Package registry actions (F-21.6): publishing a version into the
 	// registry and promoting an artifact between namespaces.
-	ActionPackagePublish = "package.publish"
-	ActionPackagePromote = "package.promote"
-	ActionLogin                  = "auth.login"
-	ActionRegister               = "auth.register"
-	ActionWorkerRegister         = "worker.register"
-	ActionWorkerDeregister       = "worker.deregister"
+	ActionPackagePublish   = "package.publish"
+	ActionPackagePromote   = "package.promote"
+	ActionLogin            = "auth.login"
+	ActionRegister         = "auth.register"
+	ActionWorkerRegister   = "worker.register"
+	ActionWorkerDeregister = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).

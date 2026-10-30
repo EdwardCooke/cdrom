@@ -69,6 +69,16 @@ service Scheduler {
   // run, drives its job instances exactly like CreateRun. The API's webhook
   // endpoint and the scheduler's cron and event loops call it.
   rpc TriggerRun(TriggerRunRequest) returns (Run);
+  // RestartRun spawns a RESUMPTION run (F-22): it asks the Database service to
+  // clone the anchor run's job rows (atomically, in one transaction) — the
+  // ancestor closure of the cut point becomes terminal carry-over jobs
+  // replicating the anchor's real outcomes, the cut point and its descendants
+  // become fresh pending jobs bound to the anchor's verbatim snapshot — and
+  // then drives the fresh suffix exactly like CreateRun (through the
+  // dependency resolver and admission gate; the carry-over prefix is terminal
+  // at birth and is never driven). The new run is marked rollback-origin
+  // (trigger "rollback", restores_run_id = the anchor).
+  rpc RestartRun(RestartRunRequest) returns (Run);
 }
 
 message Job {
@@ -134,6 +144,13 @@ message Job {
   // are metadata (they never gate, route, or serialize work). Empty means the
   // job has no labels.
   map<string, string> labels = 24;
+  // carried_over marks a job that is a CARRY-OVER clone in a resumption run
+  // (F-22): it replicates the terminal outcome of the anchor run's ancestor
+  // of the cut point (born terminal, with the anchor's outputs and step
+  // results copied) rather than having executed in this run. False for every
+  // ordinary job and for the fresh suffix of a resumption. Mirrored from
+  // cdrom.db.v1.Job.carried_over.
+  bool carried_over = 25;
 }
 
 message SubmitJobRequest {
@@ -253,6 +270,11 @@ message Run {
   // the old definition. A run created against a specific version (a re-run of
   // an old run) records that version instead of the pipeline's current one.
   int32 pipeline_version = 12;
+  // restores_run_id is the ANCHOR run this run restores (F-22): nonzero when
+  // this run was spawned by a resumption (RestartRun), pointing at the
+  // previous successful run whose snapshot it re-executes. 0 for an ordinary
+  // run. Mirrored from cdrom.db.v1.PipelineRun.restores_run_id.
+  int64 restores_run_id = 13;
 }
 
 message CreateRunRequest {
@@ -299,4 +321,17 @@ message TriggerRunRequest {
   // that is an object or a list keeps its structure). Empty for a run not
   // started by a webhook.
   google.protobuf.Struct upstream_claims = 6;
+}
+// RestartRunRequest is the request for the scheduler's RestartRun RPC (F-22):
+// it names the anchor run and the cut point of the resumption.
+message RestartRunRequest {
+  // anchor_run_id is the run to restore FROM: it must be a succeeded run;
+  // its job rows are the source of the clone (the resumption inherits
+  // nothing from the pipeline definition or the world of today).
+  int64 anchor_run_id = 1;
+  // from_job_key is the CUT POINT, named by the anchor's stable job key
+  // (F-08): this job and everything downstream of it re-execute fresh; its
+  // strict ancestors are carried over as terminal clones. It must exist among
+  // the anchor's jobs (NotFound otherwise).
+  string from_job_key = 2;
 }

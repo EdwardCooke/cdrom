@@ -7,6 +7,7 @@
 package apiv1
 
 import (
+	v1 "cdrom/internal/gen/cdrom/db/v1"
 	context "context"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
@@ -45,6 +46,8 @@ const (
 	API_SendEmail_FullMethodName            = "/cdrom.api.v1.API/SendEmail"
 	API_SendWebhook_FullMethodName          = "/cdrom.api.v1.API/SendWebhook"
 	API_ClaimStepOnce_FullMethodName        = "/cdrom.api.v1.API/ClaimStepOnce"
+	API_InitiateRestore_FullMethodName      = "/cdrom.api.v1.API/InitiateRestore"
+	API_GetRun_FullMethodName               = "/cdrom.api.v1.API/GetRun"
 )
 
 // APIClient is the client API for API service.
@@ -183,6 +186,24 @@ type APIClient interface {
 	// every API replica and worker process. When job-token auth is enabled the
 	// caller must present a job token scoped to the job.
 	ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error)
+	// Restoration (F-22). A rollback step handler on an execution target calls
+	// InitiateRestore to spawn a resumption of ITS OWN pipeline: the API
+	// validates the job token (establishing the caller's run → pipeline),
+	// applies the server-side guards (rollbacks do not re-arm — a
+	// rollback-origin caller is refused; a cooldown suppresses flapping
+	// pipelines), finds the anchor (the latest successful, non-rollback-origin
+	// run of the caller's pipeline via the Database service), and asks the
+	// scheduler to RestartRun from the requested cut point. The target never
+	// chooses the anchor: containment to the caller's own pipeline is a
+	// property of the mediation, not of the request. When job-token auth is
+	// enabled the caller must present a job token scoped to the job.
+	InitiateRestore(ctx context.Context, in *InitiateRestoreRequest, opts ...grpc.CallOption) (*InitiateRestoreResponse, error)
+	// GetRun is a lightweight read of a run's CURRENT status (F-22): the
+	// rollback step handler polls it (while waiting on the resumption it
+	// initiated) to learn the resumption's verdict. It wraps the Database
+	// service's GetRun. When job-token auth is enabled the caller must present
+	// a job token scoped to the job.
+	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*v1.PipelineRun, error)
 }
 
 type aPIClient struct {
@@ -467,6 +488,26 @@ func (c *aPIClient) ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest,
 	return out, nil
 }
 
+func (c *aPIClient) InitiateRestore(ctx context.Context, in *InitiateRestoreRequest, opts ...grpc.CallOption) (*InitiateRestoreResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InitiateRestoreResponse)
+	err := c.cc.Invoke(ctx, API_InitiateRestore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*v1.PipelineRun, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.PipelineRun)
+	err := c.cc.Invoke(ctx, API_GetRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // APIServer is the server API for API service.
 // All implementations must embed UnimplementedAPIServer
 // for forward compatibility.
@@ -603,6 +644,24 @@ type APIServer interface {
 	// every API replica and worker process. When job-token auth is enabled the
 	// caller must present a job token scoped to the job.
 	ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error)
+	// Restoration (F-22). A rollback step handler on an execution target calls
+	// InitiateRestore to spawn a resumption of ITS OWN pipeline: the API
+	// validates the job token (establishing the caller's run → pipeline),
+	// applies the server-side guards (rollbacks do not re-arm — a
+	// rollback-origin caller is refused; a cooldown suppresses flapping
+	// pipelines), finds the anchor (the latest successful, non-rollback-origin
+	// run of the caller's pipeline via the Database service), and asks the
+	// scheduler to RestartRun from the requested cut point. The target never
+	// chooses the anchor: containment to the caller's own pipeline is a
+	// property of the mediation, not of the request. When job-token auth is
+	// enabled the caller must present a job token scoped to the job.
+	InitiateRestore(context.Context, *InitiateRestoreRequest) (*InitiateRestoreResponse, error)
+	// GetRun is a lightweight read of a run's CURRENT status (F-22): the
+	// rollback step handler polls it (while waiting on the resumption it
+	// initiated) to learn the resumption's verdict. It wraps the Database
+	// service's GetRun. When job-token auth is enabled the caller must present
+	// a job token scoped to the job.
+	GetRun(context.Context, *GetRunRequest) (*v1.PipelineRun, error)
 	mustEmbedUnimplementedAPIServer()
 }
 
@@ -687,6 +746,12 @@ func (UnimplementedAPIServer) SendWebhook(context.Context, *SendWebhookRequest) 
 }
 func (UnimplementedAPIServer) ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimStepOnce not implemented")
+}
+func (UnimplementedAPIServer) InitiateRestore(context.Context, *InitiateRestoreRequest) (*InitiateRestoreResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InitiateRestore not implemented")
+}
+func (UnimplementedAPIServer) GetRun(context.Context, *GetRunRequest) (*v1.PipelineRun, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRun not implemented")
 }
 func (UnimplementedAPIServer) mustEmbedUnimplementedAPIServer() {}
 func (UnimplementedAPIServer) testEmbeddedByValue()             {}
@@ -1123,6 +1188,42 @@ func _API_ClaimStepOnce_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _API_InitiateRestore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InitiateRestoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).InitiateRestore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_InitiateRestore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).InitiateRestore(ctx, req.(*InitiateRestoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_GetRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).GetRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_GetRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).GetRun(ctx, req.(*GetRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // API_ServiceDesc is the grpc.ServiceDesc for API service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1213,6 +1314,14 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClaimStepOnce",
 			Handler:    _API_ClaimStepOnce_Handler,
+		},
+		{
+			MethodName: "InitiateRestore",
+			Handler:    _API_InitiateRestore_Handler,
+		},
+		{
+			MethodName: "GetRun",
+			Handler:    _API_GetRun_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

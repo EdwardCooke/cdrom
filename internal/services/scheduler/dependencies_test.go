@@ -19,6 +19,9 @@ type fakeDependencyDB struct {
 	skipCalls      []int64
 	clearedDeps    []int64 // job ids UpdateJob cleared depends_on for
 	updateJobError error
+	// releasedObservations records, per job id, the dependency observations
+	// the resolver persisted at release (F-22).
+	releasedObservations map[int64][]*dbpb.DependencyObservation
 }
 
 func (f *fakeDependencyDB) ListJobs(ctx context.Context, in *dbpb.ListJobsRequest, opts ...grpc.CallOption) (*dbpb.ListJobsResponse, error) {
@@ -62,6 +65,12 @@ func (f *fakeDependencyDB) UpdateJob(ctx context.Context, in *dbpb.UpdateJobRequ
 		if job, ok := f.jobs[in.GetId()]; ok {
 			job.DependsOn = nil
 		}
+	}
+	if obs := in.GetDependencyObservations(); len(obs) > 0 {
+		if f.releasedObservations == nil {
+			f.releasedObservations = make(map[int64][]*dbpb.DependencyObservation)
+		}
+		f.releasedObservations[in.GetId()] = obs
 	}
 	return f.jobs[in.GetId()], nil
 }
@@ -285,5 +294,135 @@ func TestResolveJobDependenciesCancelledDependencyWithIgnoreFailedSkips(t *testi
 	}
 	if got := api.dispatchedIDs(); len(got) != 0 {
 		t.Errorf("dispatched = %v, want none", got)
+	}
+}
+
+// TestResolveJobDependenciesBranchReleasedOnFailedDependency verifies that a
+// BRANCH job (F-22) whose dependency FAILED is RELEASED (not skipped) once all
+// dependencies are terminal, and that the resolver captures the dependency's
+// REAL outcome (failed, with outputs) as a persisted observation.
+func TestResolveJobDependenciesBranchReleasedOnFailedDependency(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Key: "verify", Status: dbpb.JobStatus_JOB_STATUS_FAILED, Outputs: map[string]string{"why": "boom"}},
+		2: {Id: 2, Key: "rollback", Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, Branch: true, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 0 {
+		t.Fatalf("skipCalls = %v, want none (a branch job reacts, it is not skipped)", db.skipCalls)
+	}
+	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
+		t.Fatalf("clearedDeps = %v, want [2]", db.clearedDeps)
+	}
+	obs := db.releasedObservations[2]
+	if len(obs) != 1 {
+		t.Fatalf("releasedObservations[2] = %v, want 1 entry", obs)
+	}
+	o := obs[0]
+	if o.GetKey() != "verify" {
+		t.Errorf("observation key = %q, want verify", o.GetKey())
+	}
+	if o.GetStatus() != dbpb.JobStatus_JOB_STATUS_FAILED {
+		t.Errorf("observation status = %v, want FAILED (the REAL outcome, not masked)", o.GetStatus())
+	}
+	if o.GetOutputs()["why"] != "boom" {
+		t.Errorf("observation outputs = %v, want the dependency's outputs copied", o.GetOutputs())
+	}
+}
+
+// TestResolveJobDependenciesNonBranchStillSkipsOnFailedDependency verifies
+// that WITHOUT the branch flag a failed dependency still SKIPs the job (F-06
+// behavior preserved): branch is opt-in.
+func TestResolveJobDependenciesNonBranchStillSkipsOnFailedDependency(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Key: "verify", Status: dbpb.JobStatus_JOB_STATUS_FAILED},
+		2: {Id: 2, Key: "cleanup", Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 1 || db.skipCalls[0] != 2 {
+		t.Fatalf("skipCalls = %v, want [2] (a non-branch job is skipped on a failed dependency)", db.skipCalls)
+	}
+	if len(db.clearedDeps) != 0 {
+		t.Errorf("clearedDeps = %v, want none", db.clearedDeps)
+	}
+}
+
+// TestResolveJobDependenciesBranchCancelledAlwaysSkips verifies that a
+// CANCELLED dependency STILL skips a branch job (F-22): aborting a lineage is
+// not revivable — branch does not override cancellation.
+func TestResolveJobDependenciesBranchCancelledAlwaysSkips(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Key: "deploy", Status: dbpb.JobStatus_JOB_STATUS_CANCELLED},
+		2: {Id: 2, Key: "rollback", Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, Branch: true, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 1 || db.skipCalls[0] != 2 {
+		t.Fatalf("skipCalls = %v, want [2] (a cancelled dependency always blocks, even a branch job)", db.skipCalls)
+	}
+	if len(db.clearedDeps) != 0 {
+		t.Errorf("clearedDeps = %v, want none", db.clearedDeps)
+	}
+}
+
+// TestResolveJobDependenciesBranchMixedOutcomesCapturesAll verifies that a
+// branch job with MIXED dependency outcomes (one succeeded, one skipped) is
+// released and captures EACH dependency's real status (F-22): the successor
+// can distinguish which feeder succeeded and which was skipped.
+func TestResolveJobDependenciesBranchMixedOutcomesCapturesAll(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Key: "green", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED, Outputs: map[string]string{"img": "v1"}},
+		2: {Id: 2, Key: "blue", Status: dbpb.JobStatus_JOB_STATUS_SKIPPED},
+		3: {Id: 3, Key: "merge", Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1, 2}, Branch: true, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.skipCalls) != 0 {
+		t.Fatalf("skipCalls = %v, want none (mixed outcomes release a branch job)", db.skipCalls)
+	}
+	obs := db.releasedObservations[3]
+	if len(obs) != 2 {
+		t.Fatalf("releasedObservations[3] = %v, want 2 entries", obs)
+	}
+	byKey := map[string]*dbpb.DependencyObservation{}
+	for _, o := range obs {
+		byKey[o.GetKey()] = o
+	}
+	if byKey["green"].GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Errorf("green observation = %v, want SUCCEEDED", byKey["green"].GetStatus())
+	}
+	if byKey["blue"].GetStatus() != dbpb.JobStatus_JOB_STATUS_SKIPPED {
+		t.Errorf("blue observation = %v, want SKIPPED (the real outcome, not forged success)", byKey["blue"].GetStatus())
+	}
+}
+
+// TestResolveJobDependenciesUniversalObservationCapture verifies that
+// observations are captured for EVERY released job with dependencies (F-22),
+// not only branch jobs: the cost is one field on the release update and the
+// data is inert for non-branch jobs.
+func TestResolveJobDependenciesUniversalObservationCapture(t *testing.T) {
+	db := &fakeDependencyDB{jobs: map[int64]*dbpb.Job{
+		1: {Id: 1, Key: "build", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED},
+		2: {Id: 2, Key: "ship", Status: dbpb.JobStatus_JOB_STATUS_PENDING, DependsOn: []int64{1}, TargetGroup: "linux"},
+	}}
+	api := &fakeRelayer{}
+	s := NewServer(nil, testLogger())
+	s.resolveJobDependencies(context.Background(), db, api)
+
+	if len(db.clearedDeps) != 1 || db.clearedDeps[0] != 2 {
+		t.Fatalf("clearedDeps = %v, want [2]", db.clearedDeps)
+	}
+	obs := db.releasedObservations[2]
+	if len(obs) != 1 || obs[0].GetKey() != "build" || obs[0].GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
+		t.Fatalf("releasedObservations[2] = %v, want [{build succeeded}]", obs)
 	}
 }

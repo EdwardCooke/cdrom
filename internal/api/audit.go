@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 
 	"cdrom/internal/audit"
 	"cdrom/internal/auth"
@@ -180,6 +181,20 @@ func (s *GRPCServer) SetWebhookConfig(w config.WebhookConfig) {
 // timeout. When nil the API uses a default client.
 func (s *GRPCServer) SetWebhookClient(c *http.Client) {
 	s.webhookClient = c
+}
+
+// SetSchedulerClient installs the scheduler client the restoration mediation
+// (F-22) uses to spawn resumption runs. When nil (tests that do not exercise
+// restoration) InitiateRestore reports a clear precondition error.
+func (s *GRPCServer) SetSchedulerClient(sc schedpb.SchedulerClient) {
+	s.scheduler = sc
+}
+
+// SetRollbackConfig sets the restoration guards' configuration (F-22): the
+// cooldown spacing between two rollback-origin initiations of the same
+// pipeline. A zero value uses the config default.
+func (s *GRPCServer) SetRollbackConfig(rc config.RollbackConfig) {
+	s.rollbackCfg = rc
 }
 
 // recordAuditGRPC records an audit event for a gRPC action. actor and

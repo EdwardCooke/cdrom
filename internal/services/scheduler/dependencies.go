@@ -100,10 +100,23 @@ func (s *Server) resolveJobDependencies(ctx context.Context, db jobDependencyChe
 }
 
 // resolveJob checks every one of job's dependencies and either skips the job
-// (a dependency did not succeed), releases it (every dependency succeeded),
-// or leaves it pending (a dependency is still pending or running).
+// (a dependency did not succeed and the job does not branch), releases it
+// (every dependency is terminal and none forbids release), or leaves it
+// pending (a dependency is still pending or running).
+//
+// On release it captures each dependency's terminal outcome (status +
+// outputs, keyed by the dependency's stable key) as a DependencyObservation
+// and persists them atomically with the depends_on clearance (F-22): the
+// clearance destroys the only record of WHICH jobs were depended upon, so the
+// observations must accompany it. The API later hands them to the execution
+// target so a branch job's step conditions can route on
+// {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}. Capture is
+// UNIVERSAL (every released job with dependencies), not limited to branch
+// jobs — the cost is one field on the release update and the data is inert
+// for non-branch jobs.
 func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, publisher dependencyPublisher, job *dbpb.Job) {
-	allSucceeded := true
+	observations := make([]*dbpb.DependencyObservation, 0, len(job.GetDependsOn()))
+	hasBlocker := false
 	for _, depID := range job.GetDependsOn() {
 		dep, err := db.GetJob(ctx, &dbpb.GetJobRequest{Id: depID})
 		if err != nil {
@@ -112,6 +125,11 @@ func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, publis
 			// state.
 			return
 		}
+		observations = append(observations, &dbpb.DependencyObservation{
+			Key:     dep.GetKey(),
+			Status:  dep.GetStatus(),
+			Outputs: dep.GetOutputs(),
+		})
 		switch dep.GetStatus() {
 		case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
 			continue
@@ -122,26 +140,28 @@ func (s *Server) resolveJob(ctx context.Context, db jobDependencyChecker, publis
 			if dep.GetIgnoreFailed() {
 				continue
 			}
-			// A dependency reached a terminal state other than succeeded: the
-			// job never runs (F-06). This short-circuits the remaining
-			// dependencies — any one of them failing is enough to skip.
+			hasBlocker = true
+		case dbpb.JobStatus_JOB_STATUS_CANCELLED:
+			// A cancelled dependency ALWAYS blocks the job (a cancellation is
+			// not something ignore_failed or branch can override — aborting a
+			// lineage is not revivable): the job never runs (F-06).
 			s.skipJob(ctx, db, publisher, job)
 			return
-		case dbpb.JobStatus_JOB_STATUS_CANCELLED, dbpb.JobStatus_JOB_STATUS_SKIPPED:
-			// A cancelled or skipped dependency always blocks the job (skip
-			// propagates; a cancellation is not something ignore_failed can
-			// override): the job never runs (F-06).
-			s.skipJob(ctx, db, publisher, job)
-			return
+		case dbpb.JobStatus_JOB_STATUS_SKIPPED:
+			// A skipped dependency blocks the job (skip propagates, F-06).
+			hasBlocker = true
 		default:
 			// Still pending or running: wait and check again next tick.
-			allSucceeded = false
+			return
 		}
 	}
-	if !allSucceeded {
+	if hasBlocker && !job.GetBranch() {
+		// A dependency reached a terminal state other than succeeded and the
+		// job does not branch: the job never runs (F-06).
+		s.skipJob(ctx, db, publisher, job)
 		return
 	}
-	s.releaseJob(ctx, db, job)
+	s.releaseJob(ctx, db, job, observations)
 }
 
 // skipJob conditionally marks job as skipped (Database.SkipJob) and, if it
@@ -184,12 +204,19 @@ func (s *Server) skipJob(ctx context.Context, db jobDependencyChecker, publisher
 // dispatched more than once. The job is not dispatched here: dispatching
 // directly would bypass the admission gate, so the admission loop is the
 // single dispatch path for a dependency-released job.
-func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, job *dbpb.Job) {
-	if _, err := db.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: job.GetId(), ClearDependsOn: true}); err != nil {
+func (s *Server) releaseJob(ctx context.Context, db jobDependencyChecker, job *dbpb.Job, observations []*dbpb.DependencyObservation) {
+	// The observations (F-22) travel with the clearance: the database
+	// persists both in one selective update, so the capture and the
+	// destruction of the depends_on record are atomic.
+	if _, err := db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
+		Id:                     job.GetId(),
+		ClearDependsOn:         true,
+		DependencyObservations: observations,
+	}); err != nil {
 		s.logger.Warn("scheduler: clear job dependencies", "job", job.GetId(), "err", err)
 		return
 	}
-	s.logger.Info("scheduler: job dependencies satisfied", "job", job.GetId())
+	s.logger.Info("scheduler: job dependencies satisfied", "job", job.GetId(), "branch", job.GetBranch(), "observations", len(observations))
 	if s.metrics != nil {
 		s.metrics.RecordDependencyResolution("released")
 	}

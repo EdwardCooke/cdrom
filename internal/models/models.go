@@ -710,6 +710,15 @@ type PipelineRun struct {
 	// FinishedAt is when the run reached a terminal status; nil while the run
 	// is still in flight.
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	// RestoresRunID is the ANCHOR run this run restores (F-22): nonzero when
+	// this run was spawned by a resumption (RestartRun), pointing at the
+	// previous successful run whose snapshot it re-executes (the suffix of its
+	// DAG, downstream of the cut point). Nil for an ordinary run. Together
+	// with the run's Trigger ("rollback") it marks a run as rollback-origin:
+	// such runs are excluded from anchor selection (a rollback never rolls
+	// back to a rollback) and are exempt from a manual environment's proceed
+	// hold (F-22).
+	RestoresRunID *uint `gorm:"column:restores_run_id;index" json:"restores_run_id,omitempty"`
 }
 
 // JobStatus represents the lifecycle state of a job.
@@ -984,6 +993,39 @@ type JobSpec struct {
 	// keys (see Pipeline.ConcurrencyKeys). Empty means the job holds no
 	// concurrency keys.
 	ConcurrencyKeys []string `json:"concurrency_keys,omitempty"`
+	// Branch, when true, makes the job REACT to its dependencies' outcomes
+	// instead of being skipped by them (F-22): a dependency that fails, times
+	// out, or is skipped no longer reflexively skips the job — the job is
+	// released (once every dependency is terminal) and its step conditions
+	// route on the real outcomes via {{ .deps.<key>.status }} /
+	// {{ .deps.<key>.outputs.<name> }}. A cancelled dependency still skips the
+	// job. Contrast with IgnoreFailed (F-06), which is set by the DEPENDENCY
+	// and masks its failure everywhere; Branch is set by THIS job and
+	// preserves the dependency's true status. Denormalized onto the job
+	// instance at run creation (Job.Branch) so the scheduler's dependency
+	// resolver can read it without decoding the spec.
+	Branch bool `json:"branch,omitempty"`
+}
+
+// DependencyObservation is the terminal outcome of one of a job's
+// dependencies (F-22), captured by the scheduler's dependency resolver when
+// it RELEASES the job (all dependencies terminal) and persisted on the job
+// row. A job's depends_on is cleared on release, so without this capture the
+// outcomes would be unrecoverable at dispatch time; the API hands these
+// observations to the execution target (preferred over a live depends_on
+// scan) so a branch job's step conditions can route on them. Capturing the
+// REAL statuses (a failed dependency stays failed) is what distinguishes
+// branch routing from ignore_failed masking (F-06).
+type DependencyObservation struct {
+	// Key is the dependency's stable key (F-08) — the name a step's condition
+	// references it by.
+	Key string `json:"key"`
+	// Status is the dependency's terminal status (succeeded, failed,
+	// timed_out, or skipped — never cancelled, which halts a branch job).
+	Status JobStatus `json:"status"`
+	// Outputs are the dependency's published outputs (F-06), copied verbatim
+	// so a branch job's conditions/steps can template against them.
+	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
 // Job is a single unit of work belonging to a pipeline.
@@ -1155,6 +1197,36 @@ type Job struct {
 	// a job not part of a run (or a run whose pipeline declares no
 	// spec.artifacts).
 	Artifacts map[string]string `gorm:"type:text;serializer:json" json:"artifacts,omitempty"`
+	// Branch is the job's branch flag (F-22), denormalized from the spec's
+	// Branch field when the job instance was created. When true the
+	// scheduler's dependency resolver releases the job (letting its
+	// conditions route on the dependencies' real outcomes) instead of
+	// skipping it when a dependency fails, times out, or is skipped; a
+	// cancelled dependency still skips it.
+	Branch bool `json:"branch"`
+	// DependencyObservations are the terminal outcomes of this job's
+	// dependencies (F-22), captured by the scheduler's dependency resolver
+	// when it releases the job and persisted here. Empty until the job is
+	// released (a skipped job captures nothing — it never runs). The API
+	// prefers these over a live depends_on scan when populating the job's
+	// upstream jobs for a target, because depends_on is CLEARED on release
+	// and the observations are the only durable record of HOW the dependencies
+	// ended. Entries carry the dependency's stable key (F-08); the target
+	// exposes them as {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}
+	// in step conditions.
+	DependencyObservations []DependencyObservation `gorm:"type:text;serializer:json" json:"dependency_observations,omitempty"`
+	// CarriedOver marks a job that is a CARRY-OVER clone in a resumption run
+	// (F-22): it replicates the terminal outcome of the anchor run's ancestor
+	// of the cut point (born terminal — succeeded or skipped — with the
+	// anchor's outputs, step results, and timestamps copied) rather than
+	// having executed in this run. False for every ordinary job and for the
+	// fresh suffix of a resumption.
+	CarriedOver bool `json:"carried_over"`
+	// RestoresJobID is the id of the ANCHOR job this job replicates (F-22);
+	// nil for an ordinary job. Set on every job of a resumption run (both the
+	// carry-over prefix and the fresh suffix), pointing at the corresponding
+	// job of the anchor run the resumption restores.
+	RestoresJobID *uint `gorm:"column:restores_job_id;index" json:"restores_job_id,omitempty"`
 	// ApprovalMessage is the (rendered) message an approval gate (F-13) shows
 	// to the user while the job is awaiting approval. It is set by the
 	// execution target when it reports the job awaiting_approval and is

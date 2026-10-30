@@ -35,6 +35,7 @@ import (
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	artifactspb "cdrom/internal/gen/cdrom/artifacts/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	schedpb "cdrom/internal/gen/cdrom/scheduler/v1"
 	"cdrom/internal/metrics"
 	"cdrom/internal/secrets"
 )
@@ -154,6 +155,16 @@ type GRPCServer struct {
 	email         config.EmailConfig
 	webhook       config.WebhookConfig
 	webhookClient *http.Client
+
+	// scheduler and rollbackCfg back the restoration (rollback) mediation
+	// (F-22): InitiateRestore (called by a rollback step handler, presenting
+	// the job's own token) validates the caller, applies the guards (no
+	// re-arm, cooldown), finds the anchor, and asks the SCHEDULER to spawn the
+	// resumption run. scheduler is installed via SetSchedulerClient (nil in
+	// tests that do not exercise restoration); rollbackCfg holds the cooldown
+	// (zero value → the config default).
+	scheduler   schedpb.SchedulerClient
+	rollbackCfg config.RollbackConfig
 }
 
 // liveWorker is a worker with an open WatchJobs stream.
@@ -166,7 +177,7 @@ type liveWorker struct {
 	environments []string
 	// labels are the worker's labels (F-29); a job dispatched to the worker merges
 	// them into the job's execution's label set.
-	labels     map[string]string
+	labels   map[string]string
 	address  string
 	lastSeen time.Time
 }
@@ -242,7 +253,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		Group:        req.GetGroup(),
 		Address:      req.GetAddress(),
 		Environments: req.GetEnvironments(),
-		Labels:         req.GetLabels(),
+		Labels:       req.GetLabels(),
 	})
 	if err != nil {
 		return nil, err
@@ -260,7 +271,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		name:         registered.GetName(),
 		group:        registered.GetGroup(),
 		environments: registered.GetEnvironments(),
-		labels:         registered.GetLabels(),
+		labels:       registered.GetLabels(),
 		address:      registered.GetAddress(),
 		lastSeen:     time.Now(),
 	}
@@ -282,7 +293,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		Group:        registered.GetGroup(),
 		Address:      registered.GetAddress(),
 		Environments: registered.GetEnvironments(),
-		Labels:         registered.GetLabels(),
+		Labels:       registered.GetLabels(),
 		LastSeenAt:   registered.GetLastSeenAt(),
 	}, nil
 }
@@ -1331,6 +1342,156 @@ func (s *GRPCServer) ClaimStepOnce(ctx context.Context, req *apipb.ClaimStepOnce
 	return &apipb.ClaimStepOnceResponse{Claimed: resp.GetClaimed()}, nil
 }
 
+// ---------------------------------------------------------------------------
+// Restoration (F-22)
+// ---------------------------------------------------------------------------
+
+// InitiateRestore is the ARMED door into restoration (F-22): a rollback step
+// handler on an execution target calls it (presenting the job's own token) to
+// spawn a resumption of the job's OWN pipeline. The mediation applies the
+// server-side guards, in order:
+//
+//  1. job-token validation (checkJobToken) — establishes the caller's job →
+//     run → pipeline. CONTAINMENT PROPERTY: the anchor is always derived from
+//     the caller's own pipeline; the request carries no pipeline id.
+//  2. no re-arm (depth ≤ 1) — a caller whose run is rollback-origin
+//     (trigger "rollback") is REFUSED: the resumption re-executes the anchor's
+//     suffix, which includes the armed rollback job; allowing it would descend
+//     generations. (The MANUAL door — POST /api/pipelines/{id}/restart — is
+//     exempt: an operator may legitimately cascade, and every initiation is
+//     audited.)
+//  3. cooldown — the most recent rollback-origin run of the pipeline must be
+//     OLDER than the configured cooldown (flap suppression).
+//  4. anchor existence — the latest SUCCESSFUL, non-rollback-origin run of
+//     the caller's pipeline (Database.PreviousSuccessfulRun); NotFound when
+//     absent (nothing to restore to).
+//  5. cut-point validity — delegated to the scheduler (Database.RestartRun
+//     rejects a from_job absent from the anchor's jobs).
+//
+// It then asks the scheduler to RestartRun(anchor, from_job) and audits the
+// initiation (actor "job:<id>", door "armed").
+func (s *GRPCServer) InitiateRestore(ctx context.Context, req *apipb.InitiateRestoreRequest) (*apipb.InitiateRestoreResponse, error) {
+	record := func(result string) {
+		if s.metrics != nil {
+			s.metrics.RecordRestoration("armed", result)
+		}
+	}
+	if req.GetJobId() == 0 {
+		record("error")
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetFromJob() == "" {
+		record("error")
+		return nil, status.Error(codes.InvalidArgument, "from_job is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
+		record("error")
+		return nil, err
+	}
+	if s.db == nil {
+		record("error")
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	if s.scheduler == nil {
+		record("error")
+		return nil, status.Error(codes.FailedPrecondition, "scheduler is not configured; restoration is unavailable")
+	}
+	// Establish the caller's job → run → pipeline (containment).
+	callerJob, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
+	if err != nil {
+		record("error")
+		return nil, err
+	}
+	if callerJob.GetRunId() == 0 || callerJob.GetPipelineId() == 0 {
+		record("error")
+		return nil, status.Error(codes.FailedPrecondition, "the calling job is not part of a pipeline run; restoration is unavailable")
+	}
+	callerRun, err := s.db.GetRun(ctx, &dbpb.GetRunRequest{Id: callerJob.GetRunId()})
+	if err != nil {
+		record("error")
+		return nil, err
+	}
+	// Guard 2: no re-arm. A rollback-origin caller is refused (depth ≤ 1).
+	if callerRun.GetTrigger() == "rollback" {
+		record("rearmed")
+		return nil, status.Error(codes.FailedPrecondition, "rollbacks do not re-arm: the calling run is itself a rollback (depth ≤ 1)")
+	}
+	pipelineID := callerJob.GetPipelineId()
+	// Guard 3: cooldown (flap suppression). Compare the newest rollback-origin
+	// run's START against now − cooldown.
+	cooldown := s.rollbackCfg.EffectiveCooldown()
+	if latest, cerr := s.db.LatestRollbackRun(ctx, &dbpb.LatestRollbackRunRequest{PipelineId: pipelineID}); cerr == nil {
+		if started := latest.GetStartedAt(); started != nil && time.Since(started.AsTime()) < cooldown {
+			record("cooldown")
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"restoration cooldown: the most recent rollback of this pipeline started %s ago (minimum spacing %s)",
+				time.Since(started.AsTime()).Round(time.Second), cooldown)
+		}
+	} else if status.Convert(cerr).Code() != codes.NotFound {
+		// A TRANSIENT database error must not OPEN the floodgates: fail closed.
+		record("error")
+		return nil, status.Errorf(codes.Unavailable, "could not verify the restoration cooldown: %v", cerr)
+	}
+	// Guard 4: the anchor — the latest successful, NON-ROLLBACK-ORIGIN run of
+	// the caller's own pipeline.
+	anchor, err := s.db.PreviousSuccessfulRun(ctx, &dbpb.PreviousSuccessfulRunRequest{PipelineId: pipelineID})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			record("no_anchor")
+		} else {
+			record("error")
+		}
+		return nil, err
+	}
+	// Guard 5 + spawn: the scheduler restarts the anchor from the cut point
+	// (a cut point absent from the anchor's jobs is rejected there).
+	spawned, err := s.scheduler.RestartRun(ctx, &schedpb.RestartRunRequest{
+		AnchorRunId: anchor.GetId(),
+		FromJobKey:  req.GetFromJob(),
+	})
+	if err != nil {
+		result := "error"
+		if status.Code(err) == codes.NotFound {
+			result = "invalid_cut_point"
+		}
+		record(result)
+		return nil, err
+	}
+	record("initiated")
+	s.logger.Info("api: resumption initiated (armed)", "caller_job", req.GetJobId(), "pipeline", pipelineID, "anchor", anchor.GetId(), "from_job", req.GetFromJob(), "new_run", spawned.GetId())
+	s.recordAuditGRPC(audit.Event{
+		Action:     audit.ActionRunRestore,
+		TargetKind: audit.TargetRun,
+		TargetID:   strconv.FormatInt(spawned.GetId(), 10),
+		PipelineID: pipelineID,
+		RunID:      spawned.GetId(),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"door": "armed", "anchor_run": anchor.GetId(), "from_job": req.GetFromJob()}),
+	}, s.reportActor("", req.GetJobId()), audit.ActorKindSystem, auditPeerAddr(ctx))
+	return &apipb.InitiateRestoreResponse{
+		RunId:       spawned.GetId(),
+		AnchorRunId: anchor.GetId(),
+	}, nil
+}
+
+// GetRun is a LIGHTWEIGHT read of a run's current status (F-22): the rollback
+// step handler polls it (while waiting on the resumption it initiated) to
+// learn the resumption's verdict. It wraps the Database service's GetRun.
+// When job-token auth is enabled the caller must present a job token scoped
+// to the job.
+func (s *GRPCServer) GetRun(ctx context.Context, req *apipb.GetRunRequest) (*dbpb.PipelineRun, error) {
+	if req.GetRunId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "run_id is required")
+	}
+	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	return s.db.GetRun(ctx, &dbpb.GetRunRequest{Id: req.GetRunId()})
+}
+
 // renderMarkdown renders markdown to HTML using gomarkdown. It is used to
 // render a notification body whose content type is "markdown" (F-18) before it
 // is sent (an email's HTML body, or a webhook's HTML body).
@@ -2153,6 +2314,14 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		ApprovalDecidedAt:   job.GetApprovalDecidedAt(),
 		Environment:         job.GetEnvironment(),
 		Approval:            job.GetApproval(),
+		// The job's dependency observations (F-22): the terminal outcomes the
+		// scheduler's dependency resolver captured at release time. Handed to
+		// the execution target (populated into upstream_jobs by
+		// upstreamJobsFor) so a branch job's step conditions can route on
+		// {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}.
+		DependencyObservations: job.GetDependencyObservations(),
+		Branch:                 job.GetBranch(),
+		CarriedOver:            job.GetCarriedOver(),
 	}
 }
 
@@ -2590,11 +2759,32 @@ func (s *GRPCServer) secretRedactorFor(ctx context.Context, jobID int64) *secret
 	return &secretRedactor{values: values}
 }
 
-// upstreamJobsFor fetches the status and outputs of the jobs job depends on
-// (F-06) so a step's condition can reference them. It is best-effort: a
-// dependency that cannot be read (e.g. it does not exist) is omitted rather
+// upstreamJobsFor gathers the status and outputs of the jobs job depends on
+// (F-06) so a step's condition can reference them. It PREFERS the job's
+// dependency observations (F-22) — the terminal outcomes the scheduler's
+// dependency resolver captured and persisted at release time, keyed by the
+// dependency's stable key — because a released job's depends_on is CLEARED,
+// leaving the observations as the only durable record of how the dependencies
+// ended (essential for a branch job's {{ .deps.<key>.status }} routing).
+// Without observations it falls back to a LIVE scan of the (uncleared)
+// depends_on list — the pre-F-22 behavior for jobs the resolver has not yet
+// processed. Best-effort: a dependency that cannot be read is omitted rather
 // than failing the dispatch, and a job with no dependencies yields nil.
 func (s *GRPCServer) upstreamJobsFor(ctx context.Context, job *apipb.Job) []*dbpb.UpstreamJob {
+	if obs := job.GetDependencyObservations(); len(obs) > 0 {
+		upstream := make([]*dbpb.UpstreamJob, 0, len(obs))
+		for _, o := range obs {
+			// The display name is cosmetic — the condition context keys the
+			// observation by the dependency's stable key (F-22).
+			upstream = append(upstream, &dbpb.UpstreamJob{
+				Key:     o.GetKey(),
+				Name:    o.GetKey(),
+				Status:  o.GetStatus(),
+				Outputs: o.GetOutputs(),
+			})
+		}
+		return upstream
+	}
 	ids := job.GetDependsOn()
 	if len(ids) == 0 {
 		return nil

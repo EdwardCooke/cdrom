@@ -144,6 +144,7 @@ The gRPC surface exposes these RPCs (see `proto/cdrom/api/v1/api.proto`):
 | Dispatch | `DispatchJob`, `NotifyJobStatus`, `CancelJob` | scheduler |
 | Artifact proxy | `UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts`, `DeleteArtifact` | workers, agents |
 | Job logs | `StreamJobLogs` (client stream) | workers, agents |
+| Restoration (F-22) | `InitiateRestore` (armed door: a `rollback` step mediating a resumption of its own pipeline), `GetRun` (polling the resumption's verdict) | workers, agents |
 
 ---
 
@@ -1214,6 +1215,14 @@ for stdout), `CDROM_AUDIT_FORMAT` (`json`/`text`), `CDROM_AUDIT_ROTATION`
 
 `CDROM_EMAIL_{HOST,PORT,FROM,USERNAME,PASSWORD,STARTTLS,INSECURE}` (SMTP on the
 API), `CDROM_WEBHOOK_TIMEOUT` (default 10s), `CDROM_WEBHOOK_TIMEOUT_MAX`.
+
+### Verification & rollback (F-22)
+
+`CDROM_ROLLBACK_COOLDOWN` (default `5m`) — minimum interval between
+armed (job-mediated) restorations of the same pipeline, measured from the
+most recent rollback-origin run's start; suppresses flapping pipelines. The
+manual door (`POST /api/pipelines/{id}/restart`, `runs.can-restore`) ignores
+both the cooldown and the no-re-arm refusal by human authority.
 
 ### Logging & metrics
 

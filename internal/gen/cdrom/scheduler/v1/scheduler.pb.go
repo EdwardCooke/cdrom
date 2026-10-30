@@ -88,7 +88,14 @@ type Job struct {
 	// computed when the job instance is created and stored as a snapshot. They
 	// are metadata (they never gate, route, or serialize work). Empty means the
 	// job has no labels.
-	Labels        map[string]string `protobuf:"bytes,24,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Labels map[string]string `protobuf:"bytes,24,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// carried_over marks a job that is a CARRY-OVER clone in a resumption run
+	// (F-22): it replicates the terminal outcome of the anchor run's ancestor
+	// of the cut point (born terminal, with the anchor's outputs and step
+	// results copied) rather than having executed in this run. False for every
+	// ordinary job and for the fresh suffix of a resumption. Mirrored from
+	// cdrom.db.v1.Job.carried_over.
+	CarriedOver   bool `protobuf:"varint,25,opt,name=carried_over,json=carriedOver,proto3" json:"carried_over,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -289,6 +296,13 @@ func (x *Job) GetLabels() map[string]string {
 		return x.Labels
 	}
 	return nil
+}
+
+func (x *Job) GetCarriedOver() bool {
+	if x != nil {
+		return x.CarriedOver
+	}
+	return false
 }
 
 type SubmitJobRequest struct {
@@ -900,8 +914,13 @@ type Run struct {
 	// the old definition. A run created against a specific version (a re-run of
 	// an old run) records that version instead of the pipeline's current one.
 	PipelineVersion int32 `protobuf:"varint,12,opt,name=pipeline_version,json=pipelineVersion,proto3" json:"pipeline_version,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// restores_run_id is the ANCHOR run this run restores (F-22): nonzero when
+	// this run was spawned by a resumption (RestartRun), pointing at the
+	// previous successful run whose snapshot it re-executes. 0 for an ordinary
+	// run. Mirrored from cdrom.db.v1.PipelineRun.restores_run_id.
+	RestoresRunId int64 `protobuf:"varint,13,opt,name=restores_run_id,json=restoresRunId,proto3" json:"restores_run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Run) Reset() {
@@ -1014,6 +1033,13 @@ func (x *Run) GetSourceRunId() int64 {
 func (x *Run) GetPipelineVersion() int32 {
 	if x != nil {
 		return x.PipelineVersion
+	}
+	return 0
+}
+
+func (x *Run) GetRestoresRunId() int64 {
+	if x != nil {
+		return x.RestoresRunId
 	}
 	return 0
 }
@@ -1200,11 +1226,72 @@ func (x *TriggerRunRequest) GetUpstreamClaims() *structpb.Struct {
 	return nil
 }
 
+// RestartRunRequest is the request for the scheduler's RestartRun RPC (F-22):
+// it names the anchor run and the cut point of the resumption.
+type RestartRunRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// anchor_run_id is the run to restore FROM: it must be a succeeded run;
+	// its job rows are the source of the clone (the resumption inherits
+	// nothing from the pipeline definition or the world of today).
+	AnchorRunId int64 `protobuf:"varint,1,opt,name=anchor_run_id,json=anchorRunId,proto3" json:"anchor_run_id,omitempty"`
+	// from_job_key is the CUT POINT, named by the anchor's stable job key
+	// (F-08): this job and everything downstream of it re-execute fresh; its
+	// strict ancestors are carried over as terminal clones. It must exist among
+	// the anchor's jobs (NotFound otherwise).
+	FromJobKey    string `protobuf:"bytes,2,opt,name=from_job_key,json=fromJobKey,proto3" json:"from_job_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RestartRunRequest) Reset() {
+	*x = RestartRunRequest{}
+	mi := &file_cdrom_scheduler_v1_scheduler_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RestartRunRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RestartRunRequest) ProtoMessage() {}
+
+func (x *RestartRunRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_scheduler_v1_scheduler_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RestartRunRequest.ProtoReflect.Descriptor instead.
+func (*RestartRunRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *RestartRunRequest) GetAnchorRunId() int64 {
+	if x != nil {
+		return x.AnchorRunId
+	}
+	return 0
+}
+
+func (x *RestartRunRequest) GetFromJobKey() string {
+	if x != nil {
+		return x.FromJobKey
+	}
+	return ""
+}
+
 var File_cdrom_scheduler_v1_scheduler_proto protoreflect.FileDescriptor
 
 const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\n" +
-	"\"cdrom/scheduler/v1/scheduler.proto\x12\x12cdrom.scheduler.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14cdrom/db/v1/db.proto\"\xa7\t\n" +
+	"\"cdrom/scheduler/v1/scheduler.proto\x12\x12cdrom.scheduler.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x14cdrom/db/v1/db.proto\"\xca\t\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -1235,7 +1322,8 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x0eapproval_actor\x18\x15 \x01(\tR\rapprovalActor\x12'\n" +
 	"\x0fapproval_reason\x18\x16 \x01(\tR\x0eapprovalReason\x12 \n" +
 	"\venvironment\x18\x17 \x01(\tR\venvironment\x12;\n" +
-	"\x06labels\x18\x18 \x03(\v2#.cdrom.scheduler.v1.Job.LabelsEntryR\x06labels\x1a:\n" +
+	"\x06labels\x18\x18 \x03(\v2#.cdrom.scheduler.v1.Job.LabelsEntryR\x06labels\x12!\n" +
+	"\fcarried_over\x18\x19 \x01(\bR\vcarriedOver\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +
@@ -1280,7 +1368,7 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\tproceeded\x18\x02 \x01(\x05R\tproceeded\"9\n" +
 	"\x11ProceedJobRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x14\n" +
-	"\x05actor\x18\x02 \x01(\tR\x05actor\"\xd8\x04\n" +
+	"\x05actor\x18\x02 \x01(\tR\x05actor\"\x80\x05\n" +
 	"\x03Run\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -1299,7 +1387,8 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\ftrigger_name\x18\n" +
 	" \x01(\tR\vtriggerName\x12\"\n" +
 	"\rsource_run_id\x18\v \x01(\x03R\vsourceRunId\x12)\n" +
-	"\x10pipeline_version\x18\f \x01(\x05R\x0fpipelineVersion\x1a9\n" +
+	"\x10pipeline_version\x18\f \x01(\x05R\x0fpipelineVersion\x12&\n" +
+	"\x0frestores_run_id\x18\r \x01(\x03R\rrestoresRunId\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfd\x01\n" +
@@ -1322,7 +1411,11 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x0fupstream_claims\x18\x06 \x01(\v2\x17.google.protobuf.StructR\x0eupstreamClaims\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x012\xa7\x06\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"Y\n" +
+	"\x11RestartRunRequest\x12\"\n" +
+	"\ranchor_run_id\x18\x01 \x01(\x03R\vanchorRunId\x12 \n" +
+	"\ffrom_job_key\x18\x02 \x01(\tR\n" +
+	"fromJobKey2\xf5\x06\n" +
 	"\tScheduler\x12J\n" +
 	"\tSubmitJob\x12$.cdrom.scheduler.v1.SubmitJobRequest\x1a\x17.cdrom.scheduler.v1.Job\x12D\n" +
 	"\x06GetJob\x12!.cdrom.scheduler.v1.GetJobRequest\x1a\x17.cdrom.scheduler.v1.Job\x12U\n" +
@@ -1336,7 +1429,9 @@ const file_cdrom_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"ProceedJob\x12%.cdrom.scheduler.v1.ProceedJobRequest\x1a\x17.cdrom.scheduler.v1.Job\x12J\n" +
 	"\tCreateRun\x12$.cdrom.scheduler.v1.CreateRunRequest\x1a\x17.cdrom.scheduler.v1.Run\x12L\n" +
 	"\n" +
-	"TriggerRun\x12%.cdrom.scheduler.v1.TriggerRunRequest\x1a\x17.cdrom.scheduler.v1.RunB3Z1cdrom/internal/gen/cdrom/scheduler/v1;schedulerv1b\x06proto3"
+	"TriggerRun\x12%.cdrom.scheduler.v1.TriggerRunRequest\x1a\x17.cdrom.scheduler.v1.Run\x12L\n" +
+	"\n" +
+	"RestartRun\x12%.cdrom.scheduler.v1.RestartRunRequest\x1a\x17.cdrom.scheduler.v1.RunB3Z1cdrom/internal/gen/cdrom/scheduler/v1;schedulerv1b\x06proto3"
 
 var (
 	file_cdrom_scheduler_v1_scheduler_proto_rawDescOnce sync.Once
@@ -1350,7 +1445,7 @@ func file_cdrom_scheduler_v1_scheduler_proto_rawDescGZIP() []byte {
 	return file_cdrom_scheduler_v1_scheduler_proto_rawDescData
 }
 
-var file_cdrom_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_cdrom_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_cdrom_scheduler_v1_scheduler_proto_goTypes = []any{
 	(*Job)(nil),                    // 0: cdrom.scheduler.v1.Job
 	(*SubmitJobRequest)(nil),       // 1: cdrom.scheduler.v1.SubmitJobRequest
@@ -1366,47 +1461,48 @@ var file_cdrom_scheduler_v1_scheduler_proto_goTypes = []any{
 	(*Run)(nil),                    // 11: cdrom.scheduler.v1.Run
 	(*CreateRunRequest)(nil),       // 12: cdrom.scheduler.v1.CreateRunRequest
 	(*TriggerRunRequest)(nil),      // 13: cdrom.scheduler.v1.TriggerRunRequest
-	nil,                            // 14: cdrom.scheduler.v1.Job.OutputsEntry
-	nil,                            // 15: cdrom.scheduler.v1.Job.RunParamsEntry
-	nil,                            // 16: cdrom.scheduler.v1.Job.LabelsEntry
-	nil,                            // 17: cdrom.scheduler.v1.Run.ParamsEntry
-	nil,                            // 18: cdrom.scheduler.v1.CreateRunRequest.ParamsEntry
-	nil,                            // 19: cdrom.scheduler.v1.TriggerRunRequest.ParamsEntry
-	(v1.JobStatus)(0),              // 20: cdrom.db.v1.JobStatus
-	(*timestamppb.Timestamp)(nil),  // 21: google.protobuf.Timestamp
-	(*v1.JobSpec)(nil),             // 22: cdrom.db.v1.JobSpec
-	(*v1.StepResult)(nil),          // 23: cdrom.db.v1.StepResult
-	(*v1.UpstreamJob)(nil),         // 24: cdrom.db.v1.UpstreamJob
-	(v1.RunStatus)(0),              // 25: cdrom.db.v1.RunStatus
-	(v1.TriggerType)(0),            // 26: cdrom.db.v1.TriggerType
-	(*durationpb.Duration)(nil),    // 27: google.protobuf.Duration
-	(*structpb.Struct)(nil),        // 28: google.protobuf.Struct
+	(*RestartRunRequest)(nil),      // 14: cdrom.scheduler.v1.RestartRunRequest
+	nil,                            // 15: cdrom.scheduler.v1.Job.OutputsEntry
+	nil,                            // 16: cdrom.scheduler.v1.Job.RunParamsEntry
+	nil,                            // 17: cdrom.scheduler.v1.Job.LabelsEntry
+	nil,                            // 18: cdrom.scheduler.v1.Run.ParamsEntry
+	nil,                            // 19: cdrom.scheduler.v1.CreateRunRequest.ParamsEntry
+	nil,                            // 20: cdrom.scheduler.v1.TriggerRunRequest.ParamsEntry
+	(v1.JobStatus)(0),              // 21: cdrom.db.v1.JobStatus
+	(*timestamppb.Timestamp)(nil),  // 22: google.protobuf.Timestamp
+	(*v1.JobSpec)(nil),             // 23: cdrom.db.v1.JobSpec
+	(*v1.StepResult)(nil),          // 24: cdrom.db.v1.StepResult
+	(*v1.UpstreamJob)(nil),         // 25: cdrom.db.v1.UpstreamJob
+	(v1.RunStatus)(0),              // 26: cdrom.db.v1.RunStatus
+	(v1.TriggerType)(0),            // 27: cdrom.db.v1.TriggerType
+	(*durationpb.Duration)(nil),    // 28: google.protobuf.Duration
+	(*structpb.Struct)(nil),        // 29: google.protobuf.Struct
 }
 var file_cdrom_scheduler_v1_scheduler_proto_depIdxs = []int32{
-	20, // 0: cdrom.scheduler.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
-	21, // 1: cdrom.scheduler.v1.Job.started_at:type_name -> google.protobuf.Timestamp
-	21, // 2: cdrom.scheduler.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
-	22, // 3: cdrom.scheduler.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
-	23, // 4: cdrom.scheduler.v1.Job.step_results:type_name -> cdrom.db.v1.StepResult
-	14, // 5: cdrom.scheduler.v1.Job.outputs:type_name -> cdrom.scheduler.v1.Job.OutputsEntry
-	24, // 6: cdrom.scheduler.v1.Job.upstream_jobs:type_name -> cdrom.db.v1.UpstreamJob
-	15, // 7: cdrom.scheduler.v1.Job.run_params:type_name -> cdrom.scheduler.v1.Job.RunParamsEntry
-	16, // 8: cdrom.scheduler.v1.Job.labels:type_name -> cdrom.scheduler.v1.Job.LabelsEntry
-	22, // 9: cdrom.scheduler.v1.SubmitJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
-	20, // 10: cdrom.scheduler.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
+	21, // 0: cdrom.scheduler.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
+	22, // 1: cdrom.scheduler.v1.Job.started_at:type_name -> google.protobuf.Timestamp
+	22, // 2: cdrom.scheduler.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
+	23, // 3: cdrom.scheduler.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
+	24, // 4: cdrom.scheduler.v1.Job.step_results:type_name -> cdrom.db.v1.StepResult
+	15, // 5: cdrom.scheduler.v1.Job.outputs:type_name -> cdrom.scheduler.v1.Job.OutputsEntry
+	25, // 6: cdrom.scheduler.v1.Job.upstream_jobs:type_name -> cdrom.db.v1.UpstreamJob
+	16, // 7: cdrom.scheduler.v1.Job.run_params:type_name -> cdrom.scheduler.v1.Job.RunParamsEntry
+	17, // 8: cdrom.scheduler.v1.Job.labels:type_name -> cdrom.scheduler.v1.Job.LabelsEntry
+	23, // 9: cdrom.scheduler.v1.SubmitJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
+	21, // 10: cdrom.scheduler.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
 	0,  // 11: cdrom.scheduler.v1.ListJobsResponse.jobs:type_name -> cdrom.scheduler.v1.Job
 	11, // 12: cdrom.scheduler.v1.ProceedRunResponse.run:type_name -> cdrom.scheduler.v1.Run
-	25, // 13: cdrom.scheduler.v1.Run.status:type_name -> cdrom.db.v1.RunStatus
-	17, // 14: cdrom.scheduler.v1.Run.params:type_name -> cdrom.scheduler.v1.Run.ParamsEntry
-	21, // 15: cdrom.scheduler.v1.Run.started_at:type_name -> google.protobuf.Timestamp
-	21, // 16: cdrom.scheduler.v1.Run.finished_at:type_name -> google.protobuf.Timestamp
-	21, // 17: cdrom.scheduler.v1.Run.created_at:type_name -> google.protobuf.Timestamp
-	21, // 18: cdrom.scheduler.v1.Run.updated_at:type_name -> google.protobuf.Timestamp
-	18, // 19: cdrom.scheduler.v1.CreateRunRequest.params:type_name -> cdrom.scheduler.v1.CreateRunRequest.ParamsEntry
-	26, // 20: cdrom.scheduler.v1.TriggerRunRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
-	19, // 21: cdrom.scheduler.v1.TriggerRunRequest.params:type_name -> cdrom.scheduler.v1.TriggerRunRequest.ParamsEntry
-	27, // 22: cdrom.scheduler.v1.TriggerRunRequest.dedup_window:type_name -> google.protobuf.Duration
-	28, // 23: cdrom.scheduler.v1.TriggerRunRequest.upstream_claims:type_name -> google.protobuf.Struct
+	26, // 13: cdrom.scheduler.v1.Run.status:type_name -> cdrom.db.v1.RunStatus
+	18, // 14: cdrom.scheduler.v1.Run.params:type_name -> cdrom.scheduler.v1.Run.ParamsEntry
+	22, // 15: cdrom.scheduler.v1.Run.started_at:type_name -> google.protobuf.Timestamp
+	22, // 16: cdrom.scheduler.v1.Run.finished_at:type_name -> google.protobuf.Timestamp
+	22, // 17: cdrom.scheduler.v1.Run.created_at:type_name -> google.protobuf.Timestamp
+	22, // 18: cdrom.scheduler.v1.Run.updated_at:type_name -> google.protobuf.Timestamp
+	19, // 19: cdrom.scheduler.v1.CreateRunRequest.params:type_name -> cdrom.scheduler.v1.CreateRunRequest.ParamsEntry
+	27, // 20: cdrom.scheduler.v1.TriggerRunRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
+	20, // 21: cdrom.scheduler.v1.TriggerRunRequest.params:type_name -> cdrom.scheduler.v1.TriggerRunRequest.ParamsEntry
+	28, // 22: cdrom.scheduler.v1.TriggerRunRequest.dedup_window:type_name -> google.protobuf.Duration
+	29, // 23: cdrom.scheduler.v1.TriggerRunRequest.upstream_claims:type_name -> google.protobuf.Struct
 	1,  // 24: cdrom.scheduler.v1.Scheduler.SubmitJob:input_type -> cdrom.scheduler.v1.SubmitJobRequest
 	2,  // 25: cdrom.scheduler.v1.Scheduler.GetJob:input_type -> cdrom.scheduler.v1.GetJobRequest
 	3,  // 26: cdrom.scheduler.v1.Scheduler.ListJobs:input_type -> cdrom.scheduler.v1.ListJobsRequest
@@ -1417,18 +1513,20 @@ var file_cdrom_scheduler_v1_scheduler_proto_depIdxs = []int32{
 	10, // 31: cdrom.scheduler.v1.Scheduler.ProceedJob:input_type -> cdrom.scheduler.v1.ProceedJobRequest
 	12, // 32: cdrom.scheduler.v1.Scheduler.CreateRun:input_type -> cdrom.scheduler.v1.CreateRunRequest
 	13, // 33: cdrom.scheduler.v1.Scheduler.TriggerRun:input_type -> cdrom.scheduler.v1.TriggerRunRequest
-	0,  // 34: cdrom.scheduler.v1.Scheduler.SubmitJob:output_type -> cdrom.scheduler.v1.Job
-	0,  // 35: cdrom.scheduler.v1.Scheduler.GetJob:output_type -> cdrom.scheduler.v1.Job
-	4,  // 36: cdrom.scheduler.v1.Scheduler.ListJobs:output_type -> cdrom.scheduler.v1.ListJobsResponse
-	0,  // 37: cdrom.scheduler.v1.Scheduler.CancelJob:output_type -> cdrom.scheduler.v1.Job
-	0,  // 38: cdrom.scheduler.v1.Scheduler.RerunJob:output_type -> cdrom.scheduler.v1.Job
-	0,  // 39: cdrom.scheduler.v1.Scheduler.ResolveApproval:output_type -> cdrom.scheduler.v1.Job
-	9,  // 40: cdrom.scheduler.v1.Scheduler.ProceedRun:output_type -> cdrom.scheduler.v1.ProceedRunResponse
-	0,  // 41: cdrom.scheduler.v1.Scheduler.ProceedJob:output_type -> cdrom.scheduler.v1.Job
-	11, // 42: cdrom.scheduler.v1.Scheduler.CreateRun:output_type -> cdrom.scheduler.v1.Run
-	11, // 43: cdrom.scheduler.v1.Scheduler.TriggerRun:output_type -> cdrom.scheduler.v1.Run
-	34, // [34:44] is the sub-list for method output_type
-	24, // [24:34] is the sub-list for method input_type
+	14, // 34: cdrom.scheduler.v1.Scheduler.RestartRun:input_type -> cdrom.scheduler.v1.RestartRunRequest
+	0,  // 35: cdrom.scheduler.v1.Scheduler.SubmitJob:output_type -> cdrom.scheduler.v1.Job
+	0,  // 36: cdrom.scheduler.v1.Scheduler.GetJob:output_type -> cdrom.scheduler.v1.Job
+	4,  // 37: cdrom.scheduler.v1.Scheduler.ListJobs:output_type -> cdrom.scheduler.v1.ListJobsResponse
+	0,  // 38: cdrom.scheduler.v1.Scheduler.CancelJob:output_type -> cdrom.scheduler.v1.Job
+	0,  // 39: cdrom.scheduler.v1.Scheduler.RerunJob:output_type -> cdrom.scheduler.v1.Job
+	0,  // 40: cdrom.scheduler.v1.Scheduler.ResolveApproval:output_type -> cdrom.scheduler.v1.Job
+	9,  // 41: cdrom.scheduler.v1.Scheduler.ProceedRun:output_type -> cdrom.scheduler.v1.ProceedRunResponse
+	0,  // 42: cdrom.scheduler.v1.Scheduler.ProceedJob:output_type -> cdrom.scheduler.v1.Job
+	11, // 43: cdrom.scheduler.v1.Scheduler.CreateRun:output_type -> cdrom.scheduler.v1.Run
+	11, // 44: cdrom.scheduler.v1.Scheduler.TriggerRun:output_type -> cdrom.scheduler.v1.Run
+	11, // 45: cdrom.scheduler.v1.Scheduler.RestartRun:output_type -> cdrom.scheduler.v1.Run
+	35, // [35:46] is the sub-list for method output_type
+	24, // [24:35] is the sub-list for method input_type
 	24, // [24:24] is the sub-list for extension type_name
 	24, // [24:24] is the sub-list for extension extendee
 	0,  // [0:24] is the sub-list for field type_name
@@ -1445,7 +1543,7 @@ func file_cdrom_scheduler_v1_scheduler_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_scheduler_v1_scheduler_proto_rawDesc), len(file_cdrom_scheduler_v1_scheduler_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
