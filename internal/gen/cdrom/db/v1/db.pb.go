@@ -4601,6 +4601,22 @@ type Job struct {
 	// carry-over prefix and the fresh suffix), pointing at the corresponding
 	// job of the anchor run the resumption restores.
 	RestoresJobId int64 `protobuf:"varint,46,opt,name=restores_job_id,json=restoresJobId,proto3" json:"restores_job_id,omitempty"`
+	// approval_approvers are the CURRENT gate's approver references (F-27):
+	// each is `group:<name>`, `role:<name>`, or a bare user identifier. Set by
+	// the execution target when it reports the job awaiting_approval and
+	// overwritten each time a step enters a gate. Empty means the gate has no
+	// approver restriction (anyone with the relevant F-14 permission may
+	// decide).
+	ApprovalApprovers []string `protobuf:"bytes,47,rep,name=approval_approvers,json=approvalApprovers,proto3" json:"approval_approvers,omitempty"`
+	// approval_quorum is the CURRENT gate's quorum depth K (F-27): the number
+	// of DISTINCT authorized approvers whose approvals resolve the gate. Zero
+	// or one means a single approval resolves it; a single rejection always
+	// resolves it immediately regardless of K.
+	ApprovalQuorum int32 `protobuf:"varint,48,opt,name=approval_quorum,json=approvalQuorum,proto3" json:"approval_quorum,omitempty"`
+	// approval_step is the name of the approval step the CURRENT gate was
+	// entered at (F-27); empty when the gate was synthesized by the
+	// environment's approval policy rather than an explicit step.
+	ApprovalStep  string `protobuf:"bytes,49,opt,name=approval_step,json=approvalStep,proto3" json:"approval_step,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4955,6 +4971,27 @@ func (x *Job) GetRestoresJobId() int64 {
 		return x.RestoresJobId
 	}
 	return 0
+}
+
+func (x *Job) GetApprovalApprovers() []string {
+	if x != nil {
+		return x.ApprovalApprovers
+	}
+	return nil
+}
+
+func (x *Job) GetApprovalQuorum() int32 {
+	if x != nil {
+		return x.ApprovalQuorum
+	}
+	return 0
+}
+
+func (x *Job) GetApprovalStep() string {
+	if x != nil {
+		return x.ApprovalStep
+	}
+	return ""
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -5471,8 +5508,22 @@ type UpdateJobRequest struct {
 	// (as UpstreamJob entries with keys) so a branch job's conditions can route
 	// on {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}.
 	DependencyObservations []*DependencyObservation `protobuf:"bytes,9,rep,name=dependency_observations,json=dependencyObservations,proto3" json:"dependency_observations,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// approval_approvers are the CURRENT gate's approver references (F-27),
+	// set by the execution target when it reports the job awaiting_approval.
+	// Overwritten each time a step enters a gate. Absent/empty leaves the
+	// previously recorded references unchanged.
+	ApprovalApprovers []string `protobuf:"bytes,10,rep,name=approval_approvers,json=approvalApprovers,proto3" json:"approval_approvers,omitempty"`
+	// approval_quorum is the CURRENT gate's quorum depth K (F-27), set by the
+	// execution target when it reports the job awaiting_approval. Absent/zero
+	// leaves the previously recorded quorum unchanged.
+	ApprovalQuorum int32 `protobuf:"varint,11,opt,name=approval_quorum,json=approvalQuorum,proto3" json:"approval_quorum,omitempty"`
+	// approval_step is the name of the approval step the gate was entered at
+	// (F-27), set by the execution target when it reports the job
+	// awaiting_approval. Absent/empty leaves the previously recorded step
+	// unchanged.
+	ApprovalStep  string `protobuf:"bytes,12,opt,name=approval_step,json=approvalStep,proto3" json:"approval_step,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpdateJobRequest) Reset() {
@@ -5566,6 +5617,27 @@ func (x *UpdateJobRequest) GetDependencyObservations() []*DependencyObservation 
 		return x.DependencyObservations
 	}
 	return nil
+}
+
+func (x *UpdateJobRequest) GetApprovalApprovers() []string {
+	if x != nil {
+		return x.ApprovalApprovers
+	}
+	return nil
+}
+
+func (x *UpdateJobRequest) GetApprovalQuorum() int32 {
+	if x != nil {
+		return x.ApprovalQuorum
+	}
+	return 0
+}
+
+func (x *UpdateJobRequest) GetApprovalStep() string {
+	if x != nil {
+		return x.ApprovalStep
+	}
+	return ""
 }
 
 type ReapJobRequest struct {
@@ -6836,7 +6908,14 @@ type ResolveApprovalRequest struct {
 	// absent the server stamps the current time.
 	DecidedAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=decided_at,json=decidedAt,proto3" json:"decided_at,omitempty"`
 	// reason is the (optional) free-text reason the user gave for the decision.
-	Reason        string `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
+	// step is the approval step the gate was entered at (F-27); forwarded so
+	// the quorum vote ledger attributes the resolving vote to the right gate.
+	Step string `protobuf:"bytes,6,opt,name=step,proto3" json:"step,omitempty"`
+	// attempt is the job's attempt the gate was entered at (F-27); forwarded
+	// so the quorum vote ledger attributes the resolving vote to the right
+	// attempt.
+	Attempt       int32 `protobuf:"varint,7,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6904,6 +6983,20 @@ func (x *ResolveApprovalRequest) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *ResolveApprovalRequest) GetStep() string {
+	if x != nil {
+		return x.Step
+	}
+	return ""
+}
+
+func (x *ResolveApprovalRequest) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
 }
 
 // ResolveApprovalResponse is the result of a ResolveApproval call.
@@ -12976,6 +13069,1183 @@ func (*PublishRoleChangeRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{167}
 }
 
+// ApprovalGroup is a named set of users that a pipeline's approval step can
+// reference via an `approvers` entry of `group:<name>`. Its effective
+// membership is the union of its manual members and every principal observed
+// to carry its claim derivation (when set).
+type ApprovalGroup struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	// name is the group's unique name (e.g. "release-managers").
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// description is a human-readable description of the group.
+	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	// members are the group's manually maintained members: opaque user
+	// identifiers (subjects/emails) matched against the deciding actor's
+	// subject and email.
+	Members []string `protobuf:"bytes,4,rep,name=members,proto3" json:"members,omitempty"`
+	// claim_name / claim_value are the group's OPTIONAL claim derivation: when
+	// both are set, every principal observed to carry a token whose claim
+	// claim_name has the value claim_value is also a member.
+	ClaimName     string                 `protobuf:"bytes,5,opt,name=claim_name,json=claimName,proto3" json:"claim_name,omitempty"`
+	ClaimValue    string                 `protobuf:"bytes,6,opt,name=claim_value,json=claimValue,proto3" json:"claim_value,omitempty"`
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApprovalGroup) Reset() {
+	*x = ApprovalGroup{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[168]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalGroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalGroup) ProtoMessage() {}
+
+func (x *ApprovalGroup) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[168]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalGroup.ProtoReflect.Descriptor instead.
+func (*ApprovalGroup) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{168}
+}
+
+func (x *ApprovalGroup) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *ApprovalGroup) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ApprovalGroup) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *ApprovalGroup) GetMembers() []string {
+	if x != nil {
+		return x.Members
+	}
+	return nil
+}
+
+func (x *ApprovalGroup) GetClaimName() string {
+	if x != nil {
+		return x.ClaimName
+	}
+	return ""
+}
+
+func (x *ApprovalGroup) GetClaimValue() string {
+	if x != nil {
+		return x.ClaimValue
+	}
+	return ""
+}
+
+func (x *ApprovalGroup) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *ApprovalGroup) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
+// CreateApprovalGroupRequest is the request to create a group.
+type CreateApprovalGroupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group's unique name; it must not collide with an existing
+	// group.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// description is a human-readable description of the group.
+	Description string `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	// members are the group's initial manually maintained members.
+	Members []string `protobuf:"bytes,3,rep,name=members,proto3" json:"members,omitempty"`
+	// claim_name / claim_value are the group's optional claim derivation.
+	ClaimName     string `protobuf:"bytes,4,opt,name=claim_name,json=claimName,proto3" json:"claim_name,omitempty"`
+	ClaimValue    string `protobuf:"bytes,5,opt,name=claim_value,json=claimValue,proto3" json:"claim_value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateApprovalGroupRequest) Reset() {
+	*x = CreateApprovalGroupRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[169]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateApprovalGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateApprovalGroupRequest) ProtoMessage() {}
+
+func (x *CreateApprovalGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[169]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateApprovalGroupRequest.ProtoReflect.Descriptor instead.
+func (*CreateApprovalGroupRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{169}
+}
+
+func (x *CreateApprovalGroupRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *CreateApprovalGroupRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *CreateApprovalGroupRequest) GetMembers() []string {
+	if x != nil {
+		return x.Members
+	}
+	return nil
+}
+
+func (x *CreateApprovalGroupRequest) GetClaimName() string {
+	if x != nil {
+		return x.ClaimName
+	}
+	return ""
+}
+
+func (x *CreateApprovalGroupRequest) GetClaimValue() string {
+	if x != nil {
+		return x.ClaimValue
+	}
+	return ""
+}
+
+type GetApprovalGroupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group's name.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetApprovalGroupRequest) Reset() {
+	*x = GetApprovalGroupRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[170]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetApprovalGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetApprovalGroupRequest) ProtoMessage() {}
+
+func (x *GetApprovalGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[170]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetApprovalGroupRequest.ProtoReflect.Descriptor instead.
+func (*GetApprovalGroupRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{170}
+}
+
+func (x *GetApprovalGroupRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type ListApprovalGroupsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApprovalGroupsRequest) Reset() {
+	*x = ListApprovalGroupsRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[171]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApprovalGroupsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApprovalGroupsRequest) ProtoMessage() {}
+
+func (x *ListApprovalGroupsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[171]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApprovalGroupsRequest.ProtoReflect.Descriptor instead.
+func (*ListApprovalGroupsRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{171}
+}
+
+type ListApprovalGroupsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Groups        []*ApprovalGroup       `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApprovalGroupsResponse) Reset() {
+	*x = ListApprovalGroupsResponse{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[172]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApprovalGroupsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApprovalGroupsResponse) ProtoMessage() {}
+
+func (x *ListApprovalGroupsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[172]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApprovalGroupsResponse.ProtoReflect.Descriptor instead.
+func (*ListApprovalGroupsResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{172}
+}
+
+func (x *ListApprovalGroupsResponse) GetGroups() []*ApprovalGroup {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
+// UpdateApprovalGroupRequest edits a group. Only the fields set on the
+// request are changed: an empty description leaves the existing description
+// unchanged; claim_name/claim_value are replaced only when BOTH are present
+// (setting both to empty clears the derivation); members are replaced only
+// when members_present is true.
+type UpdateApprovalGroupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group to update.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// description, when non-empty, replaces the group's description.
+	Description string `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	// claim_name / claim_value, when both present, replace the group's claim
+	// derivation (either/both empty clears it).
+	ClaimName  string `protobuf:"bytes,3,opt,name=claim_name,json=claimName,proto3" json:"claim_name,omitempty"`
+	ClaimValue string `protobuf:"bytes,4,opt,name=claim_value,json=claimValue,proto3" json:"claim_value,omitempty"`
+	// members, when members_present is true, REPLACE the group's member list.
+	Members []string `protobuf:"bytes,5,rep,name=members,proto3" json:"members,omitempty"`
+	// members_present signals that members should be replaced (an empty list
+	// with members_present true empties the group's manual members).
+	MembersPresent bool `protobuf:"varint,6,opt,name=members_present,json=membersPresent,proto3" json:"members_present,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *UpdateApprovalGroupRequest) Reset() {
+	*x = UpdateApprovalGroupRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[173]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateApprovalGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateApprovalGroupRequest) ProtoMessage() {}
+
+func (x *UpdateApprovalGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[173]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateApprovalGroupRequest.ProtoReflect.Descriptor instead.
+func (*UpdateApprovalGroupRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{173}
+}
+
+func (x *UpdateApprovalGroupRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *UpdateApprovalGroupRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *UpdateApprovalGroupRequest) GetClaimName() string {
+	if x != nil {
+		return x.ClaimName
+	}
+	return ""
+}
+
+func (x *UpdateApprovalGroupRequest) GetClaimValue() string {
+	if x != nil {
+		return x.ClaimValue
+	}
+	return ""
+}
+
+func (x *UpdateApprovalGroupRequest) GetMembers() []string {
+	if x != nil {
+		return x.Members
+	}
+	return nil
+}
+
+func (x *UpdateApprovalGroupRequest) GetMembersPresent() bool {
+	if x != nil {
+		return x.MembersPresent
+	}
+	return false
+}
+
+type DeleteApprovalGroupRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group to delete.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteApprovalGroupRequest) Reset() {
+	*x = DeleteApprovalGroupRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[174]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteApprovalGroupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteApprovalGroupRequest) ProtoMessage() {}
+
+func (x *DeleteApprovalGroupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[174]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteApprovalGroupRequest.ProtoReflect.Descriptor instead.
+func (*DeleteApprovalGroupRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{174}
+}
+
+func (x *DeleteApprovalGroupRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// AddApprovalGroupMemberRequest atomically adds a single member to a group.
+type AddApprovalGroupMemberRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group's name.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// member is the user identifier (subject/email) to add.
+	Member        string `protobuf:"bytes,2,opt,name=member,proto3" json:"member,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddApprovalGroupMemberRequest) Reset() {
+	*x = AddApprovalGroupMemberRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[175]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddApprovalGroupMemberRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddApprovalGroupMemberRequest) ProtoMessage() {}
+
+func (x *AddApprovalGroupMemberRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[175]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddApprovalGroupMemberRequest.ProtoReflect.Descriptor instead.
+func (*AddApprovalGroupMemberRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{175}
+}
+
+func (x *AddApprovalGroupMemberRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AddApprovalGroupMemberRequest) GetMember() string {
+	if x != nil {
+		return x.Member
+	}
+	return ""
+}
+
+// RemoveApprovalGroupMemberRequest atomically removes a single member from a
+// group.
+type RemoveApprovalGroupMemberRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group's name.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// member is the user identifier (subject/email) to remove.
+	Member        string `protobuf:"bytes,2,opt,name=member,proto3" json:"member,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RemoveApprovalGroupMemberRequest) Reset() {
+	*x = RemoveApprovalGroupMemberRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[176]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RemoveApprovalGroupMemberRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RemoveApprovalGroupMemberRequest) ProtoMessage() {}
+
+func (x *RemoveApprovalGroupMemberRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[176]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RemoveApprovalGroupMemberRequest.ProtoReflect.Descriptor instead.
+func (*RemoveApprovalGroupMemberRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{176}
+}
+
+func (x *RemoveApprovalGroupMemberRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *RemoveApprovalGroupMemberRequest) GetMember() string {
+	if x != nil {
+		return x.Member
+	}
+	return ""
+}
+
+// EffectiveApprovalGroupMembersRequest asks for a group's effective
+// membership (manual members UNION claim-derived members).
+type EffectiveApprovalGroupMembersRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the group's name.
+	Name          string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectiveApprovalGroupMembersRequest) Reset() {
+	*x = EffectiveApprovalGroupMembersRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[177]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectiveApprovalGroupMembersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectiveApprovalGroupMembersRequest) ProtoMessage() {}
+
+func (x *EffectiveApprovalGroupMembersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[177]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectiveApprovalGroupMembersRequest.ProtoReflect.Descriptor instead.
+func (*EffectiveApprovalGroupMembersRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{177}
+}
+
+func (x *EffectiveApprovalGroupMembersRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type EffectiveApprovalGroupMembersResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// members is the group's effective membership (deduplicated).
+	Members       []string `protobuf:"bytes,1,rep,name=members,proto3" json:"members,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectiveApprovalGroupMembersResponse) Reset() {
+	*x = EffectiveApprovalGroupMembersResponse{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[178]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectiveApprovalGroupMembersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectiveApprovalGroupMembersResponse) ProtoMessage() {}
+
+func (x *EffectiveApprovalGroupMembersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[178]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectiveApprovalGroupMembersResponse.ProtoReflect.Descriptor instead.
+func (*EffectiveApprovalGroupMembersResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{178}
+}
+
+func (x *EffectiveApprovalGroupMembersResponse) GetMembers() []string {
+	if x != nil {
+		return x.Members
+	}
+	return nil
+}
+
+// RecordObservedClaimRequest records that a principal presented a token
+// bearing a (claim, value) pair.
+type RecordObservedClaimRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// principal_subject is the token's subject (the user's id / email).
+	PrincipalSubject string `protobuf:"bytes,1,opt,name=principal_subject,json=principalSubject,proto3" json:"principal_subject,omitempty"`
+	// claim_name is the name of the observed claim.
+	ClaimName string `protobuf:"bytes,2,opt,name=claim_name,json=claimName,proto3" json:"claim_name,omitempty"`
+	// claim_value is the observed value of the claim.
+	ClaimValue    string `protobuf:"bytes,3,opt,name=claim_value,json=claimValue,proto3" json:"claim_value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordObservedClaimRequest) Reset() {
+	*x = RecordObservedClaimRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[179]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordObservedClaimRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordObservedClaimRequest) ProtoMessage() {}
+
+func (x *RecordObservedClaimRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[179]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordObservedClaimRequest.ProtoReflect.Descriptor instead.
+func (*RecordObservedClaimRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{179}
+}
+
+func (x *RecordObservedClaimRequest) GetPrincipalSubject() string {
+	if x != nil {
+		return x.PrincipalSubject
+	}
+	return ""
+}
+
+func (x *RecordObservedClaimRequest) GetClaimName() string {
+	if x != nil {
+		return x.ClaimName
+	}
+	return ""
+}
+
+func (x *RecordObservedClaimRequest) GetClaimValue() string {
+	if x != nil {
+		return x.ClaimValue
+	}
+	return ""
+}
+
+// ObservedClaimsForRequest asks for the distinct claim values observed for a
+// principal's subject under a claim name.
+type ObservedClaimsForRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// principal_subject is the token's subject.
+	PrincipalSubject string `protobuf:"bytes,1,opt,name=principal_subject,json=principalSubject,proto3" json:"principal_subject,omitempty"`
+	// claim_name is the name of the claim.
+	ClaimName     string `protobuf:"bytes,2,opt,name=claim_name,json=claimName,proto3" json:"claim_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObservedClaimsForRequest) Reset() {
+	*x = ObservedClaimsForRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[180]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObservedClaimsForRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObservedClaimsForRequest) ProtoMessage() {}
+
+func (x *ObservedClaimsForRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[180]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObservedClaimsForRequest.ProtoReflect.Descriptor instead.
+func (*ObservedClaimsForRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{180}
+}
+
+func (x *ObservedClaimsForRequest) GetPrincipalSubject() string {
+	if x != nil {
+		return x.PrincipalSubject
+	}
+	return ""
+}
+
+func (x *ObservedClaimsForRequest) GetClaimName() string {
+	if x != nil {
+		return x.ClaimName
+	}
+	return ""
+}
+
+type ObservedClaimsForResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// values is the set of distinct claim values observed for the principal
+	// under the claim name.
+	Values        []string `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObservedClaimsForResponse) Reset() {
+	*x = ObservedClaimsForResponse{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[181]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObservedClaimsForResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObservedClaimsForResponse) ProtoMessage() {}
+
+func (x *ObservedClaimsForResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[181]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObservedClaimsForResponse.ProtoReflect.Descriptor instead.
+func (*ObservedClaimsForResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{181}
+}
+
+func (x *ObservedClaimsForResponse) GetValues() []string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
+// CastApprovalVoteRequest casts a vote on a job's approval gate (F-27
+// quorum).
+type CastApprovalVoteRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// job_id is the job whose approval gate the vote belongs to.
+	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	// step is the approval step the gate was entered at ("" when synthesized).
+	Step string `protobuf:"bytes,2,opt,name=step,proto3" json:"step,omitempty"`
+	// attempt is the job's attempt the gate was entered at.
+	Attempt int32 `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// actor is the identity (the OIDC subject) of the voter.
+	Actor string `protobuf:"bytes,4,opt,name=actor,proto3" json:"actor,omitempty"`
+	// decision is the vote: "approved" or "rejected".
+	Decision      string `protobuf:"bytes,5,opt,name=decision,proto3" json:"decision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CastApprovalVoteRequest) Reset() {
+	*x = CastApprovalVoteRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[182]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CastApprovalVoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CastApprovalVoteRequest) ProtoMessage() {}
+
+func (x *CastApprovalVoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[182]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CastApprovalVoteRequest.ProtoReflect.Descriptor instead.
+func (*CastApprovalVoteRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{182}
+}
+
+func (x *CastApprovalVoteRequest) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+func (x *CastApprovalVoteRequest) GetStep() string {
+	if x != nil {
+		return x.Step
+	}
+	return ""
+}
+
+func (x *CastApprovalVoteRequest) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *CastApprovalVoteRequest) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+func (x *CastApprovalVoteRequest) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+// ApprovalVote is one row in the quorum ledger of a job's approval gate
+// (F-27): an immutable record that ACTOR cast DECISION at STEP (ATTEMPT) at
+// TIME. Returned in batches (CastApprovalVoteResponse.votes, Job.approval_votes)
+// so the API/UI can count distinct approvals.
+type ApprovalVote struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// job_id is the job whose approval gate the vote belongs to.
+	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	// step is the approval step the gate was entered at ("" when synthesized).
+	Step string `protobuf:"bytes,2,opt,name=step,proto3" json:"step,omitempty"`
+	// attempt is the job's attempt the gate was entered at.
+	Attempt int32 `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// actor is the identity (the OIDC subject) of the voter.
+	Actor string `protobuf:"bytes,4,opt,name=actor,proto3" json:"actor,omitempty"`
+	// decision is the vote: "approved" or "rejected".
+	Decision string `protobuf:"bytes,5,opt,name=decision,proto3" json:"decision,omitempty"`
+	// at is when the vote was cast.
+	At            *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=at,proto3" json:"at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApprovalVote) Reset() {
+	*x = ApprovalVote{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[183]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalVote) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalVote) ProtoMessage() {}
+
+func (x *ApprovalVote) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[183]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalVote.ProtoReflect.Descriptor instead.
+func (*ApprovalVote) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{183}
+}
+
+func (x *ApprovalVote) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+func (x *ApprovalVote) GetStep() string {
+	if x != nil {
+		return x.Step
+	}
+	return ""
+}
+
+func (x *ApprovalVote) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *ApprovalVote) GetActor() string {
+	if x != nil {
+		return x.Actor
+	}
+	return ""
+}
+
+func (x *ApprovalVote) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *ApprovalVote) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
+// CastApprovalVoteResponse is the result of a CastApprovalVote call: the
+// gate's ledger after recording the vote.
+type CastApprovalVoteResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// recorded is true when the vote was freshly recorded (false when it
+	// superseded or duplicated a prior vote by the same actor, or when the job
+	// was no longer awaiting approval and the vote was refused).
+	Recorded bool `protobuf:"varint,1,opt,name=recorded,proto3" json:"recorded,omitempty"`
+	// votes is the gate's CURRENT ledger (latest attempt, this step): every
+	// distinct actor's latest vote. The API counts the distinct "approved"
+	// actors to decide when the quorum is met.
+	Votes         []*ApprovalVote `protobuf:"bytes,2,rep,name=votes,proto3" json:"votes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CastApprovalVoteResponse) Reset() {
+	*x = CastApprovalVoteResponse{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[184]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CastApprovalVoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CastApprovalVoteResponse) ProtoMessage() {}
+
+func (x *CastApprovalVoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[184]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CastApprovalVoteResponse.ProtoReflect.Descriptor instead.
+func (*CastApprovalVoteResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{184}
+}
+
+func (x *CastApprovalVoteResponse) GetRecorded() bool {
+	if x != nil {
+		return x.Recorded
+	}
+	return false
+}
+
+func (x *CastApprovalVoteResponse) GetVotes() []*ApprovalVote {
+	if x != nil {
+		return x.Votes
+	}
+	return nil
+}
+
+// ListApprovalVotesRequest asks for the quorum ledger of a job's current gate
+// (F-27).
+type ListApprovalVotesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// job_id is the job whose approval gate ledger is requested.
+	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	// step is the approval step the gate was entered at (match CastApprovalVote).
+	Step string `protobuf:"bytes,2,opt,name=step,proto3" json:"step,omitempty"`
+	// attempt is the job's attempt the gate was entered at (match CastApprovalVote).
+	Attempt       int32 `protobuf:"varint,3,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApprovalVotesRequest) Reset() {
+	*x = ListApprovalVotesRequest{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[185]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApprovalVotesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApprovalVotesRequest) ProtoMessage() {}
+
+func (x *ListApprovalVotesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[185]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApprovalVotesRequest.ProtoReflect.Descriptor instead.
+func (*ListApprovalVotesRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{185}
+}
+
+func (x *ListApprovalVotesRequest) GetJobId() int64 {
+	if x != nil {
+		return x.JobId
+	}
+	return 0
+}
+
+func (x *ListApprovalVotesRequest) GetStep() string {
+	if x != nil {
+		return x.Step
+	}
+	return ""
+}
+
+func (x *ListApprovalVotesRequest) GetAttempt() int32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+type ListApprovalVotesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// votes is the gate's ledger: every distinct actor's latest vote.
+	Votes         []*ApprovalVote `protobuf:"bytes,1,rep,name=votes,proto3" json:"votes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApprovalVotesResponse) Reset() {
+	*x = ListApprovalVotesResponse{}
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[186]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApprovalVotesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApprovalVotesResponse) ProtoMessage() {}
+
+func (x *ListApprovalVotesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[186]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApprovalVotesResponse.ProtoReflect.Descriptor instead.
+func (*ListApprovalVotesResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{186}
+}
+
+func (x *ListApprovalVotesResponse) GetVotes() []*ApprovalVote {
+	if x != nil {
+		return x.Votes
+	}
+	return nil
+}
+
 // AuditEvent is one entry in the append-only audit log: a record of a
 // significant action (who did what to which resource, when, from where, with
 // what outcome, and what changed).
@@ -13037,7 +14307,7 @@ type AuditEvent struct {
 
 func (x *AuditEvent) Reset() {
 	*x = AuditEvent{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[168]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[187]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13049,7 +14319,7 @@ func (x *AuditEvent) String() string {
 func (*AuditEvent) ProtoMessage() {}
 
 func (x *AuditEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[168]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[187]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13062,7 +14332,7 @@ func (x *AuditEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuditEvent.ProtoReflect.Descriptor instead.
 func (*AuditEvent) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{168}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{187}
 }
 
 func (x *AuditEvent) GetId() int64 {
@@ -13212,7 +14482,7 @@ type AppendAuditEventRequest struct {
 
 func (x *AppendAuditEventRequest) Reset() {
 	*x = AppendAuditEventRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[169]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[188]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13224,7 +14494,7 @@ func (x *AppendAuditEventRequest) String() string {
 func (*AppendAuditEventRequest) ProtoMessage() {}
 
 func (x *AppendAuditEventRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[169]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[188]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13237,7 +14507,7 @@ func (x *AppendAuditEventRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendAuditEventRequest.ProtoReflect.Descriptor instead.
 func (*AppendAuditEventRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{169}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{188}
 }
 
 func (x *AppendAuditEventRequest) GetActor() string {
@@ -13357,7 +14627,7 @@ type ListAuditEventsRequest struct {
 
 func (x *ListAuditEventsRequest) Reset() {
 	*x = ListAuditEventsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[170]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[189]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13369,7 +14639,7 @@ func (x *ListAuditEventsRequest) String() string {
 func (*ListAuditEventsRequest) ProtoMessage() {}
 
 func (x *ListAuditEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[170]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[189]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13382,7 +14652,7 @@ func (x *ListAuditEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAuditEventsRequest.ProtoReflect.Descriptor instead.
 func (*ListAuditEventsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{170}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{189}
 }
 
 func (x *ListAuditEventsRequest) GetActor() string {
@@ -13451,7 +14721,7 @@ type ListAuditEventsResponse struct {
 
 func (x *ListAuditEventsResponse) Reset() {
 	*x = ListAuditEventsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[171]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[190]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13463,7 +14733,7 @@ func (x *ListAuditEventsResponse) String() string {
 func (*ListAuditEventsResponse) ProtoMessage() {}
 
 func (x *ListAuditEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[171]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[190]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13476,7 +14746,7 @@ func (x *ListAuditEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAuditEventsResponse.ProtoReflect.Descriptor instead.
 func (*ListAuditEventsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{171}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{190}
 }
 
 func (x *ListAuditEventsResponse) GetEvents() []*AuditEvent {
@@ -13499,7 +14769,7 @@ type PruneAuditEventsRequest struct {
 
 func (x *PruneAuditEventsRequest) Reset() {
 	*x = PruneAuditEventsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[172]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[191]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13511,7 +14781,7 @@ func (x *PruneAuditEventsRequest) String() string {
 func (*PruneAuditEventsRequest) ProtoMessage() {}
 
 func (x *PruneAuditEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[172]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[191]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13524,7 +14794,7 @@ func (x *PruneAuditEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PruneAuditEventsRequest.ProtoReflect.Descriptor instead.
 func (*PruneAuditEventsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{172}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{191}
 }
 
 func (x *PruneAuditEventsRequest) GetCreatedBefore() *timestamppb.Timestamp {
@@ -13545,7 +14815,7 @@ type PruneAuditEventsResponse struct {
 
 func (x *PruneAuditEventsResponse) Reset() {
 	*x = PruneAuditEventsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[173]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[192]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13557,7 +14827,7 @@ func (x *PruneAuditEventsResponse) String() string {
 func (*PruneAuditEventsResponse) ProtoMessage() {}
 
 func (x *PruneAuditEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[173]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[192]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13570,7 +14840,7 @@ func (x *PruneAuditEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PruneAuditEventsResponse.ProtoReflect.Descriptor instead.
 func (*PruneAuditEventsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{173}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{192}
 }
 
 func (x *PruneAuditEventsResponse) GetPruned() int64 {
@@ -13602,7 +14872,7 @@ type AcquireJobSlotsRequest struct {
 
 func (x *AcquireJobSlotsRequest) Reset() {
 	*x = AcquireJobSlotsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[174]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[193]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13614,7 +14884,7 @@ func (x *AcquireJobSlotsRequest) String() string {
 func (*AcquireJobSlotsRequest) ProtoMessage() {}
 
 func (x *AcquireJobSlotsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[174]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[193]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13627,7 +14897,7 @@ func (x *AcquireJobSlotsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquireJobSlotsRequest.ProtoReflect.Descriptor instead.
 func (*AcquireJobSlotsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{174}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{193}
 }
 
 func (x *AcquireJobSlotsRequest) GetJobId() int64 {
@@ -13666,7 +14936,7 @@ type AcquireJobSlotsResponse struct {
 
 func (x *AcquireJobSlotsResponse) Reset() {
 	*x = AcquireJobSlotsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[175]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[194]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13678,7 +14948,7 @@ func (x *AcquireJobSlotsResponse) String() string {
 func (*AcquireJobSlotsResponse) ProtoMessage() {}
 
 func (x *AcquireJobSlotsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[175]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[194]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13691,7 +14961,7 @@ func (x *AcquireJobSlotsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcquireJobSlotsResponse.ProtoReflect.Descriptor instead.
 func (*AcquireJobSlotsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{175}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{194}
 }
 
 func (x *AcquireJobSlotsResponse) GetAcquired() bool {
@@ -13723,7 +14993,7 @@ type ReleaseJobSlotsRequest struct {
 
 func (x *ReleaseJobSlotsRequest) Reset() {
 	*x = ReleaseJobSlotsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[176]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[195]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13735,7 +15005,7 @@ func (x *ReleaseJobSlotsRequest) String() string {
 func (*ReleaseJobSlotsRequest) ProtoMessage() {}
 
 func (x *ReleaseJobSlotsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[176]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[195]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13748,7 +15018,7 @@ func (x *ReleaseJobSlotsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseJobSlotsRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseJobSlotsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{176}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{195}
 }
 
 func (x *ReleaseJobSlotsRequest) GetJobId() int64 {
@@ -13774,7 +15044,7 @@ type ReleaseJobSlotsResponse struct {
 
 func (x *ReleaseJobSlotsResponse) Reset() {
 	*x = ReleaseJobSlotsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[177]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[196]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13786,7 +15056,7 @@ func (x *ReleaseJobSlotsResponse) String() string {
 func (*ReleaseJobSlotsResponse) ProtoMessage() {}
 
 func (x *ReleaseJobSlotsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[177]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[196]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13799,7 +15069,7 @@ func (x *ReleaseJobSlotsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseJobSlotsResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseJobSlotsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{177}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{196}
 }
 
 // GetQueueStatusRequest is the (empty) request for GetQueueStatus; it is
@@ -13812,7 +15082,7 @@ type GetQueueStatusRequest struct {
 
 func (x *GetQueueStatusRequest) Reset() {
 	*x = GetQueueStatusRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[178]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[197]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13824,7 +15094,7 @@ func (x *GetQueueStatusRequest) String() string {
 func (*GetQueueStatusRequest) ProtoMessage() {}
 
 func (x *GetQueueStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[178]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[197]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13837,7 +15107,7 @@ func (x *GetQueueStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueueStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetQueueStatusRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{178}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{197}
 }
 
 // ReconcileConcurrencyRequest is the (empty) request for
@@ -13850,7 +15120,7 @@ type ReconcileConcurrencyRequest struct {
 
 func (x *ReconcileConcurrencyRequest) Reset() {
 	*x = ReconcileConcurrencyRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[179]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[198]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13862,7 +15132,7 @@ func (x *ReconcileConcurrencyRequest) String() string {
 func (*ReconcileConcurrencyRequest) ProtoMessage() {}
 
 func (x *ReconcileConcurrencyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[179]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[198]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13875,7 +15145,7 @@ func (x *ReconcileConcurrencyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileConcurrencyRequest.ProtoReflect.Descriptor instead.
 func (*ReconcileConcurrencyRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{179}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{198}
 }
 
 // ReconcileConcurrencyResponse is the result of a ReconcileConcurrency call.
@@ -13890,7 +15160,7 @@ type ReconcileConcurrencyResponse struct {
 
 func (x *ReconcileConcurrencyResponse) Reset() {
 	*x = ReconcileConcurrencyResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[180]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[199]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13902,7 +15172,7 @@ func (x *ReconcileConcurrencyResponse) String() string {
 func (*ReconcileConcurrencyResponse) ProtoMessage() {}
 
 func (x *ReconcileConcurrencyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[180]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[199]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13915,7 +15185,7 @@ func (x *ReconcileConcurrencyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileConcurrencyResponse.ProtoReflect.Descriptor instead.
 func (*ReconcileConcurrencyResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{180}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{199}
 }
 
 func (x *ReconcileConcurrencyResponse) GetReleased() int32 {
@@ -13952,7 +15222,7 @@ type QueuePendingJob struct {
 
 func (x *QueuePendingJob) Reset() {
 	*x = QueuePendingJob{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[181]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[200]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13964,7 +15234,7 @@ func (x *QueuePendingJob) String() string {
 func (*QueuePendingJob) ProtoMessage() {}
 
 func (x *QueuePendingJob) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[181]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[200]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13977,7 +15247,7 @@ func (x *QueuePendingJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueuePendingJob.ProtoReflect.Descriptor instead.
 func (*QueuePendingJob) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{181}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{200}
 }
 
 func (x *QueuePendingJob) GetId() int64 {
@@ -14045,7 +15315,7 @@ type QueueGroupLoad struct {
 
 func (x *QueueGroupLoad) Reset() {
 	*x = QueueGroupLoad{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[182]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[201]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14057,7 +15327,7 @@ func (x *QueueGroupLoad) String() string {
 func (*QueueGroupLoad) ProtoMessage() {}
 
 func (x *QueueGroupLoad) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[182]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[201]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14070,7 +15340,7 @@ func (x *QueueGroupLoad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueGroupLoad.ProtoReflect.Descriptor instead.
 func (*QueueGroupLoad) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{182}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{201}
 }
 
 func (x *QueueGroupLoad) GetGroup() string {
@@ -14111,7 +15381,7 @@ type QueueKeyLoad struct {
 
 func (x *QueueKeyLoad) Reset() {
 	*x = QueueKeyLoad{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[183]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[202]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14123,7 +15393,7 @@ func (x *QueueKeyLoad) String() string {
 func (*QueueKeyLoad) ProtoMessage() {}
 
 func (x *QueueKeyLoad) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[183]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[202]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14136,7 +15406,7 @@ func (x *QueueKeyLoad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueKeyLoad.ProtoReflect.Descriptor instead.
 func (*QueueKeyLoad) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{183}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{202}
 }
 
 func (x *QueueKeyLoad) GetKey() string {
@@ -14185,7 +15455,7 @@ type QueueStatus struct {
 
 func (x *QueueStatus) Reset() {
 	*x = QueueStatus{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[184]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[203]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14197,7 +15467,7 @@ func (x *QueueStatus) String() string {
 func (*QueueStatus) ProtoMessage() {}
 
 func (x *QueueStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[184]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[203]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14210,7 +15480,7 @@ func (x *QueueStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueueStatus.ProtoReflect.Descriptor instead.
 func (*QueueStatus) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{184}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{203}
 }
 
 func (x *QueueStatus) GetPending() []*QueuePendingJob {
@@ -14273,7 +15543,7 @@ type ConcurrencyLimit struct {
 
 func (x *ConcurrencyLimit) Reset() {
 	*x = ConcurrencyLimit{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[185]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[204]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14285,7 +15555,7 @@ func (x *ConcurrencyLimit) String() string {
 func (*ConcurrencyLimit) ProtoMessage() {}
 
 func (x *ConcurrencyLimit) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[185]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[204]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14298,7 +15568,7 @@ func (x *ConcurrencyLimit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConcurrencyLimit.ProtoReflect.Descriptor instead.
 func (*ConcurrencyLimit) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{185}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{204}
 }
 
 func (x *ConcurrencyLimit) GetId() int64 {
@@ -14356,7 +15626,7 @@ type ListConcurrencyLimitsRequest struct {
 
 func (x *ListConcurrencyLimitsRequest) Reset() {
 	*x = ListConcurrencyLimitsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[186]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[205]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14368,7 +15638,7 @@ func (x *ListConcurrencyLimitsRequest) String() string {
 func (*ListConcurrencyLimitsRequest) ProtoMessage() {}
 
 func (x *ListConcurrencyLimitsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[186]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[205]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14381,7 +15651,7 @@ func (x *ListConcurrencyLimitsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListConcurrencyLimitsRequest.ProtoReflect.Descriptor instead.
 func (*ListConcurrencyLimitsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{186}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{205}
 }
 
 func (x *ListConcurrencyLimitsRequest) GetKind() string {
@@ -14402,7 +15672,7 @@ type ListConcurrencyLimitsResponse struct {
 
 func (x *ListConcurrencyLimitsResponse) Reset() {
 	*x = ListConcurrencyLimitsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[187]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[206]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14414,7 +15684,7 @@ func (x *ListConcurrencyLimitsResponse) String() string {
 func (*ListConcurrencyLimitsResponse) ProtoMessage() {}
 
 func (x *ListConcurrencyLimitsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[187]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[206]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14427,7 +15697,7 @@ func (x *ListConcurrencyLimitsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListConcurrencyLimitsResponse.ProtoReflect.Descriptor instead.
 func (*ListConcurrencyLimitsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{187}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{206}
 }
 
 func (x *ListConcurrencyLimitsResponse) GetLimits() []*ConcurrencyLimit {
@@ -14454,7 +15724,7 @@ type CreateConcurrencyLimitRequest struct {
 
 func (x *CreateConcurrencyLimitRequest) Reset() {
 	*x = CreateConcurrencyLimitRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[188]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[207]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14466,7 +15736,7 @@ func (x *CreateConcurrencyLimitRequest) String() string {
 func (*CreateConcurrencyLimitRequest) ProtoMessage() {}
 
 func (x *CreateConcurrencyLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[188]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[207]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14479,7 +15749,7 @@ func (x *CreateConcurrencyLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateConcurrencyLimitRequest.ProtoReflect.Descriptor instead.
 func (*CreateConcurrencyLimitRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{188}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{207}
 }
 
 func (x *CreateConcurrencyLimitRequest) GetKind() string {
@@ -14521,7 +15791,7 @@ type UpdateConcurrencyLimitRequest struct {
 
 func (x *UpdateConcurrencyLimitRequest) Reset() {
 	*x = UpdateConcurrencyLimitRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[189]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[208]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14533,7 +15803,7 @@ func (x *UpdateConcurrencyLimitRequest) String() string {
 func (*UpdateConcurrencyLimitRequest) ProtoMessage() {}
 
 func (x *UpdateConcurrencyLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[189]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[208]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14546,7 +15816,7 @@ func (x *UpdateConcurrencyLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateConcurrencyLimitRequest.ProtoReflect.Descriptor instead.
 func (*UpdateConcurrencyLimitRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{189}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{208}
 }
 
 func (x *UpdateConcurrencyLimitRequest) GetId() int64 {
@@ -14582,7 +15852,7 @@ type DeleteConcurrencyLimitRequest struct {
 
 func (x *DeleteConcurrencyLimitRequest) Reset() {
 	*x = DeleteConcurrencyLimitRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[190]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[209]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14594,7 +15864,7 @@ func (x *DeleteConcurrencyLimitRequest) String() string {
 func (*DeleteConcurrencyLimitRequest) ProtoMessage() {}
 
 func (x *DeleteConcurrencyLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[190]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[209]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14607,7 +15877,7 @@ func (x *DeleteConcurrencyLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteConcurrencyLimitRequest.ProtoReflect.Descriptor instead.
 func (*DeleteConcurrencyLimitRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{190}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{209}
 }
 
 func (x *DeleteConcurrencyLimitRequest) GetId() int64 {
@@ -14642,7 +15912,7 @@ type SSHKnownHost struct {
 
 func (x *SSHKnownHost) Reset() {
 	*x = SSHKnownHost{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[191]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[210]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14654,7 +15924,7 @@ func (x *SSHKnownHost) String() string {
 func (*SSHKnownHost) ProtoMessage() {}
 
 func (x *SSHKnownHost) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[191]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[210]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14667,7 +15937,7 @@ func (x *SSHKnownHost) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SSHKnownHost.ProtoReflect.Descriptor instead.
 func (*SSHKnownHost) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{191}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{210}
 }
 
 func (x *SSHKnownHost) GetId() int64 {
@@ -14728,7 +15998,7 @@ type ListSSHKnownHostsRequest struct {
 
 func (x *ListSSHKnownHostsRequest) Reset() {
 	*x = ListSSHKnownHostsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[192]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[211]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14740,7 +16010,7 @@ func (x *ListSSHKnownHostsRequest) String() string {
 func (*ListSSHKnownHostsRequest) ProtoMessage() {}
 
 func (x *ListSSHKnownHostsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[192]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[211]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14753,7 +16023,7 @@ func (x *ListSSHKnownHostsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSSHKnownHostsRequest.ProtoReflect.Descriptor instead.
 func (*ListSSHKnownHostsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{192}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{211}
 }
 
 // ListSSHKnownHostsResponse is the result of a ListSSHKnownHosts call.
@@ -14767,7 +16037,7 @@ type ListSSHKnownHostsResponse struct {
 
 func (x *ListSSHKnownHostsResponse) Reset() {
 	*x = ListSSHKnownHostsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[193]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[212]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14779,7 +16049,7 @@ func (x *ListSSHKnownHostsResponse) String() string {
 func (*ListSSHKnownHostsResponse) ProtoMessage() {}
 
 func (x *ListSSHKnownHostsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[193]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[212]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14792,7 +16062,7 @@ func (x *ListSSHKnownHostsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSSHKnownHostsResponse.ProtoReflect.Descriptor instead.
 func (*ListSSHKnownHostsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{193}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{212}
 }
 
 func (x *ListSSHKnownHostsResponse) GetHosts() []*SSHKnownHost {
@@ -14820,7 +16090,7 @@ type CreateSSHKnownHostRequest struct {
 
 func (x *CreateSSHKnownHostRequest) Reset() {
 	*x = CreateSSHKnownHostRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[194]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[213]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14832,7 +16102,7 @@ func (x *CreateSSHKnownHostRequest) String() string {
 func (*CreateSSHKnownHostRequest) ProtoMessage() {}
 
 func (x *CreateSSHKnownHostRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[194]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[213]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14845,7 +16115,7 @@ func (x *CreateSSHKnownHostRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSSHKnownHostRequest.ProtoReflect.Descriptor instead.
 func (*CreateSSHKnownHostRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{194}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{213}
 }
 
 func (x *CreateSSHKnownHostRequest) GetHostPattern() string {
@@ -14887,7 +16157,7 @@ type DeleteSSHKnownHostRequest struct {
 
 func (x *DeleteSSHKnownHostRequest) Reset() {
 	*x = DeleteSSHKnownHostRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[195]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[214]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14899,7 +16169,7 @@ func (x *DeleteSSHKnownHostRequest) String() string {
 func (*DeleteSSHKnownHostRequest) ProtoMessage() {}
 
 func (x *DeleteSSHKnownHostRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[195]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[214]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14912,7 +16182,7 @@ func (x *DeleteSSHKnownHostRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSSHKnownHostRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSSHKnownHostRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{195}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{214}
 }
 
 func (x *DeleteSSHKnownHostRequest) GetId() int64 {
@@ -14944,7 +16214,7 @@ type HTTPHeader struct {
 
 func (x *HTTPHeader) Reset() {
 	*x = HTTPHeader{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[196]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[215]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14956,7 +16226,7 @@ func (x *HTTPHeader) String() string {
 func (*HTTPHeader) ProtoMessage() {}
 
 func (x *HTTPHeader) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[196]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[215]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14969,7 +16239,7 @@ func (x *HTTPHeader) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HTTPHeader.ProtoReflect.Descriptor instead.
 func (*HTTPHeader) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{196}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{215}
 }
 
 func (x *HTTPHeader) GetName() string {
@@ -15040,7 +16310,7 @@ type SourceCredential struct {
 
 func (x *SourceCredential) Reset() {
 	*x = SourceCredential{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[197]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[216]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15052,7 +16322,7 @@ func (x *SourceCredential) String() string {
 func (*SourceCredential) ProtoMessage() {}
 
 func (x *SourceCredential) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[197]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[216]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15065,7 +16335,7 @@ func (x *SourceCredential) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SourceCredential.ProtoReflect.Descriptor instead.
 func (*SourceCredential) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{197}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{216}
 }
 
 func (x *SourceCredential) GetId() int64 {
@@ -15161,7 +16431,7 @@ type ListSourceCredentialsRequest struct {
 
 func (x *ListSourceCredentialsRequest) Reset() {
 	*x = ListSourceCredentialsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[198]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[217]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15173,7 +16443,7 @@ func (x *ListSourceCredentialsRequest) String() string {
 func (*ListSourceCredentialsRequest) ProtoMessage() {}
 
 func (x *ListSourceCredentialsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[198]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[217]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15186,7 +16456,7 @@ func (x *ListSourceCredentialsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSourceCredentialsRequest.ProtoReflect.Descriptor instead.
 func (*ListSourceCredentialsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{198}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{217}
 }
 
 // ListSourceCredentialsResponse is the result of a ListSourceCredentials call.
@@ -15200,7 +16470,7 @@ type ListSourceCredentialsResponse struct {
 
 func (x *ListSourceCredentialsResponse) Reset() {
 	*x = ListSourceCredentialsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[199]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[218]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15212,7 +16482,7 @@ func (x *ListSourceCredentialsResponse) String() string {
 func (*ListSourceCredentialsResponse) ProtoMessage() {}
 
 func (x *ListSourceCredentialsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[199]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[218]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15225,7 +16495,7 @@ func (x *ListSourceCredentialsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSourceCredentialsResponse.ProtoReflect.Descriptor instead.
 func (*ListSourceCredentialsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{199}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{218}
 }
 
 func (x *ListSourceCredentialsResponse) GetCredentials() []*SourceCredential {
@@ -15269,7 +16539,7 @@ type CreateSourceCredentialRequest struct {
 
 func (x *CreateSourceCredentialRequest) Reset() {
 	*x = CreateSourceCredentialRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[200]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[219]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15281,7 +16551,7 @@ func (x *CreateSourceCredentialRequest) String() string {
 func (*CreateSourceCredentialRequest) ProtoMessage() {}
 
 func (x *CreateSourceCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[200]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[219]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15294,7 +16564,7 @@ func (x *CreateSourceCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSourceCredentialRequest.ProtoReflect.Descriptor instead.
 func (*CreateSourceCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{200}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{219}
 }
 
 func (x *CreateSourceCredentialRequest) GetName() string {
@@ -15372,7 +16642,7 @@ type GetSourceCredentialRequest struct {
 
 func (x *GetSourceCredentialRequest) Reset() {
 	*x = GetSourceCredentialRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[201]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[220]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15384,7 +16654,7 @@ func (x *GetSourceCredentialRequest) String() string {
 func (*GetSourceCredentialRequest) ProtoMessage() {}
 
 func (x *GetSourceCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[201]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[220]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15397,7 +16667,7 @@ func (x *GetSourceCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSourceCredentialRequest.ProtoReflect.Descriptor instead.
 func (*GetSourceCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{201}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{220}
 }
 
 func (x *GetSourceCredentialRequest) GetName() string {
@@ -15437,7 +16707,7 @@ type UpdateSourceCredentialRequest struct {
 
 func (x *UpdateSourceCredentialRequest) Reset() {
 	*x = UpdateSourceCredentialRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[202]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[221]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15449,7 +16719,7 @@ func (x *UpdateSourceCredentialRequest) String() string {
 func (*UpdateSourceCredentialRequest) ProtoMessage() {}
 
 func (x *UpdateSourceCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[202]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[221]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15462,7 +16732,7 @@ func (x *UpdateSourceCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateSourceCredentialRequest.ProtoReflect.Descriptor instead.
 func (*UpdateSourceCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{202}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{221}
 }
 
 func (x *UpdateSourceCredentialRequest) GetName() string {
@@ -15533,7 +16803,7 @@ type DeleteSourceCredentialRequest struct {
 
 func (x *DeleteSourceCredentialRequest) Reset() {
 	*x = DeleteSourceCredentialRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[203]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[222]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15545,7 +16815,7 @@ func (x *DeleteSourceCredentialRequest) String() string {
 func (*DeleteSourceCredentialRequest) ProtoMessage() {}
 
 func (x *DeleteSourceCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[203]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[222]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15558,7 +16828,7 @@ func (x *DeleteSourceCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSourceCredentialRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSourceCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{203}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{222}
 }
 
 func (x *DeleteSourceCredentialRequest) GetName() string {
@@ -15595,7 +16865,7 @@ type PipelineSource struct {
 
 func (x *PipelineSource) Reset() {
 	*x = PipelineSource{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[204]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[223]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15607,7 +16877,7 @@ func (x *PipelineSource) String() string {
 func (*PipelineSource) ProtoMessage() {}
 
 func (x *PipelineSource) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[204]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[223]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15620,7 +16890,7 @@ func (x *PipelineSource) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PipelineSource.ProtoReflect.Descriptor instead.
 func (*PipelineSource) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{204}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{223}
 }
 
 func (x *PipelineSource) GetId() int64 {
@@ -15695,7 +16965,7 @@ type PipelineSourceState struct {
 
 func (x *PipelineSourceState) Reset() {
 	*x = PipelineSourceState{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[205]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[224]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15707,7 +16977,7 @@ func (x *PipelineSourceState) String() string {
 func (*PipelineSourceState) ProtoMessage() {}
 
 func (x *PipelineSourceState) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[205]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[224]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15720,7 +16990,7 @@ func (x *PipelineSourceState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PipelineSourceState.ProtoReflect.Descriptor instead.
 func (*PipelineSourceState) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{205}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{224}
 }
 
 func (x *PipelineSourceState) GetPipelineId() int64 {
@@ -15777,7 +17047,7 @@ type AttachPipelineSourceRequest struct {
 
 func (x *AttachPipelineSourceRequest) Reset() {
 	*x = AttachPipelineSourceRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[206]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[225]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15789,7 +17059,7 @@ func (x *AttachPipelineSourceRequest) String() string {
 func (*AttachPipelineSourceRequest) ProtoMessage() {}
 
 func (x *AttachPipelineSourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[206]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[225]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15802,7 +17072,7 @@ func (x *AttachPipelineSourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachPipelineSourceRequest.ProtoReflect.Descriptor instead.
 func (*AttachPipelineSourceRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{206}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{225}
 }
 
 func (x *AttachPipelineSourceRequest) GetPipelineId() int64 {
@@ -15844,7 +17114,7 @@ type GetPipelineSourceRequest struct {
 
 func (x *GetPipelineSourceRequest) Reset() {
 	*x = GetPipelineSourceRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[207]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[226]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15856,7 +17126,7 @@ func (x *GetPipelineSourceRequest) String() string {
 func (*GetPipelineSourceRequest) ProtoMessage() {}
 
 func (x *GetPipelineSourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[207]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[226]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15869,7 +17139,7 @@ func (x *GetPipelineSourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPipelineSourceRequest.ProtoReflect.Descriptor instead.
 func (*GetPipelineSourceRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{207}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{226}
 }
 
 func (x *GetPipelineSourceRequest) GetPipelineId() int64 {
@@ -15891,7 +17161,7 @@ type ListPipelineSourcesRequest struct {
 
 func (x *ListPipelineSourcesRequest) Reset() {
 	*x = ListPipelineSourcesRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[208]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[227]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15903,7 +17173,7 @@ func (x *ListPipelineSourcesRequest) String() string {
 func (*ListPipelineSourcesRequest) ProtoMessage() {}
 
 func (x *ListPipelineSourcesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[208]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[227]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15916,7 +17186,7 @@ func (x *ListPipelineSourcesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPipelineSourcesRequest.ProtoReflect.Descriptor instead.
 func (*ListPipelineSourcesRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{208}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{227}
 }
 
 // ListPipelineSourcesResponse is the result of a ListPipelineSources call.
@@ -15930,7 +17200,7 @@ type ListPipelineSourcesResponse struct {
 
 func (x *ListPipelineSourcesResponse) Reset() {
 	*x = ListPipelineSourcesResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[209]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[228]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15942,7 +17212,7 @@ func (x *ListPipelineSourcesResponse) String() string {
 func (*ListPipelineSourcesResponse) ProtoMessage() {}
 
 func (x *ListPipelineSourcesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[209]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[228]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15955,7 +17225,7 @@ func (x *ListPipelineSourcesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPipelineSourcesResponse.ProtoReflect.Descriptor instead.
 func (*ListPipelineSourcesResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{209}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{228}
 }
 
 func (x *ListPipelineSourcesResponse) GetSources() []*PipelineSource {
@@ -15977,7 +17247,7 @@ type CountSourcesByCredentialRequest struct {
 
 func (x *CountSourcesByCredentialRequest) Reset() {
 	*x = CountSourcesByCredentialRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[210]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[229]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15989,7 +17259,7 @@ func (x *CountSourcesByCredentialRequest) String() string {
 func (*CountSourcesByCredentialRequest) ProtoMessage() {}
 
 func (x *CountSourcesByCredentialRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[210]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[229]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16002,7 +17272,7 @@ func (x *CountSourcesByCredentialRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CountSourcesByCredentialRequest.ProtoReflect.Descriptor instead.
 func (*CountSourcesByCredentialRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{210}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{229}
 }
 
 func (x *CountSourcesByCredentialRequest) GetCredential() string {
@@ -16024,7 +17294,7 @@ type CountSourcesByCredentialResponse struct {
 
 func (x *CountSourcesByCredentialResponse) Reset() {
 	*x = CountSourcesByCredentialResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[211]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[230]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16036,7 +17306,7 @@ func (x *CountSourcesByCredentialResponse) String() string {
 func (*CountSourcesByCredentialResponse) ProtoMessage() {}
 
 func (x *CountSourcesByCredentialResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[211]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[230]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16049,7 +17319,7 @@ func (x *CountSourcesByCredentialResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CountSourcesByCredentialResponse.ProtoReflect.Descriptor instead.
 func (*CountSourcesByCredentialResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{211}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{230}
 }
 
 func (x *CountSourcesByCredentialResponse) GetCount() int64 {
@@ -16071,7 +17341,7 @@ type GetPipelineSourceStateRequest struct {
 
 func (x *GetPipelineSourceStateRequest) Reset() {
 	*x = GetPipelineSourceStateRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[212]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[231]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16083,7 +17353,7 @@ func (x *GetPipelineSourceStateRequest) String() string {
 func (*GetPipelineSourceStateRequest) ProtoMessage() {}
 
 func (x *GetPipelineSourceStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[212]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[231]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16096,7 +17366,7 @@ func (x *GetPipelineSourceStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPipelineSourceStateRequest.ProtoReflect.Descriptor instead.
 func (*GetPipelineSourceStateRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{212}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{231}
 }
 
 func (x *GetPipelineSourceStateRequest) GetPipelineId() int64 {
@@ -16117,7 +17387,7 @@ type DetachPipelineSourceRequest struct {
 
 func (x *DetachPipelineSourceRequest) Reset() {
 	*x = DetachPipelineSourceRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[213]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[232]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16129,7 +17399,7 @@ func (x *DetachPipelineSourceRequest) String() string {
 func (*DetachPipelineSourceRequest) ProtoMessage() {}
 
 func (x *DetachPipelineSourceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[213]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[232]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16142,7 +17412,7 @@ func (x *DetachPipelineSourceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetachPipelineSourceRequest.ProtoReflect.Descriptor instead.
 func (*DetachPipelineSourceRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{213}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{232}
 }
 
 func (x *DetachPipelineSourceRequest) GetPipelineId() int64 {
@@ -16175,7 +17445,7 @@ type SetPipelineSourceStateRequest struct {
 
 func (x *SetPipelineSourceStateRequest) Reset() {
 	*x = SetPipelineSourceStateRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[214]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[233]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16187,7 +17457,7 @@ func (x *SetPipelineSourceStateRequest) String() string {
 func (*SetPipelineSourceStateRequest) ProtoMessage() {}
 
 func (x *SetPipelineSourceStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[214]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[233]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16200,7 +17470,7 @@ func (x *SetPipelineSourceStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPipelineSourceStateRequest.ProtoReflect.Descriptor instead.
 func (*SetPipelineSourceStateRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{214}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{233}
 }
 
 func (x *SetPipelineSourceStateRequest) GetPipelineId() int64 {
@@ -16302,7 +17572,7 @@ type StorageObject struct {
 
 func (x *StorageObject) Reset() {
 	*x = StorageObject{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[215]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[234]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16314,7 +17584,7 @@ func (x *StorageObject) String() string {
 func (*StorageObject) ProtoMessage() {}
 
 func (x *StorageObject) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[215]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[234]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16327,7 +17597,7 @@ func (x *StorageObject) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageObject.ProtoReflect.Descriptor instead.
 func (*StorageObject) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{215}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{234}
 }
 
 func (x *StorageObject) GetUid() string {
@@ -16470,7 +17740,7 @@ type AllocateStorageObjectRequest struct {
 
 func (x *AllocateStorageObjectRequest) Reset() {
 	*x = AllocateStorageObjectRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[216]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[235]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16482,7 +17752,7 @@ func (x *AllocateStorageObjectRequest) String() string {
 func (*AllocateStorageObjectRequest) ProtoMessage() {}
 
 func (x *AllocateStorageObjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[216]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[235]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16495,7 +17765,7 @@ func (x *AllocateStorageObjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllocateStorageObjectRequest.ProtoReflect.Descriptor instead.
 func (*AllocateStorageObjectRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{216}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{235}
 }
 
 func (x *AllocateStorageObjectRequest) GetKind() string {
@@ -16578,7 +17848,7 @@ type ConfirmStorageObjectRequest struct {
 
 func (x *ConfirmStorageObjectRequest) Reset() {
 	*x = ConfirmStorageObjectRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[217]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[236]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16590,7 +17860,7 @@ func (x *ConfirmStorageObjectRequest) String() string {
 func (*ConfirmStorageObjectRequest) ProtoMessage() {}
 
 func (x *ConfirmStorageObjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[217]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[236]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16603,7 +17873,7 @@ func (x *ConfirmStorageObjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfirmStorageObjectRequest.ProtoReflect.Descriptor instead.
 func (*ConfirmStorageObjectRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{217}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{236}
 }
 
 func (x *ConfirmStorageObjectRequest) GetUid() string {
@@ -16638,7 +17908,7 @@ type GetStorageObjectRequest struct {
 
 func (x *GetStorageObjectRequest) Reset() {
 	*x = GetStorageObjectRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[218]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[237]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16650,7 +17920,7 @@ func (x *GetStorageObjectRequest) String() string {
 func (*GetStorageObjectRequest) ProtoMessage() {}
 
 func (x *GetStorageObjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[218]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[237]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16663,7 +17933,7 @@ func (x *GetStorageObjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStorageObjectRequest.ProtoReflect.Descriptor instead.
 func (*GetStorageObjectRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{218}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{237}
 }
 
 func (x *GetStorageObjectRequest) GetNamespace() string {
@@ -16693,7 +17963,7 @@ type ListStorageObjectsRequest struct {
 
 func (x *ListStorageObjectsRequest) Reset() {
 	*x = ListStorageObjectsRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[219]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[238]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16705,7 +17975,7 @@ func (x *ListStorageObjectsRequest) String() string {
 func (*ListStorageObjectsRequest) ProtoMessage() {}
 
 func (x *ListStorageObjectsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[219]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[238]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16718,7 +17988,7 @@ func (x *ListStorageObjectsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListStorageObjectsRequest.ProtoReflect.Descriptor instead.
 func (*ListStorageObjectsRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{219}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{238}
 }
 
 func (x *ListStorageObjectsRequest) GetNamespace() string {
@@ -16746,7 +18016,7 @@ type ListStorageObjectsResponse struct {
 
 func (x *ListStorageObjectsResponse) Reset() {
 	*x = ListStorageObjectsResponse{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[220]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[239]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16758,7 +18028,7 @@ func (x *ListStorageObjectsResponse) String() string {
 func (*ListStorageObjectsResponse) ProtoMessage() {}
 
 func (x *ListStorageObjectsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[220]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[239]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16771,7 +18041,7 @@ func (x *ListStorageObjectsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListStorageObjectsResponse.ProtoReflect.Descriptor instead.
 func (*ListStorageObjectsResponse) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{220}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{239}
 }
 
 func (x *ListStorageObjectsResponse) GetObjects() []*StorageObject {
@@ -16792,7 +18062,7 @@ type TouchStorageObjectRequest struct {
 
 func (x *TouchStorageObjectRequest) Reset() {
 	*x = TouchStorageObjectRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[221]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[240]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16804,7 +18074,7 @@ func (x *TouchStorageObjectRequest) String() string {
 func (*TouchStorageObjectRequest) ProtoMessage() {}
 
 func (x *TouchStorageObjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[221]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[240]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16817,7 +18087,7 @@ func (x *TouchStorageObjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TouchStorageObjectRequest.ProtoReflect.Descriptor instead.
 func (*TouchStorageObjectRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{221}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{240}
 }
 
 func (x *TouchStorageObjectRequest) GetUid() string {
@@ -16840,7 +18110,7 @@ type SyncLogSizeRequest struct {
 
 func (x *SyncLogSizeRequest) Reset() {
 	*x = SyncLogSizeRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[222]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[241]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16852,7 +18122,7 @@ func (x *SyncLogSizeRequest) String() string {
 func (*SyncLogSizeRequest) ProtoMessage() {}
 
 func (x *SyncLogSizeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[222]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[241]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16865,7 +18135,7 @@ func (x *SyncLogSizeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncLogSizeRequest.ProtoReflect.Descriptor instead.
 func (*SyncLogSizeRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{222}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{241}
 }
 
 func (x *SyncLogSizeRequest) GetUid() string {
@@ -16893,7 +18163,7 @@ type DeleteStorageObjectRequest struct {
 
 func (x *DeleteStorageObjectRequest) Reset() {
 	*x = DeleteStorageObjectRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[223]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[242]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16905,7 +18175,7 @@ func (x *DeleteStorageObjectRequest) String() string {
 func (*DeleteStorageObjectRequest) ProtoMessage() {}
 
 func (x *DeleteStorageObjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[223]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[242]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16918,7 +18188,7 @@ func (x *DeleteStorageObjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteStorageObjectRequest.ProtoReflect.Descriptor instead.
 func (*DeleteStorageObjectRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{223}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{242}
 }
 
 func (x *DeleteStorageObjectRequest) GetUid() string {
@@ -16951,7 +18221,7 @@ type ResolvePackageReferenceRequest struct {
 
 func (x *ResolvePackageReferenceRequest) Reset() {
 	*x = ResolvePackageReferenceRequest{}
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[224]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[243]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16963,7 +18233,7 @@ func (x *ResolvePackageReferenceRequest) String() string {
 func (*ResolvePackageReferenceRequest) ProtoMessage() {}
 
 func (x *ResolvePackageReferenceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_db_v1_db_proto_msgTypes[224]
+	mi := &file_cdrom_db_v1_db_proto_msgTypes[243]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16976,7 +18246,7 @@ func (x *ResolvePackageReferenceRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvePackageReferenceRequest.ProtoReflect.Descriptor instead.
 func (*ResolvePackageReferenceRequest) Descriptor() ([]byte, []int) {
-	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{224}
+	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{243}
 }
 
 func (x *ResolvePackageReferenceRequest) GetPackageName() string {
@@ -17361,7 +18631,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\ffailure_mode\x18\x05 \x01(\x0e2\x18.cdrom.db.v1.FailureModeR\vfailureMode\x12!\n" +
 	"\fstep_barrier\x18\x06 \x01(\bR\vstepBarrier\x12)\n" +
 	"\x10concurrency_keys\x18\a \x03(\tR\x0fconcurrencyKeys\x12\x16\n" +
-	"\x06branch\x18\b \x01(\bR\x06branch\"\x90\x13\n" +
+	"\x06branch\x18\b \x01(\bR\x06branch\"\x8d\x14\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -17418,7 +18688,10 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x06branch\x18+ \x01(\bR\x06branch\x12[\n" +
 	"\x17dependency_observations\x18, \x03(\v2\".cdrom.db.v1.DependencyObservationR\x16dependencyObservations\x12!\n" +
 	"\fcarried_over\x18- \x01(\bR\vcarriedOver\x12&\n" +
-	"\x0frestores_job_id\x18. \x01(\x03R\rrestoresJobId\x1a:\n" +
+	"\x0frestores_job_id\x18. \x01(\x03R\rrestoresJobId\x12-\n" +
+	"\x12approval_approvers\x18/ \x03(\tR\x11approvalApprovers\x12'\n" +
+	"\x0fapproval_quorum\x180 \x01(\x05R\x0eapprovalQuorum\x12#\n" +
+	"\rapproval_step\x181 \x01(\tR\fapprovalStep\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +
@@ -17470,7 +18743,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x06run_id\x18\x03 \x01(\x03R\x05runId\"8\n" +
 	"\x10ListJobsResponse\x12$\n" +
 	"\x04jobs\x18\x01 \x03(\v2\x10.cdrom.db.v1.JobR\x04jobs\"\x1a\n" +
-	"\x18ListRetriableJobsRequest\"\xba\x04\n" +
+	"\x18ListRetriableJobsRequest\"\xb7\x05\n" +
 	"\x10UpdateJobRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12.\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x129\n" +
@@ -17482,7 +18755,11 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x10clear_depends_on\x18\x06 \x01(\bR\x0eclearDependsOn\x12D\n" +
 	"\aoutputs\x18\a \x03(\v2*.cdrom.db.v1.UpdateJobRequest.OutputsEntryR\aoutputs\x12)\n" +
 	"\x10approval_message\x18\b \x01(\tR\x0fapprovalMessage\x12[\n" +
-	"\x17dependency_observations\x18\t \x03(\v2\".cdrom.db.v1.DependencyObservationR\x16dependencyObservations\x1a:\n" +
+	"\x17dependency_observations\x18\t \x03(\v2\".cdrom.db.v1.DependencyObservationR\x16dependencyObservations\x12-\n" +
+	"\x12approval_approvers\x18\n" +
+	" \x03(\tR\x11approvalApprovers\x12'\n" +
+	"\x0fapproval_quorum\x18\v \x01(\x05R\x0eapprovalQuorum\x12#\n" +
+	"\rapproval_step\x18\f \x01(\tR\fapprovalStep\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"]\n" +
@@ -17589,14 +18866,16 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\tstep_name\x18\x02 \x01(\tR\bstepName\"V\n" +
 	"\x18CheckStepBarrierResponse\x12\x1c\n" +
 	"\tsatisfied\x18\x01 \x01(\bR\tsatisfied\x12\x1c\n" +
-	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\xb4\x01\n" +
+	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"\xe2\x01\n" +
 	"\x16ResolveApprovalRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1a\n" +
 	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x14\n" +
 	"\x05actor\x18\x03 \x01(\tR\x05actor\x129\n" +
 	"\n" +
 	"decided_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tdecidedAt\x12\x16\n" +
-	"\x06reason\x18\x05 \x01(\tR\x06reason\"5\n" +
+	"\x06reason\x18\x05 \x01(\tR\x06reason\x12\x12\n" +
+	"\x04step\x18\x06 \x01(\tR\x04step\x12\x18\n" +
+	"\aattempt\x18\a \x01(\x05R\aattempt\"5\n" +
 	"\x17ResolveApprovalResponse\x12\x1a\n" +
 	"\bresolved\x18\x01 \x01(\bR\bresolved\"\xc5\x01\n" +
 	"\x05Event\x12\x0e\n" +
@@ -18027,7 +19306,88 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\bbindings\x18\x01 \x03(\v2\x18.cdrom.db.v1.RoleBindingR\bbindings\"*\n" +
 	"\x18DeleteRoleBindingRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"\x1a\n" +
-	"\x18PublishRoleChangeRequest\"\xc6\x03\n" +
+	"\x18PublishRoleChangeRequest\"\xa5\x02\n" +
+	"\rApprovalGroup\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12\x18\n" +
+	"\amembers\x18\x04 \x03(\tR\amembers\x12\x1d\n" +
+	"\n" +
+	"claim_name\x18\x05 \x01(\tR\tclaimName\x12\x1f\n" +
+	"\vclaim_value\x18\x06 \x01(\tR\n" +
+	"claimValue\x129\n" +
+	"\n" +
+	"created_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"updated_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\xac\x01\n" +
+	"\x1aCreateApprovalGroupRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x18\n" +
+	"\amembers\x18\x03 \x03(\tR\amembers\x12\x1d\n" +
+	"\n" +
+	"claim_name\x18\x04 \x01(\tR\tclaimName\x12\x1f\n" +
+	"\vclaim_value\x18\x05 \x01(\tR\n" +
+	"claimValue\"-\n" +
+	"\x17GetApprovalGroupRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"\x1b\n" +
+	"\x19ListApprovalGroupsRequest\"P\n" +
+	"\x1aListApprovalGroupsResponse\x122\n" +
+	"\x06groups\x18\x01 \x03(\v2\x1a.cdrom.db.v1.ApprovalGroupR\x06groups\"\xd5\x01\n" +
+	"\x1aUpdateApprovalGroupRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1d\n" +
+	"\n" +
+	"claim_name\x18\x03 \x01(\tR\tclaimName\x12\x1f\n" +
+	"\vclaim_value\x18\x04 \x01(\tR\n" +
+	"claimValue\x12\x18\n" +
+	"\amembers\x18\x05 \x03(\tR\amembers\x12'\n" +
+	"\x0fmembers_present\x18\x06 \x01(\bR\x0emembersPresent\"0\n" +
+	"\x1aDeleteApprovalGroupRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"K\n" +
+	"\x1dAddApprovalGroupMemberRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06member\x18\x02 \x01(\tR\x06member\"N\n" +
+	" RemoveApprovalGroupMemberRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06member\x18\x02 \x01(\tR\x06member\":\n" +
+	"$EffectiveApprovalGroupMembersRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"A\n" +
+	"%EffectiveApprovalGroupMembersResponse\x12\x18\n" +
+	"\amembers\x18\x01 \x03(\tR\amembers\"\x89\x01\n" +
+	"\x1aRecordObservedClaimRequest\x12+\n" +
+	"\x11principal_subject\x18\x01 \x01(\tR\x10principalSubject\x12\x1d\n" +
+	"\n" +
+	"claim_name\x18\x02 \x01(\tR\tclaimName\x12\x1f\n" +
+	"\vclaim_value\x18\x03 \x01(\tR\n" +
+	"claimValue\"f\n" +
+	"\x18ObservedClaimsForRequest\x12+\n" +
+	"\x11principal_subject\x18\x01 \x01(\tR\x10principalSubject\x12\x1d\n" +
+	"\n" +
+	"claim_name\x18\x02 \x01(\tR\tclaimName\"3\n" +
+	"\x19ObservedClaimsForResponse\x12\x16\n" +
+	"\x06values\x18\x01 \x03(\tR\x06values\"\x90\x01\n" +
+	"\x17CastApprovalVoteRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x12\n" +
+	"\x04step\x18\x02 \x01(\tR\x04step\x12\x18\n" +
+	"\aattempt\x18\x03 \x01(\x05R\aattempt\x12\x14\n" +
+	"\x05actor\x18\x04 \x01(\tR\x05actor\x12\x1a\n" +
+	"\bdecision\x18\x05 \x01(\tR\bdecision\"\xb1\x01\n" +
+	"\fApprovalVote\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x12\n" +
+	"\x04step\x18\x02 \x01(\tR\x04step\x12\x18\n" +
+	"\aattempt\x18\x03 \x01(\x05R\aattempt\x12\x14\n" +
+	"\x05actor\x18\x04 \x01(\tR\x05actor\x12\x1a\n" +
+	"\bdecision\x18\x05 \x01(\tR\bdecision\x12*\n" +
+	"\x02at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\"g\n" +
+	"\x18CastApprovalVoteResponse\x12\x1a\n" +
+	"\brecorded\x18\x01 \x01(\bR\brecorded\x12/\n" +
+	"\x05votes\x18\x02 \x03(\v2\x19.cdrom.db.v1.ApprovalVoteR\x05votes\"_\n" +
+	"\x18ListApprovalVotesRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x12\n" +
+	"\x04step\x18\x02 \x01(\tR\x04step\x12\x18\n" +
+	"\aattempt\x18\x03 \x01(\x05R\aattempt\"L\n" +
+	"\x19ListApprovalVotesResponse\x12/\n" +
+	"\x05votes\x18\x01 \x03(\v2\x19.cdrom.db.v1.ApprovalVoteR\x05votes\"\xc6\x03\n" +
 	"\n" +
 	"AuditEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x14\n" +
@@ -18383,7 +19743,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x15STEP_STATUS_SUCCEEDED\x10\x01\x12\x16\n" +
 	"\x12STEP_STATUS_FAILED\x10\x02\x12\x17\n" +
 	"\x13STEP_STATUS_SKIPPED\x10\x03\x12\x19\n" +
-	"\x15STEP_STATUS_TIMED_OUT\x10\x042\xc6[\n" +
+	"\x15STEP_STATUS_TIMED_OUT\x10\x042\xe7d\n" +
 	"\bDatabase\x12K\n" +
 	"\x0eCreatePipeline\x12\".cdrom.db.v1.CreatePipelineRequest\x1a\x15.cdrom.db.v1.Pipeline\x12E\n" +
 	"\vGetPipeline\x12\x1f.cdrom.db.v1.GetPipelineRequest\x1a\x15.cdrom.db.v1.Pipeline\x12V\n" +
@@ -18481,7 +19841,19 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x0eAddRoleBinding\x12\".cdrom.db.v1.AddRoleBindingRequest\x1a\x18.cdrom.db.v1.RoleBinding\x12_\n" +
 	"\x10ListRoleBindings\x12$.cdrom.db.v1.ListRoleBindingsRequest\x1a%.cdrom.db.v1.ListRoleBindingsResponse\x12R\n" +
 	"\x11DeleteRoleBinding\x12%.cdrom.db.v1.DeleteRoleBindingRequest\x1a\x16.google.protobuf.Empty\x12]\n" +
-	"\x11PublishRoleChange\x12%.cdrom.db.v1.PublishRoleChangeRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12Q\n" +
+	"\x11PublishRoleChange\x12%.cdrom.db.v1.PublishRoleChangeRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12Z\n" +
+	"\x13CreateApprovalGroup\x12'.cdrom.db.v1.CreateApprovalGroupRequest\x1a\x1a.cdrom.db.v1.ApprovalGroup\x12T\n" +
+	"\x10GetApprovalGroup\x12$.cdrom.db.v1.GetApprovalGroupRequest\x1a\x1a.cdrom.db.v1.ApprovalGroup\x12e\n" +
+	"\x12ListApprovalGroups\x12&.cdrom.db.v1.ListApprovalGroupsRequest\x1a'.cdrom.db.v1.ListApprovalGroupsResponse\x12Z\n" +
+	"\x13UpdateApprovalGroup\x12'.cdrom.db.v1.UpdateApprovalGroupRequest\x1a\x1a.cdrom.db.v1.ApprovalGroup\x12V\n" +
+	"\x13DeleteApprovalGroup\x12'.cdrom.db.v1.DeleteApprovalGroupRequest\x1a\x16.google.protobuf.Empty\x12`\n" +
+	"\x16AddApprovalGroupMember\x12*.cdrom.db.v1.AddApprovalGroupMemberRequest\x1a\x1a.cdrom.db.v1.ApprovalGroup\x12f\n" +
+	"\x19RemoveApprovalGroupMember\x12-.cdrom.db.v1.RemoveApprovalGroupMemberRequest\x1a\x1a.cdrom.db.v1.ApprovalGroup\x12\x86\x01\n" +
+	"\x1dEffectiveApprovalGroupMembers\x121.cdrom.db.v1.EffectiveApprovalGroupMembersRequest\x1a2.cdrom.db.v1.EffectiveApprovalGroupMembersResponse\x12V\n" +
+	"\x13RecordObservedClaim\x12'.cdrom.db.v1.RecordObservedClaimRequest\x1a\x16.google.protobuf.Empty\x12b\n" +
+	"\x11ObservedClaimsFor\x12%.cdrom.db.v1.ObservedClaimsForRequest\x1a&.cdrom.db.v1.ObservedClaimsForResponse\x12_\n" +
+	"\x10CastApprovalVote\x12$.cdrom.db.v1.CastApprovalVoteRequest\x1a%.cdrom.db.v1.CastApprovalVoteResponse\x12b\n" +
+	"\x11ListApprovalVotes\x12%.cdrom.db.v1.ListApprovalVotesRequest\x1a&.cdrom.db.v1.ListApprovalVotesResponse\x12Q\n" +
 	"\x10AppendAuditEvent\x12$.cdrom.db.v1.AppendAuditEventRequest\x1a\x17.cdrom.db.v1.AuditEvent\x12\\\n" +
 	"\x0fListAuditEvents\x12#.cdrom.db.v1.ListAuditEventsRequest\x1a$.cdrom.db.v1.ListAuditEventsResponse\x12_\n" +
 	"\x10PruneAuditEvents\x12$.cdrom.db.v1.PruneAuditEventsRequest\x1a%.cdrom.db.v1.PruneAuditEventsResponse\x12\\\n" +
@@ -18543,7 +19915,7 @@ func file_cdrom_db_v1_db_proto_rawDescGZIP() []byte {
 }
 
 var file_cdrom_db_v1_db_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_cdrom_db_v1_db_proto_msgTypes = make([]protoimpl.MessageInfo, 262)
+var file_cdrom_db_v1_db_proto_msgTypes = make([]protoimpl.MessageInfo, 281)
 var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(VariableShape)(0),                            // 0: cdrom.db.v1.VariableShape
 	(TriggerType)(0),                              // 1: cdrom.db.v1.TriggerType
@@ -18721,627 +20093,676 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*ListRoleBindingsResponse)(nil),              // 173: cdrom.db.v1.ListRoleBindingsResponse
 	(*DeleteRoleBindingRequest)(nil),              // 174: cdrom.db.v1.DeleteRoleBindingRequest
 	(*PublishRoleChangeRequest)(nil),              // 175: cdrom.db.v1.PublishRoleChangeRequest
-	(*AuditEvent)(nil),                            // 176: cdrom.db.v1.AuditEvent
-	(*AppendAuditEventRequest)(nil),               // 177: cdrom.db.v1.AppendAuditEventRequest
-	(*ListAuditEventsRequest)(nil),                // 178: cdrom.db.v1.ListAuditEventsRequest
-	(*ListAuditEventsResponse)(nil),               // 179: cdrom.db.v1.ListAuditEventsResponse
-	(*PruneAuditEventsRequest)(nil),               // 180: cdrom.db.v1.PruneAuditEventsRequest
-	(*PruneAuditEventsResponse)(nil),              // 181: cdrom.db.v1.PruneAuditEventsResponse
-	(*AcquireJobSlotsRequest)(nil),                // 182: cdrom.db.v1.AcquireJobSlotsRequest
-	(*AcquireJobSlotsResponse)(nil),               // 183: cdrom.db.v1.AcquireJobSlotsResponse
-	(*ReleaseJobSlotsRequest)(nil),                // 184: cdrom.db.v1.ReleaseJobSlotsRequest
-	(*ReleaseJobSlotsResponse)(nil),               // 185: cdrom.db.v1.ReleaseJobSlotsResponse
-	(*GetQueueStatusRequest)(nil),                 // 186: cdrom.db.v1.GetQueueStatusRequest
-	(*ReconcileConcurrencyRequest)(nil),           // 187: cdrom.db.v1.ReconcileConcurrencyRequest
-	(*ReconcileConcurrencyResponse)(nil),          // 188: cdrom.db.v1.ReconcileConcurrencyResponse
-	(*QueuePendingJob)(nil),                       // 189: cdrom.db.v1.QueuePendingJob
-	(*QueueGroupLoad)(nil),                        // 190: cdrom.db.v1.QueueGroupLoad
-	(*QueueKeyLoad)(nil),                          // 191: cdrom.db.v1.QueueKeyLoad
-	(*QueueStatus)(nil),                           // 192: cdrom.db.v1.QueueStatus
-	(*ConcurrencyLimit)(nil),                      // 193: cdrom.db.v1.ConcurrencyLimit
-	(*ListConcurrencyLimitsRequest)(nil),          // 194: cdrom.db.v1.ListConcurrencyLimitsRequest
-	(*ListConcurrencyLimitsResponse)(nil),         // 195: cdrom.db.v1.ListConcurrencyLimitsResponse
-	(*CreateConcurrencyLimitRequest)(nil),         // 196: cdrom.db.v1.CreateConcurrencyLimitRequest
-	(*UpdateConcurrencyLimitRequest)(nil),         // 197: cdrom.db.v1.UpdateConcurrencyLimitRequest
-	(*DeleteConcurrencyLimitRequest)(nil),         // 198: cdrom.db.v1.DeleteConcurrencyLimitRequest
-	(*SSHKnownHost)(nil),                          // 199: cdrom.db.v1.SSHKnownHost
-	(*ListSSHKnownHostsRequest)(nil),              // 200: cdrom.db.v1.ListSSHKnownHostsRequest
-	(*ListSSHKnownHostsResponse)(nil),             // 201: cdrom.db.v1.ListSSHKnownHostsResponse
-	(*CreateSSHKnownHostRequest)(nil),             // 202: cdrom.db.v1.CreateSSHKnownHostRequest
-	(*DeleteSSHKnownHostRequest)(nil),             // 203: cdrom.db.v1.DeleteSSHKnownHostRequest
-	(*HTTPHeader)(nil),                            // 204: cdrom.db.v1.HTTPHeader
-	(*SourceCredential)(nil),                      // 205: cdrom.db.v1.SourceCredential
-	(*ListSourceCredentialsRequest)(nil),          // 206: cdrom.db.v1.ListSourceCredentialsRequest
-	(*ListSourceCredentialsResponse)(nil),         // 207: cdrom.db.v1.ListSourceCredentialsResponse
-	(*CreateSourceCredentialRequest)(nil),         // 208: cdrom.db.v1.CreateSourceCredentialRequest
-	(*GetSourceCredentialRequest)(nil),            // 209: cdrom.db.v1.GetSourceCredentialRequest
-	(*UpdateSourceCredentialRequest)(nil),         // 210: cdrom.db.v1.UpdateSourceCredentialRequest
-	(*DeleteSourceCredentialRequest)(nil),         // 211: cdrom.db.v1.DeleteSourceCredentialRequest
-	(*PipelineSource)(nil),                        // 212: cdrom.db.v1.PipelineSource
-	(*PipelineSourceState)(nil),                   // 213: cdrom.db.v1.PipelineSourceState
-	(*AttachPipelineSourceRequest)(nil),           // 214: cdrom.db.v1.AttachPipelineSourceRequest
-	(*GetPipelineSourceRequest)(nil),              // 215: cdrom.db.v1.GetPipelineSourceRequest
-	(*ListPipelineSourcesRequest)(nil),            // 216: cdrom.db.v1.ListPipelineSourcesRequest
-	(*ListPipelineSourcesResponse)(nil),           // 217: cdrom.db.v1.ListPipelineSourcesResponse
-	(*CountSourcesByCredentialRequest)(nil),       // 218: cdrom.db.v1.CountSourcesByCredentialRequest
-	(*CountSourcesByCredentialResponse)(nil),      // 219: cdrom.db.v1.CountSourcesByCredentialResponse
-	(*GetPipelineSourceStateRequest)(nil),         // 220: cdrom.db.v1.GetPipelineSourceStateRequest
-	(*DetachPipelineSourceRequest)(nil),           // 221: cdrom.db.v1.DetachPipelineSourceRequest
-	(*SetPipelineSourceStateRequest)(nil),         // 222: cdrom.db.v1.SetPipelineSourceStateRequest
-	(*StorageObject)(nil),                         // 223: cdrom.db.v1.StorageObject
-	(*AllocateStorageObjectRequest)(nil),          // 224: cdrom.db.v1.AllocateStorageObjectRequest
-	(*ConfirmStorageObjectRequest)(nil),           // 225: cdrom.db.v1.ConfirmStorageObjectRequest
-	(*GetStorageObjectRequest)(nil),               // 226: cdrom.db.v1.GetStorageObjectRequest
-	(*ListStorageObjectsRequest)(nil),             // 227: cdrom.db.v1.ListStorageObjectsRequest
-	(*ListStorageObjectsResponse)(nil),            // 228: cdrom.db.v1.ListStorageObjectsResponse
-	(*TouchStorageObjectRequest)(nil),             // 229: cdrom.db.v1.TouchStorageObjectRequest
-	(*SyncLogSizeRequest)(nil),                    // 230: cdrom.db.v1.SyncLogSizeRequest
-	(*DeleteStorageObjectRequest)(nil),            // 231: cdrom.db.v1.DeleteStorageObjectRequest
-	(*ResolvePackageReferenceRequest)(nil),        // 232: cdrom.db.v1.ResolvePackageReferenceRequest
-	nil,                                           // 233: cdrom.db.v1.Pipeline.LabelsEntry
-	nil,                                           // 234: cdrom.db.v1.Pipeline.AnnotationsEntry
-	nil,                                           // 235: cdrom.db.v1.Trigger.ParamsEntry
-	nil,                                           // 236: cdrom.db.v1.Trigger.OidcClaimsEntry
-	nil,                                           // 237: cdrom.db.v1.CreatePipelineRequest.LabelsEntry
-	nil,                                           // 238: cdrom.db.v1.CreatePipelineRequest.AnnotationsEntry
-	nil,                                           // 239: cdrom.db.v1.ListPipelinesRequest.LabelsEntry
-	nil,                                           // 240: cdrom.db.v1.UpdatePipelineRequest.LabelsEntry
-	nil,                                           // 241: cdrom.db.v1.UpdatePipelineRequest.AnnotationsEntry
-	nil,                                           // 242: cdrom.db.v1.PipelineRun.ParamsEntry
-	nil,                                           // 243: cdrom.db.v1.PipelineRun.ArtifactsEntry
-	nil,                                           // 244: cdrom.db.v1.CreateRunRequest.ParamsEntry
-	nil,                                           // 245: cdrom.db.v1.TriggerRunRequest.ParamsEntry
-	nil,                                           // 246: cdrom.db.v1.ListRunsRequest.LabelsEntry
-	nil,                                           // 247: cdrom.db.v1.PipelineVersion.LabelsEntry
-	nil,                                           // 248: cdrom.db.v1.StepResult.OutputsEntry
-	nil,                                           // 249: cdrom.db.v1.UpstreamJob.OutputsEntry
-	nil,                                           // 250: cdrom.db.v1.DependencyObservation.OutputsEntry
-	nil,                                           // 251: cdrom.db.v1.JobStep.EnvEntry
-	nil,                                           // 252: cdrom.db.v1.JobStep.ParamsEntry
-	nil,                                           // 253: cdrom.db.v1.Job.OutputsEntry
-	nil,                                           // 254: cdrom.db.v1.Job.RunParamsEntry
-	nil,                                           // 255: cdrom.db.v1.Job.LabelsEntry
-	nil,                                           // 256: cdrom.db.v1.Job.ArtifactsEntry
-	nil,                                           // 257: cdrom.db.v1.JobDefinition.LabelsEntry
-	nil,                                           // 258: cdrom.db.v1.UpdateJobRequest.OutputsEntry
-	nil,                                           // 259: cdrom.db.v1.JobExecution.OutputsEntry
-	nil,                                           // 260: cdrom.db.v1.JobExecution.LabelsEntry
-	nil,                                           // 261: cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
-	nil,                                           // 262: cdrom.db.v1.Worker.LabelsEntry
-	nil,                                           // 263: cdrom.db.v1.RegisterWorkerRequest.LabelsEntry
-	nil,                                           // 264: cdrom.db.v1.Environment.LabelsEntry
-	nil,                                           // 265: cdrom.db.v1.CreateEnvironmentRequest.LabelsEntry
-	nil,                                           // 266: cdrom.db.v1.UpdateEnvironmentRequest.LabelsEntry
-	nil,                                           // 267: cdrom.db.v1.WorkerGroup.LabelsEntry
-	nil,                                           // 268: cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntry
-	nil,                                           // 269: cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntry
-	(*timestamppb.Timestamp)(nil),                 // 270: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                       // 271: google.protobuf.Struct
-	(*durationpb.Duration)(nil),                   // 272: google.protobuf.Duration
-	(*emptypb.Empty)(nil),                         // 273: google.protobuf.Empty
+	(*ApprovalGroup)(nil),                         // 176: cdrom.db.v1.ApprovalGroup
+	(*CreateApprovalGroupRequest)(nil),            // 177: cdrom.db.v1.CreateApprovalGroupRequest
+	(*GetApprovalGroupRequest)(nil),               // 178: cdrom.db.v1.GetApprovalGroupRequest
+	(*ListApprovalGroupsRequest)(nil),             // 179: cdrom.db.v1.ListApprovalGroupsRequest
+	(*ListApprovalGroupsResponse)(nil),            // 180: cdrom.db.v1.ListApprovalGroupsResponse
+	(*UpdateApprovalGroupRequest)(nil),            // 181: cdrom.db.v1.UpdateApprovalGroupRequest
+	(*DeleteApprovalGroupRequest)(nil),            // 182: cdrom.db.v1.DeleteApprovalGroupRequest
+	(*AddApprovalGroupMemberRequest)(nil),         // 183: cdrom.db.v1.AddApprovalGroupMemberRequest
+	(*RemoveApprovalGroupMemberRequest)(nil),      // 184: cdrom.db.v1.RemoveApprovalGroupMemberRequest
+	(*EffectiveApprovalGroupMembersRequest)(nil),  // 185: cdrom.db.v1.EffectiveApprovalGroupMembersRequest
+	(*EffectiveApprovalGroupMembersResponse)(nil), // 186: cdrom.db.v1.EffectiveApprovalGroupMembersResponse
+	(*RecordObservedClaimRequest)(nil),            // 187: cdrom.db.v1.RecordObservedClaimRequest
+	(*ObservedClaimsForRequest)(nil),              // 188: cdrom.db.v1.ObservedClaimsForRequest
+	(*ObservedClaimsForResponse)(nil),             // 189: cdrom.db.v1.ObservedClaimsForResponse
+	(*CastApprovalVoteRequest)(nil),               // 190: cdrom.db.v1.CastApprovalVoteRequest
+	(*ApprovalVote)(nil),                          // 191: cdrom.db.v1.ApprovalVote
+	(*CastApprovalVoteResponse)(nil),              // 192: cdrom.db.v1.CastApprovalVoteResponse
+	(*ListApprovalVotesRequest)(nil),              // 193: cdrom.db.v1.ListApprovalVotesRequest
+	(*ListApprovalVotesResponse)(nil),             // 194: cdrom.db.v1.ListApprovalVotesResponse
+	(*AuditEvent)(nil),                            // 195: cdrom.db.v1.AuditEvent
+	(*AppendAuditEventRequest)(nil),               // 196: cdrom.db.v1.AppendAuditEventRequest
+	(*ListAuditEventsRequest)(nil),                // 197: cdrom.db.v1.ListAuditEventsRequest
+	(*ListAuditEventsResponse)(nil),               // 198: cdrom.db.v1.ListAuditEventsResponse
+	(*PruneAuditEventsRequest)(nil),               // 199: cdrom.db.v1.PruneAuditEventsRequest
+	(*PruneAuditEventsResponse)(nil),              // 200: cdrom.db.v1.PruneAuditEventsResponse
+	(*AcquireJobSlotsRequest)(nil),                // 201: cdrom.db.v1.AcquireJobSlotsRequest
+	(*AcquireJobSlotsResponse)(nil),               // 202: cdrom.db.v1.AcquireJobSlotsResponse
+	(*ReleaseJobSlotsRequest)(nil),                // 203: cdrom.db.v1.ReleaseJobSlotsRequest
+	(*ReleaseJobSlotsResponse)(nil),               // 204: cdrom.db.v1.ReleaseJobSlotsResponse
+	(*GetQueueStatusRequest)(nil),                 // 205: cdrom.db.v1.GetQueueStatusRequest
+	(*ReconcileConcurrencyRequest)(nil),           // 206: cdrom.db.v1.ReconcileConcurrencyRequest
+	(*ReconcileConcurrencyResponse)(nil),          // 207: cdrom.db.v1.ReconcileConcurrencyResponse
+	(*QueuePendingJob)(nil),                       // 208: cdrom.db.v1.QueuePendingJob
+	(*QueueGroupLoad)(nil),                        // 209: cdrom.db.v1.QueueGroupLoad
+	(*QueueKeyLoad)(nil),                          // 210: cdrom.db.v1.QueueKeyLoad
+	(*QueueStatus)(nil),                           // 211: cdrom.db.v1.QueueStatus
+	(*ConcurrencyLimit)(nil),                      // 212: cdrom.db.v1.ConcurrencyLimit
+	(*ListConcurrencyLimitsRequest)(nil),          // 213: cdrom.db.v1.ListConcurrencyLimitsRequest
+	(*ListConcurrencyLimitsResponse)(nil),         // 214: cdrom.db.v1.ListConcurrencyLimitsResponse
+	(*CreateConcurrencyLimitRequest)(nil),         // 215: cdrom.db.v1.CreateConcurrencyLimitRequest
+	(*UpdateConcurrencyLimitRequest)(nil),         // 216: cdrom.db.v1.UpdateConcurrencyLimitRequest
+	(*DeleteConcurrencyLimitRequest)(nil),         // 217: cdrom.db.v1.DeleteConcurrencyLimitRequest
+	(*SSHKnownHost)(nil),                          // 218: cdrom.db.v1.SSHKnownHost
+	(*ListSSHKnownHostsRequest)(nil),              // 219: cdrom.db.v1.ListSSHKnownHostsRequest
+	(*ListSSHKnownHostsResponse)(nil),             // 220: cdrom.db.v1.ListSSHKnownHostsResponse
+	(*CreateSSHKnownHostRequest)(nil),             // 221: cdrom.db.v1.CreateSSHKnownHostRequest
+	(*DeleteSSHKnownHostRequest)(nil),             // 222: cdrom.db.v1.DeleteSSHKnownHostRequest
+	(*HTTPHeader)(nil),                            // 223: cdrom.db.v1.HTTPHeader
+	(*SourceCredential)(nil),                      // 224: cdrom.db.v1.SourceCredential
+	(*ListSourceCredentialsRequest)(nil),          // 225: cdrom.db.v1.ListSourceCredentialsRequest
+	(*ListSourceCredentialsResponse)(nil),         // 226: cdrom.db.v1.ListSourceCredentialsResponse
+	(*CreateSourceCredentialRequest)(nil),         // 227: cdrom.db.v1.CreateSourceCredentialRequest
+	(*GetSourceCredentialRequest)(nil),            // 228: cdrom.db.v1.GetSourceCredentialRequest
+	(*UpdateSourceCredentialRequest)(nil),         // 229: cdrom.db.v1.UpdateSourceCredentialRequest
+	(*DeleteSourceCredentialRequest)(nil),         // 230: cdrom.db.v1.DeleteSourceCredentialRequest
+	(*PipelineSource)(nil),                        // 231: cdrom.db.v1.PipelineSource
+	(*PipelineSourceState)(nil),                   // 232: cdrom.db.v1.PipelineSourceState
+	(*AttachPipelineSourceRequest)(nil),           // 233: cdrom.db.v1.AttachPipelineSourceRequest
+	(*GetPipelineSourceRequest)(nil),              // 234: cdrom.db.v1.GetPipelineSourceRequest
+	(*ListPipelineSourcesRequest)(nil),            // 235: cdrom.db.v1.ListPipelineSourcesRequest
+	(*ListPipelineSourcesResponse)(nil),           // 236: cdrom.db.v1.ListPipelineSourcesResponse
+	(*CountSourcesByCredentialRequest)(nil),       // 237: cdrom.db.v1.CountSourcesByCredentialRequest
+	(*CountSourcesByCredentialResponse)(nil),      // 238: cdrom.db.v1.CountSourcesByCredentialResponse
+	(*GetPipelineSourceStateRequest)(nil),         // 239: cdrom.db.v1.GetPipelineSourceStateRequest
+	(*DetachPipelineSourceRequest)(nil),           // 240: cdrom.db.v1.DetachPipelineSourceRequest
+	(*SetPipelineSourceStateRequest)(nil),         // 241: cdrom.db.v1.SetPipelineSourceStateRequest
+	(*StorageObject)(nil),                         // 242: cdrom.db.v1.StorageObject
+	(*AllocateStorageObjectRequest)(nil),          // 243: cdrom.db.v1.AllocateStorageObjectRequest
+	(*ConfirmStorageObjectRequest)(nil),           // 244: cdrom.db.v1.ConfirmStorageObjectRequest
+	(*GetStorageObjectRequest)(nil),               // 245: cdrom.db.v1.GetStorageObjectRequest
+	(*ListStorageObjectsRequest)(nil),             // 246: cdrom.db.v1.ListStorageObjectsRequest
+	(*ListStorageObjectsResponse)(nil),            // 247: cdrom.db.v1.ListStorageObjectsResponse
+	(*TouchStorageObjectRequest)(nil),             // 248: cdrom.db.v1.TouchStorageObjectRequest
+	(*SyncLogSizeRequest)(nil),                    // 249: cdrom.db.v1.SyncLogSizeRequest
+	(*DeleteStorageObjectRequest)(nil),            // 250: cdrom.db.v1.DeleteStorageObjectRequest
+	(*ResolvePackageReferenceRequest)(nil),        // 251: cdrom.db.v1.ResolvePackageReferenceRequest
+	nil,                                           // 252: cdrom.db.v1.Pipeline.LabelsEntry
+	nil,                                           // 253: cdrom.db.v1.Pipeline.AnnotationsEntry
+	nil,                                           // 254: cdrom.db.v1.Trigger.ParamsEntry
+	nil,                                           // 255: cdrom.db.v1.Trigger.OidcClaimsEntry
+	nil,                                           // 256: cdrom.db.v1.CreatePipelineRequest.LabelsEntry
+	nil,                                           // 257: cdrom.db.v1.CreatePipelineRequest.AnnotationsEntry
+	nil,                                           // 258: cdrom.db.v1.ListPipelinesRequest.LabelsEntry
+	nil,                                           // 259: cdrom.db.v1.UpdatePipelineRequest.LabelsEntry
+	nil,                                           // 260: cdrom.db.v1.UpdatePipelineRequest.AnnotationsEntry
+	nil,                                           // 261: cdrom.db.v1.PipelineRun.ParamsEntry
+	nil,                                           // 262: cdrom.db.v1.PipelineRun.ArtifactsEntry
+	nil,                                           // 263: cdrom.db.v1.CreateRunRequest.ParamsEntry
+	nil,                                           // 264: cdrom.db.v1.TriggerRunRequest.ParamsEntry
+	nil,                                           // 265: cdrom.db.v1.ListRunsRequest.LabelsEntry
+	nil,                                           // 266: cdrom.db.v1.PipelineVersion.LabelsEntry
+	nil,                                           // 267: cdrom.db.v1.StepResult.OutputsEntry
+	nil,                                           // 268: cdrom.db.v1.UpstreamJob.OutputsEntry
+	nil,                                           // 269: cdrom.db.v1.DependencyObservation.OutputsEntry
+	nil,                                           // 270: cdrom.db.v1.JobStep.EnvEntry
+	nil,                                           // 271: cdrom.db.v1.JobStep.ParamsEntry
+	nil,                                           // 272: cdrom.db.v1.Job.OutputsEntry
+	nil,                                           // 273: cdrom.db.v1.Job.RunParamsEntry
+	nil,                                           // 274: cdrom.db.v1.Job.LabelsEntry
+	nil,                                           // 275: cdrom.db.v1.Job.ArtifactsEntry
+	nil,                                           // 276: cdrom.db.v1.JobDefinition.LabelsEntry
+	nil,                                           // 277: cdrom.db.v1.UpdateJobRequest.OutputsEntry
+	nil,                                           // 278: cdrom.db.v1.JobExecution.OutputsEntry
+	nil,                                           // 279: cdrom.db.v1.JobExecution.LabelsEntry
+	nil,                                           // 280: cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
+	nil,                                           // 281: cdrom.db.v1.Worker.LabelsEntry
+	nil,                                           // 282: cdrom.db.v1.RegisterWorkerRequest.LabelsEntry
+	nil,                                           // 283: cdrom.db.v1.Environment.LabelsEntry
+	nil,                                           // 284: cdrom.db.v1.CreateEnvironmentRequest.LabelsEntry
+	nil,                                           // 285: cdrom.db.v1.UpdateEnvironmentRequest.LabelsEntry
+	nil,                                           // 286: cdrom.db.v1.WorkerGroup.LabelsEntry
+	nil,                                           // 287: cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntry
+	nil,                                           // 288: cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntry
+	(*timestamppb.Timestamp)(nil),                 // 289: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                       // 290: google.protobuf.Struct
+	(*durationpb.Duration)(nil),                   // 291: google.protobuf.Duration
+	(*emptypb.Empty)(nil),                         // 292: google.protobuf.Empty
 }
 var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	0,   // 0: cdrom.db.v1.Variable.shape:type_name -> cdrom.db.v1.VariableShape
 	11,  // 1: cdrom.db.v1.VariableSet.variables:type_name -> cdrom.db.v1.Variable
 	10,  // 2: cdrom.db.v1.VariableSet.vault_imports:type_name -> cdrom.db.v1.VaultImport
-	270, // 3: cdrom.db.v1.Pipeline.created_at:type_name -> google.protobuf.Timestamp
-	270, // 4: cdrom.db.v1.Pipeline.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 3: cdrom.db.v1.Pipeline.created_at:type_name -> google.protobuf.Timestamp
+	289, // 4: cdrom.db.v1.Pipeline.updated_at:type_name -> google.protobuf.Timestamp
 	6,   // 5: cdrom.db.v1.Pipeline.failure_mode:type_name -> cdrom.db.v1.FailureMode
 	49,  // 6: cdrom.db.v1.Pipeline.jobs:type_name -> cdrom.db.v1.JobDefinition
 	17,  // 7: cdrom.db.v1.Pipeline.triggers:type_name -> cdrom.db.v1.Trigger
 	8,   // 8: cdrom.db.v1.Pipeline.params:type_name -> cdrom.db.v1.Parameter
 	9,   // 9: cdrom.db.v1.Pipeline.secrets:type_name -> cdrom.db.v1.Secret
-	233, // 10: cdrom.db.v1.Pipeline.labels:type_name -> cdrom.db.v1.Pipeline.LabelsEntry
+	252, // 10: cdrom.db.v1.Pipeline.labels:type_name -> cdrom.db.v1.Pipeline.LabelsEntry
 	12,  // 11: cdrom.db.v1.Pipeline.variable_sets:type_name -> cdrom.db.v1.VariableSet
 	13,  // 12: cdrom.db.v1.Pipeline.secret_sources:type_name -> cdrom.db.v1.SecretSource
 	15,  // 13: cdrom.db.v1.Pipeline.artifacts:type_name -> cdrom.db.v1.PackageArtifact
-	234, // 14: cdrom.db.v1.Pipeline.annotations:type_name -> cdrom.db.v1.Pipeline.AnnotationsEntry
+	253, // 14: cdrom.db.v1.Pipeline.annotations:type_name -> cdrom.db.v1.Pipeline.AnnotationsEntry
 	1,   // 15: cdrom.db.v1.Trigger.type:type_name -> cdrom.db.v1.TriggerType
 	2,   // 16: cdrom.db.v1.Trigger.event_status:type_name -> cdrom.db.v1.RunStatus
-	235, // 17: cdrom.db.v1.Trigger.params:type_name -> cdrom.db.v1.Trigger.ParamsEntry
-	236, // 18: cdrom.db.v1.Trigger.oidc_claims:type_name -> cdrom.db.v1.Trigger.OidcClaimsEntry
+	254, // 17: cdrom.db.v1.Trigger.params:type_name -> cdrom.db.v1.Trigger.ParamsEntry
+	255, // 18: cdrom.db.v1.Trigger.oidc_claims:type_name -> cdrom.db.v1.Trigger.OidcClaimsEntry
 	6,   // 19: cdrom.db.v1.CreatePipelineRequest.failure_mode:type_name -> cdrom.db.v1.FailureMode
 	49,  // 20: cdrom.db.v1.CreatePipelineRequest.jobs:type_name -> cdrom.db.v1.JobDefinition
 	17,  // 21: cdrom.db.v1.CreatePipelineRequest.triggers:type_name -> cdrom.db.v1.Trigger
 	8,   // 22: cdrom.db.v1.CreatePipelineRequest.params:type_name -> cdrom.db.v1.Parameter
 	9,   // 23: cdrom.db.v1.CreatePipelineRequest.secrets:type_name -> cdrom.db.v1.Secret
-	237, // 24: cdrom.db.v1.CreatePipelineRequest.labels:type_name -> cdrom.db.v1.CreatePipelineRequest.LabelsEntry
+	256, // 24: cdrom.db.v1.CreatePipelineRequest.labels:type_name -> cdrom.db.v1.CreatePipelineRequest.LabelsEntry
 	12,  // 25: cdrom.db.v1.CreatePipelineRequest.variable_sets:type_name -> cdrom.db.v1.VariableSet
 	13,  // 26: cdrom.db.v1.CreatePipelineRequest.secret_sources:type_name -> cdrom.db.v1.SecretSource
 	15,  // 27: cdrom.db.v1.CreatePipelineRequest.artifacts:type_name -> cdrom.db.v1.PackageArtifact
-	238, // 28: cdrom.db.v1.CreatePipelineRequest.annotations:type_name -> cdrom.db.v1.CreatePipelineRequest.AnnotationsEntry
+	257, // 28: cdrom.db.v1.CreatePipelineRequest.annotations:type_name -> cdrom.db.v1.CreatePipelineRequest.AnnotationsEntry
 	1,   // 29: cdrom.db.v1.ListPipelinesRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
-	239, // 30: cdrom.db.v1.ListPipelinesRequest.labels:type_name -> cdrom.db.v1.ListPipelinesRequest.LabelsEntry
+	258, // 30: cdrom.db.v1.ListPipelinesRequest.labels:type_name -> cdrom.db.v1.ListPipelinesRequest.LabelsEntry
 	16,  // 31: cdrom.db.v1.ListPipelinesResponse.pipelines:type_name -> cdrom.db.v1.Pipeline
 	6,   // 32: cdrom.db.v1.UpdatePipelineRequest.failure_mode:type_name -> cdrom.db.v1.FailureMode
 	49,  // 33: cdrom.db.v1.UpdatePipelineRequest.jobs:type_name -> cdrom.db.v1.JobDefinition
 	17,  // 34: cdrom.db.v1.UpdatePipelineRequest.triggers:type_name -> cdrom.db.v1.Trigger
 	8,   // 35: cdrom.db.v1.UpdatePipelineRequest.params:type_name -> cdrom.db.v1.Parameter
 	9,   // 36: cdrom.db.v1.UpdatePipelineRequest.secrets:type_name -> cdrom.db.v1.Secret
-	240, // 37: cdrom.db.v1.UpdatePipelineRequest.labels:type_name -> cdrom.db.v1.UpdatePipelineRequest.LabelsEntry
+	259, // 37: cdrom.db.v1.UpdatePipelineRequest.labels:type_name -> cdrom.db.v1.UpdatePipelineRequest.LabelsEntry
 	12,  // 38: cdrom.db.v1.UpdatePipelineRequest.variable_sets:type_name -> cdrom.db.v1.VariableSet
 	13,  // 39: cdrom.db.v1.UpdatePipelineRequest.secret_sources:type_name -> cdrom.db.v1.SecretSource
 	15,  // 40: cdrom.db.v1.UpdatePipelineRequest.artifacts:type_name -> cdrom.db.v1.PackageArtifact
-	241, // 41: cdrom.db.v1.UpdatePipelineRequest.annotations:type_name -> cdrom.db.v1.UpdatePipelineRequest.AnnotationsEntry
+	260, // 41: cdrom.db.v1.UpdatePipelineRequest.annotations:type_name -> cdrom.db.v1.UpdatePipelineRequest.AnnotationsEntry
 	2,   // 42: cdrom.db.v1.PipelineRun.status:type_name -> cdrom.db.v1.RunStatus
-	242, // 43: cdrom.db.v1.PipelineRun.params:type_name -> cdrom.db.v1.PipelineRun.ParamsEntry
-	270, // 44: cdrom.db.v1.PipelineRun.started_at:type_name -> google.protobuf.Timestamp
-	270, // 45: cdrom.db.v1.PipelineRun.finished_at:type_name -> google.protobuf.Timestamp
-	270, // 46: cdrom.db.v1.PipelineRun.created_at:type_name -> google.protobuf.Timestamp
-	270, // 47: cdrom.db.v1.PipelineRun.updated_at:type_name -> google.protobuf.Timestamp
-	271, // 48: cdrom.db.v1.PipelineRun.upstream_claims:type_name -> google.protobuf.Struct
-	243, // 49: cdrom.db.v1.PipelineRun.artifacts:type_name -> cdrom.db.v1.PipelineRun.ArtifactsEntry
+	261, // 43: cdrom.db.v1.PipelineRun.params:type_name -> cdrom.db.v1.PipelineRun.ParamsEntry
+	289, // 44: cdrom.db.v1.PipelineRun.started_at:type_name -> google.protobuf.Timestamp
+	289, // 45: cdrom.db.v1.PipelineRun.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 46: cdrom.db.v1.PipelineRun.created_at:type_name -> google.protobuf.Timestamp
+	289, // 47: cdrom.db.v1.PipelineRun.updated_at:type_name -> google.protobuf.Timestamp
+	290, // 48: cdrom.db.v1.PipelineRun.upstream_claims:type_name -> google.protobuf.Struct
+	262, // 49: cdrom.db.v1.PipelineRun.artifacts:type_name -> cdrom.db.v1.PipelineRun.ArtifactsEntry
 	24,  // 50: cdrom.db.v1.RestartRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
 	48,  // 51: cdrom.db.v1.RestartRunResponse.jobs:type_name -> cdrom.db.v1.Job
-	244, // 52: cdrom.db.v1.CreateRunRequest.params:type_name -> cdrom.db.v1.CreateRunRequest.ParamsEntry
+	263, // 52: cdrom.db.v1.CreateRunRequest.params:type_name -> cdrom.db.v1.CreateRunRequest.ParamsEntry
 	24,  // 53: cdrom.db.v1.CreateRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
 	48,  // 54: cdrom.db.v1.CreateRunResponse.jobs:type_name -> cdrom.db.v1.Job
 	1,   // 55: cdrom.db.v1.TriggerRunRequest.trigger_type:type_name -> cdrom.db.v1.TriggerType
-	245, // 56: cdrom.db.v1.TriggerRunRequest.params:type_name -> cdrom.db.v1.TriggerRunRequest.ParamsEntry
-	272, // 57: cdrom.db.v1.TriggerRunRequest.dedup_window:type_name -> google.protobuf.Duration
-	271, // 58: cdrom.db.v1.TriggerRunRequest.upstream_claims:type_name -> google.protobuf.Struct
+	264, // 56: cdrom.db.v1.TriggerRunRequest.params:type_name -> cdrom.db.v1.TriggerRunRequest.ParamsEntry
+	291, // 57: cdrom.db.v1.TriggerRunRequest.dedup_window:type_name -> google.protobuf.Duration
+	290, // 58: cdrom.db.v1.TriggerRunRequest.upstream_claims:type_name -> google.protobuf.Struct
 	24,  // 59: cdrom.db.v1.TriggerRunResponse.run:type_name -> cdrom.db.v1.PipelineRun
 	48,  // 60: cdrom.db.v1.TriggerRunResponse.jobs:type_name -> cdrom.db.v1.Job
 	2,   // 61: cdrom.db.v1.ListRunsRequest.status:type_name -> cdrom.db.v1.RunStatus
-	270, // 62: cdrom.db.v1.ListRunsRequest.finished_after:type_name -> google.protobuf.Timestamp
-	246, // 63: cdrom.db.v1.ListRunsRequest.labels:type_name -> cdrom.db.v1.ListRunsRequest.LabelsEntry
+	289, // 62: cdrom.db.v1.ListRunsRequest.finished_after:type_name -> google.protobuf.Timestamp
+	265, // 63: cdrom.db.v1.ListRunsRequest.labels:type_name -> cdrom.db.v1.ListRunsRequest.LabelsEntry
 	24,  // 64: cdrom.db.v1.ListRunsResponse.runs:type_name -> cdrom.db.v1.PipelineRun
 	2,   // 65: cdrom.db.v1.UpdateRunRequest.status:type_name -> cdrom.db.v1.RunStatus
-	270, // 66: cdrom.db.v1.UpdateRunRequest.started_at:type_name -> google.protobuf.Timestamp
-	270, // 67: cdrom.db.v1.UpdateRunRequest.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 66: cdrom.db.v1.UpdateRunRequest.started_at:type_name -> google.protobuf.Timestamp
+	289, // 67: cdrom.db.v1.UpdateRunRequest.finished_at:type_name -> google.protobuf.Timestamp
 	6,   // 68: cdrom.db.v1.PipelineVersion.failure_mode:type_name -> cdrom.db.v1.FailureMode
 	49,  // 69: cdrom.db.v1.PipelineVersion.jobs:type_name -> cdrom.db.v1.JobDefinition
 	17,  // 70: cdrom.db.v1.PipelineVersion.triggers:type_name -> cdrom.db.v1.Trigger
 	8,   // 71: cdrom.db.v1.PipelineVersion.params:type_name -> cdrom.db.v1.Parameter
-	270, // 72: cdrom.db.v1.PipelineVersion.created_at:type_name -> google.protobuf.Timestamp
+	289, // 72: cdrom.db.v1.PipelineVersion.created_at:type_name -> google.protobuf.Timestamp
 	9,   // 73: cdrom.db.v1.PipelineVersion.secrets:type_name -> cdrom.db.v1.Secret
-	247, // 74: cdrom.db.v1.PipelineVersion.labels:type_name -> cdrom.db.v1.PipelineVersion.LabelsEntry
+	266, // 74: cdrom.db.v1.PipelineVersion.labels:type_name -> cdrom.db.v1.PipelineVersion.LabelsEntry
 	12,  // 75: cdrom.db.v1.PipelineVersion.variable_sets:type_name -> cdrom.db.v1.VariableSet
 	13,  // 76: cdrom.db.v1.PipelineVersion.secret_sources:type_name -> cdrom.db.v1.SecretSource
 	15,  // 77: cdrom.db.v1.PipelineVersion.artifacts:type_name -> cdrom.db.v1.PackageArtifact
 	37,  // 78: cdrom.db.v1.ListPipelineVersionsResponse.versions:type_name -> cdrom.db.v1.PipelineVersion
 	7,   // 79: cdrom.db.v1.StepResult.status:type_name -> cdrom.db.v1.StepStatus
-	248, // 80: cdrom.db.v1.StepResult.outputs:type_name -> cdrom.db.v1.StepResult.OutputsEntry
+	267, // 80: cdrom.db.v1.StepResult.outputs:type_name -> cdrom.db.v1.StepResult.OutputsEntry
 	3,   // 81: cdrom.db.v1.UpstreamJob.status:type_name -> cdrom.db.v1.JobStatus
-	249, // 82: cdrom.db.v1.UpstreamJob.outputs:type_name -> cdrom.db.v1.UpstreamJob.OutputsEntry
+	268, // 82: cdrom.db.v1.UpstreamJob.outputs:type_name -> cdrom.db.v1.UpstreamJob.OutputsEntry
 	3,   // 83: cdrom.db.v1.DependencyObservation.status:type_name -> cdrom.db.v1.JobStatus
-	250, // 84: cdrom.db.v1.DependencyObservation.outputs:type_name -> cdrom.db.v1.DependencyObservation.OutputsEntry
-	251, // 85: cdrom.db.v1.JobStep.env:type_name -> cdrom.db.v1.JobStep.EnvEntry
-	272, // 86: cdrom.db.v1.JobStep.timeout:type_name -> google.protobuf.Duration
-	252, // 87: cdrom.db.v1.JobStep.params:type_name -> cdrom.db.v1.JobStep.ParamsEntry
-	272, // 88: cdrom.db.v1.RetryPolicy.backoff:type_name -> google.protobuf.Duration
+	269, // 84: cdrom.db.v1.DependencyObservation.outputs:type_name -> cdrom.db.v1.DependencyObservation.OutputsEntry
+	270, // 85: cdrom.db.v1.JobStep.env:type_name -> cdrom.db.v1.JobStep.EnvEntry
+	291, // 86: cdrom.db.v1.JobStep.timeout:type_name -> google.protobuf.Duration
+	271, // 87: cdrom.db.v1.JobStep.params:type_name -> cdrom.db.v1.JobStep.ParamsEntry
+	291, // 88: cdrom.db.v1.RetryPolicy.backoff:type_name -> google.protobuf.Duration
 	45,  // 89: cdrom.db.v1.JobSpec.steps:type_name -> cdrom.db.v1.JobStep
-	272, // 90: cdrom.db.v1.JobSpec.timeout:type_name -> google.protobuf.Duration
+	291, // 90: cdrom.db.v1.JobSpec.timeout:type_name -> google.protobuf.Duration
 	46,  // 91: cdrom.db.v1.JobSpec.retry:type_name -> cdrom.db.v1.RetryPolicy
 	6,   // 92: cdrom.db.v1.JobSpec.failure_mode:type_name -> cdrom.db.v1.FailureMode
 	3,   // 93: cdrom.db.v1.Job.status:type_name -> cdrom.db.v1.JobStatus
-	270, // 94: cdrom.db.v1.Job.started_at:type_name -> google.protobuf.Timestamp
-	270, // 95: cdrom.db.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
-	270, // 96: cdrom.db.v1.Job.created_at:type_name -> google.protobuf.Timestamp
-	270, // 97: cdrom.db.v1.Job.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 94: cdrom.db.v1.Job.started_at:type_name -> google.protobuf.Timestamp
+	289, // 95: cdrom.db.v1.Job.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 96: cdrom.db.v1.Job.created_at:type_name -> google.protobuf.Timestamp
+	289, // 97: cdrom.db.v1.Job.updated_at:type_name -> google.protobuf.Timestamp
 	47,  // 98: cdrom.db.v1.Job.spec:type_name -> cdrom.db.v1.JobSpec
 	41,  // 99: cdrom.db.v1.Job.step_results:type_name -> cdrom.db.v1.StepResult
-	253, // 100: cdrom.db.v1.Job.outputs:type_name -> cdrom.db.v1.Job.OutputsEntry
+	272, // 100: cdrom.db.v1.Job.outputs:type_name -> cdrom.db.v1.Job.OutputsEntry
 	42,  // 101: cdrom.db.v1.Job.upstream_jobs:type_name -> cdrom.db.v1.UpstreamJob
 	6,   // 102: cdrom.db.v1.Job.failure_mode:type_name -> cdrom.db.v1.FailureMode
-	271, // 103: cdrom.db.v1.Job.upstream_claims:type_name -> google.protobuf.Struct
-	254, // 104: cdrom.db.v1.Job.run_params:type_name -> cdrom.db.v1.Job.RunParamsEntry
+	290, // 103: cdrom.db.v1.Job.upstream_claims:type_name -> google.protobuf.Struct
+	273, // 104: cdrom.db.v1.Job.run_params:type_name -> cdrom.db.v1.Job.RunParamsEntry
 	9,   // 105: cdrom.db.v1.Job.secrets:type_name -> cdrom.db.v1.Secret
-	270, // 106: cdrom.db.v1.Job.approval_requested_at:type_name -> google.protobuf.Timestamp
-	270, // 107: cdrom.db.v1.Job.approval_decided_at:type_name -> google.protobuf.Timestamp
-	270, // 108: cdrom.db.v1.Job.concurrency_admitted_at:type_name -> google.protobuf.Timestamp
+	289, // 106: cdrom.db.v1.Job.approval_requested_at:type_name -> google.protobuf.Timestamp
+	289, // 107: cdrom.db.v1.Job.approval_decided_at:type_name -> google.protobuf.Timestamp
+	289, // 108: cdrom.db.v1.Job.concurrency_admitted_at:type_name -> google.protobuf.Timestamp
 	4,   // 109: cdrom.db.v1.Job.automation:type_name -> cdrom.db.v1.Automation
 	5,   // 110: cdrom.db.v1.Job.approval:type_name -> cdrom.db.v1.ApprovalPolicy
-	255, // 111: cdrom.db.v1.Job.labels:type_name -> cdrom.db.v1.Job.LabelsEntry
+	274, // 111: cdrom.db.v1.Job.labels:type_name -> cdrom.db.v1.Job.LabelsEntry
 	11,  // 112: cdrom.db.v1.Job.variables:type_name -> cdrom.db.v1.Variable
 	10,  // 113: cdrom.db.v1.Job.vault_imports:type_name -> cdrom.db.v1.VaultImport
-	256, // 114: cdrom.db.v1.Job.artifacts:type_name -> cdrom.db.v1.Job.ArtifactsEntry
+	275, // 114: cdrom.db.v1.Job.artifacts:type_name -> cdrom.db.v1.Job.ArtifactsEntry
 	43,  // 115: cdrom.db.v1.Job.dependency_observations:type_name -> cdrom.db.v1.DependencyObservation
 	47,  // 116: cdrom.db.v1.JobDefinition.spec:type_name -> cdrom.db.v1.JobSpec
 	4,   // 117: cdrom.db.v1.JobDefinition.automation:type_name -> cdrom.db.v1.Automation
 	5,   // 118: cdrom.db.v1.JobDefinition.approval:type_name -> cdrom.db.v1.ApprovalPolicy
-	257, // 119: cdrom.db.v1.JobDefinition.labels:type_name -> cdrom.db.v1.JobDefinition.LabelsEntry
+	276, // 119: cdrom.db.v1.JobDefinition.labels:type_name -> cdrom.db.v1.JobDefinition.LabelsEntry
 	11,  // 120: cdrom.db.v1.JobDefinition.variables:type_name -> cdrom.db.v1.Variable
 	10,  // 121: cdrom.db.v1.JobDefinition.vault_imports:type_name -> cdrom.db.v1.VaultImport
 	47,  // 122: cdrom.db.v1.CreateJobRequest.spec:type_name -> cdrom.db.v1.JobSpec
 	3,   // 123: cdrom.db.v1.ListJobsRequest.status:type_name -> cdrom.db.v1.JobStatus
 	48,  // 124: cdrom.db.v1.ListJobsResponse.jobs:type_name -> cdrom.db.v1.Job
 	3,   // 125: cdrom.db.v1.UpdateJobRequest.status:type_name -> cdrom.db.v1.JobStatus
-	270, // 126: cdrom.db.v1.UpdateJobRequest.started_at:type_name -> google.protobuf.Timestamp
-	270, // 127: cdrom.db.v1.UpdateJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 126: cdrom.db.v1.UpdateJobRequest.started_at:type_name -> google.protobuf.Timestamp
+	289, // 127: cdrom.db.v1.UpdateJobRequest.finished_at:type_name -> google.protobuf.Timestamp
 	41,  // 128: cdrom.db.v1.UpdateJobRequest.step_results:type_name -> cdrom.db.v1.StepResult
-	258, // 129: cdrom.db.v1.UpdateJobRequest.outputs:type_name -> cdrom.db.v1.UpdateJobRequest.OutputsEntry
+	277, // 129: cdrom.db.v1.UpdateJobRequest.outputs:type_name -> cdrom.db.v1.UpdateJobRequest.OutputsEntry
 	43,  // 130: cdrom.db.v1.UpdateJobRequest.dependency_observations:type_name -> cdrom.db.v1.DependencyObservation
-	270, // 131: cdrom.db.v1.ReapJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	270, // 132: cdrom.db.v1.CancelJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	270, // 133: cdrom.db.v1.SkipJobRequest.finished_at:type_name -> google.protobuf.Timestamp
-	270, // 134: cdrom.db.v1.ClaimJobRequest.started_at:type_name -> google.protobuf.Timestamp
+	289, // 131: cdrom.db.v1.ReapJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 132: cdrom.db.v1.CancelJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 133: cdrom.db.v1.SkipJobRequest.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 134: cdrom.db.v1.ClaimJobRequest.started_at:type_name -> google.protobuf.Timestamp
 	3,   // 135: cdrom.db.v1.JobExecution.status:type_name -> cdrom.db.v1.JobStatus
-	270, // 136: cdrom.db.v1.JobExecution.started_at:type_name -> google.protobuf.Timestamp
-	270, // 137: cdrom.db.v1.JobExecution.finished_at:type_name -> google.protobuf.Timestamp
-	270, // 138: cdrom.db.v1.JobExecution.created_at:type_name -> google.protobuf.Timestamp
-	270, // 139: cdrom.db.v1.JobExecution.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 136: cdrom.db.v1.JobExecution.started_at:type_name -> google.protobuf.Timestamp
+	289, // 137: cdrom.db.v1.JobExecution.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 138: cdrom.db.v1.JobExecution.created_at:type_name -> google.protobuf.Timestamp
+	289, // 139: cdrom.db.v1.JobExecution.updated_at:type_name -> google.protobuf.Timestamp
 	41,  // 140: cdrom.db.v1.JobExecution.step_results:type_name -> cdrom.db.v1.StepResult
-	259, // 141: cdrom.db.v1.JobExecution.outputs:type_name -> cdrom.db.v1.JobExecution.OutputsEntry
-	260, // 142: cdrom.db.v1.JobExecution.labels:type_name -> cdrom.db.v1.JobExecution.LabelsEntry
-	270, // 143: cdrom.db.v1.StartJobExecutionRequest.started_at:type_name -> google.protobuf.Timestamp
+	278, // 141: cdrom.db.v1.JobExecution.outputs:type_name -> cdrom.db.v1.JobExecution.OutputsEntry
+	279, // 142: cdrom.db.v1.JobExecution.labels:type_name -> cdrom.db.v1.JobExecution.LabelsEntry
+	289, // 143: cdrom.db.v1.StartJobExecutionRequest.started_at:type_name -> google.protobuf.Timestamp
 	65,  // 144: cdrom.db.v1.StartJobExecutionResponse.execution:type_name -> cdrom.db.v1.JobExecution
 	65,  // 145: cdrom.db.v1.ListJobExecutionsResponse.executions:type_name -> cdrom.db.v1.JobExecution
 	3,   // 146: cdrom.db.v1.UpdateJobExecutionRequest.status:type_name -> cdrom.db.v1.JobStatus
-	270, // 147: cdrom.db.v1.UpdateJobExecutionRequest.finished_at:type_name -> google.protobuf.Timestamp
+	289, // 147: cdrom.db.v1.UpdateJobExecutionRequest.finished_at:type_name -> google.protobuf.Timestamp
 	41,  // 148: cdrom.db.v1.UpdateJobExecutionRequest.step_results:type_name -> cdrom.db.v1.StepResult
-	261, // 149: cdrom.db.v1.UpdateJobExecutionRequest.outputs:type_name -> cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
-	270, // 150: cdrom.db.v1.StepCompletion.created_at:type_name -> google.protobuf.Timestamp
-	270, // 151: cdrom.db.v1.StepCompletion.updated_at:type_name -> google.protobuf.Timestamp
-	270, // 152: cdrom.db.v1.ResolveApprovalRequest.decided_at:type_name -> google.protobuf.Timestamp
-	270, // 153: cdrom.db.v1.Event.created_at:type_name -> google.protobuf.Timestamp
+	280, // 149: cdrom.db.v1.UpdateJobExecutionRequest.outputs:type_name -> cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
+	289, // 150: cdrom.db.v1.StepCompletion.created_at:type_name -> google.protobuf.Timestamp
+	289, // 151: cdrom.db.v1.StepCompletion.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 152: cdrom.db.v1.ResolveApprovalRequest.decided_at:type_name -> google.protobuf.Timestamp
+	289, // 153: cdrom.db.v1.Event.created_at:type_name -> google.protobuf.Timestamp
 	3,   // 154: cdrom.db.v1.PublishJobStatusRequest.status:type_name -> cdrom.db.v1.JobStatus
 	2,   // 155: cdrom.db.v1.PublishRunStatusRequest.status:type_name -> cdrom.db.v1.RunStatus
 	78,  // 156: cdrom.db.v1.TailEventsResponse.events:type_name -> cdrom.db.v1.Event
-	272, // 157: cdrom.db.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	272, // 158: cdrom.db.v1.AcquireLeaseRequest.heartbeat_ttl:type_name -> google.protobuf.Duration
-	270, // 159: cdrom.db.v1.Lease.expires_at:type_name -> google.protobuf.Timestamp
-	270, // 160: cdrom.db.v1.Lease.last_heartbeat:type_name -> google.protobuf.Timestamp
-	270, // 161: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
-	262, // 162: cdrom.db.v1.Worker.labels:type_name -> cdrom.db.v1.Worker.LabelsEntry
-	263, // 163: cdrom.db.v1.RegisterWorkerRequest.labels:type_name -> cdrom.db.v1.RegisterWorkerRequest.LabelsEntry
+	291, // 157: cdrom.db.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	291, // 158: cdrom.db.v1.AcquireLeaseRequest.heartbeat_ttl:type_name -> google.protobuf.Duration
+	289, // 159: cdrom.db.v1.Lease.expires_at:type_name -> google.protobuf.Timestamp
+	289, // 160: cdrom.db.v1.Lease.last_heartbeat:type_name -> google.protobuf.Timestamp
+	289, // 161: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
+	281, // 162: cdrom.db.v1.Worker.labels:type_name -> cdrom.db.v1.Worker.LabelsEntry
+	282, // 163: cdrom.db.v1.RegisterWorkerRequest.labels:type_name -> cdrom.db.v1.RegisterWorkerRequest.LabelsEntry
 	97,  // 164: cdrom.db.v1.ListWorkersResponse.workers:type_name -> cdrom.db.v1.Worker
 	4,   // 165: cdrom.db.v1.Environment.automation:type_name -> cdrom.db.v1.Automation
-	270, // 166: cdrom.db.v1.Environment.created_at:type_name -> google.protobuf.Timestamp
-	270, // 167: cdrom.db.v1.Environment.updated_at:type_name -> google.protobuf.Timestamp
-	264, // 168: cdrom.db.v1.Environment.labels:type_name -> cdrom.db.v1.Environment.LabelsEntry
+	289, // 166: cdrom.db.v1.Environment.created_at:type_name -> google.protobuf.Timestamp
+	289, // 167: cdrom.db.v1.Environment.updated_at:type_name -> google.protobuf.Timestamp
+	283, // 168: cdrom.db.v1.Environment.labels:type_name -> cdrom.db.v1.Environment.LabelsEntry
 	4,   // 169: cdrom.db.v1.CreateEnvironmentRequest.automation:type_name -> cdrom.db.v1.Automation
-	265, // 170: cdrom.db.v1.CreateEnvironmentRequest.labels:type_name -> cdrom.db.v1.CreateEnvironmentRequest.LabelsEntry
+	284, // 170: cdrom.db.v1.CreateEnvironmentRequest.labels:type_name -> cdrom.db.v1.CreateEnvironmentRequest.LabelsEntry
 	104, // 171: cdrom.db.v1.ListEnvironmentsResponse.environments:type_name -> cdrom.db.v1.Environment
 	4,   // 172: cdrom.db.v1.UpdateEnvironmentRequest.automation:type_name -> cdrom.db.v1.Automation
-	266, // 173: cdrom.db.v1.UpdateEnvironmentRequest.labels:type_name -> cdrom.db.v1.UpdateEnvironmentRequest.LabelsEntry
-	267, // 174: cdrom.db.v1.WorkerGroup.labels:type_name -> cdrom.db.v1.WorkerGroup.LabelsEntry
-	270, // 175: cdrom.db.v1.WorkerGroup.created_at:type_name -> google.protobuf.Timestamp
-	270, // 176: cdrom.db.v1.WorkerGroup.updated_at:type_name -> google.protobuf.Timestamp
-	268, // 177: cdrom.db.v1.CreateWorkerGroupRequest.labels:type_name -> cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntry
+	285, // 173: cdrom.db.v1.UpdateEnvironmentRequest.labels:type_name -> cdrom.db.v1.UpdateEnvironmentRequest.LabelsEntry
+	286, // 174: cdrom.db.v1.WorkerGroup.labels:type_name -> cdrom.db.v1.WorkerGroup.LabelsEntry
+	289, // 175: cdrom.db.v1.WorkerGroup.created_at:type_name -> google.protobuf.Timestamp
+	289, // 176: cdrom.db.v1.WorkerGroup.updated_at:type_name -> google.protobuf.Timestamp
+	287, // 177: cdrom.db.v1.CreateWorkerGroupRequest.labels:type_name -> cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntry
 	114, // 178: cdrom.db.v1.ListWorkerGroupsResponse.groups:type_name -> cdrom.db.v1.WorkerGroup
-	269, // 179: cdrom.db.v1.UpdateWorkerGroupRequest.labels:type_name -> cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntry
-	270, // 180: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
-	270, // 181: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
+	288, // 179: cdrom.db.v1.UpdateWorkerGroupRequest.labels:type_name -> cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntry
+	289, // 180: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
+	289, // 181: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
 	121, // 182: cdrom.db.v1.ListIDPSigningKeysResponse.keys:type_name -> cdrom.db.v1.IDPSigningKey
 	121, // 183: cdrom.db.v1.SetIDPSigningKeysRequest.keys:type_name -> cdrom.db.v1.IDPSigningKey
-	270, // 184: cdrom.db.v1.IDPAuthCode.created_at:type_name -> google.protobuf.Timestamp
+	289, // 184: cdrom.db.v1.IDPAuthCode.created_at:type_name -> google.protobuf.Timestamp
 	125, // 185: cdrom.db.v1.StoreIDPAuthCodeRequest.code:type_name -> cdrom.db.v1.IDPAuthCode
-	270, // 186: cdrom.db.v1.PruneIDPAuthCodesRequest.created_before:type_name -> google.protobuf.Timestamp
-	270, // 187: cdrom.db.v1.IDPUser.created_at:type_name -> google.protobuf.Timestamp
+	289, // 186: cdrom.db.v1.PruneIDPAuthCodesRequest.created_before:type_name -> google.protobuf.Timestamp
+	289, // 187: cdrom.db.v1.IDPUser.created_at:type_name -> google.protobuf.Timestamp
 	129, // 188: cdrom.db.v1.CreateIDPUserRequest.user:type_name -> cdrom.db.v1.IDPUser
 	129, // 189: cdrom.db.v1.ListIDPUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
 	129, // 190: cdrom.db.v1.UpdateIDPUserRequest.user:type_name -> cdrom.db.v1.IDPUser
-	270, // 191: cdrom.db.v1.IDPAPIKey.expires_at:type_name -> google.protobuf.Timestamp
-	270, // 192: cdrom.db.v1.IDPAPIKey.created_at:type_name -> google.protobuf.Timestamp
-	270, // 193: cdrom.db.v1.IDPAPIKey.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 191: cdrom.db.v1.IDPAPIKey.expires_at:type_name -> google.protobuf.Timestamp
+	289, // 192: cdrom.db.v1.IDPAPIKey.created_at:type_name -> google.protobuf.Timestamp
+	289, // 193: cdrom.db.v1.IDPAPIKey.updated_at:type_name -> google.protobuf.Timestamp
 	136, // 194: cdrom.db.v1.CreateIDPAPIKeyRequest.key:type_name -> cdrom.db.v1.IDPAPIKey
 	136, // 195: cdrom.db.v1.ListIDPAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
 	136, // 196: cdrom.db.v1.UpdateIDPAPIKeyRequest.key:type_name -> cdrom.db.v1.IDPAPIKey
-	272, // 197: cdrom.db.v1.VerifyIDPAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	291, // 197: cdrom.db.v1.VerifyIDPAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
 	136, // 198: cdrom.db.v1.VerifyIDPAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
 	129, // 199: cdrom.db.v1.VerifyIDPAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
-	270, // 200: cdrom.db.v1.ServiceAccountKey.rotated_at:type_name -> google.protobuf.Timestamp
-	270, // 201: cdrom.db.v1.ServiceAccount.deleted_at:type_name -> google.protobuf.Timestamp
+	289, // 200: cdrom.db.v1.ServiceAccountKey.rotated_at:type_name -> google.protobuf.Timestamp
+	289, // 201: cdrom.db.v1.ServiceAccount.deleted_at:type_name -> google.protobuf.Timestamp
 	147, // 202: cdrom.db.v1.ServiceAccount.keys:type_name -> cdrom.db.v1.ServiceAccountKey
-	270, // 203: cdrom.db.v1.ServiceAccount.created_at:type_name -> google.protobuf.Timestamp
-	270, // 204: cdrom.db.v1.ServiceAccount.updated_at:type_name -> google.protobuf.Timestamp
-	270, // 205: cdrom.db.v1.ServiceAccount.key_locked_until:type_name -> google.protobuf.Timestamp
+	289, // 203: cdrom.db.v1.ServiceAccount.created_at:type_name -> google.protobuf.Timestamp
+	289, // 204: cdrom.db.v1.ServiceAccount.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 205: cdrom.db.v1.ServiceAccount.key_locked_until:type_name -> google.protobuf.Timestamp
 	148, // 206: cdrom.db.v1.CreateServiceAccountRequest.account:type_name -> cdrom.db.v1.ServiceAccount
 	147, // 207: cdrom.db.v1.CreateServiceAccountRequest.keys:type_name -> cdrom.db.v1.ServiceAccountKey
 	148, // 208: cdrom.db.v1.ListServiceAccountsResponse.accounts:type_name -> cdrom.db.v1.ServiceAccount
 	148, // 209: cdrom.db.v1.UpdateServiceAccountRequest.account:type_name -> cdrom.db.v1.ServiceAccount
-	272, // 210: cdrom.db.v1.RecordServiceAccountKeyAttemptRequest.lockout_duration:type_name -> google.protobuf.Duration
-	270, // 211: cdrom.db.v1.Role.created_at:type_name -> google.protobuf.Timestamp
-	270, // 212: cdrom.db.v1.Role.updated_at:type_name -> google.protobuf.Timestamp
+	291, // 210: cdrom.db.v1.RecordServiceAccountKeyAttemptRequest.lockout_duration:type_name -> google.protobuf.Duration
+	289, // 211: cdrom.db.v1.Role.created_at:type_name -> google.protobuf.Timestamp
+	289, // 212: cdrom.db.v1.Role.updated_at:type_name -> google.protobuf.Timestamp
 	163, // 213: cdrom.db.v1.ListRolesResponse.roles:type_name -> cdrom.db.v1.Role
-	270, // 214: cdrom.db.v1.RoleBinding.created_at:type_name -> google.protobuf.Timestamp
+	289, // 214: cdrom.db.v1.RoleBinding.created_at:type_name -> google.protobuf.Timestamp
 	170, // 215: cdrom.db.v1.ListRoleBindingsResponse.bindings:type_name -> cdrom.db.v1.RoleBinding
-	270, // 216: cdrom.db.v1.AuditEvent.created_at:type_name -> google.protobuf.Timestamp
-	270, // 217: cdrom.db.v1.ListAuditEventsRequest.from:type_name -> google.protobuf.Timestamp
-	270, // 218: cdrom.db.v1.ListAuditEventsRequest.to:type_name -> google.protobuf.Timestamp
-	176, // 219: cdrom.db.v1.ListAuditEventsResponse.events:type_name -> cdrom.db.v1.AuditEvent
-	270, // 220: cdrom.db.v1.PruneAuditEventsRequest.created_before:type_name -> google.protobuf.Timestamp
-	270, // 221: cdrom.db.v1.QueuePendingJob.created_at:type_name -> google.protobuf.Timestamp
-	189, // 222: cdrom.db.v1.QueueStatus.pending:type_name -> cdrom.db.v1.QueuePendingJob
-	190, // 223: cdrom.db.v1.QueueStatus.groups:type_name -> cdrom.db.v1.QueueGroupLoad
-	191, // 224: cdrom.db.v1.QueueStatus.keys:type_name -> cdrom.db.v1.QueueKeyLoad
-	270, // 225: cdrom.db.v1.ConcurrencyLimit.created_at:type_name -> google.protobuf.Timestamp
-	270, // 226: cdrom.db.v1.ConcurrencyLimit.updated_at:type_name -> google.protobuf.Timestamp
-	193, // 227: cdrom.db.v1.ListConcurrencyLimitsResponse.limits:type_name -> cdrom.db.v1.ConcurrencyLimit
-	270, // 228: cdrom.db.v1.SSHKnownHost.created_at:type_name -> google.protobuf.Timestamp
-	270, // 229: cdrom.db.v1.SSHKnownHost.updated_at:type_name -> google.protobuf.Timestamp
-	199, // 230: cdrom.db.v1.ListSSHKnownHostsResponse.hosts:type_name -> cdrom.db.v1.SSHKnownHost
-	204, // 231: cdrom.db.v1.SourceCredential.headers:type_name -> cdrom.db.v1.HTTPHeader
-	270, // 232: cdrom.db.v1.SourceCredential.created_at:type_name -> google.protobuf.Timestamp
-	270, // 233: cdrom.db.v1.SourceCredential.updated_at:type_name -> google.protobuf.Timestamp
-	205, // 234: cdrom.db.v1.ListSourceCredentialsResponse.credentials:type_name -> cdrom.db.v1.SourceCredential
-	204, // 235: cdrom.db.v1.CreateSourceCredentialRequest.headers:type_name -> cdrom.db.v1.HTTPHeader
-	204, // 236: cdrom.db.v1.UpdateSourceCredentialRequest.headers:type_name -> cdrom.db.v1.HTTPHeader
-	270, // 237: cdrom.db.v1.PipelineSource.created_at:type_name -> google.protobuf.Timestamp
-	270, // 238: cdrom.db.v1.PipelineSource.updated_at:type_name -> google.protobuf.Timestamp
-	270, // 239: cdrom.db.v1.PipelineSourceState.last_synced_at:type_name -> google.protobuf.Timestamp
-	212, // 240: cdrom.db.v1.ListPipelineSourcesResponse.sources:type_name -> cdrom.db.v1.PipelineSource
-	270, // 241: cdrom.db.v1.SetPipelineSourceStateRequest.last_synced_at:type_name -> google.protobuf.Timestamp
-	270, // 242: cdrom.db.v1.StorageObject.created_at:type_name -> google.protobuf.Timestamp
-	270, // 243: cdrom.db.v1.StorageObject.last_downloaded_at:type_name -> google.protobuf.Timestamp
-	223, // 244: cdrom.db.v1.ListStorageObjectsResponse.objects:type_name -> cdrom.db.v1.StorageObject
-	44,  // 245: cdrom.db.v1.JobStep.ParamsEntry.value:type_name -> cdrom.db.v1.ParamValue
-	18,  // 246: cdrom.db.v1.Database.CreatePipeline:input_type -> cdrom.db.v1.CreatePipelineRequest
-	19,  // 247: cdrom.db.v1.Database.GetPipeline:input_type -> cdrom.db.v1.GetPipelineRequest
-	20,  // 248: cdrom.db.v1.Database.ListPipelines:input_type -> cdrom.db.v1.ListPipelinesRequest
-	22,  // 249: cdrom.db.v1.Database.UpdatePipeline:input_type -> cdrom.db.v1.UpdatePipelineRequest
-	23,  // 250: cdrom.db.v1.Database.DeletePipeline:input_type -> cdrom.db.v1.DeletePipelineRequest
-	31,  // 251: cdrom.db.v1.Database.TriggerRun:input_type -> cdrom.db.v1.TriggerRunRequest
-	29,  // 252: cdrom.db.v1.Database.CreateRun:input_type -> cdrom.db.v1.CreateRunRequest
-	33,  // 253: cdrom.db.v1.Database.GetRun:input_type -> cdrom.db.v1.GetRunRequest
-	34,  // 254: cdrom.db.v1.Database.ListRuns:input_type -> cdrom.db.v1.ListRunsRequest
-	25,  // 255: cdrom.db.v1.Database.PreviousSuccessfulRun:input_type -> cdrom.db.v1.PreviousSuccessfulRunRequest
-	26,  // 256: cdrom.db.v1.Database.LatestRollbackRun:input_type -> cdrom.db.v1.LatestRollbackRunRequest
-	27,  // 257: cdrom.db.v1.Database.RestartRun:input_type -> cdrom.db.v1.RestartRunRequest
-	36,  // 258: cdrom.db.v1.Database.UpdateRun:input_type -> cdrom.db.v1.UpdateRunRequest
-	38,  // 259: cdrom.db.v1.Database.ListPipelineVersions:input_type -> cdrom.db.v1.ListPipelineVersionsRequest
-	40,  // 260: cdrom.db.v1.Database.GetPipelineVersion:input_type -> cdrom.db.v1.GetPipelineVersionRequest
-	50,  // 261: cdrom.db.v1.Database.CreateJob:input_type -> cdrom.db.v1.CreateJobRequest
-	51,  // 262: cdrom.db.v1.Database.GetJob:input_type -> cdrom.db.v1.GetJobRequest
-	52,  // 263: cdrom.db.v1.Database.ListJobs:input_type -> cdrom.db.v1.ListJobsRequest
-	54,  // 264: cdrom.db.v1.Database.ListRetriableJobs:input_type -> cdrom.db.v1.ListRetriableJobsRequest
-	55,  // 265: cdrom.db.v1.Database.UpdateJob:input_type -> cdrom.db.v1.UpdateJobRequest
-	96,  // 266: cdrom.db.v1.Database.DeleteJob:input_type -> cdrom.db.v1.DeleteJobRequest
-	93,  // 267: cdrom.db.v1.Database.ClaimJobRetry:input_type -> cdrom.db.v1.ClaimJobRetryRequest
-	94,  // 268: cdrom.db.v1.Database.RerunJob:input_type -> cdrom.db.v1.RerunJobRequest
-	56,  // 269: cdrom.db.v1.Database.ReapJob:input_type -> cdrom.db.v1.ReapJobRequest
-	58,  // 270: cdrom.db.v1.Database.CancelJob:input_type -> cdrom.db.v1.CancelJobRequest
-	60,  // 271: cdrom.db.v1.Database.SkipJob:input_type -> cdrom.db.v1.SkipJobRequest
-	62,  // 272: cdrom.db.v1.Database.ClaimJob:input_type -> cdrom.db.v1.ClaimJobRequest
-	64,  // 273: cdrom.db.v1.Database.ListPendingByGroup:input_type -> cdrom.db.v1.ListPendingByGroupRequest
-	66,  // 274: cdrom.db.v1.Database.StartJobExecution:input_type -> cdrom.db.v1.StartJobExecutionRequest
-	68,  // 275: cdrom.db.v1.Database.ListJobExecutions:input_type -> cdrom.db.v1.ListJobExecutionsRequest
-	70,  // 276: cdrom.db.v1.Database.UpdateJobExecution:input_type -> cdrom.db.v1.UpdateJobExecutionRequest
-	71,  // 277: cdrom.db.v1.Database.AbandonWorkerExecutions:input_type -> cdrom.db.v1.AbandonWorkerExecutionsRequest
-	73,  // 278: cdrom.db.v1.Database.ReportStepCompletion:input_type -> cdrom.db.v1.ReportStepCompletionRequest
-	74,  // 279: cdrom.db.v1.Database.CheckStepBarrier:input_type -> cdrom.db.v1.CheckStepBarrierRequest
-	76,  // 280: cdrom.db.v1.Database.ResolveApproval:input_type -> cdrom.db.v1.ResolveApprovalRequest
-	79,  // 281: cdrom.db.v1.Database.PublishAssignment:input_type -> cdrom.db.v1.PublishAssignmentRequest
-	80,  // 282: cdrom.db.v1.Database.PublishCancel:input_type -> cdrom.db.v1.PublishCancelRequest
-	81,  // 283: cdrom.db.v1.Database.PublishJobStatus:input_type -> cdrom.db.v1.PublishJobStatusRequest
-	82,  // 284: cdrom.db.v1.Database.PublishRunStatus:input_type -> cdrom.db.v1.PublishRunStatusRequest
-	83,  // 285: cdrom.db.v1.Database.PublishWorkerEvent:input_type -> cdrom.db.v1.PublishWorkerEventRequest
-	84,  // 286: cdrom.db.v1.Database.PublishLogUpdated:input_type -> cdrom.db.v1.PublishLogUpdatedRequest
-	86,  // 287: cdrom.db.v1.Database.TailEvents:input_type -> cdrom.db.v1.TailEventsRequest
-	88,  // 288: cdrom.db.v1.Database.AcquireLease:input_type -> cdrom.db.v1.AcquireLeaseRequest
-	90,  // 289: cdrom.db.v1.Database.ReleaseLease:input_type -> cdrom.db.v1.ReleaseLeaseRequest
-	91,  // 290: cdrom.db.v1.Database.GetLease:input_type -> cdrom.db.v1.GetLeaseRequest
-	98,  // 291: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
-	99,  // 292: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
-	100, // 293: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
-	102, // 294: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
-	103, // 295: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
-	122, // 296: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
-	124, // 297: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
-	126, // 298: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
-	127, // 299: cdrom.db.v1.Database.ConsumeIDPAuthCode:input_type -> cdrom.db.v1.ConsumeIDPAuthCodeRequest
-	128, // 300: cdrom.db.v1.Database.PruneIDPAuthCodes:input_type -> cdrom.db.v1.PruneIDPAuthCodesRequest
-	130, // 301: cdrom.db.v1.Database.CreateUser:input_type -> cdrom.db.v1.CreateIDPUserRequest
-	131, // 302: cdrom.db.v1.Database.GetIDPUser:input_type -> cdrom.db.v1.GetIDPUserRequest
-	132, // 303: cdrom.db.v1.Database.ListIDPUsers:input_type -> cdrom.db.v1.ListIDPUsersRequest
-	134, // 304: cdrom.db.v1.Database.UpdateIDPUser:input_type -> cdrom.db.v1.UpdateIDPUserRequest
-	135, // 305: cdrom.db.v1.Database.DeleteIDPUser:input_type -> cdrom.db.v1.DeleteIDPUserRequest
-	137, // 306: cdrom.db.v1.Database.CreateAPIKey:input_type -> cdrom.db.v1.CreateIDPAPIKeyRequest
-	138, // 307: cdrom.db.v1.Database.GetAPIKey:input_type -> cdrom.db.v1.GetIDPAPIKeyRequest
-	139, // 308: cdrom.db.v1.Database.ListAPIKeys:input_type -> cdrom.db.v1.ListIDPAPIKeysRequest
-	141, // 309: cdrom.db.v1.Database.UpdateAPIKey:input_type -> cdrom.db.v1.UpdateIDPAPIKeyRequest
-	142, // 310: cdrom.db.v1.Database.RotateAPIKey:input_type -> cdrom.db.v1.RotateIDPAPIKeyRequest
-	143, // 311: cdrom.db.v1.Database.DeleteAPIKey:input_type -> cdrom.db.v1.DeleteIDPAPIKeyRequest
-	144, // 312: cdrom.db.v1.Database.VerifyAPIKey:input_type -> cdrom.db.v1.VerifyIDPAPIKeyRequest
-	146, // 313: cdrom.db.v1.Database.ResetAPIKeyLockout:input_type -> cdrom.db.v1.ResetIDPAPIKeyLockoutRequest
-	149, // 314: cdrom.db.v1.Database.CreateServiceAccount:input_type -> cdrom.db.v1.CreateServiceAccountRequest
-	150, // 315: cdrom.db.v1.Database.GetServiceAccount:input_type -> cdrom.db.v1.GetServiceAccountRequest
-	151, // 316: cdrom.db.v1.Database.ListServiceAccounts:input_type -> cdrom.db.v1.ListServiceAccountsRequest
-	153, // 317: cdrom.db.v1.Database.UpdateServiceAccount:input_type -> cdrom.db.v1.UpdateServiceAccountRequest
-	154, // 318: cdrom.db.v1.Database.RotateServiceAccountKey:input_type -> cdrom.db.v1.RotateServiceAccountKeyRequest
-	155, // 319: cdrom.db.v1.Database.DisableServiceAccount:input_type -> cdrom.db.v1.ServiceAccountStateRequest
-	155, // 320: cdrom.db.v1.Database.EnableServiceAccount:input_type -> cdrom.db.v1.ServiceAccountStateRequest
-	156, // 321: cdrom.db.v1.Database.DeleteServiceAccount:input_type -> cdrom.db.v1.DeleteServiceAccountRequest
-	157, // 322: cdrom.db.v1.Database.RecordServiceAccountKeyAttempt:input_type -> cdrom.db.v1.RecordServiceAccountKeyAttemptRequest
-	158, // 323: cdrom.db.v1.Database.ResetServiceAccountLockout:input_type -> cdrom.db.v1.ResetServiceAccountLockoutRequest
-	159, // 324: cdrom.db.v1.Database.NextSecretNonce:input_type -> cdrom.db.v1.NextSecretNonceRequest
-	161, // 325: cdrom.db.v1.Database.ClaimStepOnce:input_type -> cdrom.db.v1.ClaimStepOnceRequest
-	164, // 326: cdrom.db.v1.Database.CreateRole:input_type -> cdrom.db.v1.CreateRoleRequest
-	165, // 327: cdrom.db.v1.Database.GetRole:input_type -> cdrom.db.v1.GetRoleRequest
-	166, // 328: cdrom.db.v1.Database.ListRoles:input_type -> cdrom.db.v1.ListRolesRequest
-	168, // 329: cdrom.db.v1.Database.UpdateRole:input_type -> cdrom.db.v1.UpdateRoleRequest
-	169, // 330: cdrom.db.v1.Database.DeleteRole:input_type -> cdrom.db.v1.DeleteRoleRequest
-	171, // 331: cdrom.db.v1.Database.AddRoleBinding:input_type -> cdrom.db.v1.AddRoleBindingRequest
-	172, // 332: cdrom.db.v1.Database.ListRoleBindings:input_type -> cdrom.db.v1.ListRoleBindingsRequest
-	174, // 333: cdrom.db.v1.Database.DeleteRoleBinding:input_type -> cdrom.db.v1.DeleteRoleBindingRequest
-	175, // 334: cdrom.db.v1.Database.PublishRoleChange:input_type -> cdrom.db.v1.PublishRoleChangeRequest
-	177, // 335: cdrom.db.v1.Database.AppendAuditEvent:input_type -> cdrom.db.v1.AppendAuditEventRequest
-	178, // 336: cdrom.db.v1.Database.ListAuditEvents:input_type -> cdrom.db.v1.ListAuditEventsRequest
-	180, // 337: cdrom.db.v1.Database.PruneAuditEvents:input_type -> cdrom.db.v1.PruneAuditEventsRequest
-	182, // 338: cdrom.db.v1.Database.AcquireJobSlots:input_type -> cdrom.db.v1.AcquireJobSlotsRequest
-	184, // 339: cdrom.db.v1.Database.ReleaseJobSlots:input_type -> cdrom.db.v1.ReleaseJobSlotsRequest
-	186, // 340: cdrom.db.v1.Database.GetQueueStatus:input_type -> cdrom.db.v1.GetQueueStatusRequest
-	187, // 341: cdrom.db.v1.Database.ReconcileConcurrency:input_type -> cdrom.db.v1.ReconcileConcurrencyRequest
-	194, // 342: cdrom.db.v1.Database.ListConcurrencyLimits:input_type -> cdrom.db.v1.ListConcurrencyLimitsRequest
-	196, // 343: cdrom.db.v1.Database.CreateConcurrencyLimit:input_type -> cdrom.db.v1.CreateConcurrencyLimitRequest
-	197, // 344: cdrom.db.v1.Database.UpdateConcurrencyLimit:input_type -> cdrom.db.v1.UpdateConcurrencyLimitRequest
-	198, // 345: cdrom.db.v1.Database.DeleteConcurrencyLimit:input_type -> cdrom.db.v1.DeleteConcurrencyLimitRequest
-	200, // 346: cdrom.db.v1.Database.ListSSHKnownHosts:input_type -> cdrom.db.v1.ListSSHKnownHostsRequest
-	202, // 347: cdrom.db.v1.Database.CreateSSHKnownHost:input_type -> cdrom.db.v1.CreateSSHKnownHostRequest
-	203, // 348: cdrom.db.v1.Database.DeleteSSHKnownHost:input_type -> cdrom.db.v1.DeleteSSHKnownHostRequest
-	206, // 349: cdrom.db.v1.Database.ListSourceCredentials:input_type -> cdrom.db.v1.ListSourceCredentialsRequest
-	208, // 350: cdrom.db.v1.Database.CreateSourceCredential:input_type -> cdrom.db.v1.CreateSourceCredentialRequest
-	209, // 351: cdrom.db.v1.Database.GetSourceCredential:input_type -> cdrom.db.v1.GetSourceCredentialRequest
-	210, // 352: cdrom.db.v1.Database.UpdateSourceCredential:input_type -> cdrom.db.v1.UpdateSourceCredentialRequest
-	211, // 353: cdrom.db.v1.Database.DeleteSourceCredential:input_type -> cdrom.db.v1.DeleteSourceCredentialRequest
-	214, // 354: cdrom.db.v1.Database.AttachPipelineSource:input_type -> cdrom.db.v1.AttachPipelineSourceRequest
-	215, // 355: cdrom.db.v1.Database.GetPipelineSource:input_type -> cdrom.db.v1.GetPipelineSourceRequest
-	216, // 356: cdrom.db.v1.Database.ListPipelineSources:input_type -> cdrom.db.v1.ListPipelineSourcesRequest
-	218, // 357: cdrom.db.v1.Database.CountSourcesByCredential:input_type -> cdrom.db.v1.CountSourcesByCredentialRequest
-	222, // 358: cdrom.db.v1.Database.SetPipelineSourceState:input_type -> cdrom.db.v1.SetPipelineSourceStateRequest
-	220, // 359: cdrom.db.v1.Database.GetPipelineSourceState:input_type -> cdrom.db.v1.GetPipelineSourceStateRequest
-	221, // 360: cdrom.db.v1.Database.DetachPipelineSource:input_type -> cdrom.db.v1.DetachPipelineSourceRequest
-	105, // 361: cdrom.db.v1.Database.CreateEnvironment:input_type -> cdrom.db.v1.CreateEnvironmentRequest
-	106, // 362: cdrom.db.v1.Database.GetEnvironment:input_type -> cdrom.db.v1.GetEnvironmentRequest
-	107, // 363: cdrom.db.v1.Database.ListEnvironments:input_type -> cdrom.db.v1.ListEnvironmentsRequest
-	109, // 364: cdrom.db.v1.Database.UpdateEnvironment:input_type -> cdrom.db.v1.UpdateEnvironmentRequest
-	110, // 365: cdrom.db.v1.Database.DeleteEnvironment:input_type -> cdrom.db.v1.DeleteEnvironmentRequest
-	111, // 366: cdrom.db.v1.Database.ListWorkersByEnvironment:input_type -> cdrom.db.v1.ListWorkersByEnvironmentRequest
-	112, // 367: cdrom.db.v1.Database.ProceedJob:input_type -> cdrom.db.v1.ProceedJobRequest
-	115, // 368: cdrom.db.v1.Database.CreateWorkerGroup:input_type -> cdrom.db.v1.CreateWorkerGroupRequest
-	116, // 369: cdrom.db.v1.Database.GetWorkerGroup:input_type -> cdrom.db.v1.GetWorkerGroupRequest
-	117, // 370: cdrom.db.v1.Database.ListWorkerGroups:input_type -> cdrom.db.v1.ListWorkerGroupsRequest
-	119, // 371: cdrom.db.v1.Database.UpdateWorkerGroup:input_type -> cdrom.db.v1.UpdateWorkerGroupRequest
-	120, // 372: cdrom.db.v1.Database.DeleteWorkerGroup:input_type -> cdrom.db.v1.DeleteWorkerGroupRequest
-	224, // 373: cdrom.db.v1.Database.AllocateStorageObject:input_type -> cdrom.db.v1.AllocateStorageObjectRequest
-	225, // 374: cdrom.db.v1.Database.ConfirmStorageObject:input_type -> cdrom.db.v1.ConfirmStorageObjectRequest
-	226, // 375: cdrom.db.v1.Database.GetStorageObject:input_type -> cdrom.db.v1.GetStorageObjectRequest
-	227, // 376: cdrom.db.v1.Database.ListStorageObjects:input_type -> cdrom.db.v1.ListStorageObjectsRequest
-	229, // 377: cdrom.db.v1.Database.TouchStorageObject:input_type -> cdrom.db.v1.TouchStorageObjectRequest
-	230, // 378: cdrom.db.v1.Database.SyncLogSize:input_type -> cdrom.db.v1.SyncLogSizeRequest
-	231, // 379: cdrom.db.v1.Database.DeleteStorageObject:input_type -> cdrom.db.v1.DeleteStorageObjectRequest
-	232, // 380: cdrom.db.v1.Database.ResolvePackageReference:input_type -> cdrom.db.v1.ResolvePackageReferenceRequest
-	16,  // 381: cdrom.db.v1.Database.CreatePipeline:output_type -> cdrom.db.v1.Pipeline
-	16,  // 382: cdrom.db.v1.Database.GetPipeline:output_type -> cdrom.db.v1.Pipeline
-	21,  // 383: cdrom.db.v1.Database.ListPipelines:output_type -> cdrom.db.v1.ListPipelinesResponse
-	16,  // 384: cdrom.db.v1.Database.UpdatePipeline:output_type -> cdrom.db.v1.Pipeline
-	273, // 385: cdrom.db.v1.Database.DeletePipeline:output_type -> google.protobuf.Empty
-	32,  // 386: cdrom.db.v1.Database.TriggerRun:output_type -> cdrom.db.v1.TriggerRunResponse
-	30,  // 387: cdrom.db.v1.Database.CreateRun:output_type -> cdrom.db.v1.CreateRunResponse
-	24,  // 388: cdrom.db.v1.Database.GetRun:output_type -> cdrom.db.v1.PipelineRun
-	35,  // 389: cdrom.db.v1.Database.ListRuns:output_type -> cdrom.db.v1.ListRunsResponse
-	24,  // 390: cdrom.db.v1.Database.PreviousSuccessfulRun:output_type -> cdrom.db.v1.PipelineRun
-	24,  // 391: cdrom.db.v1.Database.LatestRollbackRun:output_type -> cdrom.db.v1.PipelineRun
-	28,  // 392: cdrom.db.v1.Database.RestartRun:output_type -> cdrom.db.v1.RestartRunResponse
-	24,  // 393: cdrom.db.v1.Database.UpdateRun:output_type -> cdrom.db.v1.PipelineRun
-	39,  // 394: cdrom.db.v1.Database.ListPipelineVersions:output_type -> cdrom.db.v1.ListPipelineVersionsResponse
-	37,  // 395: cdrom.db.v1.Database.GetPipelineVersion:output_type -> cdrom.db.v1.PipelineVersion
-	48,  // 396: cdrom.db.v1.Database.CreateJob:output_type -> cdrom.db.v1.Job
-	48,  // 397: cdrom.db.v1.Database.GetJob:output_type -> cdrom.db.v1.Job
-	53,  // 398: cdrom.db.v1.Database.ListJobs:output_type -> cdrom.db.v1.ListJobsResponse
-	53,  // 399: cdrom.db.v1.Database.ListRetriableJobs:output_type -> cdrom.db.v1.ListJobsResponse
-	48,  // 400: cdrom.db.v1.Database.UpdateJob:output_type -> cdrom.db.v1.Job
-	273, // 401: cdrom.db.v1.Database.DeleteJob:output_type -> google.protobuf.Empty
-	95,  // 402: cdrom.db.v1.Database.ClaimJobRetry:output_type -> cdrom.db.v1.ClaimJobRetryResponse
-	48,  // 403: cdrom.db.v1.Database.RerunJob:output_type -> cdrom.db.v1.Job
-	57,  // 404: cdrom.db.v1.Database.ReapJob:output_type -> cdrom.db.v1.ReapJobResponse
-	59,  // 405: cdrom.db.v1.Database.CancelJob:output_type -> cdrom.db.v1.CancelJobResponse
-	61,  // 406: cdrom.db.v1.Database.SkipJob:output_type -> cdrom.db.v1.SkipJobResponse
-	63,  // 407: cdrom.db.v1.Database.ClaimJob:output_type -> cdrom.db.v1.ClaimJobResponse
-	53,  // 408: cdrom.db.v1.Database.ListPendingByGroup:output_type -> cdrom.db.v1.ListJobsResponse
-	67,  // 409: cdrom.db.v1.Database.StartJobExecution:output_type -> cdrom.db.v1.StartJobExecutionResponse
-	69,  // 410: cdrom.db.v1.Database.ListJobExecutions:output_type -> cdrom.db.v1.ListJobExecutionsResponse
-	65,  // 411: cdrom.db.v1.Database.UpdateJobExecution:output_type -> cdrom.db.v1.JobExecution
-	273, // 412: cdrom.db.v1.Database.AbandonWorkerExecutions:output_type -> google.protobuf.Empty
-	273, // 413: cdrom.db.v1.Database.ReportStepCompletion:output_type -> google.protobuf.Empty
-	75,  // 414: cdrom.db.v1.Database.CheckStepBarrier:output_type -> cdrom.db.v1.CheckStepBarrierResponse
-	77,  // 415: cdrom.db.v1.Database.ResolveApproval:output_type -> cdrom.db.v1.ResolveApprovalResponse
-	85,  // 416: cdrom.db.v1.Database.PublishAssignment:output_type -> cdrom.db.v1.PublishEventResponse
-	85,  // 417: cdrom.db.v1.Database.PublishCancel:output_type -> cdrom.db.v1.PublishEventResponse
-	85,  // 418: cdrom.db.v1.Database.PublishJobStatus:output_type -> cdrom.db.v1.PublishEventResponse
-	85,  // 419: cdrom.db.v1.Database.PublishRunStatus:output_type -> cdrom.db.v1.PublishEventResponse
-	85,  // 420: cdrom.db.v1.Database.PublishWorkerEvent:output_type -> cdrom.db.v1.PublishEventResponse
-	85,  // 421: cdrom.db.v1.Database.PublishLogUpdated:output_type -> cdrom.db.v1.PublishEventResponse
-	87,  // 422: cdrom.db.v1.Database.TailEvents:output_type -> cdrom.db.v1.TailEventsResponse
-	89,  // 423: cdrom.db.v1.Database.AcquireLease:output_type -> cdrom.db.v1.AcquireLeaseResponse
-	273, // 424: cdrom.db.v1.Database.ReleaseLease:output_type -> google.protobuf.Empty
-	92,  // 425: cdrom.db.v1.Database.GetLease:output_type -> cdrom.db.v1.Lease
-	97,  // 426: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
-	97,  // 427: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
-	101, // 428: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
-	97,  // 429: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
-	273, // 430: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
-	123, // 431: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
-	273, // 432: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
-	273, // 433: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
-	125, // 434: cdrom.db.v1.Database.ConsumeIDPAuthCode:output_type -> cdrom.db.v1.IDPAuthCode
-	273, // 435: cdrom.db.v1.Database.PruneIDPAuthCodes:output_type -> google.protobuf.Empty
-	129, // 436: cdrom.db.v1.Database.CreateUser:output_type -> cdrom.db.v1.IDPUser
-	129, // 437: cdrom.db.v1.Database.GetIDPUser:output_type -> cdrom.db.v1.IDPUser
-	133, // 438: cdrom.db.v1.Database.ListIDPUsers:output_type -> cdrom.db.v1.ListIDPUsersResponse
-	129, // 439: cdrom.db.v1.Database.UpdateIDPUser:output_type -> cdrom.db.v1.IDPUser
-	273, // 440: cdrom.db.v1.Database.DeleteIDPUser:output_type -> google.protobuf.Empty
-	136, // 441: cdrom.db.v1.Database.CreateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	136, // 442: cdrom.db.v1.Database.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	140, // 443: cdrom.db.v1.Database.ListAPIKeys:output_type -> cdrom.db.v1.ListIDPAPIKeysResponse
-	136, // 444: cdrom.db.v1.Database.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	136, // 445: cdrom.db.v1.Database.RotateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	273, // 446: cdrom.db.v1.Database.DeleteAPIKey:output_type -> google.protobuf.Empty
-	145, // 447: cdrom.db.v1.Database.VerifyAPIKey:output_type -> cdrom.db.v1.VerifyIDPAPIKeyResponse
-	273, // 448: cdrom.db.v1.Database.ResetAPIKeyLockout:output_type -> google.protobuf.Empty
-	148, // 449: cdrom.db.v1.Database.CreateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	148, // 450: cdrom.db.v1.Database.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	152, // 451: cdrom.db.v1.Database.ListServiceAccounts:output_type -> cdrom.db.v1.ListServiceAccountsResponse
-	148, // 452: cdrom.db.v1.Database.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	148, // 453: cdrom.db.v1.Database.RotateServiceAccountKey:output_type -> cdrom.db.v1.ServiceAccount
-	148, // 454: cdrom.db.v1.Database.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	148, // 455: cdrom.db.v1.Database.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	148, // 456: cdrom.db.v1.Database.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	148, // 457: cdrom.db.v1.Database.RecordServiceAccountKeyAttempt:output_type -> cdrom.db.v1.ServiceAccount
-	273, // 458: cdrom.db.v1.Database.ResetServiceAccountLockout:output_type -> google.protobuf.Empty
-	160, // 459: cdrom.db.v1.Database.NextSecretNonce:output_type -> cdrom.db.v1.NextSecretNonceResponse
-	162, // 460: cdrom.db.v1.Database.ClaimStepOnce:output_type -> cdrom.db.v1.ClaimStepOnceResponse
-	163, // 461: cdrom.db.v1.Database.CreateRole:output_type -> cdrom.db.v1.Role
-	163, // 462: cdrom.db.v1.Database.GetRole:output_type -> cdrom.db.v1.Role
-	167, // 463: cdrom.db.v1.Database.ListRoles:output_type -> cdrom.db.v1.ListRolesResponse
-	163, // 464: cdrom.db.v1.Database.UpdateRole:output_type -> cdrom.db.v1.Role
-	273, // 465: cdrom.db.v1.Database.DeleteRole:output_type -> google.protobuf.Empty
-	170, // 466: cdrom.db.v1.Database.AddRoleBinding:output_type -> cdrom.db.v1.RoleBinding
-	173, // 467: cdrom.db.v1.Database.ListRoleBindings:output_type -> cdrom.db.v1.ListRoleBindingsResponse
-	273, // 468: cdrom.db.v1.Database.DeleteRoleBinding:output_type -> google.protobuf.Empty
-	85,  // 469: cdrom.db.v1.Database.PublishRoleChange:output_type -> cdrom.db.v1.PublishEventResponse
-	176, // 470: cdrom.db.v1.Database.AppendAuditEvent:output_type -> cdrom.db.v1.AuditEvent
-	179, // 471: cdrom.db.v1.Database.ListAuditEvents:output_type -> cdrom.db.v1.ListAuditEventsResponse
-	181, // 472: cdrom.db.v1.Database.PruneAuditEvents:output_type -> cdrom.db.v1.PruneAuditEventsResponse
-	183, // 473: cdrom.db.v1.Database.AcquireJobSlots:output_type -> cdrom.db.v1.AcquireJobSlotsResponse
-	185, // 474: cdrom.db.v1.Database.ReleaseJobSlots:output_type -> cdrom.db.v1.ReleaseJobSlotsResponse
-	192, // 475: cdrom.db.v1.Database.GetQueueStatus:output_type -> cdrom.db.v1.QueueStatus
-	188, // 476: cdrom.db.v1.Database.ReconcileConcurrency:output_type -> cdrom.db.v1.ReconcileConcurrencyResponse
-	195, // 477: cdrom.db.v1.Database.ListConcurrencyLimits:output_type -> cdrom.db.v1.ListConcurrencyLimitsResponse
-	193, // 478: cdrom.db.v1.Database.CreateConcurrencyLimit:output_type -> cdrom.db.v1.ConcurrencyLimit
-	193, // 479: cdrom.db.v1.Database.UpdateConcurrencyLimit:output_type -> cdrom.db.v1.ConcurrencyLimit
-	273, // 480: cdrom.db.v1.Database.DeleteConcurrencyLimit:output_type -> google.protobuf.Empty
-	201, // 481: cdrom.db.v1.Database.ListSSHKnownHosts:output_type -> cdrom.db.v1.ListSSHKnownHostsResponse
-	199, // 482: cdrom.db.v1.Database.CreateSSHKnownHost:output_type -> cdrom.db.v1.SSHKnownHost
-	273, // 483: cdrom.db.v1.Database.DeleteSSHKnownHost:output_type -> google.protobuf.Empty
-	207, // 484: cdrom.db.v1.Database.ListSourceCredentials:output_type -> cdrom.db.v1.ListSourceCredentialsResponse
-	205, // 485: cdrom.db.v1.Database.CreateSourceCredential:output_type -> cdrom.db.v1.SourceCredential
-	205, // 486: cdrom.db.v1.Database.GetSourceCredential:output_type -> cdrom.db.v1.SourceCredential
-	205, // 487: cdrom.db.v1.Database.UpdateSourceCredential:output_type -> cdrom.db.v1.SourceCredential
-	273, // 488: cdrom.db.v1.Database.DeleteSourceCredential:output_type -> google.protobuf.Empty
-	212, // 489: cdrom.db.v1.Database.AttachPipelineSource:output_type -> cdrom.db.v1.PipelineSource
-	212, // 490: cdrom.db.v1.Database.GetPipelineSource:output_type -> cdrom.db.v1.PipelineSource
-	217, // 491: cdrom.db.v1.Database.ListPipelineSources:output_type -> cdrom.db.v1.ListPipelineSourcesResponse
-	219, // 492: cdrom.db.v1.Database.CountSourcesByCredential:output_type -> cdrom.db.v1.CountSourcesByCredentialResponse
-	213, // 493: cdrom.db.v1.Database.SetPipelineSourceState:output_type -> cdrom.db.v1.PipelineSourceState
-	213, // 494: cdrom.db.v1.Database.GetPipelineSourceState:output_type -> cdrom.db.v1.PipelineSourceState
-	273, // 495: cdrom.db.v1.Database.DetachPipelineSource:output_type -> google.protobuf.Empty
-	104, // 496: cdrom.db.v1.Database.CreateEnvironment:output_type -> cdrom.db.v1.Environment
-	104, // 497: cdrom.db.v1.Database.GetEnvironment:output_type -> cdrom.db.v1.Environment
-	108, // 498: cdrom.db.v1.Database.ListEnvironments:output_type -> cdrom.db.v1.ListEnvironmentsResponse
-	104, // 499: cdrom.db.v1.Database.UpdateEnvironment:output_type -> cdrom.db.v1.Environment
-	273, // 500: cdrom.db.v1.Database.DeleteEnvironment:output_type -> google.protobuf.Empty
-	101, // 501: cdrom.db.v1.Database.ListWorkersByEnvironment:output_type -> cdrom.db.v1.ListWorkersResponse
-	113, // 502: cdrom.db.v1.Database.ProceedJob:output_type -> cdrom.db.v1.ProceedJobResponse
-	114, // 503: cdrom.db.v1.Database.CreateWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
-	114, // 504: cdrom.db.v1.Database.GetWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
-	118, // 505: cdrom.db.v1.Database.ListWorkerGroups:output_type -> cdrom.db.v1.ListWorkerGroupsResponse
-	114, // 506: cdrom.db.v1.Database.UpdateWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
-	273, // 507: cdrom.db.v1.Database.DeleteWorkerGroup:output_type -> google.protobuf.Empty
-	223, // 508: cdrom.db.v1.Database.AllocateStorageObject:output_type -> cdrom.db.v1.StorageObject
-	223, // 509: cdrom.db.v1.Database.ConfirmStorageObject:output_type -> cdrom.db.v1.StorageObject
-	223, // 510: cdrom.db.v1.Database.GetStorageObject:output_type -> cdrom.db.v1.StorageObject
-	228, // 511: cdrom.db.v1.Database.ListStorageObjects:output_type -> cdrom.db.v1.ListStorageObjectsResponse
-	223, // 512: cdrom.db.v1.Database.TouchStorageObject:output_type -> cdrom.db.v1.StorageObject
-	223, // 513: cdrom.db.v1.Database.SyncLogSize:output_type -> cdrom.db.v1.StorageObject
-	273, // 514: cdrom.db.v1.Database.DeleteStorageObject:output_type -> google.protobuf.Empty
-	223, // 515: cdrom.db.v1.Database.ResolvePackageReference:output_type -> cdrom.db.v1.StorageObject
-	381, // [381:516] is the sub-list for method output_type
-	246, // [246:381] is the sub-list for method input_type
-	246, // [246:246] is the sub-list for extension type_name
-	246, // [246:246] is the sub-list for extension extendee
-	0,   // [0:246] is the sub-list for field type_name
+	289, // 216: cdrom.db.v1.ApprovalGroup.created_at:type_name -> google.protobuf.Timestamp
+	289, // 217: cdrom.db.v1.ApprovalGroup.updated_at:type_name -> google.protobuf.Timestamp
+	176, // 218: cdrom.db.v1.ListApprovalGroupsResponse.groups:type_name -> cdrom.db.v1.ApprovalGroup
+	289, // 219: cdrom.db.v1.ApprovalVote.at:type_name -> google.protobuf.Timestamp
+	191, // 220: cdrom.db.v1.CastApprovalVoteResponse.votes:type_name -> cdrom.db.v1.ApprovalVote
+	191, // 221: cdrom.db.v1.ListApprovalVotesResponse.votes:type_name -> cdrom.db.v1.ApprovalVote
+	289, // 222: cdrom.db.v1.AuditEvent.created_at:type_name -> google.protobuf.Timestamp
+	289, // 223: cdrom.db.v1.ListAuditEventsRequest.from:type_name -> google.protobuf.Timestamp
+	289, // 224: cdrom.db.v1.ListAuditEventsRequest.to:type_name -> google.protobuf.Timestamp
+	195, // 225: cdrom.db.v1.ListAuditEventsResponse.events:type_name -> cdrom.db.v1.AuditEvent
+	289, // 226: cdrom.db.v1.PruneAuditEventsRequest.created_before:type_name -> google.protobuf.Timestamp
+	289, // 227: cdrom.db.v1.QueuePendingJob.created_at:type_name -> google.protobuf.Timestamp
+	208, // 228: cdrom.db.v1.QueueStatus.pending:type_name -> cdrom.db.v1.QueuePendingJob
+	209, // 229: cdrom.db.v1.QueueStatus.groups:type_name -> cdrom.db.v1.QueueGroupLoad
+	210, // 230: cdrom.db.v1.QueueStatus.keys:type_name -> cdrom.db.v1.QueueKeyLoad
+	289, // 231: cdrom.db.v1.ConcurrencyLimit.created_at:type_name -> google.protobuf.Timestamp
+	289, // 232: cdrom.db.v1.ConcurrencyLimit.updated_at:type_name -> google.protobuf.Timestamp
+	212, // 233: cdrom.db.v1.ListConcurrencyLimitsResponse.limits:type_name -> cdrom.db.v1.ConcurrencyLimit
+	289, // 234: cdrom.db.v1.SSHKnownHost.created_at:type_name -> google.protobuf.Timestamp
+	289, // 235: cdrom.db.v1.SSHKnownHost.updated_at:type_name -> google.protobuf.Timestamp
+	218, // 236: cdrom.db.v1.ListSSHKnownHostsResponse.hosts:type_name -> cdrom.db.v1.SSHKnownHost
+	223, // 237: cdrom.db.v1.SourceCredential.headers:type_name -> cdrom.db.v1.HTTPHeader
+	289, // 238: cdrom.db.v1.SourceCredential.created_at:type_name -> google.protobuf.Timestamp
+	289, // 239: cdrom.db.v1.SourceCredential.updated_at:type_name -> google.protobuf.Timestamp
+	224, // 240: cdrom.db.v1.ListSourceCredentialsResponse.credentials:type_name -> cdrom.db.v1.SourceCredential
+	223, // 241: cdrom.db.v1.CreateSourceCredentialRequest.headers:type_name -> cdrom.db.v1.HTTPHeader
+	223, // 242: cdrom.db.v1.UpdateSourceCredentialRequest.headers:type_name -> cdrom.db.v1.HTTPHeader
+	289, // 243: cdrom.db.v1.PipelineSource.created_at:type_name -> google.protobuf.Timestamp
+	289, // 244: cdrom.db.v1.PipelineSource.updated_at:type_name -> google.protobuf.Timestamp
+	289, // 245: cdrom.db.v1.PipelineSourceState.last_synced_at:type_name -> google.protobuf.Timestamp
+	231, // 246: cdrom.db.v1.ListPipelineSourcesResponse.sources:type_name -> cdrom.db.v1.PipelineSource
+	289, // 247: cdrom.db.v1.SetPipelineSourceStateRequest.last_synced_at:type_name -> google.protobuf.Timestamp
+	289, // 248: cdrom.db.v1.StorageObject.created_at:type_name -> google.protobuf.Timestamp
+	289, // 249: cdrom.db.v1.StorageObject.last_downloaded_at:type_name -> google.protobuf.Timestamp
+	242, // 250: cdrom.db.v1.ListStorageObjectsResponse.objects:type_name -> cdrom.db.v1.StorageObject
+	44,  // 251: cdrom.db.v1.JobStep.ParamsEntry.value:type_name -> cdrom.db.v1.ParamValue
+	18,  // 252: cdrom.db.v1.Database.CreatePipeline:input_type -> cdrom.db.v1.CreatePipelineRequest
+	19,  // 253: cdrom.db.v1.Database.GetPipeline:input_type -> cdrom.db.v1.GetPipelineRequest
+	20,  // 254: cdrom.db.v1.Database.ListPipelines:input_type -> cdrom.db.v1.ListPipelinesRequest
+	22,  // 255: cdrom.db.v1.Database.UpdatePipeline:input_type -> cdrom.db.v1.UpdatePipelineRequest
+	23,  // 256: cdrom.db.v1.Database.DeletePipeline:input_type -> cdrom.db.v1.DeletePipelineRequest
+	31,  // 257: cdrom.db.v1.Database.TriggerRun:input_type -> cdrom.db.v1.TriggerRunRequest
+	29,  // 258: cdrom.db.v1.Database.CreateRun:input_type -> cdrom.db.v1.CreateRunRequest
+	33,  // 259: cdrom.db.v1.Database.GetRun:input_type -> cdrom.db.v1.GetRunRequest
+	34,  // 260: cdrom.db.v1.Database.ListRuns:input_type -> cdrom.db.v1.ListRunsRequest
+	25,  // 261: cdrom.db.v1.Database.PreviousSuccessfulRun:input_type -> cdrom.db.v1.PreviousSuccessfulRunRequest
+	26,  // 262: cdrom.db.v1.Database.LatestRollbackRun:input_type -> cdrom.db.v1.LatestRollbackRunRequest
+	27,  // 263: cdrom.db.v1.Database.RestartRun:input_type -> cdrom.db.v1.RestartRunRequest
+	36,  // 264: cdrom.db.v1.Database.UpdateRun:input_type -> cdrom.db.v1.UpdateRunRequest
+	38,  // 265: cdrom.db.v1.Database.ListPipelineVersions:input_type -> cdrom.db.v1.ListPipelineVersionsRequest
+	40,  // 266: cdrom.db.v1.Database.GetPipelineVersion:input_type -> cdrom.db.v1.GetPipelineVersionRequest
+	50,  // 267: cdrom.db.v1.Database.CreateJob:input_type -> cdrom.db.v1.CreateJobRequest
+	51,  // 268: cdrom.db.v1.Database.GetJob:input_type -> cdrom.db.v1.GetJobRequest
+	52,  // 269: cdrom.db.v1.Database.ListJobs:input_type -> cdrom.db.v1.ListJobsRequest
+	54,  // 270: cdrom.db.v1.Database.ListRetriableJobs:input_type -> cdrom.db.v1.ListRetriableJobsRequest
+	55,  // 271: cdrom.db.v1.Database.UpdateJob:input_type -> cdrom.db.v1.UpdateJobRequest
+	96,  // 272: cdrom.db.v1.Database.DeleteJob:input_type -> cdrom.db.v1.DeleteJobRequest
+	93,  // 273: cdrom.db.v1.Database.ClaimJobRetry:input_type -> cdrom.db.v1.ClaimJobRetryRequest
+	94,  // 274: cdrom.db.v1.Database.RerunJob:input_type -> cdrom.db.v1.RerunJobRequest
+	56,  // 275: cdrom.db.v1.Database.ReapJob:input_type -> cdrom.db.v1.ReapJobRequest
+	58,  // 276: cdrom.db.v1.Database.CancelJob:input_type -> cdrom.db.v1.CancelJobRequest
+	60,  // 277: cdrom.db.v1.Database.SkipJob:input_type -> cdrom.db.v1.SkipJobRequest
+	62,  // 278: cdrom.db.v1.Database.ClaimJob:input_type -> cdrom.db.v1.ClaimJobRequest
+	64,  // 279: cdrom.db.v1.Database.ListPendingByGroup:input_type -> cdrom.db.v1.ListPendingByGroupRequest
+	66,  // 280: cdrom.db.v1.Database.StartJobExecution:input_type -> cdrom.db.v1.StartJobExecutionRequest
+	68,  // 281: cdrom.db.v1.Database.ListJobExecutions:input_type -> cdrom.db.v1.ListJobExecutionsRequest
+	70,  // 282: cdrom.db.v1.Database.UpdateJobExecution:input_type -> cdrom.db.v1.UpdateJobExecutionRequest
+	71,  // 283: cdrom.db.v1.Database.AbandonWorkerExecutions:input_type -> cdrom.db.v1.AbandonWorkerExecutionsRequest
+	73,  // 284: cdrom.db.v1.Database.ReportStepCompletion:input_type -> cdrom.db.v1.ReportStepCompletionRequest
+	74,  // 285: cdrom.db.v1.Database.CheckStepBarrier:input_type -> cdrom.db.v1.CheckStepBarrierRequest
+	76,  // 286: cdrom.db.v1.Database.ResolveApproval:input_type -> cdrom.db.v1.ResolveApprovalRequest
+	79,  // 287: cdrom.db.v1.Database.PublishAssignment:input_type -> cdrom.db.v1.PublishAssignmentRequest
+	80,  // 288: cdrom.db.v1.Database.PublishCancel:input_type -> cdrom.db.v1.PublishCancelRequest
+	81,  // 289: cdrom.db.v1.Database.PublishJobStatus:input_type -> cdrom.db.v1.PublishJobStatusRequest
+	82,  // 290: cdrom.db.v1.Database.PublishRunStatus:input_type -> cdrom.db.v1.PublishRunStatusRequest
+	83,  // 291: cdrom.db.v1.Database.PublishWorkerEvent:input_type -> cdrom.db.v1.PublishWorkerEventRequest
+	84,  // 292: cdrom.db.v1.Database.PublishLogUpdated:input_type -> cdrom.db.v1.PublishLogUpdatedRequest
+	86,  // 293: cdrom.db.v1.Database.TailEvents:input_type -> cdrom.db.v1.TailEventsRequest
+	88,  // 294: cdrom.db.v1.Database.AcquireLease:input_type -> cdrom.db.v1.AcquireLeaseRequest
+	90,  // 295: cdrom.db.v1.Database.ReleaseLease:input_type -> cdrom.db.v1.ReleaseLeaseRequest
+	91,  // 296: cdrom.db.v1.Database.GetLease:input_type -> cdrom.db.v1.GetLeaseRequest
+	98,  // 297: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
+	99,  // 298: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
+	100, // 299: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
+	102, // 300: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
+	103, // 301: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
+	122, // 302: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
+	124, // 303: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
+	126, // 304: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
+	127, // 305: cdrom.db.v1.Database.ConsumeIDPAuthCode:input_type -> cdrom.db.v1.ConsumeIDPAuthCodeRequest
+	128, // 306: cdrom.db.v1.Database.PruneIDPAuthCodes:input_type -> cdrom.db.v1.PruneIDPAuthCodesRequest
+	130, // 307: cdrom.db.v1.Database.CreateUser:input_type -> cdrom.db.v1.CreateIDPUserRequest
+	131, // 308: cdrom.db.v1.Database.GetIDPUser:input_type -> cdrom.db.v1.GetIDPUserRequest
+	132, // 309: cdrom.db.v1.Database.ListIDPUsers:input_type -> cdrom.db.v1.ListIDPUsersRequest
+	134, // 310: cdrom.db.v1.Database.UpdateIDPUser:input_type -> cdrom.db.v1.UpdateIDPUserRequest
+	135, // 311: cdrom.db.v1.Database.DeleteIDPUser:input_type -> cdrom.db.v1.DeleteIDPUserRequest
+	137, // 312: cdrom.db.v1.Database.CreateAPIKey:input_type -> cdrom.db.v1.CreateIDPAPIKeyRequest
+	138, // 313: cdrom.db.v1.Database.GetAPIKey:input_type -> cdrom.db.v1.GetIDPAPIKeyRequest
+	139, // 314: cdrom.db.v1.Database.ListAPIKeys:input_type -> cdrom.db.v1.ListIDPAPIKeysRequest
+	141, // 315: cdrom.db.v1.Database.UpdateAPIKey:input_type -> cdrom.db.v1.UpdateIDPAPIKeyRequest
+	142, // 316: cdrom.db.v1.Database.RotateAPIKey:input_type -> cdrom.db.v1.RotateIDPAPIKeyRequest
+	143, // 317: cdrom.db.v1.Database.DeleteAPIKey:input_type -> cdrom.db.v1.DeleteIDPAPIKeyRequest
+	144, // 318: cdrom.db.v1.Database.VerifyAPIKey:input_type -> cdrom.db.v1.VerifyIDPAPIKeyRequest
+	146, // 319: cdrom.db.v1.Database.ResetAPIKeyLockout:input_type -> cdrom.db.v1.ResetIDPAPIKeyLockoutRequest
+	149, // 320: cdrom.db.v1.Database.CreateServiceAccount:input_type -> cdrom.db.v1.CreateServiceAccountRequest
+	150, // 321: cdrom.db.v1.Database.GetServiceAccount:input_type -> cdrom.db.v1.GetServiceAccountRequest
+	151, // 322: cdrom.db.v1.Database.ListServiceAccounts:input_type -> cdrom.db.v1.ListServiceAccountsRequest
+	153, // 323: cdrom.db.v1.Database.UpdateServiceAccount:input_type -> cdrom.db.v1.UpdateServiceAccountRequest
+	154, // 324: cdrom.db.v1.Database.RotateServiceAccountKey:input_type -> cdrom.db.v1.RotateServiceAccountKeyRequest
+	155, // 325: cdrom.db.v1.Database.DisableServiceAccount:input_type -> cdrom.db.v1.ServiceAccountStateRequest
+	155, // 326: cdrom.db.v1.Database.EnableServiceAccount:input_type -> cdrom.db.v1.ServiceAccountStateRequest
+	156, // 327: cdrom.db.v1.Database.DeleteServiceAccount:input_type -> cdrom.db.v1.DeleteServiceAccountRequest
+	157, // 328: cdrom.db.v1.Database.RecordServiceAccountKeyAttempt:input_type -> cdrom.db.v1.RecordServiceAccountKeyAttemptRequest
+	158, // 329: cdrom.db.v1.Database.ResetServiceAccountLockout:input_type -> cdrom.db.v1.ResetServiceAccountLockoutRequest
+	159, // 330: cdrom.db.v1.Database.NextSecretNonce:input_type -> cdrom.db.v1.NextSecretNonceRequest
+	161, // 331: cdrom.db.v1.Database.ClaimStepOnce:input_type -> cdrom.db.v1.ClaimStepOnceRequest
+	164, // 332: cdrom.db.v1.Database.CreateRole:input_type -> cdrom.db.v1.CreateRoleRequest
+	165, // 333: cdrom.db.v1.Database.GetRole:input_type -> cdrom.db.v1.GetRoleRequest
+	166, // 334: cdrom.db.v1.Database.ListRoles:input_type -> cdrom.db.v1.ListRolesRequest
+	168, // 335: cdrom.db.v1.Database.UpdateRole:input_type -> cdrom.db.v1.UpdateRoleRequest
+	169, // 336: cdrom.db.v1.Database.DeleteRole:input_type -> cdrom.db.v1.DeleteRoleRequest
+	171, // 337: cdrom.db.v1.Database.AddRoleBinding:input_type -> cdrom.db.v1.AddRoleBindingRequest
+	172, // 338: cdrom.db.v1.Database.ListRoleBindings:input_type -> cdrom.db.v1.ListRoleBindingsRequest
+	174, // 339: cdrom.db.v1.Database.DeleteRoleBinding:input_type -> cdrom.db.v1.DeleteRoleBindingRequest
+	175, // 340: cdrom.db.v1.Database.PublishRoleChange:input_type -> cdrom.db.v1.PublishRoleChangeRequest
+	177, // 341: cdrom.db.v1.Database.CreateApprovalGroup:input_type -> cdrom.db.v1.CreateApprovalGroupRequest
+	178, // 342: cdrom.db.v1.Database.GetApprovalGroup:input_type -> cdrom.db.v1.GetApprovalGroupRequest
+	179, // 343: cdrom.db.v1.Database.ListApprovalGroups:input_type -> cdrom.db.v1.ListApprovalGroupsRequest
+	181, // 344: cdrom.db.v1.Database.UpdateApprovalGroup:input_type -> cdrom.db.v1.UpdateApprovalGroupRequest
+	182, // 345: cdrom.db.v1.Database.DeleteApprovalGroup:input_type -> cdrom.db.v1.DeleteApprovalGroupRequest
+	183, // 346: cdrom.db.v1.Database.AddApprovalGroupMember:input_type -> cdrom.db.v1.AddApprovalGroupMemberRequest
+	184, // 347: cdrom.db.v1.Database.RemoveApprovalGroupMember:input_type -> cdrom.db.v1.RemoveApprovalGroupMemberRequest
+	185, // 348: cdrom.db.v1.Database.EffectiveApprovalGroupMembers:input_type -> cdrom.db.v1.EffectiveApprovalGroupMembersRequest
+	187, // 349: cdrom.db.v1.Database.RecordObservedClaim:input_type -> cdrom.db.v1.RecordObservedClaimRequest
+	188, // 350: cdrom.db.v1.Database.ObservedClaimsFor:input_type -> cdrom.db.v1.ObservedClaimsForRequest
+	190, // 351: cdrom.db.v1.Database.CastApprovalVote:input_type -> cdrom.db.v1.CastApprovalVoteRequest
+	193, // 352: cdrom.db.v1.Database.ListApprovalVotes:input_type -> cdrom.db.v1.ListApprovalVotesRequest
+	196, // 353: cdrom.db.v1.Database.AppendAuditEvent:input_type -> cdrom.db.v1.AppendAuditEventRequest
+	197, // 354: cdrom.db.v1.Database.ListAuditEvents:input_type -> cdrom.db.v1.ListAuditEventsRequest
+	199, // 355: cdrom.db.v1.Database.PruneAuditEvents:input_type -> cdrom.db.v1.PruneAuditEventsRequest
+	201, // 356: cdrom.db.v1.Database.AcquireJobSlots:input_type -> cdrom.db.v1.AcquireJobSlotsRequest
+	203, // 357: cdrom.db.v1.Database.ReleaseJobSlots:input_type -> cdrom.db.v1.ReleaseJobSlotsRequest
+	205, // 358: cdrom.db.v1.Database.GetQueueStatus:input_type -> cdrom.db.v1.GetQueueStatusRequest
+	206, // 359: cdrom.db.v1.Database.ReconcileConcurrency:input_type -> cdrom.db.v1.ReconcileConcurrencyRequest
+	213, // 360: cdrom.db.v1.Database.ListConcurrencyLimits:input_type -> cdrom.db.v1.ListConcurrencyLimitsRequest
+	215, // 361: cdrom.db.v1.Database.CreateConcurrencyLimit:input_type -> cdrom.db.v1.CreateConcurrencyLimitRequest
+	216, // 362: cdrom.db.v1.Database.UpdateConcurrencyLimit:input_type -> cdrom.db.v1.UpdateConcurrencyLimitRequest
+	217, // 363: cdrom.db.v1.Database.DeleteConcurrencyLimit:input_type -> cdrom.db.v1.DeleteConcurrencyLimitRequest
+	219, // 364: cdrom.db.v1.Database.ListSSHKnownHosts:input_type -> cdrom.db.v1.ListSSHKnownHostsRequest
+	221, // 365: cdrom.db.v1.Database.CreateSSHKnownHost:input_type -> cdrom.db.v1.CreateSSHKnownHostRequest
+	222, // 366: cdrom.db.v1.Database.DeleteSSHKnownHost:input_type -> cdrom.db.v1.DeleteSSHKnownHostRequest
+	225, // 367: cdrom.db.v1.Database.ListSourceCredentials:input_type -> cdrom.db.v1.ListSourceCredentialsRequest
+	227, // 368: cdrom.db.v1.Database.CreateSourceCredential:input_type -> cdrom.db.v1.CreateSourceCredentialRequest
+	228, // 369: cdrom.db.v1.Database.GetSourceCredential:input_type -> cdrom.db.v1.GetSourceCredentialRequest
+	229, // 370: cdrom.db.v1.Database.UpdateSourceCredential:input_type -> cdrom.db.v1.UpdateSourceCredentialRequest
+	230, // 371: cdrom.db.v1.Database.DeleteSourceCredential:input_type -> cdrom.db.v1.DeleteSourceCredentialRequest
+	233, // 372: cdrom.db.v1.Database.AttachPipelineSource:input_type -> cdrom.db.v1.AttachPipelineSourceRequest
+	234, // 373: cdrom.db.v1.Database.GetPipelineSource:input_type -> cdrom.db.v1.GetPipelineSourceRequest
+	235, // 374: cdrom.db.v1.Database.ListPipelineSources:input_type -> cdrom.db.v1.ListPipelineSourcesRequest
+	237, // 375: cdrom.db.v1.Database.CountSourcesByCredential:input_type -> cdrom.db.v1.CountSourcesByCredentialRequest
+	241, // 376: cdrom.db.v1.Database.SetPipelineSourceState:input_type -> cdrom.db.v1.SetPipelineSourceStateRequest
+	239, // 377: cdrom.db.v1.Database.GetPipelineSourceState:input_type -> cdrom.db.v1.GetPipelineSourceStateRequest
+	240, // 378: cdrom.db.v1.Database.DetachPipelineSource:input_type -> cdrom.db.v1.DetachPipelineSourceRequest
+	105, // 379: cdrom.db.v1.Database.CreateEnvironment:input_type -> cdrom.db.v1.CreateEnvironmentRequest
+	106, // 380: cdrom.db.v1.Database.GetEnvironment:input_type -> cdrom.db.v1.GetEnvironmentRequest
+	107, // 381: cdrom.db.v1.Database.ListEnvironments:input_type -> cdrom.db.v1.ListEnvironmentsRequest
+	109, // 382: cdrom.db.v1.Database.UpdateEnvironment:input_type -> cdrom.db.v1.UpdateEnvironmentRequest
+	110, // 383: cdrom.db.v1.Database.DeleteEnvironment:input_type -> cdrom.db.v1.DeleteEnvironmentRequest
+	111, // 384: cdrom.db.v1.Database.ListWorkersByEnvironment:input_type -> cdrom.db.v1.ListWorkersByEnvironmentRequest
+	112, // 385: cdrom.db.v1.Database.ProceedJob:input_type -> cdrom.db.v1.ProceedJobRequest
+	115, // 386: cdrom.db.v1.Database.CreateWorkerGroup:input_type -> cdrom.db.v1.CreateWorkerGroupRequest
+	116, // 387: cdrom.db.v1.Database.GetWorkerGroup:input_type -> cdrom.db.v1.GetWorkerGroupRequest
+	117, // 388: cdrom.db.v1.Database.ListWorkerGroups:input_type -> cdrom.db.v1.ListWorkerGroupsRequest
+	119, // 389: cdrom.db.v1.Database.UpdateWorkerGroup:input_type -> cdrom.db.v1.UpdateWorkerGroupRequest
+	120, // 390: cdrom.db.v1.Database.DeleteWorkerGroup:input_type -> cdrom.db.v1.DeleteWorkerGroupRequest
+	243, // 391: cdrom.db.v1.Database.AllocateStorageObject:input_type -> cdrom.db.v1.AllocateStorageObjectRequest
+	244, // 392: cdrom.db.v1.Database.ConfirmStorageObject:input_type -> cdrom.db.v1.ConfirmStorageObjectRequest
+	245, // 393: cdrom.db.v1.Database.GetStorageObject:input_type -> cdrom.db.v1.GetStorageObjectRequest
+	246, // 394: cdrom.db.v1.Database.ListStorageObjects:input_type -> cdrom.db.v1.ListStorageObjectsRequest
+	248, // 395: cdrom.db.v1.Database.TouchStorageObject:input_type -> cdrom.db.v1.TouchStorageObjectRequest
+	249, // 396: cdrom.db.v1.Database.SyncLogSize:input_type -> cdrom.db.v1.SyncLogSizeRequest
+	250, // 397: cdrom.db.v1.Database.DeleteStorageObject:input_type -> cdrom.db.v1.DeleteStorageObjectRequest
+	251, // 398: cdrom.db.v1.Database.ResolvePackageReference:input_type -> cdrom.db.v1.ResolvePackageReferenceRequest
+	16,  // 399: cdrom.db.v1.Database.CreatePipeline:output_type -> cdrom.db.v1.Pipeline
+	16,  // 400: cdrom.db.v1.Database.GetPipeline:output_type -> cdrom.db.v1.Pipeline
+	21,  // 401: cdrom.db.v1.Database.ListPipelines:output_type -> cdrom.db.v1.ListPipelinesResponse
+	16,  // 402: cdrom.db.v1.Database.UpdatePipeline:output_type -> cdrom.db.v1.Pipeline
+	292, // 403: cdrom.db.v1.Database.DeletePipeline:output_type -> google.protobuf.Empty
+	32,  // 404: cdrom.db.v1.Database.TriggerRun:output_type -> cdrom.db.v1.TriggerRunResponse
+	30,  // 405: cdrom.db.v1.Database.CreateRun:output_type -> cdrom.db.v1.CreateRunResponse
+	24,  // 406: cdrom.db.v1.Database.GetRun:output_type -> cdrom.db.v1.PipelineRun
+	35,  // 407: cdrom.db.v1.Database.ListRuns:output_type -> cdrom.db.v1.ListRunsResponse
+	24,  // 408: cdrom.db.v1.Database.PreviousSuccessfulRun:output_type -> cdrom.db.v1.PipelineRun
+	24,  // 409: cdrom.db.v1.Database.LatestRollbackRun:output_type -> cdrom.db.v1.PipelineRun
+	28,  // 410: cdrom.db.v1.Database.RestartRun:output_type -> cdrom.db.v1.RestartRunResponse
+	24,  // 411: cdrom.db.v1.Database.UpdateRun:output_type -> cdrom.db.v1.PipelineRun
+	39,  // 412: cdrom.db.v1.Database.ListPipelineVersions:output_type -> cdrom.db.v1.ListPipelineVersionsResponse
+	37,  // 413: cdrom.db.v1.Database.GetPipelineVersion:output_type -> cdrom.db.v1.PipelineVersion
+	48,  // 414: cdrom.db.v1.Database.CreateJob:output_type -> cdrom.db.v1.Job
+	48,  // 415: cdrom.db.v1.Database.GetJob:output_type -> cdrom.db.v1.Job
+	53,  // 416: cdrom.db.v1.Database.ListJobs:output_type -> cdrom.db.v1.ListJobsResponse
+	53,  // 417: cdrom.db.v1.Database.ListRetriableJobs:output_type -> cdrom.db.v1.ListJobsResponse
+	48,  // 418: cdrom.db.v1.Database.UpdateJob:output_type -> cdrom.db.v1.Job
+	292, // 419: cdrom.db.v1.Database.DeleteJob:output_type -> google.protobuf.Empty
+	95,  // 420: cdrom.db.v1.Database.ClaimJobRetry:output_type -> cdrom.db.v1.ClaimJobRetryResponse
+	48,  // 421: cdrom.db.v1.Database.RerunJob:output_type -> cdrom.db.v1.Job
+	57,  // 422: cdrom.db.v1.Database.ReapJob:output_type -> cdrom.db.v1.ReapJobResponse
+	59,  // 423: cdrom.db.v1.Database.CancelJob:output_type -> cdrom.db.v1.CancelJobResponse
+	61,  // 424: cdrom.db.v1.Database.SkipJob:output_type -> cdrom.db.v1.SkipJobResponse
+	63,  // 425: cdrom.db.v1.Database.ClaimJob:output_type -> cdrom.db.v1.ClaimJobResponse
+	53,  // 426: cdrom.db.v1.Database.ListPendingByGroup:output_type -> cdrom.db.v1.ListJobsResponse
+	67,  // 427: cdrom.db.v1.Database.StartJobExecution:output_type -> cdrom.db.v1.StartJobExecutionResponse
+	69,  // 428: cdrom.db.v1.Database.ListJobExecutions:output_type -> cdrom.db.v1.ListJobExecutionsResponse
+	65,  // 429: cdrom.db.v1.Database.UpdateJobExecution:output_type -> cdrom.db.v1.JobExecution
+	292, // 430: cdrom.db.v1.Database.AbandonWorkerExecutions:output_type -> google.protobuf.Empty
+	292, // 431: cdrom.db.v1.Database.ReportStepCompletion:output_type -> google.protobuf.Empty
+	75,  // 432: cdrom.db.v1.Database.CheckStepBarrier:output_type -> cdrom.db.v1.CheckStepBarrierResponse
+	77,  // 433: cdrom.db.v1.Database.ResolveApproval:output_type -> cdrom.db.v1.ResolveApprovalResponse
+	85,  // 434: cdrom.db.v1.Database.PublishAssignment:output_type -> cdrom.db.v1.PublishEventResponse
+	85,  // 435: cdrom.db.v1.Database.PublishCancel:output_type -> cdrom.db.v1.PublishEventResponse
+	85,  // 436: cdrom.db.v1.Database.PublishJobStatus:output_type -> cdrom.db.v1.PublishEventResponse
+	85,  // 437: cdrom.db.v1.Database.PublishRunStatus:output_type -> cdrom.db.v1.PublishEventResponse
+	85,  // 438: cdrom.db.v1.Database.PublishWorkerEvent:output_type -> cdrom.db.v1.PublishEventResponse
+	85,  // 439: cdrom.db.v1.Database.PublishLogUpdated:output_type -> cdrom.db.v1.PublishEventResponse
+	87,  // 440: cdrom.db.v1.Database.TailEvents:output_type -> cdrom.db.v1.TailEventsResponse
+	89,  // 441: cdrom.db.v1.Database.AcquireLease:output_type -> cdrom.db.v1.AcquireLeaseResponse
+	292, // 442: cdrom.db.v1.Database.ReleaseLease:output_type -> google.protobuf.Empty
+	92,  // 443: cdrom.db.v1.Database.GetLease:output_type -> cdrom.db.v1.Lease
+	97,  // 444: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
+	97,  // 445: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
+	101, // 446: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
+	97,  // 447: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
+	292, // 448: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
+	123, // 449: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
+	292, // 450: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
+	292, // 451: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
+	125, // 452: cdrom.db.v1.Database.ConsumeIDPAuthCode:output_type -> cdrom.db.v1.IDPAuthCode
+	292, // 453: cdrom.db.v1.Database.PruneIDPAuthCodes:output_type -> google.protobuf.Empty
+	129, // 454: cdrom.db.v1.Database.CreateUser:output_type -> cdrom.db.v1.IDPUser
+	129, // 455: cdrom.db.v1.Database.GetIDPUser:output_type -> cdrom.db.v1.IDPUser
+	133, // 456: cdrom.db.v1.Database.ListIDPUsers:output_type -> cdrom.db.v1.ListIDPUsersResponse
+	129, // 457: cdrom.db.v1.Database.UpdateIDPUser:output_type -> cdrom.db.v1.IDPUser
+	292, // 458: cdrom.db.v1.Database.DeleteIDPUser:output_type -> google.protobuf.Empty
+	136, // 459: cdrom.db.v1.Database.CreateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	136, // 460: cdrom.db.v1.Database.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	140, // 461: cdrom.db.v1.Database.ListAPIKeys:output_type -> cdrom.db.v1.ListIDPAPIKeysResponse
+	136, // 462: cdrom.db.v1.Database.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	136, // 463: cdrom.db.v1.Database.RotateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	292, // 464: cdrom.db.v1.Database.DeleteAPIKey:output_type -> google.protobuf.Empty
+	145, // 465: cdrom.db.v1.Database.VerifyAPIKey:output_type -> cdrom.db.v1.VerifyIDPAPIKeyResponse
+	292, // 466: cdrom.db.v1.Database.ResetAPIKeyLockout:output_type -> google.protobuf.Empty
+	148, // 467: cdrom.db.v1.Database.CreateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	148, // 468: cdrom.db.v1.Database.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	152, // 469: cdrom.db.v1.Database.ListServiceAccounts:output_type -> cdrom.db.v1.ListServiceAccountsResponse
+	148, // 470: cdrom.db.v1.Database.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	148, // 471: cdrom.db.v1.Database.RotateServiceAccountKey:output_type -> cdrom.db.v1.ServiceAccount
+	148, // 472: cdrom.db.v1.Database.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	148, // 473: cdrom.db.v1.Database.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	148, // 474: cdrom.db.v1.Database.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	148, // 475: cdrom.db.v1.Database.RecordServiceAccountKeyAttempt:output_type -> cdrom.db.v1.ServiceAccount
+	292, // 476: cdrom.db.v1.Database.ResetServiceAccountLockout:output_type -> google.protobuf.Empty
+	160, // 477: cdrom.db.v1.Database.NextSecretNonce:output_type -> cdrom.db.v1.NextSecretNonceResponse
+	162, // 478: cdrom.db.v1.Database.ClaimStepOnce:output_type -> cdrom.db.v1.ClaimStepOnceResponse
+	163, // 479: cdrom.db.v1.Database.CreateRole:output_type -> cdrom.db.v1.Role
+	163, // 480: cdrom.db.v1.Database.GetRole:output_type -> cdrom.db.v1.Role
+	167, // 481: cdrom.db.v1.Database.ListRoles:output_type -> cdrom.db.v1.ListRolesResponse
+	163, // 482: cdrom.db.v1.Database.UpdateRole:output_type -> cdrom.db.v1.Role
+	292, // 483: cdrom.db.v1.Database.DeleteRole:output_type -> google.protobuf.Empty
+	170, // 484: cdrom.db.v1.Database.AddRoleBinding:output_type -> cdrom.db.v1.RoleBinding
+	173, // 485: cdrom.db.v1.Database.ListRoleBindings:output_type -> cdrom.db.v1.ListRoleBindingsResponse
+	292, // 486: cdrom.db.v1.Database.DeleteRoleBinding:output_type -> google.protobuf.Empty
+	85,  // 487: cdrom.db.v1.Database.PublishRoleChange:output_type -> cdrom.db.v1.PublishEventResponse
+	176, // 488: cdrom.db.v1.Database.CreateApprovalGroup:output_type -> cdrom.db.v1.ApprovalGroup
+	176, // 489: cdrom.db.v1.Database.GetApprovalGroup:output_type -> cdrom.db.v1.ApprovalGroup
+	180, // 490: cdrom.db.v1.Database.ListApprovalGroups:output_type -> cdrom.db.v1.ListApprovalGroupsResponse
+	176, // 491: cdrom.db.v1.Database.UpdateApprovalGroup:output_type -> cdrom.db.v1.ApprovalGroup
+	292, // 492: cdrom.db.v1.Database.DeleteApprovalGroup:output_type -> google.protobuf.Empty
+	176, // 493: cdrom.db.v1.Database.AddApprovalGroupMember:output_type -> cdrom.db.v1.ApprovalGroup
+	176, // 494: cdrom.db.v1.Database.RemoveApprovalGroupMember:output_type -> cdrom.db.v1.ApprovalGroup
+	186, // 495: cdrom.db.v1.Database.EffectiveApprovalGroupMembers:output_type -> cdrom.db.v1.EffectiveApprovalGroupMembersResponse
+	292, // 496: cdrom.db.v1.Database.RecordObservedClaim:output_type -> google.protobuf.Empty
+	189, // 497: cdrom.db.v1.Database.ObservedClaimsFor:output_type -> cdrom.db.v1.ObservedClaimsForResponse
+	192, // 498: cdrom.db.v1.Database.CastApprovalVote:output_type -> cdrom.db.v1.CastApprovalVoteResponse
+	194, // 499: cdrom.db.v1.Database.ListApprovalVotes:output_type -> cdrom.db.v1.ListApprovalVotesResponse
+	195, // 500: cdrom.db.v1.Database.AppendAuditEvent:output_type -> cdrom.db.v1.AuditEvent
+	198, // 501: cdrom.db.v1.Database.ListAuditEvents:output_type -> cdrom.db.v1.ListAuditEventsResponse
+	200, // 502: cdrom.db.v1.Database.PruneAuditEvents:output_type -> cdrom.db.v1.PruneAuditEventsResponse
+	202, // 503: cdrom.db.v1.Database.AcquireJobSlots:output_type -> cdrom.db.v1.AcquireJobSlotsResponse
+	204, // 504: cdrom.db.v1.Database.ReleaseJobSlots:output_type -> cdrom.db.v1.ReleaseJobSlotsResponse
+	211, // 505: cdrom.db.v1.Database.GetQueueStatus:output_type -> cdrom.db.v1.QueueStatus
+	207, // 506: cdrom.db.v1.Database.ReconcileConcurrency:output_type -> cdrom.db.v1.ReconcileConcurrencyResponse
+	214, // 507: cdrom.db.v1.Database.ListConcurrencyLimits:output_type -> cdrom.db.v1.ListConcurrencyLimitsResponse
+	212, // 508: cdrom.db.v1.Database.CreateConcurrencyLimit:output_type -> cdrom.db.v1.ConcurrencyLimit
+	212, // 509: cdrom.db.v1.Database.UpdateConcurrencyLimit:output_type -> cdrom.db.v1.ConcurrencyLimit
+	292, // 510: cdrom.db.v1.Database.DeleteConcurrencyLimit:output_type -> google.protobuf.Empty
+	220, // 511: cdrom.db.v1.Database.ListSSHKnownHosts:output_type -> cdrom.db.v1.ListSSHKnownHostsResponse
+	218, // 512: cdrom.db.v1.Database.CreateSSHKnownHost:output_type -> cdrom.db.v1.SSHKnownHost
+	292, // 513: cdrom.db.v1.Database.DeleteSSHKnownHost:output_type -> google.protobuf.Empty
+	226, // 514: cdrom.db.v1.Database.ListSourceCredentials:output_type -> cdrom.db.v1.ListSourceCredentialsResponse
+	224, // 515: cdrom.db.v1.Database.CreateSourceCredential:output_type -> cdrom.db.v1.SourceCredential
+	224, // 516: cdrom.db.v1.Database.GetSourceCredential:output_type -> cdrom.db.v1.SourceCredential
+	224, // 517: cdrom.db.v1.Database.UpdateSourceCredential:output_type -> cdrom.db.v1.SourceCredential
+	292, // 518: cdrom.db.v1.Database.DeleteSourceCredential:output_type -> google.protobuf.Empty
+	231, // 519: cdrom.db.v1.Database.AttachPipelineSource:output_type -> cdrom.db.v1.PipelineSource
+	231, // 520: cdrom.db.v1.Database.GetPipelineSource:output_type -> cdrom.db.v1.PipelineSource
+	236, // 521: cdrom.db.v1.Database.ListPipelineSources:output_type -> cdrom.db.v1.ListPipelineSourcesResponse
+	238, // 522: cdrom.db.v1.Database.CountSourcesByCredential:output_type -> cdrom.db.v1.CountSourcesByCredentialResponse
+	232, // 523: cdrom.db.v1.Database.SetPipelineSourceState:output_type -> cdrom.db.v1.PipelineSourceState
+	232, // 524: cdrom.db.v1.Database.GetPipelineSourceState:output_type -> cdrom.db.v1.PipelineSourceState
+	292, // 525: cdrom.db.v1.Database.DetachPipelineSource:output_type -> google.protobuf.Empty
+	104, // 526: cdrom.db.v1.Database.CreateEnvironment:output_type -> cdrom.db.v1.Environment
+	104, // 527: cdrom.db.v1.Database.GetEnvironment:output_type -> cdrom.db.v1.Environment
+	108, // 528: cdrom.db.v1.Database.ListEnvironments:output_type -> cdrom.db.v1.ListEnvironmentsResponse
+	104, // 529: cdrom.db.v1.Database.UpdateEnvironment:output_type -> cdrom.db.v1.Environment
+	292, // 530: cdrom.db.v1.Database.DeleteEnvironment:output_type -> google.protobuf.Empty
+	101, // 531: cdrom.db.v1.Database.ListWorkersByEnvironment:output_type -> cdrom.db.v1.ListWorkersResponse
+	113, // 532: cdrom.db.v1.Database.ProceedJob:output_type -> cdrom.db.v1.ProceedJobResponse
+	114, // 533: cdrom.db.v1.Database.CreateWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
+	114, // 534: cdrom.db.v1.Database.GetWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
+	118, // 535: cdrom.db.v1.Database.ListWorkerGroups:output_type -> cdrom.db.v1.ListWorkerGroupsResponse
+	114, // 536: cdrom.db.v1.Database.UpdateWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
+	292, // 537: cdrom.db.v1.Database.DeleteWorkerGroup:output_type -> google.protobuf.Empty
+	242, // 538: cdrom.db.v1.Database.AllocateStorageObject:output_type -> cdrom.db.v1.StorageObject
+	242, // 539: cdrom.db.v1.Database.ConfirmStorageObject:output_type -> cdrom.db.v1.StorageObject
+	242, // 540: cdrom.db.v1.Database.GetStorageObject:output_type -> cdrom.db.v1.StorageObject
+	247, // 541: cdrom.db.v1.Database.ListStorageObjects:output_type -> cdrom.db.v1.ListStorageObjectsResponse
+	242, // 542: cdrom.db.v1.Database.TouchStorageObject:output_type -> cdrom.db.v1.StorageObject
+	242, // 543: cdrom.db.v1.Database.SyncLogSize:output_type -> cdrom.db.v1.StorageObject
+	292, // 544: cdrom.db.v1.Database.DeleteStorageObject:output_type -> google.protobuf.Empty
+	242, // 545: cdrom.db.v1.Database.ResolvePackageReference:output_type -> cdrom.db.v1.StorageObject
+	399, // [399:546] is the sub-list for method output_type
+	252, // [252:399] is the sub-list for method input_type
+	252, // [252:252] is the sub-list for extension type_name
+	252, // [252:252] is the sub-list for extension extendee
+	0,   // [0:252] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_db_v1_db_proto_init() }
@@ -19349,14 +20770,14 @@ func file_cdrom_db_v1_db_proto_init() {
 	if File_cdrom_db_v1_db_proto != nil {
 		return
 	}
-	file_cdrom_db_v1_db_proto_msgTypes[189].OneofWrappers = []any{}
+	file_cdrom_db_v1_db_proto_msgTypes[208].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_db_v1_db_proto_rawDesc), len(file_cdrom_db_v1_db_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   262,
+			NumMessages:   281,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

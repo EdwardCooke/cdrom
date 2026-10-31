@@ -466,14 +466,35 @@ func TokenExchangeFromContext(ctx context.Context) TokenExchange {
 // set) and must return promptly when that context is done.
 type Approval interface {
 	// ReportAwaitingApproval reports that the job is paused at an approval
-	// gate, showing message to the user (F-13). It is called once, before the
-	// handler waits for a decision.
-	ReportAwaitingApproval(ctx context.Context, message string) error
+	// gate, showing message to the user (F-13) and carrying the gate's
+	// approver references and quorum depth (F-27). It is called once, before
+	// the handler waits for a decision.
+	ReportAwaitingApproval(ctx context.Context, message string, gate GateInfo) error
 	// CheckApproval reports the current state of the job's approval gate:
 	// whether it has been resolved (approved or rejected) or whether the job
 	// has been cancelled. A handler waiting at the gate polls it until the
 	// gate is resolved.
 	CheckApproval(ctx context.Context) (CheckApprovalResult, error)
+}
+
+// GateInfo describes the approval gate a step is entering (F-27). It travels
+// from the execution target to the API so the API can persist the gate's
+// approver references and quorum depth on the job (visible to the UI and used
+// for decision-time authorization).
+type GateInfo struct {
+	// Approvers are the gate's approver references: each is `group:<name>`,
+	// `role:<name>`, or a bare user identifier. Empty means the gate has no
+	// approver restriction (anyone with the relevant F-14 permission may
+	// decide).
+	Approvers []string
+	// Quorum is the gate's quorum depth K: the number of DISTINCT authorized
+	// approvers whose approvals resolve the gate. Zero or one means a single
+	// approval resolves it; a single rejection always resolves it immediately.
+	Quorum int
+	// Step is the name of the approval step the gate was entered at ("" when
+	// the gate was synthesized by the environment's approval policy rather
+	// than an explicit step).
+	Step string
 }
 
 // CheckApprovalResult is the outcome of an Approval.CheckApproval call.

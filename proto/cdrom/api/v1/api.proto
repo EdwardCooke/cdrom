@@ -402,6 +402,15 @@ message Job {
   // carried_over marks a terminal job cloned from the anchor run during a
   // resumption (F-22), so clients can distinguish it from the fresh suffix.
   bool carried_over = 37;
+  // approval_approvers are the CURRENT gate's approver references (F-27):
+  // each is `group:<name>`, `role:<name>`, or a bare user identifier. Set by
+  // the execution target when it reports the job awaiting_approval and
+  // visible to the UI (via GET /api/jobs/{id}) so the prompt can name the
+  // waiting party(ies). Empty means the gate has no approver restriction.
+  repeated string approval_approvers = 38;
+  // approval_quorum is the CURRENT gate's quorum depth K (F-27); zero or one
+  // means a single approval resolves it.
+  int32 approval_quorum = 39;
 }
 
 message JobAssignment {
@@ -526,6 +535,22 @@ message ReportJobStatusRequest {
   // awaiting_approval (F-13); the API persists it on the job so the UI can
   // show it. It is ignored for any other status.
   string approval_message = 8;
+  // approval_approvers are the gate's approver references (F-27): each is
+  // `group:<name>`, `role:<name>`, or a bare user identifier. Set by the
+  // execution target when it reports the job awaiting_approval; the API
+  // persists them on the job so the UI can name the waiting party(ies) and
+  // the decision-time authorization can resolve the authorized set. Ignored
+  // for any other status.
+  repeated string approval_approvers = 9;
+  // approval_quorum is the gate's quorum depth K (F-27): the number of
+  // DISTINCT authorized approvers whose approvals resolve the gate. Zero or
+  // one means a single approval resolves it. Set alongside the approvers;
+  // ignored for any other status.
+  int32 approval_quorum = 10;
+  // approval_step is the name of the approval step the gate was entered at
+  // (F-27); set alongside the approvers so the quorum vote ledger can
+  // attribute votes to the gate. Ignored for any other status.
+  string approval_step = 11;
 }
 
 // ReportStepCompletionRequest records that the calling worker has completed a
@@ -577,6 +602,14 @@ message CheckApprovalResponse {
   // cancelled is true when the job has been cancelled (a target waiting at
   // the gate should stop and report the job cancelled).
   bool cancelled = 3;
+  // quorum is the gate's quorum depth K (F-27); zero or one means a single
+  // approval resolves it. Exposed so a target waiting at a quorum gate can
+  // log its progress.
+  int32 quorum = 4;
+  // votes_collected is the number of DISTINCT authorized approvers who have
+  // approved the gate so far (F-27); informational for the target (the gate
+  // resolves only when votes_collected reaches quorum, or on any rejection).
+  int32 votes_collected = 5;
 }
 
 // JobLogStream names which output stream a chunk of log data belongs to.

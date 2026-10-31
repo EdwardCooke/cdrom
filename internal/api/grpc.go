@@ -521,9 +521,12 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			return nil, status.Error(codes.Unavailable, "database service is not configured")
 		}
 		updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
-			Id:              req.GetJobId(),
-			Status:          req.GetStatus(),
-			ApprovalMessage: req.GetApprovalMessage(),
+			Id:                req.GetJobId(),
+			Status:            req.GetStatus(),
+			ApprovalMessage:   req.GetApprovalMessage(),
+			ApprovalApprovers: req.GetApprovalApprovers(),
+			ApprovalQuorum:    req.GetApprovalQuorum(),
+			ApprovalStep:      req.GetApprovalStep(),
 		})
 		if err != nil {
 			return nil, err
@@ -2312,8 +2315,12 @@ func toAPIJob(job *dbpb.Job) *apipb.Job {
 		ApprovalReason:      job.GetApprovalReason(),
 		ApprovalRequestedAt: job.GetApprovalRequestedAt(),
 		ApprovalDecidedAt:   job.GetApprovalDecidedAt(),
-		Environment:         job.GetEnvironment(),
-		Approval:            job.GetApproval(),
+		// The CURRENT gate's approver references and quorum depth (F-27), so
+		// the UI can name the waiting party(ies) and show quorum progress.
+		ApprovalApprovers: job.GetApprovalApprovers(),
+		ApprovalQuorum:    job.GetApprovalQuorum(),
+		Environment:       job.GetEnvironment(),
+		Approval:          job.GetApproval(),
 		// The job's dependency observations (F-22): the terminal outcomes the
 		// scheduler's dependency resolver captured at release time. Handed to
 		// the execution target (populated into upstream_jobs by
@@ -2362,7 +2369,13 @@ func (s *GRPCServer) applyEnvironmentApprovalGate(ctx context.Context, apiJob *a
 	if spec == nil {
 		spec = &dbpb.JobSpec{}
 	}
+	// The synthesized gate carries a FIXED step name (F-27): the approval
+	// handler records it on the job (approval_step) so the quorum vote ledger
+	// can attribute votes to this gate distinctly from a pipeline-authored
+	// approval step.
+	const environmentGateStep = "environment-approval"
 	gate := &dbpb.JobStep{
+		Name: environmentGateStep,
 		Type: executor.TypeApproval,
 		Params: map[string]*dbpb.ParamValue{
 			"message": {String_: fmt.Sprintf("Approve deployment of job %q to environment %q", apiJob.GetName(), apiJob.GetEnvironment())},

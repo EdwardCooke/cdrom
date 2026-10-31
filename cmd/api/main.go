@@ -295,6 +295,11 @@ func main() {
 	if apiMetrics != nil {
 		inner = apiMetrics.Middleware(inner)
 	}
+	// Observe the authenticated principal's token claims (F-27): record them
+	// in the Database service so approval groups with a claim derivation can
+	// compute their effective membership at decision time. Wraps the INNER
+	// handler (inside the auth middleware) so it sees the verified user.
+	inner = api.WrapClaimObserver(inner, apiServer)
 	apiHandler := authBundle.MiddlewareExempt(inner, exempt...)
 	if apiMetrics != nil {
 		apiHandler = apiMetrics.AuthFailureMiddleware(apiHandler)

@@ -150,7 +150,33 @@ message Job {
   // results copied) rather than having executed in this run. False for every
   // ordinary job and for the fresh suffix of a resumption. Mirrored from
   // cdrom.db.v1.Job.carried_over.
+    // carried_over marks a job that is a CARRY-OVER clone in a resumption run
+  // (F-22): it replicates the terminal outcome of the anchor run's ancestor
+  // of the cut point (born terminal, with the anchor's outputs, step
+  // results copied) rather than having executed in this run. False for every
+  // ordinary job and for the fresh suffix of a resumption. Mirrored from
+  // cdrom.db.v1.Job.carried_over.
   bool carried_over = 25;
+  // approval_approvers are the CURRENT gate's approver references (F-27):
+  // each is `group:<name>`, `role:<name>`, or a bare user identifier. Set by
+  // the execution target when it reports the job awaiting_approval and
+  // visible to the UI (via GET /api/jobs/{id}) so the prompt can name the
+  // waiting party(ies). Empty means the gate has no approver restriction.
+  // Mirrors cdrom.db.v1.Job.approval_approvers.
+  repeated string approval_approvers = 26;
+  // approval_quorum is the CURRENT gate's quorum depth K (F-27); zero or one
+  // means a single approval resolves it. Mirrors
+  // cdrom.db.v1.Job.approval_quorum.
+  int32 approval_quorum = 27;
+  // approval_votes is the CURRENT gate's quorum ledger (F-27): the distinct
+  // voters and their decisions so far. Populated by the scheduler (toProtoJob)
+  // from the Database service; empty when the gate has no quorum or no votes.
+  repeated cdrom.db.v1.ApprovalVote approval_votes = 28;
+  // approval_step is the name of the approval step the CURRENT gate was
+  // entered at (F-27); empty when the gate was synthesized by the
+  // environment's approval policy rather than an explicit step. Mirrors
+  // cdrom.db.v1.Job.approval_step.
+  string approval_step = 29;
 }
 
 message SubmitJobRequest {
@@ -205,6 +231,13 @@ message ResolveApprovalRequest {
   string actor = 3;
   // reason is the (optional) free-text reason the user gave for the decision.
   string reason = 4;
+  // step is the approval step the gate was entered at (F-27); forwarded to
+  // the quorum vote ledger so the resolving vote is attributed to the right
+  // gate.
+  string step = 5;
+  // attempt is the job's attempt the gate was entered at (F-27); forwarded to
+  // the quorum vote ledger.
+  int32 attempt = 6;
 }
 
 // ProceedRunRequest releases the jobs of a run held by a `manual` environment

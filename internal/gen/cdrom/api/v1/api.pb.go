@@ -806,9 +806,18 @@ type Job struct {
 	Branch bool `protobuf:"varint,36,opt,name=branch,proto3" json:"branch,omitempty"`
 	// carried_over marks a terminal job cloned from the anchor run during a
 	// resumption (F-22), so clients can distinguish it from the fresh suffix.
-	CarriedOver   bool `protobuf:"varint,37,opt,name=carried_over,json=carriedOver,proto3" json:"carried_over,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CarriedOver bool `protobuf:"varint,37,opt,name=carried_over,json=carriedOver,proto3" json:"carried_over,omitempty"`
+	// approval_approvers are the CURRENT gate's approver references (F-27):
+	// each is `group:<name>`, `role:<name>`, or a bare user identifier. Set by
+	// the execution target when it reports the job awaiting_approval and
+	// visible to the UI (via GET /api/jobs/{id}) so the prompt can name the
+	// waiting party(ies). Empty means the gate has no approver restriction.
+	ApprovalApprovers []string `protobuf:"bytes,38,rep,name=approval_approvers,json=approvalApprovers,proto3" json:"approval_approvers,omitempty"`
+	// approval_quorum is the CURRENT gate's quorum depth K (F-27); zero or one
+	// means a single approval resolves it.
+	ApprovalQuorum int32 `protobuf:"varint,39,opt,name=approval_quorum,json=approvalQuorum,proto3" json:"approval_quorum,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Job) Reset() {
@@ -1098,6 +1107,20 @@ func (x *Job) GetCarriedOver() bool {
 		return x.CarriedOver
 	}
 	return false
+}
+
+func (x *Job) GetApprovalApprovers() []string {
+	if x != nil {
+		return x.ApprovalApprovers
+	}
+	return nil
+}
+
+func (x *Job) GetApprovalQuorum() int32 {
+	if x != nil {
+		return x.ApprovalQuorum
+	}
+	return 0
 }
 
 type JobAssignment struct {
@@ -1762,8 +1785,24 @@ type ReportJobStatusRequest struct {
 	// awaiting_approval (F-13); the API persists it on the job so the UI can
 	// show it. It is ignored for any other status.
 	ApprovalMessage string `protobuf:"bytes,8,opt,name=approval_message,json=approvalMessage,proto3" json:"approval_message,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// approval_approvers are the gate's approver references (F-27): each is
+	// `group:<name>`, `role:<name>`, or a bare user identifier. Set by the
+	// execution target when it reports the job awaiting_approval; the API
+	// persists them on the job so the UI can name the waiting party(ies) and
+	// the decision-time authorization can resolve the authorized set. Ignored
+	// for any other status.
+	ApprovalApprovers []string `protobuf:"bytes,9,rep,name=approval_approvers,json=approvalApprovers,proto3" json:"approval_approvers,omitempty"`
+	// approval_quorum is the gate's quorum depth K (F-27): the number of
+	// DISTINCT authorized approvers whose approvals resolve the gate. Zero or
+	// one means a single approval resolves it. Set alongside the approvers;
+	// ignored for any other status.
+	ApprovalQuorum int32 `protobuf:"varint,10,opt,name=approval_quorum,json=approvalQuorum,proto3" json:"approval_quorum,omitempty"`
+	// approval_step is the name of the approval step the gate was entered at
+	// (F-27); set alongside the approvers so the quorum vote ledger can
+	// attribute votes to the gate. Ignored for any other status.
+	ApprovalStep  string `protobuf:"bytes,11,opt,name=approval_step,json=approvalStep,proto3" json:"approval_step,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReportJobStatusRequest) Reset() {
@@ -1848,6 +1887,27 @@ func (x *ReportJobStatusRequest) GetWorkerName() string {
 func (x *ReportJobStatusRequest) GetApprovalMessage() string {
 	if x != nil {
 		return x.ApprovalMessage
+	}
+	return ""
+}
+
+func (x *ReportJobStatusRequest) GetApprovalApprovers() []string {
+	if x != nil {
+		return x.ApprovalApprovers
+	}
+	return nil
+}
+
+func (x *ReportJobStatusRequest) GetApprovalQuorum() int32 {
+	if x != nil {
+		return x.ApprovalQuorum
+	}
+	return 0
+}
+
+func (x *ReportJobStatusRequest) GetApprovalStep() string {
+	if x != nil {
+		return x.ApprovalStep
 	}
 	return ""
 }
@@ -2089,9 +2149,17 @@ type CheckApprovalResponse struct {
 	Decision string `protobuf:"bytes,2,opt,name=decision,proto3" json:"decision,omitempty"`
 	// cancelled is true when the job has been cancelled (a target waiting at
 	// the gate should stop and report the job cancelled).
-	Cancelled     bool `protobuf:"varint,3,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Cancelled bool `protobuf:"varint,3,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	// quorum is the gate's quorum depth K (F-27); zero or one means a single
+	// approval resolves it. Exposed so a target waiting at a quorum gate can
+	// log its progress.
+	Quorum int32 `protobuf:"varint,4,opt,name=quorum,proto3" json:"quorum,omitempty"`
+	// votes_collected is the number of DISTINCT authorized approvers who have
+	// approved the gate so far (F-27); informational for the target (the gate
+	// resolves only when votes_collected reaches quorum, or on any rejection).
+	VotesCollected int32 `protobuf:"varint,5,opt,name=votes_collected,json=votesCollected,proto3" json:"votes_collected,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CheckApprovalResponse) Reset() {
@@ -2143,6 +2211,20 @@ func (x *CheckApprovalResponse) GetCancelled() bool {
 		return x.Cancelled
 	}
 	return false
+}
+
+func (x *CheckApprovalResponse) GetQuorum() int32 {
+	if x != nil {
+		return x.Quorum
+	}
+	return 0
+}
+
+func (x *CheckApprovalResponse) GetVotesCollected() int32 {
+	if x != nil {
+		return x.VotesCollected
+	}
+	return 0
 }
 
 // JobLogMetadata identifies the log a chunk of data belongs to. It is set on
@@ -3306,7 +3388,7 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x10HeartbeatRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"G\n" +
 	"\x11HeartbeatResponse\x122\n" +
-	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\x82\x0f\n" +
+	"\x15poll_interval_seconds\x18\x01 \x01(\x05R\x13pollIntervalSeconds\"\xda\x0f\n" +
 	"\x03Job\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -3350,7 +3432,9 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\tartifacts\x18\" \x03(\v2 .cdrom.api.v1.Job.ArtifactsEntryR\tartifacts\x12[\n" +
 	"\x17dependency_observations\x18# \x03(\v2\".cdrom.db.v1.DependencyObservationR\x16dependencyObservations\x12\x16\n" +
 	"\x06branch\x18$ \x01(\bR\x06branch\x12!\n" +
-	"\fcarried_over\x18% \x01(\bR\vcarriedOver\x1a:\n" +
+	"\fcarried_over\x18% \x01(\bR\vcarriedOver\x12-\n" +
+	"\x12approval_approvers\x18& \x03(\tR\x11approvalApprovers\x12'\n" +
+	"\x0fapproval_quorum\x18' \x01(\x05R\x0eapprovalQuorum\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +
@@ -3399,7 +3483,7 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\"\n" +
 	"\fenvironments\x18\x02 \x03(\tR\fenvironments\"@\n" +
 	"\x17ListPendingJobsResponse\x12%\n" +
-	"\x04jobs\x18\x01 \x03(\v2\x11.cdrom.api.v1.JobR\x04jobs\"\xe8\x03\n" +
+	"\x04jobs\x18\x01 \x03(\v2\x11.cdrom.api.v1.JobR\x04jobs\"\xe5\x04\n" +
 	"\x16ReportJobStatusRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12.\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x129\n" +
@@ -3411,7 +3495,11 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\aoutputs\x18\x06 \x03(\v21.cdrom.api.v1.ReportJobStatusRequest.OutputsEntryR\aoutputs\x12\x1f\n" +
 	"\vworker_name\x18\a \x01(\tR\n" +
 	"workerName\x12)\n" +
-	"\x10approval_message\x18\b \x01(\tR\x0fapprovalMessage\x1a:\n" +
+	"\x10approval_message\x18\b \x01(\tR\x0fapprovalMessage\x12-\n" +
+	"\x12approval_approvers\x18\t \x03(\tR\x11approvalApprovers\x12'\n" +
+	"\x0fapproval_quorum\x18\n" +
+	" \x01(\x05R\x0eapprovalQuorum\x12#\n" +
+	"\rapproval_step\x18\v \x01(\tR\fapprovalStep\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
@@ -3427,11 +3515,13 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\tsatisfied\x18\x01 \x01(\bR\tsatisfied\x12\x1c\n" +
 	"\tcancelled\x18\x02 \x01(\bR\tcancelled\"-\n" +
 	"\x14CheckApprovalRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"m\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\xae\x01\n" +
 	"\x15CheckApprovalResponse\x12\x1a\n" +
 	"\bresolved\x18\x01 \x01(\bR\bresolved\x12\x1a\n" +
 	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x1c\n" +
-	"\tcancelled\x18\x03 \x01(\bR\tcancelled\"x\n" +
+	"\tcancelled\x18\x03 \x01(\bR\tcancelled\x12\x16\n" +
+	"\x06quorum\x18\x04 \x01(\x05R\x06quorum\x12'\n" +
+	"\x0fvotes_collected\x18\x05 \x01(\x05R\x0evotesCollected\"x\n" +
 	"\x0eJobLogMetadata\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
 	"\tstep_name\x18\x02 \x01(\tR\bstepName\x122\n" +

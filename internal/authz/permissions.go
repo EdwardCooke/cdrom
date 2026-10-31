@@ -93,6 +93,15 @@ const (
 	// and the armed rollback step handler's API mediation). Pipeline-scoped,
 	// denied by default (grant it to a role to enable manual restoration).
 	PermRunsRestore = "runs.can-restore"
+	// Approval-group management permissions (F-27). Approval groups (named
+	// sets of users an approval step can reference) are platform-wide:
+	// can-view reads a group and its members, can-manage creates/updates/
+	// deletes a group and its memberships. Denied by default (grant them to a
+	// role to enable group administration); the ability to DECIDE a gate is
+	// governed separately by jobs.can-approve / jobs.can-reject plus the
+	// gate's approver references.
+	PermApprovalsView   = "approvals.can-view"
+	PermApprovalsManage = "approvals.can-manage"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -140,6 +149,8 @@ var AllPermissions = []string{
 	PermPackagesPublish,
 	PermPackagesPromote,
 	PermRunsRestore,
+	PermApprovalsView,
+	PermApprovalsManage,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

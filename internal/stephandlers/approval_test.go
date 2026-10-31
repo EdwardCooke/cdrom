@@ -14,17 +14,19 @@ import (
 )
 
 // fakeApproval is a stub executor.Approval for step-handler tests: it records
-// the message each ReportAwaitingApproval reported and returns a configured
-// CheckApprovalResult (so a test can simulate an approval, a rejection, or a
-// cancellation).
+// the message and gate info each ReportAwaitingApproval reported and returns a
+// configured CheckApprovalResult (so a test can simulate an approval, a
+// rejection, or a cancellation).
 type fakeApproval struct {
 	messages []string
+	gates    []executor.GateInfo
 	result   executor.CheckApprovalResult
 	checkErr error
 }
 
-func (f *fakeApproval) ReportAwaitingApproval(ctx context.Context, message string) error {
+func (f *fakeApproval) ReportAwaitingApproval(ctx context.Context, message string, gate executor.GateInfo) error {
 	f.messages = append(f.messages, message)
+	f.gates = append(f.gates, gate)
 	return nil
 }
 

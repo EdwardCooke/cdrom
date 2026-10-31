@@ -117,7 +117,7 @@ func (s *Server) GetJob(ctx context.Context, req *schedpb.GetJobRequest) (*sched
 	if err != nil {
 		return nil, err
 	}
-	return toProtoJob(job), nil
+	return s.withApprovalVotes(ctx, job), nil
 }
 
 // ListJobs lists jobs from the Database service.
@@ -131,7 +131,7 @@ func (s *Server) ListJobs(ctx context.Context, req *schedpb.ListJobsRequest) (*s
 	}
 	result := &schedpb.ListJobsResponse{}
 	for _, job := range response.GetJobs() {
-		result.Jobs = append(result.Jobs, toProtoJob(job))
+		result.Jobs = append(result.Jobs, s.withApprovalVotes(ctx, job))
 	}
 	return result, nil
 }
@@ -277,15 +277,24 @@ func (s *Server) RerunJob(ctx context.Context, req *schedpb.RerunJobRequest) (*s
 	return s.rerunJob(ctx, s.db, s.db, req.GetId())
 }
 
-// ResolveApproval records the outcome of a job's approval gate (F-13): it
-// persists the decision (approved or rejected), the actor, and the reason via
-// the Database service (conditionally — only if the job is still awaiting
+// ResolveApproval records the outcome of a job's approval gate (F-13/F-27):
+// it persists the decision (approved or rejected), the actor, and the reason
+// via the Database service (conditionally — only if the job is still awaiting
 // approval), and appends a "job_status" event to the shared event log (F-23)
 // so every API pod can fan the decision out to its UI clients. A job that is
 // no longer awaiting approval (it was cancelled, or the gate was already
 // resolved) is left untouched, so a late decision is a no-op. The execution
 // target waiting at the gate observes the decision on its next CheckApproval
 // poll and proceeds (approved) or fails the job (rejected).
+//
+// UNDER QUORUM (F-27): the caller (the API, which has ALREADY verified the
+// actor is an authorized approver) invokes this only when the gate SHOULD
+// resolve — i.e. a rejection (always resolves immediately) or an approval that
+// brings the distinct-approved count to the quorum K. The scheduler CASTS the
+// resolving vote into the quorum ledger (Database.CastApprovalVote, so the
+// ledger is complete and attributable) and THEN flips the gate
+// (Database.ResolveApproval). Without quorum (K <= 1) it behaves exactly as
+// before: a single decision resolves the gate.
 func (s *Server) ResolveApproval(ctx context.Context, req *schedpb.ResolveApprovalRequest) (*schedpb.Job, error) {
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
@@ -293,12 +302,37 @@ func (s *Server) ResolveApproval(ctx context.Context, req *schedpb.ResolveApprov
 	if req.GetDecision() != "approved" && req.GetDecision() != "rejected" {
 		return nil, status.Error(codes.InvalidArgument, "decision must be \"approved\" or \"rejected\"")
 	}
+	// Load the job FIRST: the quorum-depth decision needs its gate fields
+	// (approval_quorum, approval_step, attempt), and the vote ledger is keyed
+	// on them.
+	current, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
+	if err != nil {
+		return nil, err
+	}
+	// Under quorum, cast the resolving vote into the ledger (attributable to
+	// this gate + attempt) before flipping. A rejection ALWAYS resolves
+	// immediately; an approval resolves only when the API determined the
+	// distinct-approved count reached K. Casting is conditional on the job
+	// still being awaiting approval, so a racing resolution is harmless.
+	if current.GetApprovalQuorum() > 1 {
+		if _, err := s.db.CastApprovalVote(ctx, &dbpb.CastApprovalVoteRequest{
+			JobId:    req.GetId(),
+			Step:     current.GetApprovalStep(),
+			Attempt:  current.GetAttempt(),
+			Actor:    req.GetActor(),
+			Decision: req.GetDecision(),
+		}); err != nil {
+			return nil, err
+		}
+	}
 	resp, err := s.db.ResolveApproval(ctx, &dbpb.ResolveApprovalRequest{
 		JobId:     req.GetId(),
 		Decision:  req.GetDecision(),
 		Actor:     req.GetActor(),
 		Reason:    req.GetReason(),
 		DecidedAt: timestamppb.Now(),
+		Step:      current.GetApprovalStep(),
+		Attempt:   current.GetAttempt(),
 	})
 	if err != nil {
 		return nil, err
@@ -312,11 +346,33 @@ func (s *Server) ResolveApproval(ctx context.Context, req *schedpb.ResolveApprov
 		return nil, err
 	}
 	if resp.GetResolved() {
-		s.logger.Info("scheduler: approval gate resolved", "job", req.GetId(), "decision", req.GetDecision(), "actor", req.GetActor())
+		s.logger.Info("scheduler: approval gate resolved", "job", req.GetId(), "decision", req.GetDecision(), "actor", req.GetActor(), "quorum", current.GetApprovalQuorum())
 	} else {
 		s.logger.Info("scheduler: approval gate already resolved or not awaiting", "job", req.GetId())
 	}
-	return toProtoJob(updated), nil
+	return s.withApprovalVotes(ctx, updated), nil
+}
+
+// withApprovalVotes decorates a job's scheduler view with the CURRENT gate's
+// quorum LEDGER (F-27) so the UI's approval prompt can show approvals
+// collected vs. required. (The gate's approver references, quorum depth, and
+// step are forwarded by toProtoJob itself.) The ledger is attached only when
+// the job is awaiting approval with a quorum deeper than one (otherwise it is
+// noise — and the extra Database call is avoided). Safe to call on every job
+// in a list: the ledger lookup fires only for the (rare) awaiting-quorum jobs.
+func (s *Server) withApprovalVotes(ctx context.Context, job *dbpb.Job) *schedpb.Job {
+	out := toProtoJob(job)
+	if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL && job.GetApprovalQuorum() > 1 {
+		resp, err := s.db.ListApprovalVotes(ctx, &dbpb.ListApprovalVotesRequest{
+			JobId:   job.GetId(),
+			Step:    job.GetApprovalStep(),
+			Attempt: job.GetAttempt(),
+		})
+		if err == nil {
+			out.ApprovalVotes = resp.GetVotes()
+		}
+	}
+	return out
 }
 
 // CreateRun starts a new execution of a pipeline (F-07): it asks the Database
@@ -669,8 +725,15 @@ func toProtoJob(job *dbpb.Job) *schedpb.Job {
 		ApprovalDecision: job.GetApprovalDecision(),
 		ApprovalActor:    job.GetApprovalActor(),
 		ApprovalReason:   job.GetApprovalReason(),
-		Environment:      job.GetEnvironment(),
-		Labels:           job.GetLabels(),
+		// The CURRENT gate's approver references, quorum depth, and step (F-27):
+		// cheap to forward (no extra Database call), so every job view carries
+		// them. The quorum LEDGER (approval_votes) is attached separately by
+		// withApprovalVotes only for awaiting-quorum jobs.
+		ApprovalApprovers: job.GetApprovalApprovers(),
+		ApprovalQuorum:    job.GetApprovalQuorum(),
+		ApprovalStep:      job.GetApprovalStep(),
+		Environment:       job.GetEnvironment(),
+		Labels:            job.GetLabels(),
 		// CarriedOver (F-22): marks a carry-over clone in a resumption run so
 		// the UI (and the API's job views) can render the assumed prefix
 		// distinctly from freshly-executed jobs.

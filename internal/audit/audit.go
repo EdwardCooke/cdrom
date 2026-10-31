@@ -204,12 +204,20 @@ const (
 	ActionSourceCredentialDelete = "source-credential.delete"
 	// Package registry actions (F-21.6): publishing a version into the
 	// registry and promoting an artifact between namespaces.
-	ActionPackagePublish   = "package.publish"
-	ActionPackagePromote   = "package.promote"
-	ActionLogin            = "auth.login"
-	ActionRegister         = "auth.register"
-	ActionWorkerRegister   = "worker.register"
-	ActionWorkerDeregister = "worker.deregister"
+	ActionPackagePublish = "package.publish"
+	ActionPackagePromote = "package.promote"
+	// ActionApprovalGroup* are the approval-group management actions (F-27):
+	// creating, updating, or deleting a group, and adding/removing a single
+	// member (the incremental membership churn).
+	ActionApprovalGroupCreate       = "approval-group.create"
+	ActionApprovalGroupUpdate       = "approval-group.update"
+	ActionApprovalGroupDelete       = "approval-group.delete"
+	ActionApprovalGroupAddMember    = "approval-group.add-member"
+	ActionApprovalGroupRemoveMember = "approval-group.remove-member"
+	ActionLogin                     = "auth.login"
+	ActionRegister                  = "auth.register"
+	ActionWorkerRegister            = "worker.register"
+	ActionWorkerDeregister          = "worker.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
 	// worker or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
@@ -253,6 +261,9 @@ const (
 	// a published version ("<name>-<version>.<ext>") or a promotion between
 	// namespaces.
 	TargetPackage = "package"
+	// TargetApprovalGroup is the target kind of an approval group (F-27): a
+	// named set of users an approval step can reference.
+	TargetApprovalGroup = "approval-group"
 )
 
 // Outcomes (F-15).

@@ -35,13 +35,18 @@ func New(api apipb.APIClient, jobID int64, token string) *Gate {
 }
 
 // ReportAwaitingApproval implements executor.Approval: it reports the job as
-// awaiting approval (F-13), carrying the message shown to the user. The API
-// persists the status and message on the job so the UI can show the gate.
-func (g *Gate) ReportAwaitingApproval(ctx context.Context, message string) error {
+// awaiting approval (F-13), carrying the message shown to the user and the
+// gate's approver references + quorum depth (F-27). The API persists the
+// status, message, and gate info on the job so the UI can show the gate and
+// the decision-time authorization can resolve the authorized set.
+func (g *Gate) ReportAwaitingApproval(ctx context.Context, message string, gate executor.GateInfo) error {
 	_, err := g.api.ReportJobStatus(grpcutil.WithBearerToken(ctx, g.token), &apipb.ReportJobStatusRequest{
-		JobId:           g.jobID,
-		Status:          dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL,
-		ApprovalMessage: message,
+		JobId:              g.jobID,
+		Status:             dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL,
+		ApprovalMessage:    message,
+		ApprovalApprovers:  gate.Approvers,
+		ApprovalQuorum:     int32(gate.Quorum),
+		ApprovalStep:       gate.Step,
 	})
 	return err
 }

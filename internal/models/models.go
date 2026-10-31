@@ -1250,6 +1250,31 @@ type Job struct {
 	// ApprovalReason is the (optional) free-text reason the user gave when they
 	// resolved the job's approval gate (F-13); empty when the user gave none.
 	ApprovalReason string `json:"approval_reason,omitempty"`
+	// ApprovalApprovers are the CURRENT gate's approver references (F-27):
+	// each is `group:<name>`, `role:<name>`, or a bare user identifier. They
+	// are set by the execution target when it reports the job
+	// awaiting_approval and OVERWRITTEN each time a step enters a gate (only
+	// one gate is active per job at a time, so a single field suffices).
+	// Empty means the gate has no approver restriction (anyone with the
+	// relevant F-14 permission may decide). Visible to the UI via
+	// GET /api/jobs/{id} so the prompt can name the waiting party(ies).
+	ApprovalApprovers []string `gorm:"type:text;serializer:json" json:"approval_approvers,omitempty"`
+	// ApprovalQuorum is the CURRENT gate's quorum depth K (F-27): the number
+	// of DISTINCT authorized approvers whose approvals resolve the gate. Zero
+	// or one means a single approval resolves it (the F-13 baseline); a
+	// single rejection always resolves it immediately regardless of K.
+	ApprovalQuorum int `json:"approval_quorum,omitempty"`
+	// ApprovalStep is the name of the approval step the CURRENT gate was
+	// entered at (F-27); empty when the gate was synthesized by the
+	// environment's approval policy rather than an explicit step. Recorded so
+	// the quorum vote ledger (ApprovalVote) can attribute votes to the gate
+	// they belonged to.
+	ApprovalStep string `json:"approval_step,omitempty"`
+	// ApprovalVotes is the CURRENT gate's quorum ledger (F-27), populated by
+	// the API from the ApprovalVote rows (latest attempt, this step) when it
+	// serves the job to the UI; it is in-memory only (gorm:"-"), never
+	// persisted on this row.
+	ApprovalVotes []ApprovalVote `gorm:"-" json:"approval_votes,omitempty"`
 	// Environment is the name of the environment this job targets (F-17);
 	// empty means the job targets its raw TargetGroup (the pre-F-17 behavior).
 	// A job targeting an environment is dispatched to the live workers that
@@ -1933,6 +1958,86 @@ type RoleBinding struct {
 	PipelineID *uint `gorm:"index" json:"pipeline_id,omitempty"`
 }
 
+// ApprovalGroup is a named set of users that a pipeline's approval step
+// (F-27) can reference via an `approvers` entry of `group:<name>`. It is a
+// set of PEOPLE, distinct from an F-14 Role (a set of PERMISSIONS); the two
+// bridge via `role:<name>` approver references and via the group's optional
+// claim derivation. A group's EFFECTIVE membership at decision time is the
+// union of its manually maintained Members and every observed principal
+// whose token carries the group's ClaimDerivation (when set), so membership
+// tracks the issuing IdP without manual edits. Rows are owned by the
+// Database service (like the role catalog and the IdP's user directory) so
+// every API replica shares the same groups; the API resolves a gate's
+// authorized set when a decision arrives and is the only place that
+// authorizes.
+type ApprovalGroup struct {
+	gorm.Model
+	// Name is the group's unique name (e.g. "release-managers").
+	Name string `gorm:"uniqueIndex;not null" json:"name"`
+	// Description is a human-readable description of the group.
+	Description string `json:"description"`
+	// Members are the group's manually maintained members: opaque user
+	// identifiers (subjects/emails) matched against the deciding actor's
+	// subject and email. They are deliberately NOT validated against the
+	// user directory at write time, so an unknown or departed member degrades
+	// gracefully (it simply never matches). Serialized to a JSON document in
+	// a text column (portable across SQLite and PostgreSQL).
+	Members []string `gorm:"type:text;serializer:json" json:"members"`
+	// ClaimName and ClaimValue are the group's OPTIONAL claim derivation
+	// (F-27): when both are set, every principal observed (by the API) to
+	// carry a token whose claim ClaimName has the value ClaimValue is ALSO a
+	// member of the group, on top of Members. Either/both empty means no
+	// derivation.
+	ClaimName  string `json:"claim_name,omitempty"`
+	ClaimValue string `json:"claim_value,omitempty"`
+}
+
+// ObservedClaim is the API's observation that a principal presented a token
+// bearing a (claim, value) pair (F-27). The API records these opportunistically
+// (middleware + login/register) so that approval groups with a claim
+// derivation can compute their effective membership lazily at DECISION time
+// (ObservedClaimsFor) without scanning any token store. A principal is
+// considered to carry a claim value if ANY of its observed tokens does.
+// Retention is a deployment concern (like the event log); the row is
+// idempotent on (principal_subject, claim_name, claim_value).
+type ObservedClaim struct {
+	gorm.Model
+	// PrincipalSubject is the token's subject (the user's id / email).
+	PrincipalSubject string `gorm:"index;not null" json:"principal_subject"`
+	// ClaimName is the name of the observed claim (e.g. "groups").
+	ClaimName string `gorm:"index;not null" json:"claim_name"`
+	// ClaimValue is the observed value of the claim (e.g. "release-managers").
+	ClaimValue string `gorm:"index;not null" json:"claim_value"`
+}
+
+// ApprovalVote is one row in the QUORUM LEDGER of a job's approval gate
+// (F-27): an immutable record that ACTOR cast DECISION at STEP (ATTEMPT) at
+// TIME. When a gate's quorum K is greater than 1, the gate resolves only
+// after K DISTINCT actors have voted "approved"; a single "rejected" vote
+// resolves it immediately. Votes are APPENDED, never rewritten or deleted,
+// so a retried or re-entered gate recounts deterministically and a duplicate
+// vote by the same actor counts at most once. Unique on
+// (job_id, step, attempt, actor): recasting the SAME decision is a no-op,
+// flipping one's vote supersedes the prior row (still counted once).
+type ApprovalVote struct {
+	gorm.Model
+	// JobID is the job whose approval gate the vote belongs to.
+	JobID uint `gorm:"index;not null" json:"job_id"`
+	// Step is the approval step the gate was entered at ("" when the gate was
+	// synthesized by the environment's approval policy rather than an
+	// explicit step).
+	Step string `json:"step,omitempty"`
+	// Attempt is the job's attempt the gate was entered at (denormalized so a
+	// retry's votes are recounted distinctly from the prior attempt's).
+	Attempt int32 `json:"attempt"`
+	// Actor is the identity (the OIDC subject) of the voter.
+	Actor string `gorm:"index;not null" json:"actor"`
+	// Decision is the vote: "approved" or "rejected".
+	Decision string `gorm:"not null" json:"decision"`
+	// At is when the vote was cast.
+	At time.Time `json:"at"`
+}
+
 // AuditEvent is one entry in the audit log (F-15): an append-only record of a
 // significant action — who (Actor) did what (Action) to which resource
 // (TargetKind/TargetID), when (CreatedAt), from where (SourceIP), with what
@@ -2199,6 +2304,9 @@ func All() []any {
 		&SecretNonce{},
 		&Role{},
 		&RoleBinding{},
+		&ApprovalGroup{},
+		&ObservedClaim{},
+		&ApprovalVote{},
 		&AuditEvent{},
 		&ConcurrencyResource{},
 		&ConcurrencyLimit{},

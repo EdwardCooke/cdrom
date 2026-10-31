@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1909,6 +1910,41 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 	// the previously recorded message unchanged.
 	if message := req.GetApprovalMessage(); message != "" {
 		updates["approval_message"] = message
+	}
+	// F-27 gate fields (approvers / quorum / step): OVERWRITTEN when the target
+	// reports the job awaiting_approval (entering a gate) and CLEARED when the
+	// job leaves the gate (reports any other status while currently awaiting),
+	// so a resolved or retried job does not advertise a stale gate. They are
+	// written via a Select patch (not the map above) because ApprovalApprovers
+	// is a JSON-serializer column — GORM only runs a field's serializer when the
+	// value flows through the model's reflected field. Guarded to non-terminal
+	// jobs so a late report cannot scribble on a finished job.
+	enteredGate := req.GetStatus() == dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL
+	// Entering the gate OVERWRITES the F-27 fields; leaving it (reporting any
+	// OTHER status while currently awaiting) CLEARS them, so a resolved or
+	// abandoned job does not advertise a stale gate. The resolution itself
+	// (ResolveApproval, incl. the quorum flip) exits via its OWN conditional
+	// UPDATE — not through here — so the fields survive the flip and the vote
+	// ledger stays attributable.
+	if !isTerminalJobStatus(job.Status) && (enteredGate || job.Status == models.JobStatusAwaitingApproval) {
+		gateSel := []string{"ApprovalApprovers", "ApprovalQuorum", "ApprovalStep"}
+		gatePatch := &models.Job{}
+		if enteredGate {
+			gatePatch.ApprovalApprovers = nonNilStrings(req.GetApprovalApprovers())
+			gatePatch.ApprovalQuorum = int(req.GetApprovalQuorum())
+			gatePatch.ApprovalStep = req.GetApprovalStep()
+		} else {
+			gatePatch.ApprovalApprovers = nil
+			gatePatch.ApprovalQuorum = 0
+			gatePatch.ApprovalStep = ""
+		}
+		if err := s.db.WithContext(ctx).
+			Model(&models.Job{}).
+			Where("id = ?", req.GetId()).
+			Select(gateSel).
+			Updates(gatePatch).Error; err != nil {
+			return nil, grpcErr(err)
+		}
 	}
 	// step_results (F-06) are informational per-step outcomes, not part of
 	// the terminal-status guard below: they are persisted whenever the
@@ -5567,6 +5603,9 @@ func toProtoJob(job *models.Job) *dbpb.Job {
 		ApprovalDecision:       job.ApprovalDecision,
 		ApprovalActor:          job.ApprovalActor,
 		ApprovalReason:         job.ApprovalReason,
+		ApprovalApprovers:      nonNilStrings(job.ApprovalApprovers),
+		ApprovalQuorum:         int32(job.ApprovalQuorum),
+		ApprovalStep:           job.ApprovalStep,
 		ConcurrencyKeys:        job.ConcurrencyKeys,
 		ConcurrencyAdmitted:    job.ConcurrencyAdmitted,
 		Environment:            job.Environment,
@@ -6238,6 +6277,7 @@ var builtinRolePermissions = map[string][]string{
 	"admin": {
 		"pipelines.can-view", "pipelines.can-create", "pipelines.can-edit",
 		"pipelines.can-delete", "runs.can-trigger", "runs.can-cancel",
+		"runs.can-proceed", "runs.can-restore",
 		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
 		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
@@ -6247,7 +6287,13 @@ var builtinRolePermissions = map[string][]string{
 		"service-accounts.can-disable", "service-accounts.can-enable",
 		"service-accounts.can-delete", "service-accounts.can-assign-roles",
 		"service-accounts.can-remove-roles", "concurrency-limits.can-view",
-		"concurrency-limits.can-manage",
+		"concurrency-limits.can-manage", "environments.can-view",
+		"environments.can-manage", "worker-groups.can-view",
+		"worker-groups.can-manage", "ssh-known-hosts.can-view",
+		"ssh-known-hosts.can-manage", "source-credentials.can-view",
+		"source-credentials.can-manage", "packages.can-view",
+		"packages.can-publish", "packages.can-promote",
+		"approvals.can-view", "approvals.can-manage",
 	},
 	"operator": {
 		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",
@@ -6326,6 +6372,7 @@ func knownPermission(p string) bool {
 	switch p {
 	case "pipelines.can-view", "pipelines.can-create", "pipelines.can-edit",
 		"pipelines.can-delete", "runs.can-trigger", "runs.can-cancel",
+		"runs.can-proceed", "runs.can-restore",
 		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
 		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
@@ -6335,7 +6382,13 @@ func knownPermission(p string) bool {
 		"service-accounts.can-disable", "service-accounts.can-enable",
 		"service-accounts.can-delete", "service-accounts.can-assign-roles",
 		"service-accounts.can-remove-roles", "concurrency-limits.can-view",
-		"concurrency-limits.can-manage":
+		"concurrency-limits.can-manage", "environments.can-view",
+		"environments.can-manage", "worker-groups.can-view",
+		"worker-groups.can-manage", "ssh-known-hosts.can-view",
+		"ssh-known-hosts.can-manage", "source-credentials.can-view",
+		"source-credentials.can-manage", "packages.can-view",
+		"packages.can-publish", "packages.can-promote",
+		"approvals.can-view", "approvals.can-manage":
 		return true
 	default:
 		return false
@@ -6568,6 +6621,426 @@ func (s *Server) PublishRoleChange(ctx context.Context, _ *dbpb.PublishRoleChang
 }
 
 // ---------------------------------------------------------------------------
+// Approval groups (F-27)
+// ---------------------------------------------------------------------------
+//
+// Approval groups are named sets of USERS that a pipeline's approval step can
+// reference via an `approvers` entry of `group:<name>`. They are a set of
+// PEOPLE, distinct from an F-14 Role (a set of PERMISSIONS). A group's
+// EFFECTIVE membership at decision time is the union of its manually
+// maintained members and every principal OBSERVED (by the API, via
+// RecordObservedClaim) to carry the group's claim derivation (when set).
+//
+// The group ROWS are owned by the Database service so every API replica shares
+// the same groups; the API resolves a gate's authorized set WHEN A DECISION
+// ARRIVES and is the only place that authorizes (membership ∩ F-14
+// permission). The quorum VOTE LEDGER (ApprovalVote rows) is also owned here:
+// votes are appended, never rewritten, so a retried or re-entered gate recounts
+// deterministically.
+
+// CreateApprovalGroup creates a group. It rejects a name that collides with an
+// existing group.
+func (s *Server) CreateApprovalGroup(ctx context.Context, req *dbpb.CreateApprovalGroupRequest) (*dbpb.ApprovalGroup, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	var existing models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&existing).Error; err == nil {
+		return nil, status.Errorf(codes.AlreadyExists, "approval group %q already exists", name)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, grpcErr(err)
+	}
+	group := &models.ApprovalGroup{
+		Name:        name,
+		Description: req.GetDescription(),
+		Members:     nonNilStrings(req.GetMembers()),
+		ClaimName:   req.GetClaimName(),
+		ClaimValue:  req.GetClaimValue(),
+	}
+	if err := s.db.WithContext(ctx).Create(group).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoApprovalGroup(group), nil
+}
+
+// GetApprovalGroup retrieves a group by name.
+func (s *Server) GetApprovalGroup(ctx context.Context, req *dbpb.GetApprovalGroupRequest) (*dbpb.ApprovalGroup, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	var group models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&group).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "approval group not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoApprovalGroup(&group), nil
+}
+
+// ListApprovalGroups returns all groups, ordered by name.
+func (s *Server) ListApprovalGroups(ctx context.Context, _ *dbpb.ListApprovalGroupsRequest) (*dbpb.ListApprovalGroupsResponse, error) {
+	var groups []models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Order("name").Find(&groups).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListApprovalGroupsResponse{}
+	for i := range groups {
+		response.Groups = append(response.Groups, toProtoApprovalGroup(&groups[i]))
+	}
+	return response, nil
+}
+
+// UpdateApprovalGroup edits a group. Only the fields set on the request are
+// changed: an empty description leaves the existing description unchanged;
+// claim_name/claim_value are replaced only when BOTH are present (neither
+// present leaves the derivation unchanged; both present — even empty —
+// replaces it); members are replaced only when members_present is true.
+func (s *Server) UpdateApprovalGroup(ctx context.Context, req *dbpb.UpdateApprovalGroupRequest) (*dbpb.ApprovalGroup, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	var group models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&group).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "approval group not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if req.GetDescription() != "" {
+		group.Description = req.GetDescription()
+	}
+	// The claim derivation is replaced whenever EITHER field is present on the
+	// request (setting both to empty clears it; leaving both empty leaves the
+	// existing derivation unchanged).
+	if req.GetClaimName() != "" || req.GetClaimValue() != "" {
+		group.ClaimName = req.GetClaimName()
+		group.ClaimValue = req.GetClaimValue()
+	}
+	if req.GetMembersPresent() {
+		group.Members = nonNilStrings(req.GetMembers())
+	}
+	if err := s.saveApprovalGroupColumns(ctx, &group); err != nil {
+		return nil, err
+	}
+	return toProtoApprovalGroup(&group), nil
+}
+
+// DeleteApprovalGroup removes a group. Deleting a group does NOT retroactively
+// affect gates already awaiting approval: the gate stores the REFERENCE
+// (`group:name`), and a reference to a nonexistent group simply contributes no
+// members at decision time (the gate falls back to its other references and
+// the F-14 permission).
+func (s *Server) DeleteApprovalGroup(ctx context.Context, req *dbpb.DeleteApprovalGroupRequest) (*emptypb.Empty, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	var group models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&group).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "approval group not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if err := s.db.WithContext(ctx).Delete(&group).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// AddApprovalGroupMember atomically adds a single member to a group's member
+// list (idempotent: adding a member already present is a no-op). The mutation
+// loads the row, mutates the slice, and saves it INSIDE a transaction so two
+// concurrent adds cannot lose one (lost-update protection for the JSON column).
+func (s *Server) AddApprovalGroupMember(ctx context.Context, req *dbpb.AddApprovalGroupMemberRequest) (*dbpb.ApprovalGroup, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	if req.GetMember() == "" {
+		return nil, status.Error(codes.InvalidArgument, "member is required")
+	}
+	var group models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("name = ?", name).First(&group).Error; err != nil {
+			return err
+		}
+		found := false
+		for _, m := range group.Members {
+			if m == req.GetMember() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			group.Members = append(nonNilStrings(group.Members), req.GetMember())
+			if err := saveApprovalGroupColumnsTx(tx, &group); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "approval group not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoApprovalGroup(&group), nil
+}
+
+// RemoveApprovalGroupMember atomically removes a single member from a group's
+// member list (idempotent: removing an absent member is a no-op). Transactional
+// like AddApprovalGroupMember.
+func (s *Server) RemoveApprovalGroupMember(ctx context.Context, req *dbpb.RemoveApprovalGroupMemberRequest) (*dbpb.ApprovalGroup, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	if req.GetMember() == "" {
+		return nil, status.Error(codes.InvalidArgument, "member is required")
+	}
+	var group models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("name = ?", name).First(&group).Error; err != nil {
+			return err
+		}
+		out := make([]string, 0, len(group.Members))
+		for _, m := range group.Members {
+			if m != req.GetMember() {
+				out = append(out, m)
+			}
+		}
+		group.Members = out
+		return saveApprovalGroupColumnsTx(tx, &group)
+	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "approval group not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return toProtoApprovalGroup(&group), nil
+}
+
+// EffectiveApprovalGroupMembers returns a group's EFFECTIVE membership: its
+// manual members UNION every principal observed to carry the group's claim
+// derivation (when set). Deduplicated.
+func (s *Server) EffectiveApprovalGroupMembers(ctx context.Context, req *dbpb.EffectiveApprovalGroupMembersRequest) (*dbpb.EffectiveApprovalGroupMembersResponse, error) {
+	name := req.GetName()
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "group name is required")
+	}
+	var group models.ApprovalGroup
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&group).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "approval group not found")
+		}
+		return nil, grpcErr(err)
+	}
+	set := make(map[string]struct{}, len(group.Members))
+	for _, m := range group.Members {
+		set[m] = struct{}{}
+	}
+	if group.ClaimName != "" && group.ClaimValue != "" {
+		var principals []string
+		if err := s.db.WithContext(ctx).
+			Model(&models.ObservedClaim{}).
+			Where("claim_name = ? AND claim_value = ?", group.ClaimName, group.ClaimValue).
+			Distinct().Pluck("principal_subject", &principals).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+		for _, p := range principals {
+			set[p] = struct{}{}
+		}
+	}
+	members := make([]string, 0, len(set))
+	for m := range set {
+		members = append(members, m)
+	}
+	sort.Strings(members)
+	return &dbpb.EffectiveApprovalGroupMembersResponse{Members: members}, nil
+}
+
+// RecordObservedClaim records that a principal presented a token bearing a
+// (claim, value) pair (F-27 claim-derived membership). Idempotent on
+// (principal, claim, value).
+func (s *Server) RecordObservedClaim(ctx context.Context, req *dbpb.RecordObservedClaimRequest) (*emptypb.Empty, error) {
+	subject := req.GetPrincipalSubject()
+	claimName := req.GetClaimName()
+	claimValue := req.GetClaimValue()
+	if subject == "" || claimName == "" || claimValue == "" {
+		return nil, status.Error(codes.InvalidArgument, "principal_subject, claim_name, and claim_value are required")
+	}
+	var existing models.ObservedClaim
+	err := s.db.WithContext(ctx).
+		Where("principal_subject = ? AND claim_name = ? AND claim_value = ?", subject, claimName, claimValue).
+		First(&existing).Error
+	if err == nil {
+		return &emptypb.Empty{}, nil // idempotent: already observed
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, grpcErr(err)
+	}
+	claim := &models.ObservedClaim{
+		PrincipalSubject: subject,
+		ClaimName:        claimName,
+		ClaimValue:       claimValue,
+	}
+	if err := s.db.WithContext(ctx).Create(claim).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ObservedClaimsFor returns the distinct claim VALUES observed for a
+// principal's subject under a claim name (F-27). The API uses it to enrich the
+// deciding actor's effective role set with claim-mapped roles.
+func (s *Server) ObservedClaimsFor(ctx context.Context, req *dbpb.ObservedClaimsForRequest) (*dbpb.ObservedClaimsForResponse, error) {
+	subject := req.GetPrincipalSubject()
+	claimName := req.GetClaimName()
+	if subject == "" || claimName == "" {
+		return nil, status.Error(codes.InvalidArgument, "principal_subject and claim_name are required")
+	}
+	var values []string
+	if err := s.db.WithContext(ctx).
+		Model(&models.ObservedClaim{}).
+		Where("principal_subject = ? AND claim_name = ?", subject, claimName).
+		Distinct().Pluck("claim_value", &values).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &dbpb.ObservedClaimsForResponse{Values: values}, nil
+}
+
+// CastApprovalVote casts (records) a vote on a job's approval gate (F-27
+// quorum) and returns the gate's ledger. Recording is idempotent on
+// (job, step, attempt, actor): casting the SAME decision again is a no-op,
+// FLIPPING one's vote supersedes the prior row (still counted once). The vote
+// is only recorded while the job is STILL awaiting approval (conditional, like
+// ResolveApproval), so a late vote on a resolved gate is refused.
+func (s *Server) CastApprovalVote(ctx context.Context, req *dbpb.CastApprovalVoteRequest) (*dbpb.CastApprovalVoteResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetActor() == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor is required")
+	}
+	if req.GetDecision() != "approved" && req.GetDecision() != "rejected" {
+		return nil, status.Error(codes.InvalidArgument, "decision must be \"approved\" or \"rejected\"")
+	}
+	at := time.Now()
+	recorded := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Conditional on the job still being awaiting approval: a late vote on a
+		// resolved (or cancelled) gate is refused.
+		var job models.Job
+		if err := tx.Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusAwaitingApproval).First(&job).Error; err != nil {
+			return err
+		}
+		// Idempotency: if the actor has ALREADY cast this SAME decision on this
+		// gate, the vote is a no-op (recorded stays false, nothing is written).
+		var existing models.ApprovalVote
+		priorErr := tx.Where("job_id = ? AND step = ? AND attempt = ? AND actor = ?",
+			job.ID, req.GetStep(), req.GetAttempt(), req.GetActor()).
+			First(&existing).Error
+		if priorErr == nil && existing.Decision == req.GetDecision() {
+			return nil // no-op
+		}
+		if priorErr != nil && !errors.Is(priorErr, gorm.ErrRecordNotFound) {
+			return priorErr
+		}
+		// Otherwise INSERT (fresh vote) or SUPERSEDE (flipping the actor's prior
+		// vote): delete the prior row (if any) and write the new one. Still
+		// counted once per actor.
+		if priorErr == nil {
+			if err := tx.Delete(&existing).Error; err != nil {
+				return err
+			}
+		}
+		vote := models.ApprovalVote{
+			JobID:    job.ID,
+			Step:     req.GetStep(),
+			Attempt:  req.GetAttempt(),
+			Actor:    req.GetActor(),
+			Decision: req.GetDecision(),
+			At:       at,
+		}
+		if err := tx.Create(&vote).Error; err != nil {
+			return err
+		}
+		recorded = true
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// The job is no longer awaiting approval: refuse the vote (but still
+			// return the current ledger so the caller can see the state).
+			return s.approvalVoteLedger(ctx, req.GetJobId(), req.GetStep(), req.GetAttempt(), false)
+		}
+		return nil, grpcErr(err)
+	}
+	return s.approvalVoteLedger(ctx, req.GetJobId(), req.GetStep(), req.GetAttempt(), recorded)
+}
+
+// approvalVoteLedger returns the gate's CURRENT ledger (latest attempt, this
+// step): every distinct actor's latest vote, as proto ApprovalVote rows.
+func (s *Server) approvalVoteLedger(ctx context.Context, jobID int64, step string, attempt int32, recorded bool) (*dbpb.CastApprovalVoteResponse, error) {
+	var votes []models.ApprovalVote
+	if err := s.db.WithContext(ctx).
+		Where("job_id = ? AND step = ? AND attempt = ?", uint(jobID), step, attempt).
+		Order("id").Find(&votes).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.CastApprovalVoteResponse{Recorded: recorded}
+	for i := range votes {
+		response.Votes = append(response.Votes, toProtoApprovalVote(&votes[i]))
+	}
+	return response, nil
+}
+
+// ListApprovalVotes returns the quorum ledger of a job's CURRENT gate (F-27):
+// the distinct actors and their latest votes (latest attempt, this step). The
+// scheduler uses it to populate the job's REST view (approval_votes) so the UI
+// can show quorum progress.
+func (s *Server) ListApprovalVotes(ctx context.Context, req *dbpb.ListApprovalVotesRequest) (*dbpb.ListApprovalVotesResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	var votes []models.ApprovalVote
+	if err := s.db.WithContext(ctx).
+		Where("job_id = ? AND step = ? AND attempt = ?", req.GetJobId(), req.GetStep(), req.GetAttempt()).
+		Order("id").Find(&votes).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListApprovalVotesResponse{}
+	for i := range votes {
+		response.Votes = append(response.Votes, toProtoApprovalVote(&votes[i]))
+	}
+	return response, nil
+}
+
+// saveApprovalGroupColumns persists the mutable columns of a group (description,
+// claim derivation, members) via a Select patch so the JSON-serializer Members
+// column round-trips.
+func (s *Server) saveApprovalGroupColumns(ctx context.Context, group *models.ApprovalGroup) error {
+	return s.db.WithContext(ctx).
+		Model(&models.ApprovalGroup{}).
+		Where("id = ?", group.ID).
+		Select("Description", "ClaimName", "ClaimValue", "Members").
+		Updates(group).Error
+}
+
+// saveApprovalGroupColumnsTx is saveApprovalGroupColumns on an explicit
+// transaction (used by the atomic member add/remove).
+func saveApprovalGroupColumnsTx(tx *gorm.DB, group *models.ApprovalGroup) error {
+	return tx.Model(&models.ApprovalGroup{}).
+		Where("id = ?", group.ID).
+		Select("Description", "ClaimName", "ClaimValue", "Members").
+		Updates(group).Error
+}
+
+// ---------------------------------------------------------------------------
 // Audit log (F-15)
 // ---------------------------------------------------------------------------
 
@@ -6734,4 +7207,32 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// toProtoApprovalGroup renders an approval group (F-27) as its
+// Database-service form.
+func toProtoApprovalGroup(group *models.ApprovalGroup) *dbpb.ApprovalGroup {
+	return &dbpb.ApprovalGroup{
+		Id:          int64(group.ID),
+		Name:        group.Name,
+		Description: group.Description,
+		Members:     nonNilStrings(group.Members),
+		ClaimName:   group.ClaimName,
+		ClaimValue:  group.ClaimValue,
+		CreatedAt:   timestamppb.New(group.CreatedAt),
+		UpdatedAt:   timestamppb.New(group.UpdatedAt),
+	}
+}
+
+// toProtoApprovalVote renders a quorum-ledger vote (F-27) as its
+// Database-service form.
+func toProtoApprovalVote(vote *models.ApprovalVote) *dbpb.ApprovalVote {
+	return &dbpb.ApprovalVote{
+		JobId:    int64(vote.JobID),
+		Step:     vote.Step,
+		Attempt:  vote.Attempt,
+		Actor:    vote.Actor,
+		Decision: vote.Decision,
+		At:       timestamppb.New(vote.At),
+	}
 }

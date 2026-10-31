@@ -396,6 +396,58 @@ service Database {
   // the other replicas see the change without a restart.
   rpc PublishRoleChange(PublishRoleChangeRequest) returns (PublishEventResponse);
 
+  // Approval groups (F-27). Named sets of users that a pipeline's approval
+  // step can reference via an `approvers` entry of `group:<name>`. Group
+  // rows are owned by the Database service so every API replica shares the
+  // same groups; the API resolves a gate's authorized set when a decision
+  // arrives and is the only place that authorizes.
+  //
+  // CreateApprovalGroup creates a group (name, description, optional initial
+  // members and claim derivation). It rejects a name that collides with an
+  // existing group. GetApprovalGroup retrieves one by name. ListApprovalGroups
+  // returns all groups. UpdateApprovalGroup edits a group's description,
+  // claim derivation, and (when members_present) REPLACES its member list.
+  // DeleteApprovalGroup removes a group.
+  rpc CreateApprovalGroup(CreateApprovalGroupRequest) returns (ApprovalGroup);
+  rpc GetApprovalGroup(GetApprovalGroupRequest) returns (ApprovalGroup);
+  rpc ListApprovalGroups(ListApprovalGroupsRequest) returns (ListApprovalGroupsResponse);
+  rpc UpdateApprovalGroup(UpdateApprovalGroupRequest) returns (ApprovalGroup);
+  rpc DeleteApprovalGroup(DeleteApprovalGroupRequest) returns (google.protobuf.Empty);
+  // AddApprovalGroupMember atomically adds a single member to a group's
+  // member list (idempotent: adding a member already present is a no-op).
+  // RemoveApprovalGroupMember atomically removes a single member (idempotent:
+  // removing an absent member is a no-op). These back the API's incremental
+  // membership endpoints (a transactional mutation of the members column,
+  // not an API-side read-modify-write).
+  rpc AddApprovalGroupMember(AddApprovalGroupMemberRequest) returns (ApprovalGroup);
+  rpc RemoveApprovalGroupMember(RemoveApprovalGroupMemberRequest) returns (ApprovalGroup);
+  // EffectiveApprovalGroupMembers returns a group's EFFECTIVE membership:
+  // its manual members UNION every principal observed (RecordObservedClaim)
+  // to carry the group's claim derivation (when set). The API uses it to
+  // resolve a gate's authorized set at decision time.
+  rpc EffectiveApprovalGroupMembers(EffectiveApprovalGroupMembersRequest) returns (EffectiveApprovalGroupMembersResponse);
+  // RecordObservedClaim records that a principal presented a token bearing a
+  // (claim, value) pair (F-27 claim-derived membership). Idempotent on
+  // (principal, claim, value); the API calls it opportunistically from its
+  // auth middleware and login/register paths.
+  rpc RecordObservedClaim(RecordObservedClaimRequest) returns (google.protobuf.Empty);
+  // ObservedClaimsFor returns the distinct claim VALUES observed for a
+  // principal's subject under a claim name (F-27). The API uses it to enrich
+  // the deciding actor's effective role set with claim-mapped roles.
+  rpc ObservedClaimsFor(ObservedClaimsForRequest) returns (ObservedClaimsForResponse);
+  // CastApprovalVote casts (records) a vote on a job's approval gate (F-27
+  // quorum) and returns the gate's ledger. Recording is idempotent on
+  // (job, step, attempt, actor): casting the same decision again is a no-op,
+  // flipping one's vote supersedes the prior row. The vote is only recorded
+  // while the job is still awaiting approval (conditional, like
+  // ResolveApproval), so a late vote on a resolved gate is refused.
+  rpc CastApprovalVote(CastApprovalVoteRequest) returns (CastApprovalVoteResponse);
+  // ListApprovalVotes returns the quorum ledger of a job's CURRENT gate (F-27):
+  // the distinct actors and their latest votes (given attempt + step). The
+  // scheduler uses it to populate the job's REST view (approval_votes) so the
+  // UI can show quorum progress.
+  rpc ListApprovalVotes(ListApprovalVotesRequest) returns (ListApprovalVotesResponse);
+
   // Audit log (F-15). The audit log is an append-only record of significant
   // actions: who (actor) did what (action) to which resource (target), when,
   // from where, with what outcome, and what changed (old/new value). The API
@@ -2112,6 +2164,22 @@ message Job {
   // carry-over prefix and the fresh suffix), pointing at the corresponding
   // job of the anchor run the resumption restores.
   int64 restores_job_id = 46;
+  // approval_approvers are the CURRENT gate's approver references (F-27):
+  // each is `group:<name>`, `role:<name>`, or a bare user identifier. Set by
+  // the execution target when it reports the job awaiting_approval and
+  // overwritten each time a step enters a gate. Empty means the gate has no
+  // approver restriction (anyone with the relevant F-14 permission may
+  // decide).
+  repeated string approval_approvers = 47;
+  // approval_quorum is the CURRENT gate's quorum depth K (F-27): the number
+  // of DISTINCT authorized approvers whose approvals resolve the gate. Zero
+  // or one means a single approval resolves it; a single rejection always
+  // resolves it immediately regardless of K.
+  int32 approval_quorum = 48;
+  // approval_step is the name of the approval step the CURRENT gate was
+  // entered at (F-27); empty when the gate was synthesized by the
+  // environment's approval policy rather than an explicit step.
+  string approval_step = 49;
 }
 
 // JobDefinition is a job definition in a pipeline (F-08): the declarative
@@ -2253,6 +2321,20 @@ message UpdateJobRequest {
   // (as UpstreamJob entries with keys) so a branch job's conditions can route
   // on {{ .deps.<key>.status }} / {{ .deps.<key>.outputs.<name> }}.
   repeated DependencyObservation dependency_observations = 9;
+  // approval_approvers are the CURRENT gate's approver references (F-27),
+  // set by the execution target when it reports the job awaiting_approval.
+  // Overwritten each time a step enters a gate. Absent/empty leaves the
+  // previously recorded references unchanged.
+  repeated string approval_approvers = 10;
+  // approval_quorum is the CURRENT gate's quorum depth K (F-27), set by the
+  // execution target when it reports the job awaiting_approval. Absent/zero
+  // leaves the previously recorded quorum unchanged.
+  int32 approval_quorum = 11;
+  // approval_step is the name of the approval step the gate was entered at
+  // (F-27), set by the execution target when it reports the job
+  // awaiting_approval. Absent/empty leaves the previously recorded step
+  // unchanged.
+  string approval_step = 12;
 }
 
 message ReapJobRequest {
@@ -2485,6 +2567,13 @@ message ResolveApprovalRequest {
   google.protobuf.Timestamp decided_at = 4;
   // reason is the (optional) free-text reason the user gave for the decision.
   string reason = 5;
+  // step is the approval step the gate was entered at (F-27); forwarded so
+  // the quorum vote ledger attributes the resolving vote to the right gate.
+  string step = 6;
+  // attempt is the job's attempt the gate was entered at (F-27); forwarded
+  // so the quorum vote ledger attributes the resolving vote to the right
+  // attempt.
+  int32 attempt = 7;
 }
 
 // ResolveApprovalResponse is the result of a ResolveApproval call.
@@ -3508,6 +3597,202 @@ message DeleteRoleBindingRequest {
 // PublishRoleChangeRequest is the (empty) request for PublishRoleChange; it is
 // present so the RPC has a request message and can grow a scope filter later.
 message PublishRoleChangeRequest {}
+
+// ---------------------------------------------------------------------------
+// Approval groups (F-27)
+// ---------------------------------------------------------------------------
+
+// ApprovalGroup is a named set of users that a pipeline's approval step can
+// reference via an `approvers` entry of `group:<name>`. Its effective
+// membership is the union of its manual members and every principal observed
+// to carry its claim derivation (when set).
+message ApprovalGroup {
+  int64 id = 1;
+  // name is the group's unique name (e.g. "release-managers").
+  string name = 2;
+  // description is a human-readable description of the group.
+  string description = 3;
+  // members are the group's manually maintained members: opaque user
+  // identifiers (subjects/emails) matched against the deciding actor's
+  // subject and email.
+  repeated string members = 4;
+  // claim_name / claim_value are the group's OPTIONAL claim derivation: when
+  // both are set, every principal observed to carry a token whose claim
+  // claim_name has the value claim_value is also a member.
+  string claim_name = 5;
+  string claim_value = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// CreateApprovalGroupRequest is the request to create a group.
+message CreateApprovalGroupRequest {
+  // name is the group's unique name; it must not collide with an existing
+  // group.
+  string name = 1;
+  // description is a human-readable description of the group.
+  string description = 2;
+  // members are the group's initial manually maintained members.
+  repeated string members = 3;
+  // claim_name / claim_value are the group's optional claim derivation.
+  string claim_name = 4;
+  string claim_value = 5;
+}
+
+message GetApprovalGroupRequest {
+  // name is the group's name.
+  string name = 1;
+}
+
+message ListApprovalGroupsRequest {}
+
+message ListApprovalGroupsResponse {
+  repeated ApprovalGroup groups = 1;
+}
+
+// UpdateApprovalGroupRequest edits a group. Only the fields set on the
+// request are changed: an empty description leaves the existing description
+// unchanged; claim_name/claim_value are replaced only when BOTH are present
+// (setting both to empty clears the derivation); members are replaced only
+// when members_present is true.
+message UpdateApprovalGroupRequest {
+  // name is the group to update.
+  string name = 1;
+  // description, when non-empty, replaces the group's description.
+  string description = 2;
+  // claim_name / claim_value, when both present, replace the group's claim
+  // derivation (either/both empty clears it).
+  string claim_name = 3;
+  string claim_value = 4;
+  // members, when members_present is true, REPLACE the group's member list.
+  repeated string members = 5;
+  // members_present signals that members should be replaced (an empty list
+  // with members_present true empties the group's manual members).
+  bool members_present = 6;
+}
+
+message DeleteApprovalGroupRequest {
+  // name is the group to delete.
+  string name = 1;
+}
+
+// AddApprovalGroupMemberRequest atomically adds a single member to a group.
+message AddApprovalGroupMemberRequest {
+  // name is the group's name.
+  string name = 1;
+  // member is the user identifier (subject/email) to add.
+  string member = 2;
+}
+
+// RemoveApprovalGroupMemberRequest atomically removes a single member from a
+// group.
+message RemoveApprovalGroupMemberRequest {
+  // name is the group's name.
+  string name = 1;
+  // member is the user identifier (subject/email) to remove.
+  string member = 2;
+}
+
+// EffectiveApprovalGroupMembersRequest asks for a group's effective
+// membership (manual members UNION claim-derived members).
+message EffectiveApprovalGroupMembersRequest {
+  // name is the group's name.
+  string name = 1;
+}
+
+message EffectiveApprovalGroupMembersResponse {
+  // members is the group's effective membership (deduplicated).
+  repeated string members = 1;
+}
+
+// RecordObservedClaimRequest records that a principal presented a token
+// bearing a (claim, value) pair.
+message RecordObservedClaimRequest {
+  // principal_subject is the token's subject (the user's id / email).
+  string principal_subject = 1;
+  // claim_name is the name of the observed claim.
+  string claim_name = 2;
+  // claim_value is the observed value of the claim.
+  string claim_value = 3;
+}
+
+// ObservedClaimsForRequest asks for the distinct claim values observed for a
+// principal's subject under a claim name.
+message ObservedClaimsForRequest {
+  // principal_subject is the token's subject.
+  string principal_subject = 1;
+  // claim_name is the name of the claim.
+  string claim_name = 2;
+}
+
+message ObservedClaimsForResponse {
+  // values is the set of distinct claim values observed for the principal
+  // under the claim name.
+  repeated string values = 1;
+}
+
+// CastApprovalVoteRequest casts a vote on a job's approval gate (F-27
+// quorum).
+message CastApprovalVoteRequest {
+  // job_id is the job whose approval gate the vote belongs to.
+  int64 job_id = 1;
+  // step is the approval step the gate was entered at ("" when synthesized).
+  string step = 2;
+  // attempt is the job's attempt the gate was entered at.
+  int32 attempt = 3;
+  // actor is the identity (the OIDC subject) of the voter.
+  string actor = 4;
+  // decision is the vote: "approved" or "rejected".
+  string decision = 5;
+}
+
+// ApprovalVote is one row in the quorum ledger of a job's approval gate
+// (F-27): an immutable record that ACTOR cast DECISION at STEP (ATTEMPT) at
+// TIME. Returned in batches (CastApprovalVoteResponse.votes, Job.approval_votes)
+// so the API/UI can count distinct approvals.
+message ApprovalVote {
+  // job_id is the job whose approval gate the vote belongs to.
+  int64 job_id = 1;
+  // step is the approval step the gate was entered at ("" when synthesized).
+  string step = 2;
+  // attempt is the job's attempt the gate was entered at.
+  int32 attempt = 3;
+  // actor is the identity (the OIDC subject) of the voter.
+  string actor = 4;
+  // decision is the vote: "approved" or "rejected".
+  string decision = 5;
+  // at is when the vote was cast.
+  google.protobuf.Timestamp at = 6;
+}
+
+// CastApprovalVoteResponse is the result of a CastApprovalVote call: the
+// gate's ledger after recording the vote.
+message CastApprovalVoteResponse {
+  // recorded is true when the vote was freshly recorded (false when it
+  // superseded or duplicated a prior vote by the same actor, or when the job
+  // was no longer awaiting approval and the vote was refused).
+  bool recorded = 1;
+  // votes is the gate's CURRENT ledger (latest attempt, this step): every
+  // distinct actor's latest vote. The API counts the distinct "approved"
+  // actors to decide when the quorum is met.
+  repeated ApprovalVote votes = 2;
+}
+
+// ListApprovalVotesRequest asks for the quorum ledger of a job's current gate
+// (F-27).
+message ListApprovalVotesRequest {
+  // job_id is the job whose approval gate ledger is requested.
+  int64 job_id = 1;
+  // step is the approval step the gate was entered at (match CastApprovalVote).
+  string step = 2;
+  // attempt is the job's attempt the gate was entered at (match CastApprovalVote).
+  int32 attempt = 3;
+}
+
+message ListApprovalVotesResponse {
+  // votes is the gate's ledger: every distinct actor's latest vote.
+  repeated ApprovalVote votes = 1;
+}
 
 // ---------------------------------------------------------------------------
 // Audit log (F-15)

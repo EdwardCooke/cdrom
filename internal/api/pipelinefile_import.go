@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/pipelinefile"
@@ -144,6 +145,21 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 	if keys, ok := doc.Spec.StringSlice("concurrencyKeys"); ok {
 		req.ConcurrencyKeys = keys
 	}
+	// The pipeline's DEFAULT approval-gate settings (F-27): spec.approvers is
+	// a list of approver references and spec.quorum is the quorum depth K. An
+	// approval step that sets no `approvers`/`quorum` of its own inherits
+	// these (merged into the step's params at save time, by
+	// applyApprovalDefaults). A malformed quorum is a loud error.
+	if appr, ok := doc.Spec.StringSlice("approvers"); ok {
+		req.Approvers = appr
+	}
+	if qRaw, ok := doc.Spec.StringValue("quorum"); ok && qRaw != "" {
+		q, err := strconv.Atoi(qRaw)
+		if err != nil || q < 1 {
+			return nil, nil, nil, pipelinefile.Errors{{File: file, Key: "spec.quorum", Reason: fmt.Sprintf("%q is not a positive integer", qRaw)}}
+		}
+		req.Quorum = q
+	}
 	req.Params = pipelineFileParams(doc.Spec)
 	req.Triggers = pipelineFileTriggers(doc.Spec)
 
@@ -183,6 +199,11 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 	if len(errs) > 0 {
 		return nil, nil, nil, errs
 	}
+	// Merge the pipeline's DEFAULT approval-gate settings (F-27) into every
+	// approval step that does not set its own, at SAVE time — so the merged
+	// params bake into the per-run spec snapshot (F-11). Covers create,
+	// update, and source re-import alike (all funnel through requestFromFile).
+	applyApprovalDefaults(req)
 	return req, req.VariableSets, req.SecretSources, nil
 }
 

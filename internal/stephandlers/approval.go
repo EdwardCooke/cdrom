@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"cdrom/internal/executor"
@@ -40,8 +42,12 @@ import (
 // poll for the decision).
 const TypeApproval = executor.TypeApproval
 
-// Param key the approval handler reads from a step's Params map.
-const ParamMessage = "message"
+// Param keys the approval handler reads from a step's Params map.
+const (
+	ParamMessage   = "message"
+	ParamApprovers = "approvers"
+	ParamQuorum    = "quorum"
+)
 
 // approvalPollInterval is how often the approval handler polls the API for the
 // gate's decision while the job waits. It is a variable (not a constant) so
@@ -81,10 +87,34 @@ func runApprovalStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logge
 		message = rendered
 	}
 
-	// Report the job as awaiting approval (F-13): the API persists the status
-	// and message so the UI can show the gate, and the execution target's
-	// status is now awaiting_approval (a non-terminal, in-flight state).
-	if err := gate.ReportAwaitingApproval(ctx, message); err != nil {
+	// Assemble the gate's approver references and quorum depth (F-27): the
+	// `approvers` param is a list of references (each `group:<name>`,
+	// `role:<name>`, or a bare user identifier) and `quorum` is the number of
+	// DISTINCT authorized approvers whose approvals resolve the gate (0/1
+	// means a single approval resolves it). When `approvers` is absent or
+	// empty the gate has no approver restriction (anyone with the relevant
+	// F-14 permission may decide — the F-13 baseline).
+	approvers := paramStrings(step, ParamApprovers)
+	quorum := 0
+	if raw := paramString(step, ParamQuorum); raw != "" {
+		k, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || k < 1 {
+			return fmt.Errorf("approval quorum: %q is not a positive integer", raw)
+		}
+		quorum = k
+	}
+
+	// Report the job as awaiting approval (F-13/F-27): the API persists the
+	// status, message, and gate info (approvers + quorum + step name) so the
+	// UI can show the gate and the decision-time authorization can resolve
+	// the authorized set, and the execution target's status is now
+	// awaiting_approval (a non-terminal, in-flight state).
+	info := executor.GateInfo{
+		Approvers: approvers,
+		Quorum:    quorum,
+		Step:      executor.StepNameFromContext(ctx),
+	}
+	if err := gate.ReportAwaitingApproval(ctx, message, info); err != nil {
 		return fmt.Errorf("report awaiting approval: %w", err)
 	}
 	sink := executor.LogSinkFromContext(ctx)

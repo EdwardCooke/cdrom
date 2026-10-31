@@ -109,6 +109,18 @@ const (
 	Database_ListRoleBindings_FullMethodName               = "/cdrom.db.v1.Database/ListRoleBindings"
 	Database_DeleteRoleBinding_FullMethodName              = "/cdrom.db.v1.Database/DeleteRoleBinding"
 	Database_PublishRoleChange_FullMethodName              = "/cdrom.db.v1.Database/PublishRoleChange"
+	Database_CreateApprovalGroup_FullMethodName            = "/cdrom.db.v1.Database/CreateApprovalGroup"
+	Database_GetApprovalGroup_FullMethodName               = "/cdrom.db.v1.Database/GetApprovalGroup"
+	Database_ListApprovalGroups_FullMethodName             = "/cdrom.db.v1.Database/ListApprovalGroups"
+	Database_UpdateApprovalGroup_FullMethodName            = "/cdrom.db.v1.Database/UpdateApprovalGroup"
+	Database_DeleteApprovalGroup_FullMethodName            = "/cdrom.db.v1.Database/DeleteApprovalGroup"
+	Database_AddApprovalGroupMember_FullMethodName         = "/cdrom.db.v1.Database/AddApprovalGroupMember"
+	Database_RemoveApprovalGroupMember_FullMethodName      = "/cdrom.db.v1.Database/RemoveApprovalGroupMember"
+	Database_EffectiveApprovalGroupMembers_FullMethodName  = "/cdrom.db.v1.Database/EffectiveApprovalGroupMembers"
+	Database_RecordObservedClaim_FullMethodName            = "/cdrom.db.v1.Database/RecordObservedClaim"
+	Database_ObservedClaimsFor_FullMethodName              = "/cdrom.db.v1.Database/ObservedClaimsFor"
+	Database_CastApprovalVote_FullMethodName               = "/cdrom.db.v1.Database/CastApprovalVote"
+	Database_ListApprovalVotes_FullMethodName              = "/cdrom.db.v1.Database/ListApprovalVotes"
 	Database_AppendAuditEvent_FullMethodName               = "/cdrom.db.v1.Database/AppendAuditEvent"
 	Database_ListAuditEvents_FullMethodName                = "/cdrom.db.v1.Database/ListAuditEvents"
 	Database_PruneAuditEvents_FullMethodName               = "/cdrom.db.v1.Database/PruneAuditEvents"
@@ -533,6 +545,57 @@ type DatabaseClient interface {
 	// the caller through the role/binding RPCs; this only appends the event so
 	// the other replicas see the change without a restart.
 	PublishRoleChange(ctx context.Context, in *PublishRoleChangeRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	// Approval groups (F-27). Named sets of users that a pipeline's approval
+	// step can reference via an `approvers` entry of `group:<name>`. Group
+	// rows are owned by the Database service so every API replica shares the
+	// same groups; the API resolves a gate's authorized set when a decision
+	// arrives and is the only place that authorizes.
+	//
+	// CreateApprovalGroup creates a group (name, description, optional initial
+	// members and claim derivation). It rejects a name that collides with an
+	// existing group. GetApprovalGroup retrieves one by name. ListApprovalGroups
+	// returns all groups. UpdateApprovalGroup edits a group's description,
+	// claim derivation, and (when members_present) REPLACES its member list.
+	// DeleteApprovalGroup removes a group.
+	CreateApprovalGroup(ctx context.Context, in *CreateApprovalGroupRequest, opts ...grpc.CallOption) (*ApprovalGroup, error)
+	GetApprovalGroup(ctx context.Context, in *GetApprovalGroupRequest, opts ...grpc.CallOption) (*ApprovalGroup, error)
+	ListApprovalGroups(ctx context.Context, in *ListApprovalGroupsRequest, opts ...grpc.CallOption) (*ListApprovalGroupsResponse, error)
+	UpdateApprovalGroup(ctx context.Context, in *UpdateApprovalGroupRequest, opts ...grpc.CallOption) (*ApprovalGroup, error)
+	DeleteApprovalGroup(ctx context.Context, in *DeleteApprovalGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// AddApprovalGroupMember atomically adds a single member to a group's
+	// member list (idempotent: adding a member already present is a no-op).
+	// RemoveApprovalGroupMember atomically removes a single member (idempotent:
+	// removing an absent member is a no-op). These back the API's incremental
+	// membership endpoints (a transactional mutation of the members column,
+	// not an API-side read-modify-write).
+	AddApprovalGroupMember(ctx context.Context, in *AddApprovalGroupMemberRequest, opts ...grpc.CallOption) (*ApprovalGroup, error)
+	RemoveApprovalGroupMember(ctx context.Context, in *RemoveApprovalGroupMemberRequest, opts ...grpc.CallOption) (*ApprovalGroup, error)
+	// EffectiveApprovalGroupMembers returns a group's EFFECTIVE membership:
+	// its manual members UNION every principal observed (RecordObservedClaim)
+	// to carry the group's claim derivation (when set). The API uses it to
+	// resolve a gate's authorized set at decision time.
+	EffectiveApprovalGroupMembers(ctx context.Context, in *EffectiveApprovalGroupMembersRequest, opts ...grpc.CallOption) (*EffectiveApprovalGroupMembersResponse, error)
+	// RecordObservedClaim records that a principal presented a token bearing a
+	// (claim, value) pair (F-27 claim-derived membership). Idempotent on
+	// (principal, claim, value); the API calls it opportunistically from its
+	// auth middleware and login/register paths.
+	RecordObservedClaim(ctx context.Context, in *RecordObservedClaimRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ObservedClaimsFor returns the distinct claim VALUES observed for a
+	// principal's subject under a claim name (F-27). The API uses it to enrich
+	// the deciding actor's effective role set with claim-mapped roles.
+	ObservedClaimsFor(ctx context.Context, in *ObservedClaimsForRequest, opts ...grpc.CallOption) (*ObservedClaimsForResponse, error)
+	// CastApprovalVote casts (records) a vote on a job's approval gate (F-27
+	// quorum) and returns the gate's ledger. Recording is idempotent on
+	// (job, step, attempt, actor): casting the same decision again is a no-op,
+	// flipping one's vote supersedes the prior row. The vote is only recorded
+	// while the job is still awaiting approval (conditional, like
+	// ResolveApproval), so a late vote on a resolved gate is refused.
+	CastApprovalVote(ctx context.Context, in *CastApprovalVoteRequest, opts ...grpc.CallOption) (*CastApprovalVoteResponse, error)
+	// ListApprovalVotes returns the quorum ledger of a job's CURRENT gate (F-27):
+	// the distinct actors and their latest votes (given attempt + step). The
+	// scheduler uses it to populate the job's REST view (approval_votes) so the
+	// UI can show quorum progress.
+	ListApprovalVotes(ctx context.Context, in *ListApprovalVotesRequest, opts ...grpc.CallOption) (*ListApprovalVotesResponse, error)
 	// Audit log (F-15). The audit log is an append-only record of significant
 	// actions: who (actor) did what (action) to which resource (target), when,
 	// from where, with what outcome, and what changed (old/new value). The API
@@ -1711,6 +1774,126 @@ func (c *databaseClient) PublishRoleChange(ctx context.Context, in *PublishRoleC
 	return out, nil
 }
 
+func (c *databaseClient) CreateApprovalGroup(ctx context.Context, in *CreateApprovalGroupRequest, opts ...grpc.CallOption) (*ApprovalGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalGroup)
+	err := c.cc.Invoke(ctx, Database_CreateApprovalGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetApprovalGroup(ctx context.Context, in *GetApprovalGroupRequest, opts ...grpc.CallOption) (*ApprovalGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalGroup)
+	err := c.cc.Invoke(ctx, Database_GetApprovalGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListApprovalGroups(ctx context.Context, in *ListApprovalGroupsRequest, opts ...grpc.CallOption) (*ListApprovalGroupsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApprovalGroupsResponse)
+	err := c.cc.Invoke(ctx, Database_ListApprovalGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateApprovalGroup(ctx context.Context, in *UpdateApprovalGroupRequest, opts ...grpc.CallOption) (*ApprovalGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalGroup)
+	err := c.cc.Invoke(ctx, Database_UpdateApprovalGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteApprovalGroup(ctx context.Context, in *DeleteApprovalGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteApprovalGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) AddApprovalGroupMember(ctx context.Context, in *AddApprovalGroupMemberRequest, opts ...grpc.CallOption) (*ApprovalGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalGroup)
+	err := c.cc.Invoke(ctx, Database_AddApprovalGroupMember_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RemoveApprovalGroupMember(ctx context.Context, in *RemoveApprovalGroupMemberRequest, opts ...grpc.CallOption) (*ApprovalGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApprovalGroup)
+	err := c.cc.Invoke(ctx, Database_RemoveApprovalGroupMember_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) EffectiveApprovalGroupMembers(ctx context.Context, in *EffectiveApprovalGroupMembersRequest, opts ...grpc.CallOption) (*EffectiveApprovalGroupMembersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EffectiveApprovalGroupMembersResponse)
+	err := c.cc.Invoke(ctx, Database_EffectiveApprovalGroupMembers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RecordObservedClaim(ctx context.Context, in *RecordObservedClaimRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_RecordObservedClaim_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ObservedClaimsFor(ctx context.Context, in *ObservedClaimsForRequest, opts ...grpc.CallOption) (*ObservedClaimsForResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ObservedClaimsForResponse)
+	err := c.cc.Invoke(ctx, Database_ObservedClaimsFor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CastApprovalVote(ctx context.Context, in *CastApprovalVoteRequest, opts ...grpc.CallOption) (*CastApprovalVoteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CastApprovalVoteResponse)
+	err := c.cc.Invoke(ctx, Database_CastApprovalVote_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListApprovalVotes(ctx context.Context, in *ListApprovalVotesRequest, opts ...grpc.CallOption) (*ListApprovalVotesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApprovalVotesResponse)
+	err := c.cc.Invoke(ctx, Database_ListApprovalVotes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) AppendAuditEvent(ctx context.Context, in *AppendAuditEventRequest, opts ...grpc.CallOption) (*AuditEvent, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AuditEvent)
@@ -2547,6 +2730,57 @@ type DatabaseServer interface {
 	// the caller through the role/binding RPCs; this only appends the event so
 	// the other replicas see the change without a restart.
 	PublishRoleChange(context.Context, *PublishRoleChangeRequest) (*PublishEventResponse, error)
+	// Approval groups (F-27). Named sets of users that a pipeline's approval
+	// step can reference via an `approvers` entry of `group:<name>`. Group
+	// rows are owned by the Database service so every API replica shares the
+	// same groups; the API resolves a gate's authorized set when a decision
+	// arrives and is the only place that authorizes.
+	//
+	// CreateApprovalGroup creates a group (name, description, optional initial
+	// members and claim derivation). It rejects a name that collides with an
+	// existing group. GetApprovalGroup retrieves one by name. ListApprovalGroups
+	// returns all groups. UpdateApprovalGroup edits a group's description,
+	// claim derivation, and (when members_present) REPLACES its member list.
+	// DeleteApprovalGroup removes a group.
+	CreateApprovalGroup(context.Context, *CreateApprovalGroupRequest) (*ApprovalGroup, error)
+	GetApprovalGroup(context.Context, *GetApprovalGroupRequest) (*ApprovalGroup, error)
+	ListApprovalGroups(context.Context, *ListApprovalGroupsRequest) (*ListApprovalGroupsResponse, error)
+	UpdateApprovalGroup(context.Context, *UpdateApprovalGroupRequest) (*ApprovalGroup, error)
+	DeleteApprovalGroup(context.Context, *DeleteApprovalGroupRequest) (*emptypb.Empty, error)
+	// AddApprovalGroupMember atomically adds a single member to a group's
+	// member list (idempotent: adding a member already present is a no-op).
+	// RemoveApprovalGroupMember atomically removes a single member (idempotent:
+	// removing an absent member is a no-op). These back the API's incremental
+	// membership endpoints (a transactional mutation of the members column,
+	// not an API-side read-modify-write).
+	AddApprovalGroupMember(context.Context, *AddApprovalGroupMemberRequest) (*ApprovalGroup, error)
+	RemoveApprovalGroupMember(context.Context, *RemoveApprovalGroupMemberRequest) (*ApprovalGroup, error)
+	// EffectiveApprovalGroupMembers returns a group's EFFECTIVE membership:
+	// its manual members UNION every principal observed (RecordObservedClaim)
+	// to carry the group's claim derivation (when set). The API uses it to
+	// resolve a gate's authorized set at decision time.
+	EffectiveApprovalGroupMembers(context.Context, *EffectiveApprovalGroupMembersRequest) (*EffectiveApprovalGroupMembersResponse, error)
+	// RecordObservedClaim records that a principal presented a token bearing a
+	// (claim, value) pair (F-27 claim-derived membership). Idempotent on
+	// (principal, claim, value); the API calls it opportunistically from its
+	// auth middleware and login/register paths.
+	RecordObservedClaim(context.Context, *RecordObservedClaimRequest) (*emptypb.Empty, error)
+	// ObservedClaimsFor returns the distinct claim VALUES observed for a
+	// principal's subject under a claim name (F-27). The API uses it to enrich
+	// the deciding actor's effective role set with claim-mapped roles.
+	ObservedClaimsFor(context.Context, *ObservedClaimsForRequest) (*ObservedClaimsForResponse, error)
+	// CastApprovalVote casts (records) a vote on a job's approval gate (F-27
+	// quorum) and returns the gate's ledger. Recording is idempotent on
+	// (job, step, attempt, actor): casting the same decision again is a no-op,
+	// flipping one's vote supersedes the prior row. The vote is only recorded
+	// while the job is still awaiting approval (conditional, like
+	// ResolveApproval), so a late vote on a resolved gate is refused.
+	CastApprovalVote(context.Context, *CastApprovalVoteRequest) (*CastApprovalVoteResponse, error)
+	// ListApprovalVotes returns the quorum ledger of a job's CURRENT gate (F-27):
+	// the distinct actors and their latest votes (given attempt + step). The
+	// scheduler uses it to populate the job's REST view (approval_votes) so the
+	// UI can show quorum progress.
+	ListApprovalVotes(context.Context, *ListApprovalVotesRequest) (*ListApprovalVotesResponse, error)
 	// Audit log (F-15). The audit log is an append-only record of significant
 	// actions: who (actor) did what (action) to which resource (target), when,
 	// from where, with what outcome, and what changed (old/new value). The API
@@ -3101,6 +3335,42 @@ func (UnimplementedDatabaseServer) DeleteRoleBinding(context.Context, *DeleteRol
 }
 func (UnimplementedDatabaseServer) PublishRoleChange(context.Context, *PublishRoleChangeRequest) (*PublishEventResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishRoleChange not implemented")
+}
+func (UnimplementedDatabaseServer) CreateApprovalGroup(context.Context, *CreateApprovalGroupRequest) (*ApprovalGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateApprovalGroup not implemented")
+}
+func (UnimplementedDatabaseServer) GetApprovalGroup(context.Context, *GetApprovalGroupRequest) (*ApprovalGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetApprovalGroup not implemented")
+}
+func (UnimplementedDatabaseServer) ListApprovalGroups(context.Context, *ListApprovalGroupsRequest) (*ListApprovalGroupsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListApprovalGroups not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateApprovalGroup(context.Context, *UpdateApprovalGroupRequest) (*ApprovalGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateApprovalGroup not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteApprovalGroup(context.Context, *DeleteApprovalGroupRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteApprovalGroup not implemented")
+}
+func (UnimplementedDatabaseServer) AddApprovalGroupMember(context.Context, *AddApprovalGroupMemberRequest) (*ApprovalGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddApprovalGroupMember not implemented")
+}
+func (UnimplementedDatabaseServer) RemoveApprovalGroupMember(context.Context, *RemoveApprovalGroupMemberRequest) (*ApprovalGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveApprovalGroupMember not implemented")
+}
+func (UnimplementedDatabaseServer) EffectiveApprovalGroupMembers(context.Context, *EffectiveApprovalGroupMembersRequest) (*EffectiveApprovalGroupMembersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method EffectiveApprovalGroupMembers not implemented")
+}
+func (UnimplementedDatabaseServer) RecordObservedClaim(context.Context, *RecordObservedClaimRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordObservedClaim not implemented")
+}
+func (UnimplementedDatabaseServer) ObservedClaimsFor(context.Context, *ObservedClaimsForRequest) (*ObservedClaimsForResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ObservedClaimsFor not implemented")
+}
+func (UnimplementedDatabaseServer) CastApprovalVote(context.Context, *CastApprovalVoteRequest) (*CastApprovalVoteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CastApprovalVote not implemented")
+}
+func (UnimplementedDatabaseServer) ListApprovalVotes(context.Context, *ListApprovalVotesRequest) (*ListApprovalVotesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListApprovalVotes not implemented")
 }
 func (UnimplementedDatabaseServer) AppendAuditEvent(context.Context, *AppendAuditEventRequest) (*AuditEvent, error) {
 	return nil, status.Error(codes.Unimplemented, "method AppendAuditEvent not implemented")
@@ -4863,6 +5133,222 @@ func _Database_PublishRoleChange_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateApprovalGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateApprovalGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateApprovalGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateApprovalGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateApprovalGroup(ctx, req.(*CreateApprovalGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetApprovalGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetApprovalGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetApprovalGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetApprovalGroup(ctx, req.(*GetApprovalGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListApprovalGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApprovalGroupsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListApprovalGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListApprovalGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListApprovalGroups(ctx, req.(*ListApprovalGroupsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateApprovalGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateApprovalGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateApprovalGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateApprovalGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateApprovalGroup(ctx, req.(*UpdateApprovalGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteApprovalGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteApprovalGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteApprovalGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteApprovalGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteApprovalGroup(ctx, req.(*DeleteApprovalGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_AddApprovalGroupMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddApprovalGroupMemberRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).AddApprovalGroupMember(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_AddApprovalGroupMember_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).AddApprovalGroupMember(ctx, req.(*AddApprovalGroupMemberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RemoveApprovalGroupMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveApprovalGroupMemberRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RemoveApprovalGroupMember(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RemoveApprovalGroupMember_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RemoveApprovalGroupMember(ctx, req.(*RemoveApprovalGroupMemberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_EffectiveApprovalGroupMembers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EffectiveApprovalGroupMembersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).EffectiveApprovalGroupMembers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_EffectiveApprovalGroupMembers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).EffectiveApprovalGroupMembers(ctx, req.(*EffectiveApprovalGroupMembersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RecordObservedClaim_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordObservedClaimRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RecordObservedClaim(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RecordObservedClaim_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RecordObservedClaim(ctx, req.(*RecordObservedClaimRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ObservedClaimsFor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ObservedClaimsForRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ObservedClaimsFor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ObservedClaimsFor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ObservedClaimsFor(ctx, req.(*ObservedClaimsForRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CastApprovalVote_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CastApprovalVoteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CastApprovalVote(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CastApprovalVote_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CastApprovalVote(ctx, req.(*CastApprovalVoteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListApprovalVotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApprovalVotesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListApprovalVotes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListApprovalVotes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListApprovalVotes(ctx, req.(*ListApprovalVotesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_AppendAuditEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AppendAuditEventRequest)
 	if err := dec(in); err != nil {
@@ -6053,6 +6539,54 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PublishRoleChange",
 			Handler:    _Database_PublishRoleChange_Handler,
+		},
+		{
+			MethodName: "CreateApprovalGroup",
+			Handler:    _Database_CreateApprovalGroup_Handler,
+		},
+		{
+			MethodName: "GetApprovalGroup",
+			Handler:    _Database_GetApprovalGroup_Handler,
+		},
+		{
+			MethodName: "ListApprovalGroups",
+			Handler:    _Database_ListApprovalGroups_Handler,
+		},
+		{
+			MethodName: "UpdateApprovalGroup",
+			Handler:    _Database_UpdateApprovalGroup_Handler,
+		},
+		{
+			MethodName: "DeleteApprovalGroup",
+			Handler:    _Database_DeleteApprovalGroup_Handler,
+		},
+		{
+			MethodName: "AddApprovalGroupMember",
+			Handler:    _Database_AddApprovalGroupMember_Handler,
+		},
+		{
+			MethodName: "RemoveApprovalGroupMember",
+			Handler:    _Database_RemoveApprovalGroupMember_Handler,
+		},
+		{
+			MethodName: "EffectiveApprovalGroupMembers",
+			Handler:    _Database_EffectiveApprovalGroupMembers_Handler,
+		},
+		{
+			MethodName: "RecordObservedClaim",
+			Handler:    _Database_RecordObservedClaim_Handler,
+		},
+		{
+			MethodName: "ObservedClaimsFor",
+			Handler:    _Database_ObservedClaimsFor_Handler,
+		},
+		{
+			MethodName: "CastApprovalVote",
+			Handler:    _Database_CastApprovalVote_Handler,
+		},
+		{
+			MethodName: "ListApprovalVotes",
+			Handler:    _Database_ListApprovalVotes_Handler,
 		},
 		{
 			MethodName: "AppendAuditEvent",

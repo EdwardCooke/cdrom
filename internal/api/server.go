@@ -37,6 +37,18 @@ import (
 	"cdrom/internal/sourceref"
 )
 
+// F-27 approval-step identifiers (mirroring internal/stephandlers'
+// ParamApprovers / ParamQuorum and executor.TypeApproval): the pipeline's
+// default approver references and quorum depth are merged into an approval
+// step's PARAMS under these keys at save time. Kept as locals here so the API
+// does not import the step-handler or executor packages (the former pulls in
+// os/exec).
+const (
+	paramKeyApprovers = "approvers"
+	paramKeyQuorum    = "quorum"
+	stepTypeApproval  = "approval"
+)
+
 // Clients are the gRPC clients the API bridges to.
 type Clients struct {
 	Database  dbpb.DatabaseClient
@@ -394,6 +406,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/role-bindings/{id}", s.deleteBinding)
 	mux.HandleFunc("GET /api/me/permissions", s.myPermissions)
 
+	// Approval groups (F-27): named sets of users an approval step can
+	// reference via `group:<name>`. Viewing requires approvals.can-view;
+	// creating/updating/deleting a group and adding/removing members requires
+	// approvals.can-manage. The incremental member endpoints back the UI's
+	// one-person-at-a-time churn (atomic add/remove in the Database service).
+	mux.HandleFunc("GET /api/approval-groups", s.listApprovalGroups)
+	mux.HandleFunc("POST /api/approval-groups", s.createApprovalGroup)
+	mux.HandleFunc("GET /api/approval-groups/{name}", s.getApprovalGroup)
+	mux.HandleFunc("PUT /api/approval-groups/{name}", s.updateApprovalGroup)
+	mux.HandleFunc("DELETE /api/approval-groups/{name}", s.deleteApprovalGroup)
+	mux.HandleFunc("POST /api/approval-groups/{name}/members", s.addApprovalGroupMember)
+	mux.HandleFunc("DELETE /api/approval-groups/{name}/members/{member}", s.removeApprovalGroupMember)
+
 	// Username/password authentication (proxied to the IdP). These are the
 	// unauthenticated entry points: login and register require no token, and
 	// user/role management requires an authenticated (admin) caller. They are
@@ -479,6 +504,19 @@ type pipelineRequest struct {
 	// "best_effort", or "any"; a job that sets its own failure mode overrides
 	// this, and a job that sets none inherits it.
 	FailureMode string `json:"failureMode,omitempty"`
+	// Approvers is the pipeline's DEFAULT approver references (F-27): each is
+	// `group:<name>`, `role:<name>`, or a bare user identifier. An approval
+	// step that sets no `approvers` param of its own inherits this set (merged
+	// into the step's params at save time, so it bakes into the per-run spec
+	// snapshot, F-11). A step that sets its own `approvers` wholly overrides
+	// it.
+	Approvers []string `json:"approvers,omitempty"`
+	// Quorum is the pipeline's DEFAULT quorum depth K (F-27): the number of
+	// DISTINCT authorized approvers whose approvals resolve a gate. An
+	// approval step that sets no `quorum` param of its own inherits this value
+	// (merged at save time). A step that sets its own `quorum` wholly
+	// overrides it. Zero means no default (a single approval resolves).
+	Quorum int `json:"quorum,omitempty"`
 	// ConcurrencyKeys are the pipeline's concurrency keys (F-16): named, global
 	// locks that serialize a run of this pipeline against runs of any other
 	// pipeline that shares a key. A job's effective key set is the union of the
@@ -562,12 +600,18 @@ func (s *Server) decodePipelineRequest(r *http.Request, pipelineID int64) (*pipe
 		}
 		req.VariableSets = variableSets
 		req.SecretSources = secretSources
+		// The file-format funnel (requestFromFile) already merged the pipeline's
+		// DEFAULT approval-gate settings (F-27) into the approval steps.
 		return req, nil
 	}
 	var req pipelineRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("invalid body: %w", err)
 	}
+	// Merge the pipeline's DEFAULT approval-gate settings (F-27) into every
+	// approval step that does not set its own, at SAVE time — so the merged
+	// params bake into the per-run spec snapshot (F-11).
+	applyApprovalDefaults(&req)
 	return &req, nil
 }
 
@@ -975,6 +1019,45 @@ func runStatusFromName(name string) dbpb.RunStatus {
 		return dbpb.RunStatus_RUN_STATUS_CANCELLED
 	default:
 		return dbpb.RunStatus_RUN_STATUS_UNSPECIFIED
+	}
+}
+
+// applyApprovalDefaults merges the pipeline's DEFAULT approver references and
+// quorum depth (F-27) into every approval step that does not set its own. It
+// runs at SAVE time (both the file-format and JSON-schema birthplaces of a
+// pipelineRequest), so the merged params bake into the per-run spec snapshot
+// (F-11): a run's gates reflect the defaults in force when the run started.
+// Override is WHOLESALE per param: a step that sets `approvers` ignores the
+// pipeline default (likewise `quorum`), so a step may set one and inherit the
+// other. A step that is not an approval step (type "approval") is untouched.
+func applyApprovalDefaults(req *pipelineRequest) {
+	if len(req.Approvers) == 0 && req.Quorum == 0 {
+		return
+	}
+	for ji := range req.Jobs {
+		spec := req.Jobs[ji].Spec
+		if spec == nil {
+			continue
+		}
+		for si := range spec.Steps {
+			step := &spec.Steps[si]
+			if step.Type != stepTypeApproval {
+				continue
+			}
+			if step.Params == nil {
+				step.Params = map[string]*paramValueRequest{}
+			}
+			if len(req.Approvers) > 0 {
+				if _, ok := step.Params[paramKeyApprovers]; !ok {
+					step.Params[paramKeyApprovers] = &paramValueRequest{Strings: req.Approvers}
+				}
+			}
+			if req.Quorum > 0 {
+				if _, ok := step.Params[paramKeyQuorum]; !ok {
+					step.Params[paramKeyQuorum] = &paramValueRequest{String: strconv.Itoa(req.Quorum)}
+				}
+			}
+		}
 	}
 }
 
@@ -1859,12 +1942,20 @@ func (s *Server) rejectJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveApproval is the shared implementation of the approve/reject
-// endpoints (F-13). It records the decision (approved or rejected), the actor
-// (the authenticated user, via auth.UserFromContext), and an optional reason
-// on the job (via the scheduler's ResolveApproval, which persists it and
-// appends a job_status event to the shared event log, F-23). The actor is the
-// authenticated user's subject; when authentication is disabled there is no
-// actor (the decision is recorded with an empty actor).
+// endpoints (F-13/F-27). It records the decision (approved or rejected), the
+// actor (the authenticated user, via auth.UserFromContext), and an optional
+// reason on the job (via the scheduler's ResolveApproval, which persists it
+// and appends a job_status event to the shared event log, F-23). Beyond the
+// F-14 permission (jobs.can-approve / jobs.can-reject), when the gate declares
+// APPROVER REFERENCES (F-27) the actor must ALSO be in the gate's authorized
+// set — resolved NOW, at decision time (group members ∪ claim-derived members
+// ∪ role holders ∪ named individuals). Under QUORUM (K > 1) an approval does
+// not resolve the gate until K distinct authorized approvers have approved; a
+// rejection always resolves it immediately. The actor is the authenticated
+// user's subject; when authentication is disabled there is no actor (the
+// decision is recorded with an empty actor) and the F-27 membership check is
+// vacuous (everyone is "allowed" by the absence of a restricting set), so the
+// F-13 baseline holds.
 func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decision string) {
 	jobID, ok := pathID(w, r)
 	if !ok {
@@ -1884,17 +1975,97 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decisio
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
-	actor := auth.UserFromContext(r.Context()).Subject
-	job, err := s.clients.Scheduler.ResolveApproval(r.Context(), &schedpb.ResolveApprovalRequest{
-		Id:       jobID,
-		Decision: decision,
-		Actor:    actor,
-		Reason:   req.Reason,
-	})
+	user := auth.UserFromContext(r.Context())
+	actor := user.Subject
+
+	// Learn the CURRENT gate's approver references, quorum depth, step, and
+	// attempt (needed for F-27 authorization and the quorum vote ledger).
+	jobResp, err := s.clients.Scheduler.GetJob(r.Context(), &schedpb.GetJobRequest{Id: jobID})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
+	gateRefs := jobResp.GetApprovalApprovers()
+	quorum := int(jobResp.GetApprovalQuorum())
+	gateStep := jobResp.GetApprovalStep()
+	attempt := jobResp.GetAttempt()
+
+	// F-27 membership: when the gate declares approver references, the actor
+	// must be in the authorized set (RESOLVED AT DECISION TIME) in addition to
+	// holding the F-14 permission above. Outside the set → 403.
+	if len(gateRefs) > 0 {
+		authorized, err := s.isAuthorizedApprover(r.Context(), user, gateRefs)
+		if err != nil {
+			grpcError(w, err)
+			return
+		}
+		if !authorized {
+			httpError(w, http.StatusForbidden, "not an authorized approver for this gate")
+			return
+		}
+	}
+
+	// F-27 quorum: a REJECTION always resolves the gate immediately. An
+	// APPROVAL resolves it when the gate has no quorum (K <= 1, the F-13
+	// baseline: a single approval decides) OR, under K > 1, once K DISTINCT
+	// authorized approvers have approved. Count the distinct approvals already
+	// cast (from the ledger) plus this one.
+	resolveNow := decision == "rejected"
+	if !resolveNow { // decision == "approved"
+		if quorum <= 1 {
+			resolveNow = true
+		} else {
+			distinct, err := s.distinctApprovedActors(r.Context(), jobID, gateStep, attempt)
+			if err != nil {
+				grpcError(w, err)
+				return
+			}
+			count := len(distinct)
+			if !containsString(distinct, actor) {
+				count++
+			}
+			resolveNow = count >= quorum
+		}
+	}
+
+	var job *schedpb.Job
+	if resolveNow {
+		// The gate resolves: the scheduler casts the resolving vote (under
+		// quorum) and flips the job out of awaiting_approval (persists the
+		// decision + publishes the job_status event, F-23).
+		job, err = s.clients.Scheduler.ResolveApproval(r.Context(), &schedpb.ResolveApprovalRequest{
+			Id:       jobID,
+			Decision: decision,
+			Actor:    actor,
+			Reason:   req.Reason,
+			Step:     gateStep,
+			Attempt:  attempt,
+		})
+		if err != nil {
+			grpcError(w, err)
+			return
+		}
+	} else {
+		// Intermediate quorum approval: RECORD the vote in the ledger (so the
+		// distinct count grows) but do NOT flip the gate — it stays
+		// awaiting_approval until K distinct approvals accrue.
+		if _, err := s.clients.Database.CastApprovalVote(r.Context(), &dbpb.CastApprovalVoteRequest{
+			JobId:    jobID,
+			Step:     gateStep,
+			Attempt:  attempt,
+			Actor:    actor,
+			Decision: decision,
+		}); err != nil {
+			grpcError(w, err)
+			return
+		}
+		job, err = s.clients.Scheduler.GetJob(r.Context(), &schedpb.GetJobRequest{Id: jobID})
+		if err != nil {
+			grpcError(w, err)
+			return
+		}
+	}
+
 	action := audit.ActionJobApprove
 	if decision == "rejected" {
 		action = audit.ActionJobReject
@@ -1907,10 +2078,170 @@ func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request, decisio
 		PipelineID: job.GetPipelineId(),
 		RunID:      job.GetRunId(),
 		Outcome:    audit.OutcomeSuccess,
-		Details:    auditJSON(map[string]any{"decision": decision, "reason": req.Reason, "status": jobStatusName(job.GetStatus())}),
+		Details:    auditJSON(map[string]any{"decision": decision, "reason": req.Reason, "status": jobStatusName(job.GetStatus()), "resolved_now": resolveNow}),
 	})
-	s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
+	if resolveNow {
+		s.publish(Event{Type: EventJobStatus, JobID: job.GetId(), Status: jobStatusName(job.GetStatus())})
+	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+// isAuthorizedApprover reports whether the actor is in the gate's AUTHORIZED
+// SET (F-27), resolved at decision time: the union of (a) the effective
+// members of every referenced GROUP (manual ∪ claim-derived), (b) everyone
+// HOLDING every referenced ROLE, and (c) the NAMED INDIVIDUALS (matched
+// against the actor's subject and email). The actor satisfies the set if ANY
+// reference matches. References are opaque strings; a group that no longer
+// exists contributes no members (its reference simply does not match).
+func (s *Server) isAuthorizedApprover(ctx context.Context, user auth.User, refs []string) (bool, error) {
+	// Candidate identities for the actor: its subject and email (a member
+	// reference may name either).
+	idents := map[string]struct{}{}
+	for _, id := range []string{user.Subject, user.Email} {
+		if id != "" {
+			idents[id] = struct{}{}
+		}
+	}
+	// The actor's EFFECTIVE roles: the token's roles claim PLUS the roles
+	// derived from the actor's live token claims via the configured F-14 claim
+	// mapping (and, as a fallback for principals whose presented token carries
+	// no claims — e.g. an API key — the roles derived from their OBSERVED
+	// claims). Computed once; role references are checked against it.
+	effRoles := map[string]struct{}{}
+	for _, ro := range user.Roles {
+		effRoles[ro] = struct{}{}
+	}
+	roleClaim := s.roleClaimName()
+	if roleClaim != "" {
+		for _, cv := range user.Claims[roleClaim] {
+			if role := s.claimMappedRole(cv); role != "" {
+				effRoles[role] = struct{}{}
+			}
+		}
+		if vals, err := s.observedClaimValues(ctx, user.Subject, roleClaim); err == nil {
+			for _, cv := range vals {
+				if role := s.claimMappedRole(cv); role != "" {
+					effRoles[role] = struct{}{}
+				}
+			}
+		}
+	}
+	hasDB := s.clients.Database != nil
+	for _, ref := range refs {
+		switch {
+		case strings.HasPrefix(ref, "group:"):
+			if !hasDB {
+				continue
+			}
+			gname := strings.TrimPrefix(ref, "group:")
+			resp, err := s.clients.Database.EffectiveApprovalGroupMembers(ctx, &dbpb.EffectiveApprovalGroupMembersRequest{Name: gname})
+			if err != nil {
+				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+					continue // the group no longer exists: contributes no members
+				}
+				return false, err
+			}
+			for _, m := range resp.GetMembers() {
+				if _, ok := idents[m]; ok {
+					return true, nil
+				}
+			}
+		case strings.HasPrefix(ref, "role:"):
+			rname := strings.TrimPrefix(ref, "role:")
+			if _, ok := effRoles[rname]; ok {
+				return true, nil
+			}
+		default:
+			// A bare user identifier matches the actor's subject or email.
+			if _, ok := idents[ref]; ok {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// distinctApprovedActors returns the DISTINCT actors who have voted "approved"
+// for the job's CURRENT gate (F-27 quorum), read from the vote ledger.
+func (s *Server) distinctApprovedActors(ctx context.Context, jobID int64, step string, attempt int32) ([]string, error) {
+	if s.clients.Database == nil {
+		return nil, nil
+	}
+	resp, err := s.clients.Database.ListApprovalVotes(ctx, &dbpb.ListApprovalVotesRequest{
+		JobId:   jobID,
+		Step:    step,
+		Attempt: attempt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, v := range resp.GetVotes() {
+		if v.GetDecision() != "approved" {
+			continue
+		}
+		a := v.GetActor()
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		seen[a] = struct{}{}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// roleClaimName returns the configured F-14 role-claim name ("" when unset or
+// the config is unavailable).
+func (s *Server) roleClaimName() string {
+	if s.cfg == nil {
+		return ""
+	}
+	return s.cfg.Auth.Roles.RoleClaim
+}
+
+// claimMappedRole returns the role name a claim VALUE maps to under the
+// configured F-14 mapping (the explicit RoleMappings entry when present,
+// otherwise the value itself when RoleClaimAsNames is set, otherwise "").
+func (s *Server) claimMappedRole(value string) string {
+	if s.cfg == nil {
+		return ""
+	}
+	roles := s.cfg.Auth.Roles
+	if role, ok := roles.RoleMappings[value]; ok {
+		return role
+	}
+	if roles.RoleClaimAsNames {
+		return value
+	}
+	return ""
+}
+
+// observedClaimValues returns the distinct claim VALUES observed for a
+// principal's subject under a claim name (F-27), or nil when the Database
+// client is unavailable.
+func (s *Server) observedClaimValues(ctx context.Context, subject, claimName string) ([]string, error) {
+	if s.clients.Database == nil || claimName == "" {
+		return nil, nil
+	}
+	resp, err := s.clients.Database.ObservedClaimsFor(ctx, &dbpb.ObservedClaimsForRequest{
+		PrincipalSubject: subject,
+		ClaimName:        claimName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetValues(), nil
+}
+
+// containsString reports whether ss contains x.
+func containsString(ss []string, x string) bool {
+	for _, s := range ss {
+		if s == x {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

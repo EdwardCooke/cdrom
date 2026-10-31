@@ -143,7 +143,7 @@ election, cross-pod live logs, shared artifacts store) is in
 | F-24 | Username/password authentication | done | [F-24](features/f-24-username-password-auth.md) |
 | F-25 | API keys | done | [F-25](features/f-25-api-keys.md) |
 | F-26 | Service accounts | planned | [F-26](features/f-26-service-accounts.md) |
-| F-27 | Approval groups (named approver sets) | planned | [F-27](features/f-27-approval-groups.md) |
+| F-27 | Approval groups (named approver sets) | done | [F-27](features/f-27-approval-groups.md) |
 | F-28 | SCIM user provisioning (automatic user management from an external IdP) | planned | [F-28](features/f-28-scim-provisioning.md) |
 
 ### Phase 7 — Organization & metadata
@@ -171,7 +171,8 @@ The phases are ordered so each builds on the last. A pragmatic first cut:
    verification/rollback.
 1. **F-13 → F-14 → F-27** — approval groups (named approver sets an
     `approval` step references instead of individual users; membership
-    resolved at decision time; optional role references and N-of-M quorum).
+    resolved at decision time; role references, N-of-M quorum, claim-derived
+    membership, and pipeline default approvers).
 1. **F-24 → F-14 → F-28** — SCIM user provisioning (the corporate IdP
     provisions/deprovisions users and groups into the IdP's user directory;
     users are soft-deleted, never hard-deleted, so audit attribution survives
@@ -237,6 +238,6 @@ Tick each feature off as it lands.
 - [x] F-24 Username/password authentication
 - [x] F-25 API keys
 - [x] F-26 Service accounts
-- [ ] F-27 Approval groups (named approver sets)
+- [x] F-27 Approval groups (named approver sets)
 - [ ] F-28 SCIM user provisioning (external IdP; soft-delete only)
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

@@ -156,6 +156,15 @@ type User struct {
 	// principal is not pipeline-scoped). Authorization limits the caller's
 	// resource-scoped permissions to these pipelines.
 	PipelineScope []uint `json:"pipeline_scope,omitempty"`
+	// Claims are the VERBATIM claims of the presented OIDC token (F-27): a
+	// claim name → its value(s) (a scalar claim is a one-element slice, a
+	// list claim keeps its elements). Captured for JWT principals so the API
+	// can (a) honor approval groups whose membership is DERIVED FROM A CLAIM
+	// (a group's claim derivation matches a decider whose token carries the
+	// declared claim value) and (b) record observed claims. Empty for
+	// non-JWT principals (API keys, service accounts) and when authentication
+	// is disabled (synthetic admin).
+	Claims map[string][]string `json:"claims,omitempty"`
 }
 
 // HasRole reports whether the user carries the named role.
@@ -347,6 +356,32 @@ func userFromIDToken(idToken *oidc.IDToken, roles config.RolesConfig) User {
 	}
 	_ = idToken.Claims(&claims)
 	user := User{Subject: claims.Subject, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
+	// Capture the token's VERBATIM claims (F-27): a claim name → its value(s).
+	// The API honors approval groups whose membership is derived from a claim
+	// (a group's claim derivation matches a decider whose token carries the
+	// declared claim value) and records observed claims. Scalars collapse to a
+	// one-element slice; non-string/non-list values are skipped.
+	var raw map[string]any
+	_ = idToken.Claims(&raw)
+	if raw != nil {
+		user.Claims = make(map[string][]string, len(raw))
+		for name, val := range raw {
+			switch v := val.(type) {
+			case string:
+				user.Claims[name] = []string{v}
+			case []any:
+				items := make([]string, 0, len(v))
+				for _, item := range v {
+					if str, ok := item.(string); ok {
+						items = append(items, str)
+					}
+				}
+				if len(items) > 0 {
+					user.Claims[name] = items
+				}
+			}
+		}
+	}
 	// JWT claim mapping (F-14): read the configured claim and map its values
 	// to role names, so group membership in an enterprise IdP drives Cdrom
 	// roles without Cdrom's user directory knowing the user at all. When the

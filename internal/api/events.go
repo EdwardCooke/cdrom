@@ -51,7 +51,12 @@ type Event struct {
 	// UI's credentials view stays in sync across replicas. The secret material
 	// is redacted before the event is published.
 	SourceCredentials []*dbpb.SourceCredential `json:"source_credentials,omitempty"`
-	At                int64                    `json:"at"`
+	// ApprovalGroups is the set of approval groups an approval_groups event
+	// carries (F-27). It is set only on approval_groups events (published when
+	// a group is created, updated, deleted, or its membership changes), so the
+	// UI's approval-groups view stays in sync across replicas.
+	ApprovalGroups []*dbpb.ApprovalGroup `json:"approval_groups,omitempty"`
+	At             int64                 `json:"at"`
 }
 
 // Event type constants.
@@ -82,6 +87,11 @@ const (
 	// It is published when a credential is created, updated, or deleted, so
 	// the UI's credentials view stays in sync across replicas.
 	EventSourceCredential = "source_credential"
+	// EventApprovalGroups is an approval-group change (F-27); the event carries
+	// the current set of approval groups. It is published when a group is
+	// created, updated, deleted, or its membership changes, so the UI's
+	// approval-groups view stays in sync across replicas.
+	EventApprovalGroups = "approval_groups"
 )
 
 // Job log stream names (the Event.Stream values for job_log events).
