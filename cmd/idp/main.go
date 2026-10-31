@@ -60,6 +60,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Pepper warnings (F-24/F-28.2). All credential secrets are Argon2ID
+	// encodings of pepper || secret; the pepper is the defense that keeps a
+	// database dump from yielding usable credentials offline. Warn prominently
+	// when it is absent (house pattern, cf. the API's secrets/pepper banners).
+	if cfg.IdP.PasswordPepper == "" {
+		logger.Error("================================================================")
+		logger.Error("SECURITY WARNING: NO USER-PASSWORD PEPPER IS CONFIGURED")
+		logger.Error("================================================================")
+		logger.Error("User passwords are Argon2ID-hashed without a pepper. A pepper")
+		logger.Error("(prepended to the KDF input) ensures a database leak does not")
+		logger.Error("reveal usable passwords. Set CDROM_IDP_PASSWORD_PEPPER (or the")
+		logger.Error("'idp.password_pepper' config) to a long random secret before")
+		logger.Error("running in production.")
+		logger.Error("================================================================")
+	}
+	if cfg.IdP.Scim.Enabled && cfg.IdP.ScimKeysPepper == "" {
+		logger.Error("================================================================")
+		logger.Error("SECURITY WARNING: NO SCIM KEY PEPPER IS CONFIGURED")
+		logger.Error("================================================================")
+		logger.Error("SCIM API keys are Argon2ID-hashed without a pepper. A pepper")
+		logger.Error("(prepended to the KDF input) ensures a database leak does not")
+		logger.Error("reveal usable SCIM keys. Set CDROM_IDP_SCIM_KEYS_PEPPER (or the")
+		logger.Error("'idp.scim_keys_pepper' config) to a long random secret before")
+		logger.Error("running in production.")
+		logger.Error("================================================================")
+	}
+
 	addr := cfg.ListenAddress
 	if addr == "" {
 		addr = config.DefaultIdPAddress

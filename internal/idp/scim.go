@@ -51,9 +51,6 @@ const (
 // the subtree, and keeping a single registration per subtree avoids the
 // exact-plus-subtree pattern pairing observed to shadow subtree routing.
 func (s *Server) mountSCIM(mux *http.ServeMux) {
-	if s.cfg.Scim.Credential == "" {
-		s.logger.Warn("scim: enabled without a credential — the surface is UNPROTECTED until F-28.2 lands; set idp.scim.credential")
-	}
 	base := config.SCIMBasePath
 	mux.HandleFunc("GET "+base+"/ServiceProviderConfig", s.scimGuard(s.handleSCIMServiceProviderConfig))
 	mux.HandleFunc("GET "+base+"/Schemas", s.scimGuard(s.handleSCIMSchemas))
@@ -68,8 +65,8 @@ func (s *Server) mountSCIM(mux *http.ServeMux) {
 // the SCIM media type).
 //
 // TODO(F-28.2): enforce the caller credential HERE — one choke point for
-// the whole surface (parse Authorization: Bearer, constant-time compare
-// against cfg.Scim.Credential, 401 SCIM-error on miss).
+// the whole surface (parse Authorization: Bearer, resolve the key against
+// the database-held SCIM API pool, 401 SCIM-error on miss).
 func (s *Server) scimGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !acceptsSCIM(r.Header.Get("Accept")) {

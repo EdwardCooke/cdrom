@@ -18,9 +18,6 @@ func TestScimDefaults(t *testing.T) {
 	if scim.PublicBase != "" {
 		t.Errorf("Scim.PublicBase = %q, want empty (announce per request)", scim.PublicBase)
 	}
-	if scim.Credential != "" {
-		t.Errorf("Scim.Credential = %q, want empty", scim.Credential)
-	}
 	if scim.MaxPageSize != DefaultSCIMMaxPageSize {
 		t.Errorf("Scim.MaxPageSize = %d, want %d (default)", scim.MaxPageSize, DefaultSCIMMaxPageSize)
 	}
@@ -35,7 +32,6 @@ idp:
   scim:
     enabled: true
     public_base: https://idp.corp.example/ext-idp/
-    credential: svc-token
     group_role_mappings:
       admins: admin
       deployers: operator
@@ -58,9 +54,6 @@ idp:
 	}
 	if norm := scim.NormalizePublicBase(); norm != "https://idp.corp.example/ext-idp" {
 		t.Errorf("NormalizePublicBase() = %q, want trailing slash stripped", norm)
-	}
-	if scim.Credential != "svc-token" {
-		t.Errorf("Scim.Credential = %q, want svc-token", scim.Credential)
 	}
 	if got := scim.GroupRoleMappings["admins"]; got != "admin" {
 		t.Errorf("GroupRoleMappings[admins] = %q, want admin", got)
@@ -97,9 +90,6 @@ func TestScimPartialMergeKeepsDefaults(t *testing.T) {
 	if scim.PublicBase != "" {
 		t.Errorf("Scim.PublicBase = %q, want empty (partial merge keeps default)", scim.PublicBase)
 	}
-	if scim.Credential != "" {
-		t.Errorf("Scim.Credential = %q, want empty", scim.Credential)
-	}
 	if scim.MaxPageSize != DefaultSCIMMaxPageSize {
 		t.Errorf("Scim.MaxPageSize = %d, want default %d", scim.MaxPageSize, DefaultSCIMMaxPageSize)
 	}
@@ -108,7 +98,6 @@ func TestScimPartialMergeKeepsDefaults(t *testing.T) {
 func TestScimEnvOverrides(t *testing.T) {
 	t.Setenv("CDROM_SCIM_ENABLED", "true")
 	t.Setenv("CDROM_SCIM_PUBLIC_BASE", "https://portal.example.com/ext-idp")
-	t.Setenv("CDROM_SCIM_CREDENTIAL", "env-token")
 	t.Setenv("CDROM_SCIM_MAX_PAGE_SIZE", "250")
 	t.Setenv("CDROM_SCIM_GROUP_ROLE_MAPPINGS", "eng=developer, sre=admin")
 
@@ -122,9 +111,6 @@ func TestScimEnvOverrides(t *testing.T) {
 	}
 	if scim.PublicBase != "https://portal.example.com/ext-idp" {
 		t.Errorf("Scim.PublicBase = %q, want the env value", scim.PublicBase)
-	}
-	if scim.Credential != "env-token" {
-		t.Errorf("Scim.Credential = %q, want env-token", scim.Credential)
 	}
 	if scim.MaxPageSize != 250 {
 		t.Errorf("Scim.MaxPageSize = %d, want 250 (env)", scim.MaxPageSize)
@@ -189,13 +175,14 @@ func TestScimMaxPageSizeClamp(t *testing.T) {
 	}
 }
 
-func TestScimValidateIgnoresMissingCredential(t *testing.T) {
-	// Per F-28.1 the absence of a credential is legal (warned at startup;
-	// guarded by F-28.2) — Validate must not reject it.
+func TestScimValidateAllowsEnabledSurface(t *testing.T) {
+	// Caller authentication (F-28.2) runs against the database-held SCIM API
+	// key pool, so enabling the surface with no keys yet is legal —
+	// Validate must not reject it.
 	cfg := testValidIdPConfig(t)
 	cfg.Scim = ScimConfig{Enabled: true}
 	if err := cfg.Validate(); err != nil {
-		t.Errorf("Validate(enabled, no credential) = %v, want nil", err)
+		t.Errorf("Validate(enabled) = %v, want nil", err)
 	}
 }
 

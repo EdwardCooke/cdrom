@@ -124,10 +124,11 @@ type IdPClient interface {
 	ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLockoutRequest, opts ...grpc.CallOption) (*ResetAPIKeyLockoutResponse, error)
 	// CreateServiceAccount creates a service account (F-26) and its two freshly
 	// generated key slots, and binds its roles. The IdP generates each key's
-	// plaintext (`cdrom-sa-…`), hashes it (mixing in a per-key salt and the
-	// request's pepper), and persists the salted hashes through the Database
-	// service. The response returns both plaintext keys exactly once. The RPC
-	// is Unimplemented when no service-account store is attached.
+	// plaintext (`cdrom-sa-…`), encodes it with Argon2ID (the pepper prepended
+	// to the KDF input; the salt is embedded in the encoding), and persists the
+	// encodings through the Database service. The response returns both
+	// plaintext keys exactly once. The RPC is Unimplemented when no
+	// service-account store is attached.
 	CreateServiceAccount(ctx context.Context, in *CreateServiceAccountRequest, opts ...grpc.CallOption) (*CreateServiceAccountResponse, error)
 	// GetServiceAccount returns an account's metadata and both slots' non-secret
 	// metadata (never the plaintext or hash) by id or login name. A missing
@@ -522,10 +523,11 @@ type IdPServer interface {
 	ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error)
 	// CreateServiceAccount creates a service account (F-26) and its two freshly
 	// generated key slots, and binds its roles. The IdP generates each key's
-	// plaintext (`cdrom-sa-…`), hashes it (mixing in a per-key salt and the
-	// request's pepper), and persists the salted hashes through the Database
-	// service. The response returns both plaintext keys exactly once. The RPC
-	// is Unimplemented when no service-account store is attached.
+	// plaintext (`cdrom-sa-…`), encodes it with Argon2ID (the pepper prepended
+	// to the KDF input; the salt is embedded in the encoding), and persists the
+	// encodings through the Database service. The response returns both
+	// plaintext keys exactly once. The RPC is Unimplemented when no
+	// service-account store is attached.
 	CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*CreateServiceAccountResponse, error)
 	// GetServiceAccount returns an account's metadata and both slots' non-secret
 	// metadata (never the plaintext or hash) by id or login name. A missing

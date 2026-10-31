@@ -1683,7 +1683,8 @@ type IDPUser struct {
 	LastName  string `gorm:"column:last_name" json:"last_name"`
 	// Email is the user's unique login identifier.
 	Email string `gorm:"uniqueIndex;not null" json:"email"`
-	// PasswordHash is the salted hash of the user's password (bcrypt). It is
+	// PasswordHash is the Argon2ID encoding of the user's password (pepper
+	// prepended to the KDF input; the salt is embedded in the encoding). It is
 	// never returned to the UI; the IdP uses it only to verify logins.
 	PasswordHash string `gorm:"column:password_hash;type:text" json:"-"`
 	// Roles are the user's role names, serialized to a JSON document in a
@@ -1698,9 +1699,12 @@ type IDPUser struct {
 	// sign-in (and vice versa).
 	APIKeyFailedCount int `gorm:"column:api_key_failed_count;not null;default:0" json:"-"`
 	// APIKeyLockedUntil is when the user's API-key lockout expires (F-25);
-	// zero means the user is not locked out. When the configured lockout
+	// nil means the user is not locked out. When the configured lockout
 	// duration is zero the lockout is permanent (until an admin resets it).
-	APIKeyLockedUntil time.Time `gorm:"column:api_key_locked_until" json:"-"`
+	// A POINTER (not a value) so GORM writes the NULL on unlock — a
+	// zero-valued time.Time is skipped by GORM's dirty-tracking and would
+	// never clear the column.
+	APIKeyLockedUntil *time.Time `gorm:"column:api_key_locked_until" json:"-"`
 }
 
 // IDPAPIKey is an API key owned by a user (F-25): a long-lived credential that
@@ -1813,15 +1817,12 @@ type ServiceAccountKey struct {
 	// Slot is the key's slot number: 1 or 2. It is unique within the account
 	// (the composite unique index with ServiceAccountID).
 	Slot int `gorm:"uniqueIndex:idx_sa_key_unique,priority:2;not null" json:"slot"`
-	// KeyHash is the salted hash of the key's plaintext (optionally mixed with
-	// a configured pepper). It is never returned to the API, IdP, or UI. On
-	// delete it is cleared to the empty value, which never matches a
+	// KeyHash is the Argon2ID encoding of the key's plaintext (PHC format;
+	// the salt is embedded in the encoding, and a configured pepper is
+	// prepended to the KDF input). It is never returned to the API, IdP, or
+	// UI. On delete it is cleared to the empty value, which never matches a
 	// credential.
 	KeyHash string `gorm:"column:key_hash;type:text" json:"-"`
-	// KeySalt is the per-key salt mixed into KeyHash. It is unique to the key
-	// (generated with the key) and is stored alongside the hash. On delete it
-	// is cleared.
-	KeySalt string `gorm:"column:key_salt;type:text" json:"-"`
 	// KeyPrefix is a short, non-secret prefix of the key (e.g. the first dozen
 	// characters) shown in listings so a caller can tell keys apart without
 	// the plaintext. On delete it is cleared.

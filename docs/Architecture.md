@@ -1198,9 +1198,16 @@ arrive with F-28.4/F-28.5. `CDROM_SCIM_PUBLIC_BASE` pins the base URL the
 surface announces to the outside world (`meta.location`, `changeInfo.location`;
 empty = derive per request from Host/X-Forwarded-Proto — correct behind
 transparent proxies; set it for prefix-stripping proxies or external DNS).
-`CDROM_SCIM_CREDENTIAL` is the bearer token the corporate IdP's SCIM connector
-must present (enforced by F-28.2; enabling without one logs a prominent
-startup warning). `CDROM_SCIM_GROUP_ROLE_MAPPINGS` is a comma-separated list
+Caller authentication (F-28.2) runs against a rotated pool of SCIM API keys
+(each stored as an Argon2ID encoding of `pepper ‖ key` — the salt embedded in
+the encoding, the same KDF as F-24/F-25/F-26; the optional pepper is
+configured ONLY on the IdP (`CDROM_IDP_SCIM_KEYS_PEPPER`) — the IdP draws the
+key at creation and verifies candidates locally over the encoding bundle at
+validation, so the Database service never sees the pepper or the plaintext —
+shown only at creation, optional expiration, revocable with a 24 h reinstate
+window, pruned 24 h after revocation) administered through the API server's
+`GET/POST /api/scim/keys[…]` endpoints; every non-revoked key is accepted,
+and zero-downtime rotation relies on overlapping valid keys. `CDROM_SCIM_GROUP_ROLE_MAPPINGS` is a comma-separated list
 of `groupName=roleName` pairs translating corporate group membership into F-14
 roles (applied by F-28.5). `CDROM_SCIM_MAX_PAGE_SIZE` raises the page bound
 the surface advertises and honors (default 100; RFC 7644 mandates no universal

@@ -300,7 +300,11 @@ service Database {
   rpc UpdateAPIKey(UpdateIDPAPIKeyRequest) returns (IDPAPIKey);
   rpc RotateAPIKey(RotateIDPAPIKeyRequest) returns (IDPAPIKey);
   rpc DeleteAPIKey(DeleteIDPAPIKeyRequest) returns (google.protobuf.Empty);
-  rpc VerifyAPIKey(VerifyIDPAPIKeyRequest) returns (VerifyIDPAPIKeyResponse);
+  // AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
+  // and optionally sets/clears the lockout instant (F-25). Relocated here
+  // from VerifyAPIKey because Argon2ID verification (salted KDF) happens in
+  // the IdP, which owns the lockout accounting.
+  rpc AdjustAPIKeyLockout(AdjustAPIKeyLockoutRequest) returns (IDPUser);
   // ResetAPIKeyLockout clears a user's API-key lockout state (the failed
   // counter and the lockout instant); an admin uses it to un-lock a user.
   rpc ResetAPIKeyLockout(ResetIDPAPIKeyLockoutRequest) returns (google.protobuf.Empty);
@@ -3056,14 +3060,20 @@ message IDPUser {
   string last_name = 3;
   // email is the user's unique login identifier.
   string email = 4;
-  // password_hash is the salted hash of the user's password (bcrypt). It is
-  // never returned by the API to the UI; the IdP uses it only to verify
-  // logins.
+  // password_hash is the salted hash of the user's password (Argon2ID,
+  // PHC encoding; the salt is embedded in the encoding). It is never
+  // returned by the API to the UI; the IdP uses it only to verify logins.
   string password_hash = 5;
   // roles are the user's role names, stamped onto the tokens the IdP mints
   // for the user.
   repeated string roles = 6;
   google.protobuf.Timestamp created_at = 7;
+  // api_key_failed_count is the user's consecutive failed API-key attempts
+  // (F-25 lockout state; the IdP adjusts it via AdjustAPIKeyLockout).
+  int32 api_key_failed_count = 8;
+  // api_key_locked_until is when the user's API-key lockout expires (F-25);
+  // unset means the user is not locked out.
+  google.protobuf.Timestamp api_key_locked_until = 9;
 }
 
 // CreateIDPUserRequest registers (or updates) a user. Email is the unique
@@ -3111,8 +3121,10 @@ message IDPAPIKey {
   string owner_id = 2;
   // description is a human-readable label for the key.
   string description = 3;
-  // key_hash is the SHA-512 hash of the key's plaintext (optionally mixed
-  // with a configured pepper). It is never returned by the API to the UI.
+  // key_hash is the Argon2ID encoding of the key's plaintext (PHC format;
+  // the salt and parameters are embedded in the encoding, and a configured
+  // pepper is prepended to the input). It is never returned by the API to
+  // the UI.
   string key_hash = 4;
   // key_prefix is a short, non-secret prefix of the key shown in listings so
   // a user can tell keys apart without the plaintext.
@@ -3186,35 +3198,20 @@ message DeleteIDPAPIKeyRequest {
   string id = 1;
 }
 
-// VerifyIDPAPIKeyRequest checks a presented `username:apikey` credential
-// against the stored key directory: it looks up the owner by email, checks
-// the owner's API-key lockout, and verifies the presented key's hash against
-// the owner's keys (and the key's expiration). On a miss it increments the
-// owner's failure counter and locks the owner out at the configured maximum.
-// The caller (the IdP) computes key_hash from the presented plaintext (mixing
-// in the configured pepper), so the Database service never sees the plaintext.
-message VerifyIDPAPIKeyRequest {
-  // username is the owner's email (the user's unique login identifier).
-  string username = 1;
-  // key_hash is the SHA-512 hash of the presented key's plaintext (computed
-  // by the caller, mixing in the configured pepper).
-  string key_hash = 2;
-  // max_failures is the failure count that triggers a lockout (the caller's
-  // configured value); 0 disables the lockout (failed attempts are counted
-  // but never lock a user out).
-  int32 max_failures = 3;
-  // lockout_duration is how long a lockout lasts; 0 means the lockout is
-  // permanent (until an admin resets it).
-  google.protobuf.Duration lockout_duration = 4;
-}
-
-// VerifyIDPAPIKeyResponse is the result of a successful API-key verification:
-// the key that matched (metadata + prefix, never the plaintext or hash) and
-// the owner's profile (so the caller can establish the authenticated user
-// with the owner's roles).
-message VerifyIDPAPIKeyResponse {
-  IDPAPIKey key = 1;
-  IDPUser owner = 2;
+// AdjustAPIKeyLockoutRequest applies a delta to a user's API-key failure
+// counter and adjusts the lockout instant. The counter floors at zero.
+// Lockout intent is expressed by the PRESENCE of lockout_until: present =
+// set it (a distant future instant denotes a permanent lockout); absent =
+// clear it (WRITE NULL).
+message AdjustAPIKeyLockoutRequest {
+  // user_id is the owner's identifier.
+  string user_id = 1;
+  // failed_delta is added to the owner's current failure counter (negative
+  // to clear it on a successful verification).
+  int32 failed_delta = 2;
+  // lockout_until, when PRESENT, is the new lockout instant; when ABSENT
+  // the lockout is cleared.
+  google.protobuf.Timestamp lockout_until = 3;
 }
 
 // ResetIDPAPIKeyLockoutRequest clears a user's API-key lockout state (the
@@ -3240,11 +3237,10 @@ message ServiceAccountKey {
   string service_account_id = 2;
   // slot is the slot number (1 or 2).
   int32 slot = 3;
-  // key_hash is the salted hash of the key's plaintext (optionally mixed with
-  // a configured pepper). It is never returned by the API to the UI.
+  // key_hash is the Argon2ID encoding of the key's plaintext (PHC format;
+  // the salt is embedded in the encoding). It is never returned by the API
+  // to the UI.
   string key_hash = 4;
-  // key_salt is the per-key salt mixed into key_hash.
-  string key_salt = 5;
   // key_prefix is a short, non-secret prefix of the key shown in listings so
   // a caller can tell keys apart without the plaintext.
   string key_prefix = 6;
@@ -3362,10 +3358,9 @@ message RotateServiceAccountKeyRequest {
   string service_account_id = 1;
   // slot is the slot to rotate (1 or 2).
   int32 slot = 2;
-  // key_hash is the new key's salted hash.
+  // key_hash is the new key's Argon2ID encoding (PHC format; the salt is
+  // embedded in the encoding).
   string key_hash = 3;
-  // key_salt is the new key's salt.
-  string key_salt = 4;
   // key_prefix is the new key's non-secret prefix.
   string key_prefix = 5;
   // revision is the account's revision the caller last saw; a mismatch is

@@ -18,7 +18,7 @@ import (
 // throwaway key manager.
 func scimTestServer(t *testing.T, publicBase string) *httptest.Server {
 	t.Helper()
-	return scimTestServerCustom(t, config.ScimConfig{Enabled: true, Credential: "svc-secret", PublicBase: publicBase})
+	return scimTestServerCustom(t, config.ScimConfig{Enabled: true, PublicBase: publicBase})
 }
 
 // scimTestServerCustom builds an IdP HTTP server with the given SCIM config
@@ -399,7 +399,7 @@ func TestSCIM_UnnestedUnknownResources404(t *testing.T) {
 
 func TestSCIM_ConfigurableMaxPageSize(t *testing.T) {
 	// Honor: a raised bound is advertised AND enforced.
-	ts := scimTestServerCustom(t, config.ScimConfig{Enabled: true, Credential: "svc-secret", MaxPageSize: 2})
+	ts := scimTestServerCustom(t, config.ScimConfig{Enabled: true, MaxPageSize: 2})
 	defer ts.Close()
 
 	_, doc := doGetSCIM(t, ts, "/scim/v2/ServiceProviderConfig")
@@ -433,7 +433,7 @@ func TestSCIM_ConfigurableMaxPageSize(t *testing.T) {
 	}
 
 	// Cap: a bound above the hard ceiling is clamped in the advertisement.
-	tsBig := scimTestServerCustom(t, config.ScimConfig{Enabled: true, Credential: "svc-secret", MaxPageSize: 1 << 20})
+	tsBig := scimTestServerCustom(t, config.ScimConfig{Enabled: true, MaxPageSize: 1 << 20})
 	defer tsBig.Close()
 	_, bigDoc := doGetSCIM(t, tsBig, "/scim/v2/ServiceProviderConfig")
 	bigAdv, _ := bigDoc["pagination"].(map[string]any)["maxResults"].(float64)

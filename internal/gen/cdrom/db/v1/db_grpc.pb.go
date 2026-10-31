@@ -86,7 +86,7 @@ const (
 	Database_UpdateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/UpdateAPIKey"
 	Database_RotateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/RotateAPIKey"
 	Database_DeleteAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/DeleteAPIKey"
-	Database_VerifyAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/VerifyAPIKey"
+	Database_AdjustAPIKeyLockout_FullMethodName            = "/cdrom.db.v1.Database/AdjustAPIKeyLockout"
 	Database_ResetAPIKeyLockout_FullMethodName             = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
 	Database_CreateServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/CreateServiceAccount"
 	Database_GetServiceAccount_FullMethodName              = "/cdrom.db.v1.Database/GetServiceAccount"
@@ -454,7 +454,11 @@ type DatabaseClient interface {
 	UpdateAPIKey(ctx context.Context, in *UpdateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
 	RotateAPIKey(ctx context.Context, in *RotateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
 	DeleteAPIKey(ctx context.Context, in *DeleteIDPAPIKeyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	VerifyAPIKey(ctx context.Context, in *VerifyIDPAPIKeyRequest, opts ...grpc.CallOption) (*VerifyIDPAPIKeyResponse, error)
+	// AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
+	// and optionally sets/clears the lockout instant (F-25). Relocated here
+	// from VerifyAPIKey because Argon2ID verification (salted KDF) happens in
+	// the IdP, which owns the lockout accounting.
+	AdjustAPIKeyLockout(ctx context.Context, in *AdjustAPIKeyLockoutRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant); an admin uses it to un-lock a user.
 	ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPIKeyLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -1544,10 +1548,10 @@ func (c *databaseClient) DeleteAPIKey(ctx context.Context, in *DeleteIDPAPIKeyRe
 	return out, nil
 }
 
-func (c *databaseClient) VerifyAPIKey(ctx context.Context, in *VerifyIDPAPIKeyRequest, opts ...grpc.CallOption) (*VerifyIDPAPIKeyResponse, error) {
+func (c *databaseClient) AdjustAPIKeyLockout(ctx context.Context, in *AdjustAPIKeyLockoutRequest, opts ...grpc.CallOption) (*IDPUser, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(VerifyIDPAPIKeyResponse)
-	err := c.cc.Invoke(ctx, Database_VerifyAPIKey_FullMethodName, in, out, cOpts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_AdjustAPIKeyLockout_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2639,7 +2643,11 @@ type DatabaseServer interface {
 	UpdateAPIKey(context.Context, *UpdateIDPAPIKeyRequest) (*IDPAPIKey, error)
 	RotateAPIKey(context.Context, *RotateIDPAPIKeyRequest) (*IDPAPIKey, error)
 	DeleteAPIKey(context.Context, *DeleteIDPAPIKeyRequest) (*emptypb.Empty, error)
-	VerifyAPIKey(context.Context, *VerifyIDPAPIKeyRequest) (*VerifyIDPAPIKeyResponse, error)
+	// AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
+	// and optionally sets/clears the lockout instant (F-25). Relocated here
+	// from VerifyAPIKey because Argon2ID verification (salted KDF) happens in
+	// the IdP, which owns the lockout accounting.
+	AdjustAPIKeyLockout(context.Context, *AdjustAPIKeyLockoutRequest) (*IDPUser, error)
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant); an admin uses it to un-lock a user.
 	ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error)
@@ -3267,8 +3275,8 @@ func (UnimplementedDatabaseServer) RotateAPIKey(context.Context, *RotateIDPAPIKe
 func (UnimplementedDatabaseServer) DeleteAPIKey(context.Context, *DeleteIDPAPIKeyRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteAPIKey not implemented")
 }
-func (UnimplementedDatabaseServer) VerifyAPIKey(context.Context, *VerifyIDPAPIKeyRequest) (*VerifyIDPAPIKeyResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method VerifyAPIKey not implemented")
+func (UnimplementedDatabaseServer) AdjustAPIKeyLockout(context.Context, *AdjustAPIKeyLockoutRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdjustAPIKeyLockout not implemented")
 }
 func (UnimplementedDatabaseServer) ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
@@ -4719,20 +4727,20 @@ func _Database_DeleteAPIKey_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_VerifyAPIKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(VerifyIDPAPIKeyRequest)
+func _Database_AdjustAPIKeyLockout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdjustAPIKeyLockoutRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).VerifyAPIKey(ctx, in)
+		return srv.(DatabaseServer).AdjustAPIKeyLockout(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_VerifyAPIKey_FullMethodName,
+		FullMethod: Database_AdjustAPIKeyLockout_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).VerifyAPIKey(ctx, req.(*VerifyIDPAPIKeyRequest))
+		return srv.(DatabaseServer).AdjustAPIKeyLockout(ctx, req.(*AdjustAPIKeyLockoutRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6449,8 +6457,8 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_DeleteAPIKey_Handler,
 		},
 		{
-			MethodName: "VerifyAPIKey",
-			Handler:    _Database_VerifyAPIKey_Handler,
+			MethodName: "AdjustAPIKeyLockout",
+			Handler:    _Database_AdjustAPIKeyLockout_Handler,
 		},
 		{
 			MethodName: "ResetAPIKeyLockout",

@@ -241,7 +241,6 @@ func copyUser(u *User) *User {
 type MemoryAPIKeyStore struct {
 	mu    sync.Mutex
 	keys  map[string]*APIKey
-	byKey map[string]*APIKey // keyed by key hash
 	// lockout tracks a user's API-key lockout state, keyed by user ID.
 	lockout map[string]*apiKeyLockout
 	users   UserStore
@@ -258,7 +257,6 @@ type apiKeyLockout struct {
 func NewMemoryAPIKeyStore(users UserStore) *MemoryAPIKeyStore {
 	return &MemoryAPIKeyStore{
 		keys:    make(map[string]*APIKey),
-		byKey:   make(map[string]*APIKey),
 		lockout: make(map[string]*apiKeyLockout),
 		users:   users,
 	}
@@ -275,16 +273,14 @@ func (s *MemoryAPIKeyStore) nextKeyID() string {
 	return strconv.Itoa(max + 1)
 }
 
-// storeKey indexes a key by its id and its hash. The caller must hold s.mu.
+// storeKey indexes a key by its id. The caller must hold s.mu.
 func (s *MemoryAPIKeyStore) storeKey(k *APIKey) {
 	s.keys[k.ID] = k
-	s.byKey[k.KeyHash] = k
 }
 
-// removeKey unindexes a key by its id and hash. The caller must hold s.mu.
+// removeKey unindexes a key by its id. The caller must hold s.mu.
 func (s *MemoryAPIKeyStore) removeKey(k *APIKey) {
 	delete(s.keys, k.ID)
-	delete(s.byKey, k.KeyHash)
 }
 
 func (s *MemoryAPIKeyStore) Create(ctx context.Context, ownerEmail, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error) {
@@ -299,13 +295,17 @@ func (s *MemoryAPIKeyStore) Create(ctx context.Context, ownerEmail, description 
 	if err != nil {
 		return nil, "", err
 	}
+	keyHash, err := EncodeAPIKey(pepper, plaintext)
+	if err != nil {
+		return nil, "", err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := &APIKey{
 		ID:            s.nextKeyID(),
 		OwnerID:       owner.ID,
 		Description:   description,
-		KeyHash:       HashAPIKey(pepper, plaintext),
+		KeyHash:       keyHash,
 		KeyPrefix:     apiDisplayPrefix(plaintext),
 		ExpiresAt:     expiresAt,
 		PipelineScope: pipelineScope,
@@ -369,10 +369,12 @@ func (s *MemoryAPIKeyStore) Rotate(_ context.Context, id, pepper string) (*APIKe
 	if err != nil {
 		return nil, "", err
 	}
-	delete(s.byKey, k.KeyHash)
-	k.KeyHash = HashAPIKey(pepper, plaintext)
+	keyHash, err := EncodeAPIKey(pepper, plaintext)
+	if err != nil {
+		return nil, "", err
+	}
+	k.KeyHash = keyHash
 	k.KeyPrefix = apiDisplayPrefix(plaintext)
-	s.byKey[k.KeyHash] = k
 	return copyAPIKey(k), plaintext, nil
 }
 
@@ -398,13 +400,15 @@ func (s *MemoryAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper
 	if lo != nil && !lo.lockedUntil.IsZero() && lo.lockedUntil.After(time.Now()) {
 		return nil, nil, status.Error(codes.Unauthenticated, "api key access is locked")
 	}
-	hash := HashAPIKey(pepper, apiKey)
 	now := time.Now()
-	for _, k := range s.byKey {
-		if k.OwnerID != owner.ID || k.KeyHash != hash {
+	for _, k := range s.keys {
+		if k.OwnerID != owner.ID || k.KeyHash == "" {
 			continue
 		}
 		if !k.ExpiresAt.IsZero() && k.ExpiresAt.Before(now) {
+			continue
+		}
+		if !VerifySecret(k.KeyHash, pepper, apiKey) {
 			continue
 		}
 		if lo != nil {
@@ -551,7 +555,7 @@ func (s *MemoryServiceAccountStore) Update(_ context.Context, id, displayName, d
 	return copyServiceAccount(acc), nil
 }
 
-func (s *MemoryServiceAccountStore) RotateKey(_ context.Context, id string, slot int, keyHash, keySalt, keyPrefix string, revision int64, _ string) (*ServiceAccount, error) {
+func (s *MemoryServiceAccountStore) RotateKey(_ context.Context, id string, slot int, keyHash, keyPrefix string, revision int64, _ string) (*ServiceAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	acc, ok := s.accounts[id]
@@ -564,7 +568,6 @@ func (s *MemoryServiceAccountStore) RotateKey(_ context.Context, id string, slot
 	for _, k := range acc.Keys {
 		if k.Slot == slot {
 			k.KeyHash = keyHash
-			k.KeySalt = keySalt
 			k.KeyPrefix = keyPrefix
 			break
 		}
@@ -603,7 +606,6 @@ func (s *MemoryServiceAccountStore) Delete(_ context.Context, id, _ string) (*Se
 		// usable verifier remains.
 		for _, k := range acc.Keys {
 			k.KeyHash = ""
-			k.KeySalt = ""
 			k.KeyPrefix = ""
 		}
 	}

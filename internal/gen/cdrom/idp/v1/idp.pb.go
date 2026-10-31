@@ -798,9 +798,9 @@ type CreateAPIKeyRequest struct {
 	// set means the key is not limited (it can act on any pipeline the owner
 	// can).
 	PipelineScope []int64 `protobuf:"varint,4,rep,packed,name=pipeline_scope,json=pipelineScope,proto3" json:"pipeline_scope,omitempty"`
-	// pepper is the secret the caller mixes into the key's hash (SHA-512 of
-	// pepper + key); empty hashes the key on its own. The caller (the API)
-	// supplies it from its auth.api_key config so the IdP hashes keys
+	// pepper is the secret the caller PREPENDS to the KDF input of the key's
+	// Argon2ID encoding; empty encodes the key on its own. The caller (the API)
+	// supplies it from its auth.api_key config so the IdP encodes keys
 	// consistently.
 	Pepper        string `protobuf:"bytes,5,opt,name=pepper,proto3" json:"pepper,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1177,8 +1177,8 @@ type RotateAPIKeyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// id is the key's identifier.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// pepper is the secret the caller mixes into the new key's hash (SHA-512 of
-	// pepper + key); empty hashes the key on its own.
+	// pepper is the secret the caller PREPENDS to the KDF input of the new
+	// key's Argon2ID encoding; empty encodes the key on its own.
 	Pepper        string `protobuf:"bytes,2,opt,name=pepper,proto3" json:"pepper,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1384,8 +1384,8 @@ type VerifyAPIKeyRequest struct {
 	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
 	// api_key is the presented key's plaintext (the `cdrom-…` value).
 	ApiKey string `protobuf:"bytes,2,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
-	// pepper is the secret mixed into the key's hash (SHA-512 of pepper + key);
-	// empty hashes the key on its own.
+	// pepper is the secret PREPENDED to the KDF input of the key's Argon2ID
+	// encoding; empty encodes the key on its own.
 	Pepper string `protobuf:"bytes,3,opt,name=pepper,proto3" json:"pepper,omitempty"`
 	// max_failures is the failure count that triggers a lockout; 0 disables the
 	// lockout (failed attempts are counted but never lock a user out).

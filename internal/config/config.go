@@ -528,12 +528,13 @@ type AuthConfig struct {
 // Service accounts are non-human identities with two API-key slots that
 // authenticate to the API in place of a JWT, presented as
 // `Authorization: Bearer <login-name>:cdrom-sa-…`. The real logic (key
-// generation, salted hashing, verification, and lockout) lives in the IdP; the
-// API is a thin proxy. The pepper is mixed into each key's salted hash (along
-// with the per-key salt) so a database leak does not reveal usable keys; it is
-// passed from the API to the IdP on each key operation (over the mTLS-protected
-// gRPC channel). When the pepper is empty the API logs a security warning at
-// startup (like the secrets-encryption-key warning).
+// generation, Argon2ID hashing, verification, and lockout) lives in the IdP;
+// the API is a thin proxy. Each key is stored as an Argon2ID encoding of
+// pepper ‖ key (the salt is embedded in the encoding), so a database leak does
+// not reveal usable keys. The pepper is passed from the API to the IdP on each
+// key operation (over the mTLS-protected gRPC channel). When the pepper is
+// empty the API logs a security warning at startup (like the
+// secrets-encryption-key warning).
 type ServiceAccountConfig struct {
 	// Enabled turns service-account authentication on. When false the API does
 	// not accept `Bearer <login-name>:cdrom-sa-…` credentials and the
@@ -548,8 +549,8 @@ type ServiceAccountConfig struct {
 	// LockoutDuration is how long a service-account key lockout lasts. A value
 	// of 0 means the lockout is permanent (until an admin resets it).
 	LockoutDuration time.Duration
-	// Pepper is an optional secret mixed into each key's salted hash (alongside
-	// the per-key salt). When empty the key is hashed with its salt alone, and
+	// Pepper is an optional secret PREPENDED to the KDF input of each key's
+	// Argon2ID encoding. When empty the key is encoded without a pepper, and
 	// the API logs a security warning at startup. It is passed from the API to
 	// the IdP on each key operation.
 	Pepper string
@@ -558,9 +559,10 @@ type ServiceAccountConfig struct {
 // APIKeyConfig configures API-key authentication (F-25). API keys are
 // per-user, per-pipeline-scoped, expiring, revocable credentials that
 // authenticate a user to the API in place of a JWT. The real logic (key
-// generation, hashing, verification, and lockout) lives in the IdP; the API
-// is a thin proxy. The pepper is mixed into the key's hash so a database leak
-// does not reveal usable keys; it is passed from the API to the IdP on each
+// generation, Argon2ID hashing, verification, and lockout) lives in the IdP;
+// the API is a thin proxy. Each key is stored as an Argon2ID encoding of
+// pepper ‖ key (the salt is embedded in the encoding), so a database leak does
+// not reveal usable keys; the pepper is passed from the API to the IdP on each
 // key operation (over the mTLS-protected gRPC channel).
 type APIKeyConfig struct {
 	// Enabled turns API-key authentication on. When false the API does not
@@ -575,9 +577,9 @@ type APIKeyConfig struct {
 	// LockoutDuration is how long an API-key lockout lasts. A value of 0
 	// means the lockout is permanent (until an admin resets it).
 	LockoutDuration time.Duration
-	// Pepper is an optional secret mixed into the key's hash (SHA-512 of
-	// pepper + key). When empty the key is hashed on its own. It is passed
-	// from the API to the IdP on each key operation.
+	// Pepper is an optional secret PREPENDED to the KDF input of the key's
+	// Argon2ID encoding. When empty the key is encoded on its own. It is
+	// passed from the API to the IdP on each key operation.
 	Pepper string
 }
 
@@ -735,6 +737,17 @@ type IdPConfig struct {
 	// job-token minting and user management) binds to. The API dials it over
 	// mTLS. Empty means the IdP uses DefaultIdPGRPCAddress.
 	GRPCAddress string
+	// PasswordPepper is an optional secret PREPENDed to the input of the
+	// Argon2ID KDF that protects user PASSWORDS (F-24). Like the API-key and
+	// service-account peppers it is held out of the database; when empty the
+	// IdP logs a security warning at startup and passwords are hashed without
+	// a pepper.
+	PasswordPepper string
+	// ScimKeysPepper is the optional secret PREPENDed to the input of the
+	// Argon2ID KDF protecting SCIM API keys (F-28.2). It is held out of the
+	// database; when empty (while the SCIM surface is enabled) the IdP logs a
+	// security warning at startup.
+	ScimKeysPepper string
 	// Scim configures the SCIM 2.0 user-provisioning surface (F-28.1). When
 	// Enabled is false (the default) the IdP serves no /scim/v2 routes.
 	Scim ScimConfig
@@ -1127,14 +1140,16 @@ type fileConfig struct {
 		} `yaml:"service_account"`
 	} `yaml:"auth"`
 	IdP *struct {
-		Issuer        *string          `yaml:"issuer"`
-		KeyLifetime   *string          `yaml:"key_lifetime"`
-		RotateBefore  *string          `yaml:"rotate_before"`
-		TokenLifetime *string          `yaml:"token_lifetime"`
-		CheckInterval *string          `yaml:"check_interval"`
-		Audiences     *[]string        `yaml:"audiences"`
-		GRPCAddress   *string          `yaml:"grpc_address"`
-		Scim          *scimFileSection `yaml:"scim"`
+		Issuer         *string          `yaml:"issuer"`
+		KeyLifetime    *string          `yaml:"key_lifetime"`
+		RotateBefore   *string          `yaml:"rotate_before"`
+		TokenLifetime  *string          `yaml:"token_lifetime"`
+		CheckInterval  *string          `yaml:"check_interval"`
+		Audiences      *[]string        `yaml:"audiences"`
+		GRPCAddress    *string          `yaml:"grpc_address"`
+		PasswordPepper *string          `yaml:"password_pepper"`
+		ScimKeysPepper *string          `yaml:"scim_keys_pepper"`
+		Scim           *scimFileSection `yaml:"scim"`
 	} `yaml:"idp"`
 	IdPGRPCAddress *string `yaml:"idp_grpc_address"`
 	GRPCAuth       *struct {
@@ -1388,6 +1403,12 @@ func applyFile(cfg *Config, path string) error {
 		if f.IdP.GRPCAddress != nil {
 			cfg.IdP.GRPCAddress = *f.IdP.GRPCAddress
 		}
+		if f.IdP.PasswordPepper != nil {
+			cfg.IdP.PasswordPepper = *f.IdP.PasswordPepper
+		}
+		if f.IdP.ScimKeysPepper != nil {
+			cfg.IdP.ScimKeysPepper = *f.IdP.ScimKeysPepper
+		}
 		mergeSCIMConfigFromFile(&cfg.IdP.Scim, f.IdP.Scim)
 	}
 	if f.IdPGRPCAddress != nil {
@@ -1606,6 +1627,7 @@ func applyEnv(cfg *Config) {
 	cfg.IdP.Issuer = envOr("CDROM_IDP_ISSUER", cfg.IdP.Issuer)
 	cfg.IdP.GRPCAddress = envOr("CDROM_IDP_GRPC_ADDR", cfg.IdP.GRPCAddress)
 	cfg.IdPGRPCAddress = envOr("CDROM_IDP_GRPC_ADDR", cfg.IdPGRPCAddress)
+	cfg.IdP.PasswordPepper = envOr("CDROM_IDP_PASSWORD_PEPPER", cfg.IdP.PasswordPepper)
 	if v := envOr("CDROM_IDP_KEY_LIFETIME", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.IdP.KeyLifetime = d
@@ -1626,13 +1648,14 @@ func applyEnv(cfg *Config) {
 			cfg.IdP.CheckInterval = d
 		}
 	}
+	cfg.IdP.PasswordPepper = envOr("CDROM_IDP_PASSWORD_PEPPER", cfg.IdP.PasswordPepper)
+	cfg.IdP.ScimKeysPepper = envOr("CDROM_IDP_SCIM_KEYS_PEPPER", cfg.IdP.ScimKeysPepper)
 	// SCIM provisioning surface (F-28.1). CDROM_SCIM_GROUP_ROLE_MAPPINGS is a
 	// comma-separated list of "groupName=roleName" pairs.
 	if v := os.Getenv("CDROM_SCIM_ENABLED"); v != "" {
 		cfg.IdP.Scim.Enabled = v == "true" || v == "1"
 	}
 	cfg.IdP.Scim.PublicBase = envOr("CDROM_SCIM_PUBLIC_BASE", cfg.IdP.Scim.PublicBase)
-	cfg.IdP.Scim.Credential = envOr("CDROM_SCIM_CREDENTIAL", cfg.IdP.Scim.Credential)
 	if v := os.Getenv("CDROM_SCIM_MAX_PAGE_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.IdP.Scim.MaxPageSize = n
@@ -1741,7 +1764,6 @@ func parseRoleMappings(s string) map[string]string {
 type scimFileSection struct {
 	Enabled           *bool             `yaml:"enabled"`
 	PublicBase        *string           `yaml:"public_base"`
-	Credential        *string           `yaml:"credential"`
 	GroupRoleMappings map[string]string `yaml:"group_role_mappings"`
 	MaxPageSize       *int              `yaml:"max_page_size"`
 }
@@ -1758,9 +1780,6 @@ func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) {
 	}
 	if src.PublicBase != nil {
 		dst.PublicBase = *src.PublicBase
-	}
-	if src.Credential != nil {
-		dst.Credential = *src.Credential
 	}
 	if src.MaxPageSize != nil {
 		dst.MaxPageSize = *src.MaxPageSize

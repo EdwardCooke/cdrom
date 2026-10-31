@@ -81,10 +81,11 @@ service IdP {
 
   // CreateServiceAccount creates a service account (F-26) and its two freshly
   // generated key slots, and binds its roles. The IdP generates each key's
-  // plaintext (`cdrom-sa-…`), hashes it (mixing in a per-key salt and the
-  // request's pepper), and persists the salted hashes through the Database
-  // service. The response returns both plaintext keys exactly once. The RPC
-  // is Unimplemented when no service-account store is attached.
+  // plaintext (`cdrom-sa-…`), encodes it with Argon2ID (the pepper prepended
+  // to the KDF input; the salt is embedded in the encoding), and persists the
+  // encodings through the Database service. The response returns both
+  // plaintext keys exactly once. The RPC is Unimplemented when no
+  // service-account store is attached.
   rpc CreateServiceAccount(CreateServiceAccountRequest) returns (CreateServiceAccountResponse);
   // GetServiceAccount returns an account's metadata and both slots' non-secret
   // metadata (never the plaintext or hash) by id or login name. A missing
@@ -260,9 +261,9 @@ message CreateAPIKeyRequest {
   // set means the key is not limited (it can act on any pipeline the owner
   // can).
   repeated int64 pipeline_scope = 4;
-  // pepper is the secret the caller mixes into the key's hash (SHA-512 of
-  // pepper + key); empty hashes the key on its own. The caller (the API)
-  // supplies it from its auth.api_key config so the IdP hashes keys
+  // pepper is the secret the caller PREPENDS to the KDF input of the key's
+  // Argon2ID encoding; empty encodes the key on its own. The caller (the API)
+  // supplies it from its auth.api_key config so the IdP encodes keys
   // consistently.
   string pepper = 5;
 }
@@ -322,8 +323,8 @@ message UpdateAPIKeyRequest {
 message RotateAPIKeyRequest {
   // id is the key's identifier.
   string id = 1;
-  // pepper is the secret the caller mixes into the new key's hash (SHA-512 of
-  // pepper + key); empty hashes the key on its own.
+  // pepper is the secret the caller PREPENDS to the KDF input of the new
+  // key's Argon2ID encoding; empty encodes the key on its own.
   string pepper = 2;
 }
 
@@ -355,8 +356,8 @@ message VerifyAPIKeyRequest {
   string username = 1;
   // api_key is the presented key's plaintext (the `cdrom-…` value).
   string api_key = 2;
-  // pepper is the secret mixed into the key's hash (SHA-512 of pepper + key);
-  // empty hashes the key on its own.
+  // pepper is the secret PREPENDED to the KDF input of the key's Argon2ID
+  // encoding; empty encodes the key on its own.
   string pepper = 3;
   // max_failures is the failure count that triggers a lockout; 0 disables the
   // lockout (failed attempts are counted but never lock a user out).

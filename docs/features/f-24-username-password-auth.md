@@ -9,7 +9,7 @@ exercised in local development without a full OIDC client. The API exposes
 unauthenticated `POST /api/login` and `POST /api/register` (plus admin-only
 `/api/users` for role management) that **proxy to the IdP over gRPC** (the
 IdP's API-only surface, over mTLS when TLS is configured), where the real logic
-lives: the IdP verifies the password against a stored bcrypt hash and, on
+lives: the IdP verifies the password against a stored Argon2ID encoding and, on
 success, mints an OIDC token for the user (stamped with the user's roles). The
 API is a pure proxy — it never sees the password hash or verifies credentials
 itself. The returned token is the same OIDC token the API already verifies on
@@ -26,12 +26,12 @@ identity provider is used.
 - `proto/cdrom/db/v1/db.proto` + `internal/services/database` — `IDPUser`
   table (GORM `AutoMigrate`) + `CreateUser` / `GetIDPUser` / `ListIDPUsers` /
   `UpdateIDPUser` / `DeleteIDPUser` RPCs. The user directory (profiles,
-  bcrypt password hashes, roles) is persisted through the Database service, so
+  Argon2ID password encodings, roles) is persisted through the Database service, so
   multiple IdP replicas share it. F-28 makes `DeleteIDPUser` a soft delete
   (tombstone, never hard-delete) and adds SCIM provisioning of this directory
   from an external IdP.
 - `proto/cdrom/idp/v1/idp.proto` + `internal/idp` — the IdP's gRPC API-only
-  surface (`GRPCServer`): `Register` (hash the password with bcrypt, store the
+  surface (`GRPCServer`): `Register` (encode the password with Argon2ID, store the
   user; the first user becomes an `admin`, later users get the default `user`
   role), `Login` (verify the password, mint an OIDC token stamped with the
   user's roles), and `ListUsers` / `CreateUser` / `UpdateUser` / `DeleteUser`
@@ -50,7 +50,7 @@ identity provider is used.
 
 **Acceptance criteria.**
 - [x] `POST /api/register` with `first_name`/`last_name`/`email`/`password`
-      creates a user (the password is stored only as a bcrypt hash, never the
+      creates a user (the password is stored only as an Argon2ID encoding, never the
       plaintext); the first user registered is given the `admin` role, later
       users the default `user` role.
 - [x] `POST /api/login` with valid credentials returns an OIDC `access_token`

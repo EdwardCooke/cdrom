@@ -168,7 +168,7 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 		}
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
-	if !VerifyPassword(user.PasswordHash, req.GetPassword()) {
+	if !VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword()) {
 		if s.metrics != nil {
 			s.metrics.RecordLogin("invalid_password")
 		}
@@ -228,7 +228,8 @@ func userName(u *User) string {
 }
 
 // Register creates a new user from the request's first/last/email and
-// password. The password is hashed (bcrypt) before it is stored; the plaintext
+// password. The password is encoded with Argon2ID (pepper prepended) before
+// it is stored; the plaintext
 // is never persisted. A duplicate email is AlreadyExists. The unauthenticated
 // register path does not honour client-supplied roles (that would let anyone
 // self-assign a role); instead it assigns a default: the first user ever
@@ -244,7 +245,7 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 	if _, err := s.users.GetByEmail(ctx, req.GetEmail()); err == nil {
 		return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
 	}
-	hash, err := HashPassword(req.GetPassword())
+	hash, err := HashPassword(s.cfg.PasswordPepper, req.GetPassword())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: hash password: %v", err)
 	}
@@ -322,7 +323,7 @@ func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserReques
 	if _, err := s.users.GetByEmail(ctx, req.GetEmail()); err == nil {
 		return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
 	}
-	hash, err := HashPassword(req.GetPassword())
+	hash, err := HashPassword(s.cfg.PasswordPepper, req.GetPassword())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: hash password: %v", err)
 	}
@@ -352,7 +353,7 @@ func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserReques
 	}
 	update := &User{ID: id, FirstName: req.GetFirstName(), LastName: req.GetLastName(), Email: req.GetEmail(), Roles: req.GetRoles()}
 	if pw := req.GetPassword(); pw != "" {
-		hash, err := HashPassword(pw)
+		hash, err := HashPassword(s.cfg.PasswordPepper, pw)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "idp: hash password: %v", err)
 		}
@@ -590,8 +591,9 @@ func userToProto(u *User) *dbpb.IDPUser {
 
 // CreateServiceAccount creates a service account and its two freshly generated
 // key slots, and binds its roles. The IdP generates each key's plaintext
-// (`cdrom-sa-…`), hashes it (mixing in a fresh per-key salt and the request's
-// pepper), and persists the salted hashes through the Database service. The
+// (`cdrom-sa-…`), encodes them with Argon2ID (the pepper prepended to the
+// KDF input; the salt is embedded in the encoding), and persists the
+// encodings through the Database service. The
 // response returns both plaintext keys exactly once. The RPC is Unimplemented
 // when no service-account store is attached.
 func (s *GRPCServer) CreateServiceAccount(ctx context.Context, req *idppb.CreateServiceAccountRequest) (*idppb.CreateServiceAccountResponse, error) {
@@ -601,8 +603,8 @@ func (s *GRPCServer) CreateServiceAccount(ctx context.Context, req *idppb.Create
 	if req.GetLoginName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "login_name is required")
 	}
-	// Generate both keys' plaintexts and their salted hashes. A failure of
-	// randomness, hashing, or storage fails the whole operation.
+	// Generate both keys' plaintexts and their Argon2ID encodings. A failure
+	// of randomness, hashing, or storage fails the whole operation.
 	keys := make([]*ServiceAccountKey, 0, 2)
 	plaintexts := make([]*idppb.ServiceAccountPlaintextKey, 0, 2)
 	for slot := 1; slot <= 2; slot++ {
@@ -610,14 +612,13 @@ func (s *GRPCServer) CreateServiceAccount(ctx context.Context, req *idppb.Create
 		if err != nil {
 			return nil, err
 		}
-		salt, err := NewServiceAccountKeySalt()
+		encoded, err := EncodeServiceAccountKey(req.GetPepper(), plaintext)
 		if err != nil {
-			return nil, err
+			return nil, status.Errorf(codes.Internal, "idp: hash service account key: %v", err)
 		}
 		keys = append(keys, &ServiceAccountKey{
 			Slot:      slot,
-			KeyHash:   HashServiceAccountKey(req.GetPepper(), salt, plaintext),
-			KeySalt:   salt,
+			KeyHash:   encoded,
 			KeyPrefix: serviceAccountKeyPrefixOf(plaintext),
 		})
 		plaintexts = append(plaintexts, &idppb.ServiceAccountPlaintextKey{Slot: int32(slot), Key: plaintext})
@@ -718,11 +719,11 @@ func (s *GRPCServer) RotateServiceAccountKey(ctx context.Context, req *idppb.Rot
 	if err != nil {
 		return nil, err
 	}
-	salt, err := NewServiceAccountKeySalt()
+	encoded, err := EncodeServiceAccountKey(req.GetPepper(), plaintext)
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.Internal, "idp: hash service account key: %v", err)
 	}
-	acc, err := s.serviceAccounts.RotateKey(ctx, req.GetId(), int(req.GetSlot()), HashServiceAccountKey(req.GetPepper(), salt, plaintext), salt, serviceAccountKeyPrefixOf(plaintext), req.GetRevision(), req.GetUpdatedBy())
+	acc, err := s.serviceAccounts.RotateKey(ctx, req.GetId(), int(req.GetSlot()), encoded, serviceAccountKeyPrefixOf(plaintext), req.GetRevision(), req.GetUpdatedBy())
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return nil, status.Error(codes.NotFound, "service account not found")

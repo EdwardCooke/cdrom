@@ -1,24 +1,23 @@
 package idp
 
-import (
-	"golang.org/x/crypto/bcrypt"
-)
-
-// HashPassword hashes a plaintext password with bcrypt (which embeds a salt)
-// so the IdP can store only the hash and verify logins against it. The
+// HashPassword hashes a plaintext password with the shared Argon2ID KDF
+// (kdf.go) under the PASSWORDS profile, prepending the optional pepper to
+// the input, so the IdP can store only the encoding and verify logins
+// against it. The encoding embeds its own random salt and parameters; the
 // plaintext is never persisted.
-func HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+func HashPassword(pepper, password string) (string, error) {
+	encoding, err := EncodeSecret(kdfPasswords, pepper, password)
 	if err != nil {
 		return "", err
 	}
-	return string(hash), nil
+	return encoding, nil
 }
 
-// VerifyPassword reports whether password matches the bcrypt hash produced by
-// HashPassword.
-func VerifyPassword(hash, password string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+// VerifyPassword reports whether password matches the Argon2ID encoding
+// produced by HashPassword under the same pepper (constant-time tag
+// compare; malformed encodings yield false).
+func VerifyPassword(pepper, encoding, password string) bool {
+	return VerifySecret(encoding, pepper, password)
 }
 
 // nonNil returns a non-nil slice so that an empty role set marshals to []

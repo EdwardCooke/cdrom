@@ -3503,78 +3503,51 @@ func (s *Server) DeleteAPIKey(ctx context.Context, req *dbpb.DeleteIDPAPIKeyRequ
 	return &emptypb.Empty{}, nil
 }
 
-// VerifyAPIKey checks a presented `username:apikey` credential against the
-// stored key directory: it looks up the owner by email, checks the owner's
-// API-key lockout, and verifies the presented key's hash against the owner's
-// keys (and the key's expiration). On a miss it increments the owner's
-// failure counter and, at the configured maximum, locks the owner out (for
-// the configured duration, or permanently when it is zero) and resets the
-// counter. A successful verification clears the owner's failure counter. The
-// caller (the IdP) computes key_hash from the presented plaintext, so this
-// service never sees the plaintext. A miss is Unauthenticated.
-func (s *Server) VerifyAPIKey(ctx context.Context, req *dbpb.VerifyIDPAPIKeyRequest) (*dbpb.VerifyIDPAPIKeyResponse, error) {
-	if req.GetUsername() == "" || req.GetKeyHash() == "" {
-		return nil, status.Error(codes.InvalidArgument, "username and key_hash are required")
+// AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
+// (floored at zero) and, when has_lockout, sets or clears the lockout
+// instant (F-25). The lockout ACCOUNTING formerly lived inside VerifyAPIKey;
+// it moved here because Argon2ID verification (salted KDF) happens in the
+// IdP, which now owns the adjustment. A missing user is NotFound.
+func (s *Server) AdjustAPIKeyLockout(ctx context.Context, req *dbpb.AdjustAPIKeyLockoutRequest) (*dbpb.IDPUser, error) {
+	userID, err := parseUserID(req.GetUserId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
-	var owner models.IDPUser
-	if err := s.db.WithContext(ctx).Where("email = ?", req.GetUsername()).First(&owner).Error; err != nil {
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", userID).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+			return nil, status.Error(codes.NotFound, "user not found")
 		}
 		return nil, grpcErr(err)
 	}
-	// While locked, every API-key verification for the owner fails (the
-	// counter is not incremented again).
-	if !owner.APIKeyLockedUntil.IsZero() && owner.APIKeyLockedUntil.After(time.Now()) {
-		return nil, status.Error(codes.Unauthenticated, "api key access is locked")
+	count := int(user.APIKeyFailedCount) + int(req.GetFailedDelta())
+	if count < 0 {
+		count = 0
 	}
-	keys, err := s.listAPIKeysByOwner(ctx, owner.ID)
-	if err != nil {
-		return nil, err
+	// Explicit lockout intent: lockout_until PRESENT = set it; ABSENT = clear
+	// it (NULL). Judged by the timestamp's presence, so the caller expresses
+	// intent unambiguously.
+	intent := req.GetLockoutUntil()
+	// Map-based update: a struct Save would SKIP zero values (including a nil
+	// pointer), leaving a cleared counter or lockout stuck in the database.
+	cols := map[string]any{"api_key_failed_count": count}
+	if tu := intent.AsTime(); intent != nil && !tu.IsZero() {
+		cols["api_key_locked_until"] = tu
+	} else {
+		cols["api_key_locked_until"] = nil // write the NULL
 	}
-	now := time.Now()
-	for i := range keys {
-		key := &keys[i]
-		if key.KeyHash != req.GetKeyHash() {
-			continue
-		}
-		if !key.ExpiresAt.IsZero() && key.ExpiresAt.Before(now) {
-			continue
-		}
-		// A match: clear the owner's failure counter and return the key and
-		// owner (so the caller can establish the authenticated user).
-		if owner.APIKeyFailedCount != 0 {
-			owner.APIKeyFailedCount = 0
-			owner.UpdatedAt = now
-			if err := s.db.WithContext(ctx).Save(&owner).Error; err != nil {
-				return nil, grpcErr(err)
-			}
-		}
-		return &dbpb.VerifyIDPAPIKeyResponse{
-			Key:   toProtoIDPAPIKey(key),
-			Owner: toProtoIDPUser(&owner),
-		}, nil
+	cols["updated_at"] = time.Now()
+	result := s.db.WithContext(ctx).Model(&user).Where("id = ?", user.ID).Updates(cols)
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
 	}
-	// A miss: increment the owner's failure counter and, at the configured
-	// maximum, lock the owner out (for the configured duration, or
-	// permanently when it is zero) and reset the counter.
-	maxFailures := int(req.GetMaxFailures())
-	if maxFailures > 0 {
-		owner.APIKeyFailedCount++
-		if owner.APIKeyFailedCount >= maxFailures {
-			if d := req.GetLockoutDuration().AsDuration(); d > 0 {
-				owner.APIKeyLockedUntil = now.Add(d)
-			} else {
-				owner.APIKeyLockedUntil = apiKeyLockoutForever
-			}
-			owner.APIKeyFailedCount = 0
-		}
-		owner.UpdatedAt = now
-		if err := s.db.WithContext(ctx).Save(&owner).Error; err != nil {
-			return nil, grpcErr(err)
-		}
+	user.APIKeyFailedCount = count
+	if tu := intent.AsTime(); intent != nil && !tu.IsZero() {
+		user.APIKeyLockedUntil = &tu
+	} else {
+		user.APIKeyLockedUntil = nil
 	}
-	return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	return toProtoIDPUser(&user), nil
 }
 
 // ResetAPIKeyLockout clears a user's API-key lockout state (the failed
@@ -3594,11 +3567,15 @@ func (s *Server) ResetAPIKeyLockout(ctx context.Context, req *dbpb.ResetIDPAPIKe
 		}
 		return nil, grpcErr(err)
 	}
-	user.APIKeyFailedCount = 0
-	user.APIKeyLockedUntil = time.Time{}
-	user.UpdatedAt = time.Now()
-	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
-		return nil, grpcErr(err)
+	// Map-based update so the zeros actually persist (a struct Save skips
+	// zero values, including the nil lockout pointer).
+	result := s.db.WithContext(ctx).Model(&user).Where("id = ?", user.ID).Updates(map[string]any{
+		"api_key_failed_count": 0,
+		"api_key_locked_until": nil,
+		"updated_at":           time.Now(),
+	})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -3656,8 +3633,9 @@ func nonNilRoles(roles []string) []string {
 // ---------------------------------------------------------------------------
 //
 // A service account is a non-human identity with two API-key slots. The IdP
-// generates and hashes the keys (mixing in a per-key salt and an optional
-// pepper) and persists the salted hashes here; the Database service stores
+// generates and encodes the keys with Argon2ID (the pepper prepended to the
+// KDF input; the salt is embedded in the encoding) and persists the
+// encodings here; the Database service stores
 // them opaquely and never sees the plaintext. The IdP does the salted-hash
 // comparison itself (like password verification, against the stored
 // hash+salt); this service only persists state and manages the lockout.
@@ -3694,7 +3672,6 @@ func serviceAccountKeyToProto(k *models.ServiceAccountKey) *dbpb.ServiceAccountK
 		ServiceAccountId: strconv.FormatUint(uint64(k.ServiceAccountID), 10),
 		Slot:             int32(k.Slot),
 		KeyHash:          k.KeyHash,
-		KeySalt:          k.KeySalt,
 		KeyPrefix:        k.KeyPrefix,
 		Generation:       int32(k.Generation),
 	}
@@ -3820,7 +3797,6 @@ func (s *Server) CreateServiceAccount(ctx context.Context, req *dbpb.CreateServi
 				ServiceAccountID: account.ID,
 				Slot:             int(k.GetSlot()),
 				KeyHash:          k.GetKeyHash(),
-				KeySalt:          k.GetKeySalt(),
 				KeyPrefix:        k.GetKeyPrefix(),
 				Generation:       1,
 				RotatedAt:        time.Now(),
@@ -3959,7 +3935,6 @@ func (s *Server) RotateServiceAccountKey(ctx context.Context, req *dbpb.RotateSe
 			return err
 		}
 		slot.KeyHash = req.GetKeyHash()
-		slot.KeySalt = req.GetKeySalt()
 		slot.KeyPrefix = req.GetKeyPrefix()
 		slot.Generation++
 		slot.RotatedAt = time.Now()
@@ -4063,7 +4038,6 @@ func (s *Server) DeleteServiceAccount(ctx context.Context, req *dbpb.DeleteServi
 			Where("service_account_id = ?", id).
 			Updates(map[string]any{
 				"key_hash":   "",
-				"key_salt":   "",
 				"key_prefix": "",
 			}).Error
 	}); err != nil {
@@ -6048,15 +6022,20 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 }
 
 func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
-	return &dbpb.IDPUser{
-		Id:           strconv.FormatUint(uint64(user.ID), 10),
-		FirstName:    user.FirstName,
-		LastName:     user.LastName,
-		Email:        user.Email,
-		PasswordHash: user.PasswordHash,
-		Roles:        nonNilRoles(user.Roles),
-		CreatedAt:    timestamppb.New(user.CreatedAt),
+	out := &dbpb.IDPUser{
+		Id:                strconv.FormatUint(uint64(user.ID), 10),
+		FirstName:         user.FirstName,
+		LastName:          user.LastName,
+		Email:             user.Email,
+		PasswordHash:      user.PasswordHash,
+		Roles:             nonNilRoles(user.Roles),
+		CreatedAt:         timestamppb.New(user.CreatedAt),
+		ApiKeyFailedCount: int32(user.APIKeyFailedCount),
 	}
+	if user.APIKeyLockedUntil != nil {
+		out.ApiKeyLockedUntil = timestamppb.New(*user.APIKeyLockedUntil)
+	}
+	return out
 }
 
 // toProtoIDPAPIKey renders an API key as its Database-service form. The key

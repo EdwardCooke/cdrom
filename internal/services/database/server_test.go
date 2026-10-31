@@ -995,7 +995,7 @@ func TestIDPUsers(t *testing.T) {
 			FirstName:    "Ada",
 			LastName:     "Lovelace",
 			Email:        "ada@example.com",
-			PasswordHash: "$2a$10$hash",
+			PasswordHash: "opaque-placeholder",
 			Roles:        []string{"admin"},
 		},
 	})
@@ -1207,72 +1207,58 @@ func TestAPIKeys(t *testing.T) {
 		t.Errorf("rotated description = %q, want renamed (unchanged)", rotated.GetDescription())
 	}
 
-	// Verify: a matching hash (and not locked) succeeds and returns the key
-	// and owner.
-	verified, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:    "ada@example.com",
-		KeyHash:     "hash-rotated",
-		MaxFailures: 3,
+	// Adjustment primitives (the lockout accounting formerly fused into
+	// VerifyAPIKey; verification itself moved to the IdP with Argon2ID):
+	// increment the failure counter.
+	adj, err := client.AdjustAPIKeyLockout(ctx, &dbpb.AdjustAPIKeyLockoutRequest{
+		UserId:      ownerID,
+		FailedDelta: 1,
 	})
 	if err != nil {
-		t.Fatalf("VerifyAPIKey: %v", err)
+		t.Fatalf("AdjustAPIKeyLockout(+1): %v", err)
 	}
-	if verified.GetKey().GetId() != keyID {
-		t.Errorf("verified key = %q, want %q", verified.GetKey().GetId(), keyID)
+	if adj.GetApiKeyFailedCount() != 1 {
+		t.Errorf("failed count = %d, want 1", adj.GetApiKeyFailedCount())
 	}
-	if verified.GetOwner().GetEmail() != "ada@example.com" {
-		t.Errorf("verified owner = %q, want ada@example.com", verified.GetOwner().GetEmail())
+	// Set a lockout instant and accumulate another failure.
+	later := time.Now().Add(time.Hour)
+	adj, err = client.AdjustAPIKeyLockout(ctx, &dbpb.AdjustAPIKeyLockoutRequest{
+		UserId:       ownerID,
+		FailedDelta:  1,
+		LockoutUntil: timestamppb.New(later),
+	})
+	if err != nil {
+		t.Fatalf("AdjustAPIKeyLockout(set lockout): %v", err)
 	}
-
-	// Verify: a miss (wrong hash) is Unauthenticated and increments the
-	// failure counter.
-	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:    "ada@example.com",
-		KeyHash:     "wrong",
-		MaxFailures: 3,
-	}); status.Code(err) != codes.Unauthenticated {
-		t.Errorf("verify miss = %v, want Unauthenticated", err)
+	if adj.GetApiKeyFailedCount() != 2 {
+		t.Errorf("failed count = %d, want 2", adj.GetApiKeyFailedCount())
 	}
-
-	// Verify: an unknown user is Unauthenticated.
-	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:    "nobody@example.com",
-		KeyHash:     "hash-rotated",
-		MaxFailures: 3,
-	}); status.Code(err) != codes.Unauthenticated {
-		t.Errorf("verify unknown user = %v, want Unauthenticated", err)
+	if got := adj.GetApiKeyLockedUntil().AsTime(); !got.Equal(later) {
+		t.Errorf("locked until = %v, want %v", got, later)
 	}
-
-	// Lockout: with max_failures=1, a single miss locks the owner out
-	// (permanently, since lockout_duration is 0); a subsequent correct
-	// verification is rejected while locked.
-	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:    "ada@example.com",
-		KeyHash:     "wrong",
-		MaxFailures: 1,
-	}); status.Code(err) != codes.Unauthenticated {
-		t.Errorf("verify (lockout trigger) = %v, want Unauthenticated", err)
+	// A negative delta clears the counter (floors at zero).
+	adj, err = client.AdjustAPIKeyLockout(ctx, &dbpb.AdjustAPIKeyLockoutRequest{
+		UserId:      ownerID,
+		FailedDelta: -5,
+	})
+	if err != nil {
+		t.Fatalf("AdjustAPIKeyLockout(-5): %v", err)
 	}
-	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:    "ada@example.com",
-		KeyHash:     "hash-rotated",
-		MaxFailures: 1,
-	}); status.Code(err) != codes.Unauthenticated {
-		t.Errorf("verify while locked = %v, want Unauthenticated", err)
+	if adj.GetApiKeyFailedCount() != 0 {
+		t.Errorf("failed count = %d, want 0 (floor)", adj.GetApiKeyFailedCount())
 	}
-
-	// Reset the lockout: a correct verification succeeds again.
-	if _, err := client.ResetAPIKeyLockout(ctx, &dbpb.ResetIDPAPIKeyLockoutRequest{UserId: ownerID}); err != nil {
-		t.Fatalf("ResetAPIKeyLockout: %v", err)
+	// Absent lockout_until clears the lockout (writes NULL). Assert the
+	// field's ABSENCE — a proto3 getter on an absent message field yields a
+	// zero Timestamp (epoch), so checking AsTime().IsZero() is unreliable.
+	adj, err = client.AdjustAPIKeyLockout(ctx, &dbpb.AdjustAPIKeyLockoutRequest{
+		UserId: ownerID,
+	})
+	if err != nil {
+		t.Fatalf("AdjustAPIKeyLockout(clear): %v", err)
 	}
-	if _, err := client.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:    "ada@example.com",
-		KeyHash:     "hash-rotated",
-		MaxFailures: 1,
-	}); err != nil {
-		t.Errorf("verify after reset = %v, want success", err)
+	if ts := adj.GetApiKeyLockedUntil(); ts != nil {
+		t.Errorf("locked until = %v, want absent (cleared)", ts.AsTime())
 	}
-
 	// Resetting a missing user is NotFound.
 	if _, err := client.ResetAPIKeyLockout(ctx, &dbpb.ResetIDPAPIKeyLockoutRequest{UserId: "424242"}); status.Code(err) != codes.NotFound {
 		t.Errorf("reset missing user = %v, want NotFound", err)

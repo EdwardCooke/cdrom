@@ -3,15 +3,12 @@ package idp
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha512"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -40,8 +37,8 @@ var apiKeyAlphabet = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY
 var apiKeyLockoutForever = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // APIKey is an API key owned by a user (F-25). The IdP generates the
-// plaintext secret at creation and at each rotation, hashes it (SHA-512,
-// optionally mixed with a pepper), and stores only the hash and a short
+// plaintext secret at creation and at each rotation, encodes it (Argon2ID,
+// pepper prepended to the KDF input, salt embedded in the encoding), and stores only the encoding and a short
 // non-secret prefix. The plaintext is returned to the caller exactly once and
 // is never persisted.
 type APIKey struct {
@@ -121,14 +118,17 @@ func apiDisplayPrefix(key string) string {
 	return key[:apiKeyDisplayPrefix]
 }
 
-// HashAPIKey returns the SHA-512 hash (hex) of the key's plaintext, optionally
-// mixed with pepper (the hash of pepper + key). A fast hash is used so
-// per-request verification stays cheap; the key is high-entropy.
-func HashAPIKey(pepper, key string) string {
-	h := sha512.New()
-	h.Write([]byte(pepper))
-	h.Write([]byte(key))
-	return hex.EncodeToString(h.Sum(nil))
+// EncodeAPIKey returns the Argon2ID encoding (PHC string, embedding its own
+// random salt and the API-key parameter profile) of the key's plaintext,
+// with the optional pepper prepended to the input. The encoding is what gets
+// stored; the plaintext is shown to the user exactly once.
+func EncodeAPIKey(pepper, key string) (string, error) {
+	return EncodeSecret(kdfAPIKeys, pepper, key)
+}
+
+// apiExpired reports whether the key's expiration (if any) has lapsed.
+func apiExpired(expiresAt time.Time, now time.Time) bool {
+	return !expiresAt.IsZero() && expiresAt.Before(now)
 }
 
 // apiKeyFromProto reconstructs an in-memory key from its Database-service form.
@@ -212,10 +212,14 @@ func (s *dbAPIKeyStore) Create(ctx context.Context, ownerEmail, description stri
 	if err != nil {
 		return nil, "", err
 	}
+	keyHash, err := EncodeAPIKey(pepper, plaintext)
+	if err != nil {
+		return nil, "", status.Errorf(codes.Internal, "idp: hash api key: %v", err)
+	}
 	key := &dbpb.IDPAPIKey{
 		OwnerId:       owner.GetId(),
 		Description:   description,
-		KeyHash:       HashAPIKey(pepper, plaintext),
+		KeyHash:       keyHash,
 		KeyPrefix:     apiDisplayPrefix(plaintext),
 		PipelineScope: int64sFromUint(pipelineScope),
 	}
@@ -277,9 +281,13 @@ func (s *dbAPIKeyStore) Rotate(ctx context.Context, id, pepper string) (*APIKey,
 	if err != nil {
 		return nil, "", err
 	}
+	keyHash, err := EncodeAPIKey(pepper, plaintext)
+	if err != nil {
+		return nil, "", status.Errorf(codes.Internal, "idp: hash api key: %v", err)
+	}
 	resp, err := s.db.RotateAPIKey(ctx, &dbpb.RotateIDPAPIKeyRequest{
 		Id:        id,
-		KeyHash:   HashAPIKey(pepper, plaintext),
+		KeyHash:   keyHash,
 		KeyPrefix: apiDisplayPrefix(plaintext),
 	})
 	if err != nil {
@@ -293,17 +301,101 @@ func (s *dbAPIKeyStore) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// Verify checks a presented `username:apikey` credential against the stored
+// key directory. Because the keys are Argon2ID encodings (their salt is
+// embedded in the stored value), the presented plaintext cannot be reduced
+// to a comparable hash UP FRONT: the owner is looked up, the owner's keys
+// are enumerated, and each stored encoding is verified against the presented
+// key locally (constant-time, per key). Lockout accounting (former home: the
+// Database service's VerifyAPIKey) is performed here through
+// AdjustAPIKeyLockout. On a miss it increments the owner's failure counter
+// and locks the owner out at maxFailures (for lockoutDuration, or
+// permanently when it is zero). A miss returns an error with
+// status.Code == codes.Unauthenticated.
 func (s *dbAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper string, maxFailures int, lockoutDuration time.Duration) (*APIKey, *User, error) {
-	resp, err := s.db.VerifyAPIKey(ctx, &dbpb.VerifyIDPAPIKeyRequest{
-		Username:        username,
-		KeyHash:         HashAPIKey(pepper, apiKey),
-		MaxFailures:     int32(maxFailures),
-		LockoutDuration: durationpb.New(lockoutDuration),
-	})
+	if username == "" || apiKey == "" {
+		return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+	owner, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Email: username})
+	if err != nil {
+		// Unknown user: fail with the same response as a bad key so the
+		// endpoint does not reveal which usernames exist.
+		if status.Code(err) == codes.NotFound {
+			return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		return nil, nil, err
+	}
+	// While locked, every API-key verification for the owner fails (the
+	// counter is not incremented again).
+	if lu := owner.GetApiKeyLockedUntil(); lu != nil && lu.AsTime().After(time.Now()) {
+		return nil, nil, status.Error(codes.Unauthenticated, "api key access is locked")
+	}
+	keysResp, err := s.db.ListAPIKeys(ctx, &dbpb.ListIDPAPIKeysRequest{OwnerId: owner.GetId()})
 	if err != nil {
 		return nil, nil, err
 	}
-	return apiKeyFromProto(resp.GetKey()), userFromProto(resp.GetOwner()), nil
+	now := time.Now()
+	matchedIdx := -1
+	for i, k := range keysResp.GetKeys() {
+		if k.GetKeyHash() == "" {
+			continue
+		}
+		// A nil ExpiresAt means the key never expires. Call AsTime() only on a
+		// present timestamp: on a nil one it yields the epoch (year 1970),
+		// which apiExpired would wrongly classify as long past.
+		if ts := k.GetExpiresAt(); ts != nil && apiExpired(ts.AsTime(), now) {
+			continue
+		}
+		if VerifySecret(k.GetKeyHash(), pepper, apiKey) {
+			matchedIdx = i
+			break
+		}
+	}
+	if matchedIdx >= 0 {
+		// A match: clear the owner's failure counter (and lift any stale
+		// lockout).
+		if err := s.adjustAPIKeyLockout(ctx, owner.GetId(), -int32(owner.GetApiKeyFailedCount()), nil); err != nil {
+			return nil, nil, err
+		}
+		return apiKeyFromProto(keysResp.GetKeys()[matchedIdx]), userFromProto(owner), nil
+	}
+	// A miss: increment the owner's failure counter and, at the configured
+	// maximum, lock the owner out (for the configured duration, or
+	// permanently when it is zero) and reset the counter.
+	if maxFailures > 0 {
+		count := int(owner.GetApiKeyFailedCount()) + 1
+		if count >= maxFailures {
+			until := now.Add(lockoutDuration)
+			if lockoutDuration == 0 {
+				until = apiKeyLockoutForever
+			}
+			if err := s.adjustAPIKeyLockout(ctx, owner.GetId(), 1, &until); err != nil {
+				return nil, nil, err
+			}
+			return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
+		}
+		if err := s.adjustAPIKeyLockout(ctx, owner.GetId(), 1, nil); err != nil {
+			return nil, nil, err
+		}
+	}
+	return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
+}
+
+// adjustAPIKeyLockout applies a delta to the owner's API-key failure counter
+// and adjusts the lockout instant (PRESENCE of lockoutUntil = set it; nil =
+// clear it) — the lockout accounting the Database service used to perform
+// inside VerifyAPIKey, now relocated because salted KDFs prevent pre-hashing
+// the presented key.
+func (s *dbAPIKeyStore) adjustAPIKeyLockout(ctx context.Context, userID string, failedDelta int32, lockoutUntil *time.Time) error {
+	req := &dbpb.AdjustAPIKeyLockoutRequest{
+		UserId:      userID,
+		FailedDelta: failedDelta,
+	}
+	if lockoutUntil != nil {
+		req.LockoutUntil = timestamppb.New(*lockoutUntil)
+	}
+	_, err := s.db.AdjustAPIKeyLockout(ctx, req)
+	return err
 }
 
 func (s *dbAPIKeyStore) ResetLockout(ctx context.Context, userID string) error {

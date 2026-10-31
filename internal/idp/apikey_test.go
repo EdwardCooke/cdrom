@@ -52,16 +52,31 @@ func TestAPIKeyGenerateAndHash(t *testing.T) {
 	if key == other {
 		t.Error("two generated keys are identical")
 	}
-	var key1 = HashAPIKey("p", key)
-	var key2 = HashAPIKey("p", key)
-	if key1 != key2 {
-		t.Error("hash is not deterministic")
+	// Encoded with the same pepper, the key verifies against its own
+	// encoding; a different pepper (even an empty one) does not.
+	enc, err := EncodeAPIKey("p", key)
+	if err != nil {
+		t.Fatalf("EncodeAPIKey: %v", err)
 	}
-	if HashAPIKey("p", key) == HashAPIKey("q", key) {
-		t.Error("hash is not pepper-sensitive")
+	if !VerifySecret(enc, "p", key) {
+		t.Error("key does not verify against its own encoding")
 	}
-	if HashAPIKey("", key) == HashAPIKey("p", key) {
-		t.Error("hash is not pepper-sensitive (empty pepper)")
+	if VerifySecret(enc, "q", key) {
+		t.Error("key verifies under a WRONG pepper")
+	}
+	if VerifySecret(enc, "", key) {
+		t.Error("key verifies under an EMPTY pepper despite one having been used")
+	}
+	// Two encodings of the same key differ (fresh random salt each time).
+	enc2, err := EncodeAPIKey("p", key)
+	if err != nil {
+		t.Fatalf("EncodeAPIKey (2): %v", err)
+	}
+	if enc == enc2 {
+		t.Error("two encodings of the same key are identical (want distinct salts)")
+	}
+	if !VerifySecret(enc2, "p", key) {
+		t.Error("second encoding does not verify")
 	}
 }
 

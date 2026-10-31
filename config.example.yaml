@@ -171,7 +171,7 @@ db:
 # job tokens (a mint request may override them).
 #
 # The IdP also hosts the user directory for username/password authentication.
-# Its state — the user directory (profiles, bcrypt password hashes, and roles)
+# Its state — the user directory (profiles, Argon2ID password encodings, and roles)
 # — is persisted through the Database service, like its signing keys and auth
 # codes, so multiple IdP replicas share the same users. The API's /api/login
 # and /api/register proxy to the IdP's gRPC user operations; the IdP verifies
@@ -197,9 +197,9 @@ db:
 #  # request (Host + X-Forwarded-Proto — right for transparent proxies);
 #  # set it when the IdP is exposed under a different origin or path
 #  # (prefix-stripping proxy, external DNS). Absolute http(s) URL required.
-#  # credential is the bearer token the connector must present (enforced by
-#  # F-28.2) — treat it as a secret; enabling WITHOUT one leaves the surface
-#  # unprotected and the IdP WARNs loudly at startup.
+#  # Callers authenticate with SCIM API keys (F-28.2) — a rotated pool held
+#  # in the database and administered through the API server's /api/scim/keys
+#  # endpoints; no key material belongs in this file.
 #  # group_role_mappings maps SCIM group display names to F-14 role names
 #  # (applied by F-28.5) so corporate group membership drives Cdrom roles.
 #  # max_page_size is the largest page the surface advertises and honors
@@ -210,7 +210,6 @@ db:
 #  #scim:
 #  #  enabled: false
 #  #  public_base: https://idp.corp.example/ext-idp
-#  #  credential: "<scim-service-token>"
 #  #  max_page_size: 100
 #  #  group_role_mappings:
 #  #    administrators: admin

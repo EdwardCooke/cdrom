@@ -11,8 +11,8 @@ carry the detailed scope and acceptance criteria for each piece.
 
 | Sub-feature | Spec | Scope | Depends on |
 |-------------|------|-------|------------|
-| **F-28.1** SCIM metadata & service configuration | [f-28.1](f-28.1-scim-metadata-and-config.md) | Mounting the SCIM 2.0 surface on the IdP's HTTP server: `ServiceProviderConfig`, `Schemas`, `ResourceTypes` + the `idp.scim` configuration object (enablement, base path, credential, group→role mappings) | — |
-| **F-28.2** SCIM caller authentication | [f-28.2](f-28.2-scim-caller-authentication.md) | Protecting the SCIM surface with a dedicated service credential (constant-time bearer check now; OAuth2 client-credentials as a stretch); 401 semantics | F-28.1 |
+| **F-28.1** SCIM metadata & service configuration | [f-28.1](f-28.1-scim-metadata-and-config.md) | Mounting the SCIM 2.0 surface on the IdP's HTTP server: `ServiceProviderConfig`, `Schemas`, `ResourceTypes` + the `idp.scim` configuration object (enablement, base path, page bound, group→role mappings) | — |
+| **F-28.2** SCIM caller authentication | [f-28.2](f-28.2-scim-caller-authentication.md) | Protecting the SCIM surface with a rotated pool of database-held SCIM API keys (Argon2ID-encoded at rest with the pepper prepended, shown only at creation, optional expiration, zero-downtime rotation via the API server's `/api/scim/keys` admin endpoints); 401 semantics | F-28.1 |
 | **F-28.3** User lifecycle foundations (soft delete) | [f-28.3](f-28.3-user-lifecycle-foundation.md) | `IDPUser` model deltas (active, tombstone, external ID, provenance), soft-delete DB/admin RPC semantics, active-vs-deprovisioned states, surviving audit attribution | F-24, F-14, F-15 |
 | **F-28.4** SCIM user management | [f-28.4](f-28.4-scim-user-management.md) | The `/Users` lifecycle (create/re-provision, update, activate/deactivate, delete/deprovision, list with pagination + filter subset), the SCIM→directory mapping, and the JIT-vs-SCIM provisioning-mode switch on the OIDC login path | F-28.1, F-28.2, F-28.3 |
 | **F-28.5** SCIM group management | [f-28.5](f-28.5-scim-group-management.md) | The `/Groups` lifecycle, group storage, and applying group→role (F-14) / group→approval-group (F-27) mappings on sync | F-28.4 |
@@ -60,8 +60,8 @@ provisioning both flow from the same corporate IdP.
     `count`, `totalResults`), a filter subset (`userName eq …`, `active eq …`,
     `externalId eq …`), and ETag/`If-Match` optimistic concurrency
     (nice-to-have).
-- **Caller authentication** — the whole surface sits behind a dedicated SCIM
-  service credential (F-28.2).
+- **Caller authentication** — the whole surface sits behind a rotated pool
+  of SCIM API keys (F-28.2).
 - **SCIM → Cdrom user mapping** (RFC 7643 User schema → `IDPUser`) — F-28.4:
   - `userName` → `Email` (the unique login identifier).
   - `name.givenName` / `name.familyName` → `FirstName` / `LastName`.
@@ -77,9 +77,6 @@ provisioning both flow from the same corporate IdP.
   same stable ID, "re-hire").
 
 **Nice-to-haves** (build after the core works):
-- **OAuth2 client-credentials** (F-28.2) — authenticate the SCIM caller with a
-  standard OAuth2 client-credentials token (instead of a static bearer
-  credential), for environments that already issue machine tokens.
 - **Bulk + ETag** (F-28.4) — SCIM `Bulk` operations and ETag/`If-Match`
   optimistic concurrency for large directories; the F-28.1 metadata
   advertisements flip on when these land.
@@ -125,11 +122,11 @@ provisioning both flow from the same corporate IdP.
   directory stays the source of truth. Locally-registered users (F-24) are
   managed manually and are not touched by SCIM.
 - **The SCIM caller is a privileged, authenticated service** (F-28.2). The
-  SCIM surface is protected by a dedicated credential (a SCIM service token,
-  or an OAuth2 client-credentials token, or a F-26 service account scoped to
-  user management) — it is not public and not part of the OIDC sign-in
-  surface. Only the corporate IdP (holding that credential) can provision
-  users.
+  SCIM surface is protected by a rotated pool of SCIM API keys —
+  database-held, hashed at rest, administered through the API server, and
+  completely separate from F-26 service accounts — so it is not public and
+  not part of the OIDC sign-in surface. Only the corporate IdP (possessing a
+  valid key) can provision users.
 - **Groups map to roles (and optionally approval groups)** (F-28.5). A SCIM
   group's membership is applied via a configurable group→role mapping (F-14)
   so corporate group membership drives Cdrom authorization; the same
