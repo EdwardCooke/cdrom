@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -734,6 +735,107 @@ type IdPConfig struct {
 	// job-token minting and user management) binds to. The API dials it over
 	// mTLS. Empty means the IdP uses DefaultIdPGRPCAddress.
 	GRPCAddress string
+	// Scim configures the SCIM 2.0 user-provisioning surface (F-28.1). When
+	// Enabled is false (the default) the IdP serves no /scim/v2 routes.
+	Scim ScimConfig
+}
+
+// ScimConfig configures the SCIM 2.0 (RFC 7643/7644) service-provider
+// surface on the IdP's HTTP server (F-28.1). An external identity provider
+// (Azure AD / Entra ID, Okta, ...) points its SCIM connector at this
+// surface to provision, update, and deprovision Cdrom users and groups.
+type ScimConfig struct {
+	// Enabled turns the SCIM surface on. When false (the default) no /
+	// scim/v2 routes are mounted and every such path 404s.
+	Enabled bool
+	// PublicBase is the BASE URL (origin [+ path prefix]) under which the
+	// SCIM surface is announced to the outside world — meta.location,
+	// changeInfo.location, and (later) Location headers. Leave EMPTY to
+	// derive it per request from the Host/X-Forwarded-Proto headers (works
+	// behind transparent reverse proxies); SET IT when the IdP is exposed
+	// under a different origin/path than it receives requests on (prefix-
+	// stripping proxies, internal vs. external DNS, pinned branding). Must
+	// be an absolute http(s):// URL when set.
+	PublicBase string
+	// Credential is the SCIM service bearer token the caller must present
+	// (Authorization: Bearer <credential>) — consumed by the F-28.2 auth
+	// guard. It is a secret: never logged, never surfaced through any
+	// API/UI, and compared in constant time.
+	Credential string
+	// GroupRoleMappings maps a SCIM group display name to an F-14 role name,
+	// so corporate group membership drives Cdrom authorization (applied by
+	// F-28.5).
+	GroupRoleMappings map[string]string
+	// MaxPageSize caps the page sizes the SCIM surface advertises and
+	// honors (published as maxResults in ServiceProviderConfig). Zero or
+	// negative falls back to DefaultSCIMMaxPageSize; values above
+	// SCIMHardCapMaxPageSize are clamped to the hard cap (defense against
+	// oversized-response abuse).
+	MaxPageSize int
+}
+
+// SCIMBasePath is the FIXED URL path the SCIM surface is mounted under on
+// the IdP's HTTP server (F-28.1). It is intentionally not configurable:
+// the mount is a flat literal so the mux patterns stay native and the
+// surface's location is predictable; where the WORLD believes the surface
+// lives (proxies, external DNS) is expressed by ScimConfig.PublicBase
+// instead.
+const SCIMBasePath = "/scim/v2"
+
+// DefaultSCIMMaxPageSize is the default largest page size the SCIM surface
+// advertises and honors (F-28.1). RFC 7644 imposes no universal ceiling —
+// providers define their own — so this is a sensible default, tunable up to
+// SCIMHardCapMaxPageSize via idp.scim.max_page_size.
+const DefaultSCIMMaxPageSize = 100
+
+// SCIMHardCapMaxPageSize is the immovable ceiling on the configured SCIM
+// page bound: a defensive cap bounding worst-case response size, not an RFC
+// mandate. Values above it are clamped to it.
+const SCIMHardCapMaxPageSize = 10000
+
+// EffectiveMaxPageSize returns the page bound the SCIM surface advertises
+// and enforces: the configured MaxPageSize when positive, capped at
+// SCIMHardCapMaxPageSize, falling back to DefaultSCIMMaxPageSize when unset.
+func (c ScimConfig) EffectiveMaxPageSize() int {
+	if c.MaxPageSize <= 0 {
+		return DefaultSCIMMaxPageSize
+	}
+	if c.MaxPageSize > SCIMHardCapMaxPageSize {
+		return SCIMHardCapMaxPageSize
+	}
+	return c.MaxPageSize
+}
+
+// NormalizePublicBase strips the trailing slash from a configured public
+// base URL ("https://idp.corp/ext/" → "https://idp.corp/ext") so concatenation
+// with resource-relative paths is uniform. Returns "" for empty input.
+func (c ScimConfig) NormalizePublicBase() string {
+	return strings.TrimRight(c.PublicBase, "/")
+}
+
+// ValidatePublicBase checks that a NON-EMPTY PublicBase is an absolute
+// http(s):// URL (relative fragments are meaningless announcements). Called
+// from IdPConfig.Validate; an empty value is legal (request-derived).
+// IsAbs() is NOT adequate here: it passes any scheme (mailto:, ldap:, ws:)
+// and opaque/hostless forms, but the value is concatenated into announced
+// URLs — only an http(s) origin is sound. Query strings and fragments are
+// likewise forbidden: the base is glued to resource paths, so "?…" or "#"
+// would swallow the glue and produce corrupted announcements.
+func (c ScimConfig) ValidatePublicBase() error {
+	if c.PublicBase == "" {
+		return nil
+	}
+	u, err := url.Parse(c.PublicBase)
+	if err != nil {
+		return fmt.Errorf("idp.scim.public_base: invalid URL %q: %w", c.PublicBase, err)
+	}
+	if !(u.Scheme == "http" || u.Scheme == "https") || u.Host == "" {
+		return fmt.Errorf("idp.scim.public_base: must be an absolute http(s):// URL, got %q", c.PublicBase)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("idp.scim.public_base: must not include a query string or fragment, got %q", c.PublicBase)
+	}
+	return nil
 }
 
 // defaultIdPIssuer is the issuer advertised when IdPConfig.Issuer is empty.
@@ -764,6 +866,9 @@ func (c IdPConfig) Validate() error {
 	}
 	if c.CheckInterval <= 0 {
 		return fmt.Errorf("idp: check_interval must be positive")
+	}
+	if err := c.Scim.ValidatePublicBase(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -889,6 +994,10 @@ func LoadWithFile(file string) (*Config, error) {
 			RotateBefore:  14 * 24 * time.Hour,
 			TokenLifetime: time.Hour,
 			CheckInterval: time.Hour,
+			// The SCIM surface (F-28.1) is disabled by default; its page
+			// bound defaults to 100 and its public base is request-derived
+			// (unset).
+			Scim: ScimConfig{MaxPageSize: DefaultSCIMMaxPageSize},
 		},
 		IdPGRPCAddress: DefaultIdPGRPCAddress,
 		GRPCAuth:       GRPCAuthConfig{},
@@ -1018,13 +1127,14 @@ type fileConfig struct {
 		} `yaml:"service_account"`
 	} `yaml:"auth"`
 	IdP *struct {
-		Issuer        *string   `yaml:"issuer"`
-		KeyLifetime   *string   `yaml:"key_lifetime"`
-		RotateBefore  *string   `yaml:"rotate_before"`
-		TokenLifetime *string   `yaml:"token_lifetime"`
-		CheckInterval *string   `yaml:"check_interval"`
-		Audiences     *[]string `yaml:"audiences"`
-		GRPCAddress   *string   `yaml:"grpc_address"`
+		Issuer        *string          `yaml:"issuer"`
+		KeyLifetime   *string          `yaml:"key_lifetime"`
+		RotateBefore  *string          `yaml:"rotate_before"`
+		TokenLifetime *string          `yaml:"token_lifetime"`
+		CheckInterval *string          `yaml:"check_interval"`
+		Audiences     *[]string        `yaml:"audiences"`
+		GRPCAddress   *string          `yaml:"grpc_address"`
+		Scim          *scimFileSection `yaml:"scim"`
 	} `yaml:"idp"`
 	IdPGRPCAddress *string `yaml:"idp_grpc_address"`
 	GRPCAuth       *struct {
@@ -1278,6 +1388,7 @@ func applyFile(cfg *Config, path string) error {
 		if f.IdP.GRPCAddress != nil {
 			cfg.IdP.GRPCAddress = *f.IdP.GRPCAddress
 		}
+		mergeSCIMConfigFromFile(&cfg.IdP.Scim, f.IdP.Scim)
 	}
 	if f.IdPGRPCAddress != nil {
 		cfg.IdPGRPCAddress = *f.IdPGRPCAddress
@@ -1515,6 +1626,21 @@ func applyEnv(cfg *Config) {
 			cfg.IdP.CheckInterval = d
 		}
 	}
+	// SCIM provisioning surface (F-28.1). CDROM_SCIM_GROUP_ROLE_MAPPINGS is a
+	// comma-separated list of "groupName=roleName" pairs.
+	if v := os.Getenv("CDROM_SCIM_ENABLED"); v != "" {
+		cfg.IdP.Scim.Enabled = v == "true" || v == "1"
+	}
+	cfg.IdP.Scim.PublicBase = envOr("CDROM_SCIM_PUBLIC_BASE", cfg.IdP.Scim.PublicBase)
+	cfg.IdP.Scim.Credential = envOr("CDROM_SCIM_CREDENTIAL", cfg.IdP.Scim.Credential)
+	if v := os.Getenv("CDROM_SCIM_MAX_PAGE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.IdP.Scim.MaxPageSize = n
+		}
+	}
+	if v := os.Getenv("CDROM_SCIM_GROUP_ROLE_MAPPINGS"); v != "" {
+		cfg.IdP.Scim.GroupRoleMappings = parseRoleMappings(v)
+	}
 	if v := os.Getenv("CDROM_GRPC_AUTH_ENABLED"); v != "" {
 		cfg.GRPCAuth.Enabled = v == "true" || v == "1"
 	}
@@ -1608,6 +1734,40 @@ func parseRoleMappings(s string) map[string]string {
 		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
 	return out
+}
+
+// scimFileSection is the nullable idp.scim section of the config file
+// (F-28.1).
+type scimFileSection struct {
+	Enabled           *bool             `yaml:"enabled"`
+	PublicBase        *string           `yaml:"public_base"`
+	Credential        *string           `yaml:"credential"`
+	GroupRoleMappings map[string]string `yaml:"group_role_mappings"`
+	MaxPageSize       *int              `yaml:"max_page_size"`
+}
+
+// mergeSCIMConfigFromFile folds the file's idp.scim section (nullable
+// scalars; a present map replaces) into dst (F-28.1). Extracted so the
+// merge is unit-testable in isolation.
+func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) {
+	if src == nil {
+		return
+	}
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.PublicBase != nil {
+		dst.PublicBase = *src.PublicBase
+	}
+	if src.Credential != nil {
+		dst.Credential = *src.Credential
+	}
+	if src.MaxPageSize != nil {
+		dst.MaxPageSize = *src.MaxPageSize
+	}
+	if src.GroupRoleMappings != nil {
+		dst.GroupRoleMappings = src.GroupRoleMappings
+	}
 }
 
 // defaultAgentName is the default identity of an ephemeral agent: the host

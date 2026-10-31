@@ -197,9 +197,13 @@ func main() {
 		}
 	}()
 
-	logger.Info("cdrom idp starting", "addr", addr, "grpc", grpcAddr, "issuer", cfg.IdP.EffectiveIssuer(),
+	startLogArgs := []any{"addr", addr, "grpc", grpcAddr, "issuer", cfg.IdP.EffectiveIssuer(),
 		"db", cfg.DBAddress, "key_lifetime", cfg.IdP.KeyLifetime,
-		"rotate_before", cfg.IdP.RotateBefore, "tls", cfg.TLS.Enabled())
+		"rotate_before", cfg.IdP.RotateBefore, "tls", cfg.TLS.Enabled()}
+	if cfg.IdP.Scim.Enabled {
+		startLogArgs = append(startLogArgs, "scim_public_base", cfg.IdP.Scim.PublicBase)
+	}
+	logger.Info("cdrom idp starting", startLogArgs...)
 	var serveErr error
 	if tlsCfg != nil {
 		serveErr = httpSrv.ListenAndServeTLS("", "")

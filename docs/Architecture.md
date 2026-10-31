@@ -1188,6 +1188,25 @@ plaintext. `make certs` generates a local set.
 `CDROM_IDP_ROTATE_BEFORE`, `CDROM_IDP_CHECK_INTERVAL` (key auto-rotation
 tuning).
 
+#### SCIM provisioning surface (F-28.1, `CDROM_SCIM_*`)
+
+OFF BY DEFAULT. When `CDROM_SCIM_ENABLED=true`, the IdP's HTTP server mounts
+the SCIM 2.0 (RFC 7643/7644) service-provider surface at the FIXED path
+`/scim/v2` beside the OIDC surface: today the metadata endpoints
+(`ServiceProviderConfig`, `Schemas`, `ResourceTypes`); `/Users` and `/Groups`
+arrive with F-28.4/F-28.5. `CDROM_SCIM_PUBLIC_BASE` pins the base URL the
+surface announces to the outside world (`meta.location`, `changeInfo.location`;
+empty = derive per request from Host/X-Forwarded-Proto — correct behind
+transparent proxies; set it for prefix-stripping proxies or external DNS).
+`CDROM_SCIM_CREDENTIAL` is the bearer token the corporate IdP's SCIM connector
+must present (enforced by F-28.2; enabling without one logs a prominent
+startup warning). `CDROM_SCIM_GROUP_ROLE_MAPPINGS` is a comma-separated list
+of `groupName=roleName` pairs translating corporate group membership into F-14
+roles (applied by F-28.5). `CDROM_SCIM_MAX_PAGE_SIZE` raises the page bound
+the surface advertises and honors (default 100; RFC 7644 mandates no universal
+ceiling — the provider declares its own — values above the 10000 hard cap are
+clamped).
+
 ### Secrets (F-12)
 
 `CDROM_SECRETS_KIND`, `CDROM_SECRETS_KEY` — base64-encoded 32-byte AES-256-GCM

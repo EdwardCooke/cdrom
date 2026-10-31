@@ -146,13 +146,17 @@ func (s *Server) SetMetrics(m *metrics.IDPMetrics) {
 	s.metrics = m
 }
 
-// Handler builds the IdP's HTTP handler (the OIDC surface).
+// Handler builds the IdP's HTTP handler (the OIDC surface, plus the SCIM
+// provisioning surface when idp.scim.enabled — F-28.1).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleDiscovery)
 	mux.HandleFunc("GET /jwks", s.handleJWKS)
 	mux.HandleFunc("GET /auth", s.handleAuthorize)
 	mux.HandleFunc("POST /token", s.handleToken)
+	if s.cfg.Scim.Enabled {
+		s.mountSCIM(mux)
+	}
 	return mux
 }
 

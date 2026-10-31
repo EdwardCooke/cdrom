@@ -185,6 +185,36 @@ db:
 #  check_interval: 1h       # how often to check whether to rotate
 #  # Default audience values stamped on minted job tokens.
 #  audiences: [cdrom-api]
+#
+#  # SCIM 2.0 provisioning surface (F-28.1). OFF BY DEFAULT: when enabled,
+#  # the IdP's HTTP server mounts the SCIM service-provider surface at the
+#  # FIXED path /scim/v2 (next to the OIDC surface) — today the metadata
+#  # endpoints (ServiceProviderConfig, Schemas, ResourceTypes); /Users and
+#  # /Groups arrive with F-28.4/F-28.5. An external identity provider
+#  # (Azure AD, Okta, ...) points its SCIM connector at this surface.
+#  # public_base pins the URL the surface ANNOUNCES to the outside world
+#  # (meta.location / changeInfo.location). Leave unset to announce per
+#  # request (Host + X-Forwarded-Proto — right for transparent proxies);
+#  # set it when the IdP is exposed under a different origin or path
+#  # (prefix-stripping proxy, external DNS). Absolute http(s) URL required.
+#  # credential is the bearer token the connector must present (enforced by
+#  # F-28.2) — treat it as a secret; enabling WITHOUT one leaves the surface
+#  # unprotected and the IdP WARNs loudly at startup.
+#  # group_role_mappings maps SCIM group display names to F-14 role names
+#  # (applied by F-28.5) so corporate group membership drives Cdrom roles.
+#  # max_page_size is the largest page the surface advertises and honors
+#  # (pagination.maxResults / filter.maxResults in ServiceProviderConfig).
+#  # RFC 7644 sets no universal ceiling — the provider chooses its own —
+#  # so raise it for huge directories; values above the 10000 hard cap are
+#  # clamped to it.
+#  #scim:
+#  #  enabled: false
+#  #  public_base: https://idp.corp.example/ext-idp
+#  #  credential: "<scim-service-token>"
+#  #  max_page_size: 100
+#  #  group_role_mappings:
+#  #    administrators: admin
+#  #    developers: operator
 
 # gRPC address of the IdP's API-only surface (job-token minting and user
 # management). The API dials it (over mTLS when the tls section is set) to

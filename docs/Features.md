@@ -144,7 +144,7 @@ election, cross-pod live logs, shared artifacts store) is in
 | F-25 | API keys | done | [F-25](features/f-25-api-keys.md) |
 | F-26 | Service accounts | planned | [F-26](features/f-26-service-accounts.md) |
 | F-27 | Approval groups (named approver sets) | done | [F-27](features/f-27-approval-groups.md) |
-| F-28 | SCIM user provisioning (automatic user management from an external IdP) | planned | [F-28](features/f-28-scim-provisioning.md) |
+| F-28 | SCIM user provisioning (automatic user management from an external IdP; decomposed into F-28.1…F-28.5) | planned | [F-28](features/f-28-scim-provisioning.md) |
 
 ### Phase 7 — Organization & metadata
 
@@ -176,7 +176,10 @@ The phases are ordered so each builds on the last. A pragmatic first cut:
 1. **F-24 → F-14 → F-28** — SCIM user provisioning (the corporate IdP
     provisions/deprovisions users and groups into the IdP's user directory;
     users are soft-deleted, never hard-deleted, so audit attribution survives
-    deprovisioning; groups map to F-14 roles / F-27 approval groups).
+    deprovisioning; groups map to F-14 roles / F-27 approval groups);
+    internally F-28.1 (metadata/config) → F-28.2 (caller auth) → F-28.3
+    (soft-delete foundations) → F-28.4 (user management) → F-28.5 (group
+    management).
 
 ---
 
@@ -239,5 +242,10 @@ Tick each feature off as it lands.
 - [x] F-25 API keys
 - [x] F-26 Service accounts
 - [x] F-27 Approval groups (named approver sets)
-- [ ] F-28 SCIM user provisioning (external IdP; soft-delete only)
+- [ ] F-28 SCIM user provisioning (overview; see F-28.1…F-28.5)
+- [x] F-28.1 SCIM metadata & service configuration
+- [ ] F-28.2 SCIM caller authentication
+- [ ] F-28.3 User lifecycle foundations (soft delete)
+- [ ] F-28.4 SCIM user management
+- [ ] F-28.5 SCIM group management
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

@@ -234,7 +234,7 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 | F-25 | API keys (`cdrom-`+64-char; per-pipeline scope; rotate/reset) | [f-25](docs/features/f-25-api-keys.md) |
 | F-26 | Service accounts (non-human identities; two rotatable key slots) | [f-26](docs/features/f-26-service-accounts.md) |
 | F-27 | Approval groups *(planned)* | [f-27](docs/features/f-27-approval-groups.md) |
-| F-28 | SCIM 2.0 user provisioning *(planned)* | [f-28](docs/features/f-28-scim-provisioning.md) |
+| F-28 | SCIM 2.0 user provisioning (decomposed into F-28.1…F-28.5) *(planned)* | [f-28](docs/features/f-28-scim-provisioning.md) |
 | F-29 | Labeling (normalized `Label` table; run label snapshot) | [f-29](docs/features/f-29-tagging.md) |
 
 ## Tech Stack & Constraints
@@ -367,7 +367,8 @@ Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
 resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
 (OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping),
-`CDROM_IDP_*`, `CDROM_GRPC_AUTH_*` (job-token auth), `CDROM_SECRETS_{KIND,KEY}`,
+`CDROM_IDP_*`, `CDROM_SCIM_*` (F-28.1 SCIM provisioning surface),
+`CDROM_GRPC_AUTH_*` (job-token auth), `CDROM_SECRETS_{KIND,KEY}`,
 `CDROM_PIPELINE_SOURCE_*` (F-21.2/F-21.5), `CDROM_AUDIT_*` (F-15),
 `CDROM_EMAIL_*` + `CDROM_WEBHOOK_TIMEOUT{,_MAX}` (F-18), `CDROM_METRICS_*`
 (F-20), `CDROM_LOG_{FILE,FORMAT,LEVEL}`.
