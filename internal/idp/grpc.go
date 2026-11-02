@@ -886,3 +886,32 @@ func (s *GRPCServer) ResetServiceAccountLockout(ctx context.Context, req *idppb.
 	}
 	return &idppb.ResetServiceAccountLockoutResponse{Status: "reset"}, nil
 }
+
+// ---------------------------------------------------------------------------
+// SCIM keys (F-28.2)
+// ---------------------------------------------------------------------------
+
+// DeriveScimKey draws a fresh SCIM connector key (32 characters from the
+// documented alphabet, crypto/rand) and computes its Argon2ID encoding with
+// the IdP's configured SCIM pepper (prepended to the KDF input; the salt is
+// drawn and embedded by the KDF). It returns the plaintext exactly once
+// together with the encoding and the 8-char prefix. NOTHING is stored here:
+// this is a pure derivation (the API persists the (encoding, prefix) pair
+// through the Database service), so the RPC is available even before any pool
+// rows exist (the bootstrap ritual). The IdP is the ONLY pepper-touching site
+// — the pepper never leaves this process.
+func (s *GRPCServer) DeriveScimKey(ctx context.Context, req *idppb.DeriveScimKeyRequest) (*idppb.DeriveScimKeyResponse, error) {
+	plaintext, err := NewScimKey()
+	if err != nil {
+		return nil, err
+	}
+	encoding, err := EncodeScimKey(s.cfg.ScimKeysPepper, plaintext)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "idp: encode scim key: %v", err)
+	}
+	return &idppb.DeriveScimKeyResponse{
+		Key:      plaintext,
+		Encoding: encoding,
+		Prefix:   scimKeyPrefixOf(plaintext),
+	}, nil
+}

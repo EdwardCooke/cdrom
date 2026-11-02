@@ -47,6 +47,7 @@ const (
 	IdP_RemoveServiceAccountRole_FullMethodName   = "/cdrom.idp.v1.IdP/RemoveServiceAccountRole"
 	IdP_VerifyServiceAccountKey_FullMethodName    = "/cdrom.idp.v1.IdP/VerifyServiceAccountKey"
 	IdP_ResetServiceAccountLockout_FullMethodName = "/cdrom.idp.v1.IdP/ResetServiceAccountLockout"
+	IdP_DeriveScimKey_FullMethodName              = "/cdrom.idp.v1.IdP/DeriveScimKey"
 )
 
 // IdPClient is the client API for IdP service.
@@ -168,6 +169,16 @@ type IdPClient interface {
 	// ResetServiceAccountLockout clears an account's key lockout state (the
 	// failed counter and the lockout instant). A missing account is NotFound.
 	ResetServiceAccountLockout(ctx context.Context, in *ResetServiceAccountLockoutRequest, opts ...grpc.CallOption) (*ResetServiceAccountLockoutResponse, error)
+	// DeriveScimKey (F-28.2) draws a fresh SCIM connector key — 32 characters
+	// from the documented alphabet (crypto/rand) — and computes its Argon2ID
+	// encoding with the IdP's configured SCIM pepper (prepended to the KDF
+	// input; the salt is drawn and embedded by the KDF). It RETURNS the
+	// plaintext exactly once together with the encoding and the 8-char prefix;
+	// the caller (the API, a thin proxy) persists the (encoding, prefix) pair
+	// through the Database service and shows the plaintext to the operator in
+	// the 201. Nothing is stored here: this is a pure derivation, so the RPC is
+	// available even before any pool rows exist (the bootstrap ritual).
+	DeriveScimKey(ctx context.Context, in *DeriveScimKeyRequest, opts ...grpc.CallOption) (*DeriveScimKeyResponse, error)
 }
 
 type idPClient struct {
@@ -448,6 +459,16 @@ func (c *idPClient) ResetServiceAccountLockout(ctx context.Context, in *ResetSer
 	return out, nil
 }
 
+func (c *idPClient) DeriveScimKey(ctx context.Context, in *DeriveScimKeyRequest, opts ...grpc.CallOption) (*DeriveScimKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeriveScimKeyResponse)
+	err := c.cc.Invoke(ctx, IdP_DeriveScimKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdPServer is the server API for IdP service.
 // All implementations must embed UnimplementedIdPServer
 // for forward compatibility.
@@ -567,6 +588,16 @@ type IdPServer interface {
 	// ResetServiceAccountLockout clears an account's key lockout state (the
 	// failed counter and the lockout instant). A missing account is NotFound.
 	ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*ResetServiceAccountLockoutResponse, error)
+	// DeriveScimKey (F-28.2) draws a fresh SCIM connector key — 32 characters
+	// from the documented alphabet (crypto/rand) — and computes its Argon2ID
+	// encoding with the IdP's configured SCIM pepper (prepended to the KDF
+	// input; the salt is drawn and embedded by the KDF). It RETURNS the
+	// plaintext exactly once together with the encoding and the 8-char prefix;
+	// the caller (the API, a thin proxy) persists the (encoding, prefix) pair
+	// through the Database service and shows the plaintext to the operator in
+	// the 201. Nothing is stored here: this is a pure derivation, so the RPC is
+	// available even before any pool rows exist (the bootstrap ritual).
+	DeriveScimKey(context.Context, *DeriveScimKeyRequest) (*DeriveScimKeyResponse, error)
 	mustEmbedUnimplementedIdPServer()
 }
 
@@ -657,6 +688,9 @@ func (UnimplementedIdPServer) VerifyServiceAccountKey(context.Context, *VerifySe
 }
 func (UnimplementedIdPServer) ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*ResetServiceAccountLockoutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetServiceAccountLockout not implemented")
+}
+func (UnimplementedIdPServer) DeriveScimKey(context.Context, *DeriveScimKeyRequest) (*DeriveScimKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeriveScimKey not implemented")
 }
 func (UnimplementedIdPServer) mustEmbedUnimplementedIdPServer() {}
 func (UnimplementedIdPServer) testEmbeddedByValue()             {}
@@ -1165,6 +1199,24 @@ func _IdP_ResetServiceAccountLockout_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IdP_DeriveScimKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeriveScimKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).DeriveScimKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_DeriveScimKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).DeriveScimKey(ctx, req.(*DeriveScimKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IdP_ServiceDesc is the grpc.ServiceDesc for IdP service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1279,6 +1331,10 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetServiceAccountLockout",
 			Handler:    _IdP_ResetServiceAccountLockout_Handler,
+		},
+		{
+			MethodName: "DeriveScimKey",
+			Handler:    _IdP_DeriveScimKey_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

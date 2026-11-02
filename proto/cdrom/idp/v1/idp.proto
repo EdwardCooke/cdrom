@@ -125,6 +125,17 @@ service IdP {
   // ResetServiceAccountLockout clears an account's key lockout state (the
   // failed counter and the lockout instant). A missing account is NotFound.
   rpc ResetServiceAccountLockout(ResetServiceAccountLockoutRequest) returns (ResetServiceAccountLockoutResponse);
+
+  // DeriveScimKey (F-28.2) draws a fresh SCIM connector key — 32 characters
+  // from the documented alphabet (crypto/rand) — and computes its Argon2ID
+  // encoding with the IdP's configured SCIM pepper (prepended to the KDF
+  // input; the salt is drawn and embedded by the KDF). It RETURNS the
+  // plaintext exactly once together with the encoding and the 8-char prefix;
+  // the caller (the API, a thin proxy) persists the (encoding, prefix) pair
+  // through the Database service and shows the plaintext to the operator in
+  // the 201. Nothing is stored here: this is a pure derivation, so the RPC is
+  // available even before any pool rows exist (the bootstrap ritual).
+  rpc DeriveScimKey(DeriveScimKeyRequest) returns (DeriveScimKeyResponse);
 }
 
 // MintJobTokenRequest is the request to mint a job token.
@@ -582,4 +593,28 @@ message ResetServiceAccountLockoutRequest {
 
 message ResetServiceAccountLockoutResponse {
   string status = 1;
+}
+
+// ---------------------------------------------------------------------------
+// SCIM keys (F-28.2)
+// ---------------------------------------------------------------------------
+
+// DeriveScimKeyRequest asks the IdP to draw a fresh SCIM connector key and
+// compute its Argon2ID encoding. The IdP is the ONLY pepper-touching site:
+// the pepper comes from ITS config (CDROM_IDP_SCIM_KEYS_PEPPER) and is never
+// transmitted; the response carries the plaintext (shown exactly once), the
+// encoding (persisted by the caller), and the prefix (listing aid).
+message DeriveScimKeyRequest {}
+
+// DeriveScimKeyResponse is the result of a derivation: the plaintext key
+// (exactly once), its Argon2ID encoding, and its 8-character prefix.
+message DeriveScimKeyResponse {
+  // key is the plaintext 32-character secret (shown to the operator exactly
+  // once, at creation).
+  string key = 1;
+  // encoding is the Argon2ID PHC encoding of pepper‖key (salt + parameters
+  // embedded). This is what the caller persists; the plaintext is discarded.
+  string encoding = 2;
+  // prefix is the first eight characters of the plaintext (display aid).
+  string prefix = 3;
 }

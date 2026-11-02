@@ -102,6 +102,18 @@ const (
 	// gate's approver references.
 	PermApprovalsView   = "approvals.can-view"
 	PermApprovalsManage = "approvals.can-manage"
+	// SCIM key management permissions (F-28.2). The bounded pool of keys that
+	// authenticate the corporate SCIM connector against the IdP's /scim/v2
+	// surface is platform-wide: can-view lists/reads the pool, can-create mints
+	// a key (rotation), can-edit renames/reschedules one, can-revoke retires it
+	// (undoable for 24 h), can-reinstate restores an accidentally revoked one.
+	// All are denied by default (grant them to a role to unlock pool
+	// administration); the admin role carries them via AllPermissions.
+	PermScimKeysView      = "scim-keys.can-view"
+	PermScimKeysCreate    = "scim-keys.can-create"
+	PermScimKeysEdit      = "scim-keys.can-edit"
+	PermScimKeysRevoke    = "scim-keys.can-revoke"
+	PermScimKeysReinstate = "scim-keys.can-reinstate"
 )
 
 // AllPermissions is the complete catalog of permissions the platform knows
@@ -151,6 +163,11 @@ var AllPermissions = []string{
 	PermRunsRestore,
 	PermApprovalsView,
 	PermApprovalsManage,
+	PermScimKeysView,
+	PermScimKeysCreate,
+	PermScimKeysEdit,
+	PermScimKeysRevoke,
+	PermScimKeysReinstate,
 }
 
 // permissionCatalog is the set of known permission names, used to validate a

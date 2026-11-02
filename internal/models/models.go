@@ -1834,6 +1834,48 @@ type ServiceAccountKey struct {
 	RotatedAt time.Time `json:"rotated_at"`
 }
 
+// ScimKey is one credential of the bounded pool that authenticates the
+// corporate SCIM connector against the IdP's /scim/v2 surface (F-28.2). A key
+// is a 32-character secret drawn from a curated alphabet; only its Argon2ID
+// encoding (PHC format — the random salt and parameters are embedded in the
+// encoding, and a configured pepper is prepended to the KDF input) and a short
+// non-secret prefix are stored. The plaintext is shown to the operator exactly
+// once (at creation) and is never persisted.
+//
+// Lifecycle: a key is valid from creation until REVOCATION (instant) or its
+// optional expiration lapse — there is no automatic ageing-out, so every
+// non-revoked key validates however old. Revocation is undoable for 24 h
+// (reinstate); a periodic sweep physically deletes rows whose revocation is
+// older than 24 h. At most five non-revoked keys exist at any time (enforced
+// at create). The pool is completely separate from F-25 user API keys and
+// F-26 service accounts: distinct table, distinct pepper, distinct auth path.
+type ScimKey struct {
+	gorm.Model
+	// Hash is the Argon2ID encoding of the key's plaintext (PHC format; the
+	// salt is embedded in the encoding, and a configured pepper is prepended
+	// to the KDF input). Unique: two keys never share an encoding (fresh salt
+	// per draw). It is never returned to the API or UI.
+	Hash string `gorm:"column:hash;type:text;uniqueIndex;not null" json:"-"`
+	// Prefix is the first eight characters of the plaintext — the human
+	// recognition device in listings (the plaintext itself is never shown
+	// again).
+	Prefix string `gorm:"column:prefix;size:8;not null" json:"prefix"`
+	// Description is the operator-supplied label (which connector /
+	// environment the key belongs to).
+	Description string `gorm:"column:description;size:200" json:"description"`
+	// CreatedBy is the identity of the principal that created the key (audit
+	// link).
+	CreatedBy string `gorm:"column:created_by" json:"created_by,omitempty"`
+	// ExpiresAt bounds the key's life; nil means the key never expires.
+	ExpiresAt *time.Time `gorm:"column:expires_at" json:"expires_at,omitempty"`
+	// LastUsedAt is bumped on successful validation (write-throttled).
+	LastUsedAt *time.Time `gorm:"column:last_used_at" json:"last_used_at,omitempty"`
+	// RevokedAt is the revocation stamp; nil means the key is active. Within
+	// 24 h of the stamp the key can be reinstated; after that a sweep
+	// physically deletes the row.
+	RevokedAt *time.Time `gorm:"column:revoked_at;index" json:"revoked_at,omitempty"`
+}
+
 // Event is a row in the shared, append-only event log (F-23, high
 // availability). The event log is the coordination bus that makes the control
 // plane horizontally scalable: every API pod tails it and fans the events out
@@ -2318,5 +2360,6 @@ func All() []any {
 		&PipelineSource{},
 		&PipelineSourceState{},
 		&StorageObject{},
+		&ScimKey{},
 	}
 }

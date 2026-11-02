@@ -91,6 +91,12 @@ type Server struct {
 	// authentication is disabled, in which case the /api/service-accounts
 	// endpoints respond 501.
 	serviceAccounts ServiceAccountClient
+	// scimKeys manages the SCIM connector key pool (F-28.2): the data plane
+	// speaks to the Database service (rows + pool semantics) and derivation
+	// detours to the IdP (the sole pepper-touching site). It is nil when the
+	// pool is not wired, in which case the /api/scim/keys endpoints respond
+	// 501.
+	scimKeys ScimKeyClient
 	// authz is the authorization engine (F-14, RBAC). It enforces role-based
 	// access on the UI-facing HTTP surface: a request is allowed only if the
 	// authenticated principal's roles grant the required permission (with a
@@ -190,6 +196,13 @@ func (s *Server) SetAPIKeyClient(c APIKeyClient) {
 // are disabled (they respond 501).
 func (s *Server) SetServiceAccountClient(c ServiceAccountClient) {
 	s.serviceAccounts = c
+}
+
+// SetScimKeyClient attaches the SCIM key pool client (F-28.2), enabling the
+// /api/scim/keys endpoints (and the prune sweep). When left nil the endpoints
+// are disabled (they respond 501).
+func (s *Server) SetScimKeyClient(c ScimKeyClient) {
+	s.scimKeys = c
 }
 
 // SetAuthz attaches the authorization engine (F-14, RBAC) and enables
@@ -462,6 +475,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/service-accounts/{id}/roles/{role}", s.removeServiceAccountRole)
 	mux.HandleFunc("DELETE /api/service-accounts/{id}", s.deleteServiceAccount)
 	mux.HandleFunc("POST /api/service-accounts/{id}/lockout/reset", s.resetServiceAccountLockout)
+
+	// SCIM keys (F-28.2, the bounded pool authenticating the corporate SCIM
+	// connector). A principal with the scim-keys.can-* permissions manages the
+	// pool. The create response returns the plaintext key exactly once. Data
+	// plane speaks to the Database service; derivation detours to the IdP (the
+	// sole pepper-touching site). Disabled (501) when the pool is not wired.
+	mux.HandleFunc("GET /api/scim/keys", s.listScimKeys)
+	mux.HandleFunc("POST /api/scim/keys", s.createScimKey)
+	mux.HandleFunc("GET /api/scim/keys/{id}", s.getScimKey)
+	mux.HandleFunc("PATCH /api/scim/keys/{id}", s.updateScimKey)
+	mux.HandleFunc("POST /api/scim/keys/{id}/revoke", s.revokeScimKey)
+	mux.HandleFunc("POST /api/scim/keys/{id}/reinstate", s.reinstateScimKey)
 
 	// Live event stream (WebSocket).
 	if s.hub != nil {

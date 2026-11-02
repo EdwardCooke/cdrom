@@ -350,6 +350,52 @@ service Database {
   // account.
   rpc ResetServiceAccountLockout(ResetServiceAccountLockoutRequest) returns (google.protobuf.Empty);
 
+  // SCIM keys (F-28.2). The bounded pool of keys that authenticate the
+  // corporate SCIM connector against the IdP's /scim/v2 surface. The Database
+  // service owns the rows and the POOL SEMANTICS (cap, CAS transitions, prune
+  // horizon, candidancy); it stores the Argon2ID encoding opaquely and never
+  // sees the pepper or the plaintext (the IdP draws the key and computes the
+  // encoding; the IdP verifies presented keys LOCALLY against the encoding
+  // bundle). Completely separate from F-25 user API keys and F-26 service
+  // accounts.
+  //
+  // CreateScimKey saves a new pool entry (the caller supplies the encoding and
+  // prefix — it drew and encoded the plaintext). Capped at five non-revoked
+  // keys: a sixth create is AlreadyExists.
+  rpc CreateScimKey(CreateScimKeyRequest) returns (ScimKey);
+  // GetScimKey returns one key (INCLUDING a revoked-within-window row, so the
+  // admin API can distinguish "still revocable-back" from "gone"). A missing
+  // or pruned key is NotFound.
+  rpc GetScimKey(GetScimKeyRequest) returns (ScimKey);
+  // ListScimKeys lists pool entries, newest first. Without include_revoked
+  // only the non-revoked (active) keys are returned.
+  rpc ListScimKeys(ListScimKeysRequest) returns (ListScimKeysResponse);
+  // UpdateScimKey edits a key's description and/or expiration (partial
+  // semantics; an explicit clear removes the expiration). Identity columns
+  // (hash, prefix, created_at, created_by) are frozen. Acts only on
+  // NON-revoked keys: a revoked key is Conflict (reinstate first).
+  rpc UpdateScimKey(UpdateScimKeyRequest) returns (ScimKey);
+  // RevokeScimKey stamps the revocation (validation stops immediately).
+  // Compare-and-set on revoked_at: an already-revoked key is Conflict; a
+  // pruned key is NotFound. Idempotent in spirit, honest in result.
+  rpc RevokeScimKey(RevokeScimKeyRequest) returns (ScimKey);
+  // ReinstateScimKey clears the revocation stamp (accidental-revocation
+  // recovery). Compare-and-set restricted to stamps younger than 24 h: a
+  // pruned key is NotFound, a too-old stamp is Conflict.
+  rpc ReinstateScimKey(ReinstateScimKeyRequest) returns (ScimKey);
+  // BundleScimKeys pulls the VALIDATION MATERIAL: the non-revoked rows'
+  // (id, encoding, expires_at, last_used_at), ≤5 elements. The IdP memoizes
+  // it briefly and verifies the presented key against each encoding locally —
+  // the presented key never travels to the Database service.
+  rpc BundleScimKeys(BundleScimKeysRequest) returns (BundleScimKeysResponse);
+  // MarkScimKeyUsed bumps a key's last_used_at on a successful validation
+  // (throttled: a bump within the throttle window is a no-op). Best-effort.
+  rpc MarkScimKeyUsed(MarkScimKeyUsedRequest) returns (google.protobuf.Empty);
+  // PruneScimKeys physically deletes rows whose revocation is older than
+  // NOW − cutoff (the 24 h reinstate window elapsed). Driven by the API's
+  // periodic sweep.
+  rpc PruneScimKeys(PruneScimKeysRequest) returns (PruneScimKeysResponse);
+
   // Secrets (F-12). NextSecretNonce returns the next value of the named
   // secret-nonce counter and atomically increments it. The counter is what
   // keeps the AES-GCM nonces unique across every API replica (they all share
@@ -3417,6 +3463,155 @@ message RecordServiceAccountKeyAttemptRequest {
 message ResetServiceAccountLockoutRequest {
   // id is the account's identifier.
   string id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// SCIM keys (F-28.2)
+// ---------------------------------------------------------------------------
+
+// ScimKey is one credential of the bounded pool that authenticates the
+// corporate SCIM connector against the IdP's /scim/v2 surface (F-28.2). Only
+// the key's Argon2ID encoding and a short non-secret prefix are stored; the
+// plaintext is shown to the operator exactly once (at creation) and is never
+// persisted. A key is valid from creation until revocation (instant) or its
+// optional expiration lapse — there is no automatic ageing-out. Revocation is
+// undoable for 24 h (reinstate); a sweep physically deletes rows whose
+// revocation is older than 24 h. At most five non-revoked keys exist at any
+// time (enforced at create). The pool is completely separate from F-25 user
+// API keys and F-26 service accounts.
+message ScimKey {
+  // id is the key's stable identifier (the database's auto-increment primary
+  // key, rendered as a string on the wire).
+  string id = 1;
+  // hash is the Argon2ID encoding of the key's plaintext (PHC format; the
+  // salt and parameters are embedded in the encoding, and a configured pepper
+  // is prepended to the KDF input). It is never returned to the API/UI.
+  string hash = 2;
+  // prefix is the first eight characters of the plaintext — the human
+  // recognition device in listings.
+  string prefix = 3;
+  // description is the operator-supplied label (which connector /
+  // environment the key belongs to).
+  string description = 4;
+  // created_by is the identity of the principal that created the key.
+  string created_by = 5;
+  // expires_at bounds the key's life; unset means the key never expires.
+  google.protobuf.Timestamp expires_at = 6;
+  // last_used_at is bumped on successful validation (throttled).
+  google.protobuf.Timestamp last_used_at = 7;
+  // revoked_at is the revocation stamp; unset means the key is active. Within
+  // 24 h of the stamp the key can be reinstated; after that a sweep
+  // physically deletes the row.
+  google.protobuf.Timestamp revoked_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// CreateScimKeyRequest saves a new pool entry. The caller (the IdP) supplies
+// the key's Argon2ID encoding and prefix (it drew the plaintext and encoded
+// it with the configured pepper); the database assigns the key's id. Creation
+// is capped: when five non-revoked keys already exist it is
+// AlreadyExists (the caller maps it to a conflict).
+message CreateScimKeyRequest {
+  // key carries the encoding, prefix, description, created_by, and the
+  // optional expiration.
+  ScimKey key = 1;
+}
+
+message GetScimKeyRequest {
+  // id is the key's identifier.
+  string id = 1;
+}
+
+// ListScimKeysRequest lists pool entries. When include_revoked is false (the
+// default) revoked-but-not-yet-pruned rows are excluded. Newest first.
+message ListScimKeysRequest {
+  bool include_revoked = 1;
+}
+
+message ListScimKeysResponse {
+  repeated ScimKey keys = 1;
+}
+
+// UpdateScimKeyRequest edits a key's description and/or expiration without
+// touching its secret (the identity columns — hash, prefix, created_at,
+// created_by — are frozen). Acts only on NON-revoked keys (a revoked key is
+// Conflict — reinstate first). Expiration intent is expressed by the
+// PRESENCE of expires_at: present = set it (strictly in the future); absent =
+// leave unchanged; the dedicated clear flag = WRITE NULL (remove the
+// expiration).
+message UpdateScimKeyRequest {
+  // id is the key's identifier.
+  string id = 1;
+  // description, when has_description is true, replaces the key's label.
+  string description = 2;
+  // has_description indicates whether description should be applied (true) or
+  // left unchanged (false).
+  bool has_description = 3;
+  // expires_at, when has_expires_at is true, replaces the key's expiration
+  // (it must be strictly in the future).
+  google.protobuf.Timestamp expires_at = 4;
+  // has_expires_at indicates whether expires_at should be APPLIED (true) or
+  // left unchanged (false).
+  bool has_expires_at = 5;
+  // clear_expires_at, when true, removes the expiration (WRITE NULL). Takes
+  // precedence over has_expires_at.
+  bool clear_expires_at = 6;
+}
+
+// RevokeScimKeyRequest stamps a key's revocation (VALIDATION stops instantly).
+// Compare-and-set on revoked_at: a key that is already revoked (or was pruned)
+// loses the race and gets Conflict / NotFound respectively — never a silent
+// no-op dressed as success.
+message RevokeScimKeyRequest {
+  // id is the key's identifier.
+  string id = 1;
+}
+
+// ReinstateScimKeyRequest clears a key's revocation stamp (recovering an
+// accidental revocation). Allowed only while the stamp is younger than 24 h
+// (compare-and-set); a pruned row is NotFound.
+message ReinstateScimKeyRequest {
+  // id is the key's identifier.
+  string id = 1;
+}
+
+// BundleScimKeysRequest pulls the VALIDATION MATERIAL: the non-revoked rows'
+// (id, encoding, expires_at, last_used_at), at most five elements (bounded by
+// the pool cap). The IdP memoizes it briefly and verifies the presented key
+// against each encoding LOCALLY — the presented key never travels to the
+// Database service.
+message BundleScimKeysRequest {}
+
+message BundleScimKeysResponse {
+  // keys are the non-revoked pool entries (candidate set), newest first.
+  repeated ScimKey keys = 1;
+}
+
+// MarkScimKeyUsedRequest records a successful validation of the named key: it
+// bumps last_used_at (throttled — a bump within the throttle window is a
+// no-op). Best-effort: the IdP ignores failures.
+message MarkScimKeyUsedRequest {
+  // id is the key's identifier.
+  string id = 1;
+  // throttle, when positive, suppresses a bump closer than this to the
+  // previous one.
+  google.protobuf.Duration throttle = 2;
+}
+
+// PruneScimKeysRequest physically deletes rows whose revocation stamp is
+// OLDER THAN NOW − cutoff (the 24 h reinstate window elapsed). The caller (the
+// API's periodic sweep) chooses the cutoff; the audit trail (F-15) retains
+// the revocations, so deletion costs no accountability.
+message PruneScimKeysRequest {
+  // cutoff is the horizon: revoked rows with revoked_at < now − cutoff are
+  // deleted.
+  google.protobuf.Duration cutoff = 1;
+}
+
+message PruneScimKeysResponse {
+  // deleted is the number of rows physically removed.
+  int32 deleted = 1;
 }
 
 // ---------------------------------------------------------------------------

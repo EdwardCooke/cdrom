@@ -98,6 +98,15 @@ const (
 	Database_DeleteServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/DeleteServiceAccount"
 	Database_RecordServiceAccountKeyAttempt_FullMethodName = "/cdrom.db.v1.Database/RecordServiceAccountKeyAttempt"
 	Database_ResetServiceAccountLockout_FullMethodName     = "/cdrom.db.v1.Database/ResetServiceAccountLockout"
+	Database_CreateScimKey_FullMethodName                  = "/cdrom.db.v1.Database/CreateScimKey"
+	Database_GetScimKey_FullMethodName                     = "/cdrom.db.v1.Database/GetScimKey"
+	Database_ListScimKeys_FullMethodName                   = "/cdrom.db.v1.Database/ListScimKeys"
+	Database_UpdateScimKey_FullMethodName                  = "/cdrom.db.v1.Database/UpdateScimKey"
+	Database_RevokeScimKey_FullMethodName                  = "/cdrom.db.v1.Database/RevokeScimKey"
+	Database_ReinstateScimKey_FullMethodName               = "/cdrom.db.v1.Database/ReinstateScimKey"
+	Database_BundleScimKeys_FullMethodName                 = "/cdrom.db.v1.Database/BundleScimKeys"
+	Database_MarkScimKeyUsed_FullMethodName                = "/cdrom.db.v1.Database/MarkScimKeyUsed"
+	Database_PruneScimKeys_FullMethodName                  = "/cdrom.db.v1.Database/PruneScimKeys"
 	Database_NextSecretNonce_FullMethodName                = "/cdrom.db.v1.Database/NextSecretNonce"
 	Database_ClaimStepOnce_FullMethodName                  = "/cdrom.db.v1.Database/ClaimStepOnce"
 	Database_CreateRole_FullMethodName                     = "/cdrom.db.v1.Database/CreateRole"
@@ -502,6 +511,51 @@ type DatabaseClient interface {
 	// failed counter and the lockout instant); an admin uses it to un-lock an
 	// account.
 	ResetServiceAccountLockout(ctx context.Context, in *ResetServiceAccountLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// SCIM keys (F-28.2). The bounded pool of keys that authenticate the
+	// corporate SCIM connector against the IdP's /scim/v2 surface. The Database
+	// service owns the rows and the POOL SEMANTICS (cap, CAS transitions, prune
+	// horizon, candidancy); it stores the Argon2ID encoding opaquely and never
+	// sees the pepper or the plaintext (the IdP draws the key and computes the
+	// encoding; the IdP verifies presented keys LOCALLY against the encoding
+	// bundle). Completely separate from F-25 user API keys and F-26 service
+	// accounts.
+	//
+	// CreateScimKey saves a new pool entry (the caller supplies the encoding and
+	// prefix — it drew and encoded the plaintext). Capped at five non-revoked
+	// keys: a sixth create is AlreadyExists.
+	CreateScimKey(ctx context.Context, in *CreateScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error)
+	// GetScimKey returns one key (INCLUDING a revoked-within-window row, so the
+	// admin API can distinguish "still revocable-back" from "gone"). A missing
+	// or pruned key is NotFound.
+	GetScimKey(ctx context.Context, in *GetScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error)
+	// ListScimKeys lists pool entries, newest first. Without include_revoked
+	// only the non-revoked (active) keys are returned.
+	ListScimKeys(ctx context.Context, in *ListScimKeysRequest, opts ...grpc.CallOption) (*ListScimKeysResponse, error)
+	// UpdateScimKey edits a key's description and/or expiration (partial
+	// semantics; an explicit clear removes the expiration). Identity columns
+	// (hash, prefix, created_at, created_by) are frozen. Acts only on
+	// NON-revoked keys: a revoked key is Conflict (reinstate first).
+	UpdateScimKey(ctx context.Context, in *UpdateScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error)
+	// RevokeScimKey stamps the revocation (validation stops immediately).
+	// Compare-and-set on revoked_at: an already-revoked key is Conflict; a
+	// pruned key is NotFound. Idempotent in spirit, honest in result.
+	RevokeScimKey(ctx context.Context, in *RevokeScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error)
+	// ReinstateScimKey clears the revocation stamp (accidental-revocation
+	// recovery). Compare-and-set restricted to stamps younger than 24 h: a
+	// pruned key is NotFound, a too-old stamp is Conflict.
+	ReinstateScimKey(ctx context.Context, in *ReinstateScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error)
+	// BundleScimKeys pulls the VALIDATION MATERIAL: the non-revoked rows'
+	// (id, encoding, expires_at, last_used_at), ≤5 elements. The IdP memoizes
+	// it briefly and verifies the presented key against each encoding locally —
+	// the presented key never travels to the Database service.
+	BundleScimKeys(ctx context.Context, in *BundleScimKeysRequest, opts ...grpc.CallOption) (*BundleScimKeysResponse, error)
+	// MarkScimKeyUsed bumps a key's last_used_at on a successful validation
+	// (throttled: a bump within the throttle window is a no-op). Best-effort.
+	MarkScimKeyUsed(ctx context.Context, in *MarkScimKeyUsedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// PruneScimKeys physically deletes rows whose revocation is older than
+	// NOW − cutoff (the 24 h reinstate window elapsed). Driven by the API's
+	// periodic sweep.
+	PruneScimKeys(ctx context.Context, in *PruneScimKeysRequest, opts ...grpc.CallOption) (*PruneScimKeysResponse, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -1668,6 +1722,96 @@ func (c *databaseClient) ResetServiceAccountLockout(ctx context.Context, in *Res
 	return out, nil
 }
 
+func (c *databaseClient) CreateScimKey(ctx context.Context, in *CreateScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScimKey)
+	err := c.cc.Invoke(ctx, Database_CreateScimKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetScimKey(ctx context.Context, in *GetScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScimKey)
+	err := c.cc.Invoke(ctx, Database_GetScimKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListScimKeys(ctx context.Context, in *ListScimKeysRequest, opts ...grpc.CallOption) (*ListScimKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListScimKeysResponse)
+	err := c.cc.Invoke(ctx, Database_ListScimKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) UpdateScimKey(ctx context.Context, in *UpdateScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScimKey)
+	err := c.cc.Invoke(ctx, Database_UpdateScimKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RevokeScimKey(ctx context.Context, in *RevokeScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScimKey)
+	err := c.cc.Invoke(ctx, Database_RevokeScimKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReinstateScimKey(ctx context.Context, in *ReinstateScimKeyRequest, opts ...grpc.CallOption) (*ScimKey, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScimKey)
+	err := c.cc.Invoke(ctx, Database_ReinstateScimKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) BundleScimKeys(ctx context.Context, in *BundleScimKeysRequest, opts ...grpc.CallOption) (*BundleScimKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BundleScimKeysResponse)
+	err := c.cc.Invoke(ctx, Database_BundleScimKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) MarkScimKeyUsed(ctx context.Context, in *MarkScimKeyUsedRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_MarkScimKeyUsed_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PruneScimKeys(ctx context.Context, in *PruneScimKeysRequest, opts ...grpc.CallOption) (*PruneScimKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PruneScimKeysResponse)
+	err := c.cc.Invoke(ctx, Database_PruneScimKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(NextSecretNonceResponse)
@@ -2691,6 +2835,51 @@ type DatabaseServer interface {
 	// failed counter and the lockout instant); an admin uses it to un-lock an
 	// account.
 	ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*emptypb.Empty, error)
+	// SCIM keys (F-28.2). The bounded pool of keys that authenticate the
+	// corporate SCIM connector against the IdP's /scim/v2 surface. The Database
+	// service owns the rows and the POOL SEMANTICS (cap, CAS transitions, prune
+	// horizon, candidancy); it stores the Argon2ID encoding opaquely and never
+	// sees the pepper or the plaintext (the IdP draws the key and computes the
+	// encoding; the IdP verifies presented keys LOCALLY against the encoding
+	// bundle). Completely separate from F-25 user API keys and F-26 service
+	// accounts.
+	//
+	// CreateScimKey saves a new pool entry (the caller supplies the encoding and
+	// prefix — it drew and encoded the plaintext). Capped at five non-revoked
+	// keys: a sixth create is AlreadyExists.
+	CreateScimKey(context.Context, *CreateScimKeyRequest) (*ScimKey, error)
+	// GetScimKey returns one key (INCLUDING a revoked-within-window row, so the
+	// admin API can distinguish "still revocable-back" from "gone"). A missing
+	// or pruned key is NotFound.
+	GetScimKey(context.Context, *GetScimKeyRequest) (*ScimKey, error)
+	// ListScimKeys lists pool entries, newest first. Without include_revoked
+	// only the non-revoked (active) keys are returned.
+	ListScimKeys(context.Context, *ListScimKeysRequest) (*ListScimKeysResponse, error)
+	// UpdateScimKey edits a key's description and/or expiration (partial
+	// semantics; an explicit clear removes the expiration). Identity columns
+	// (hash, prefix, created_at, created_by) are frozen. Acts only on
+	// NON-revoked keys: a revoked key is Conflict (reinstate first).
+	UpdateScimKey(context.Context, *UpdateScimKeyRequest) (*ScimKey, error)
+	// RevokeScimKey stamps the revocation (validation stops immediately).
+	// Compare-and-set on revoked_at: an already-revoked key is Conflict; a
+	// pruned key is NotFound. Idempotent in spirit, honest in result.
+	RevokeScimKey(context.Context, *RevokeScimKeyRequest) (*ScimKey, error)
+	// ReinstateScimKey clears the revocation stamp (accidental-revocation
+	// recovery). Compare-and-set restricted to stamps younger than 24 h: a
+	// pruned key is NotFound, a too-old stamp is Conflict.
+	ReinstateScimKey(context.Context, *ReinstateScimKeyRequest) (*ScimKey, error)
+	// BundleScimKeys pulls the VALIDATION MATERIAL: the non-revoked rows'
+	// (id, encoding, expires_at, last_used_at), ≤5 elements. The IdP memoizes
+	// it briefly and verifies the presented key against each encoding locally —
+	// the presented key never travels to the Database service.
+	BundleScimKeys(context.Context, *BundleScimKeysRequest) (*BundleScimKeysResponse, error)
+	// MarkScimKeyUsed bumps a key's last_used_at on a successful validation
+	// (throttled: a bump within the throttle window is a no-op). Best-effort.
+	MarkScimKeyUsed(context.Context, *MarkScimKeyUsedRequest) (*emptypb.Empty, error)
+	// PruneScimKeys physically deletes rows whose revocation is older than
+	// NOW − cutoff (the 24 h reinstate window elapsed). Driven by the API's
+	// periodic sweep.
+	PruneScimKeys(context.Context, *PruneScimKeysRequest) (*PruneScimKeysResponse, error)
 	// Secrets (F-12). NextSecretNonce returns the next value of the named
 	// secret-nonce counter and atomically increments it. The counter is what
 	// keeps the AES-GCM nonces unique across every API replica (they all share
@@ -3310,6 +3499,33 @@ func (UnimplementedDatabaseServer) RecordServiceAccountKeyAttempt(context.Contex
 }
 func (UnimplementedDatabaseServer) ResetServiceAccountLockout(context.Context, *ResetServiceAccountLockoutRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetServiceAccountLockout not implemented")
+}
+func (UnimplementedDatabaseServer) CreateScimKey(context.Context, *CreateScimKeyRequest) (*ScimKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateScimKey not implemented")
+}
+func (UnimplementedDatabaseServer) GetScimKey(context.Context, *GetScimKeyRequest) (*ScimKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetScimKey not implemented")
+}
+func (UnimplementedDatabaseServer) ListScimKeys(context.Context, *ListScimKeysRequest) (*ListScimKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListScimKeys not implemented")
+}
+func (UnimplementedDatabaseServer) UpdateScimKey(context.Context, *UpdateScimKeyRequest) (*ScimKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateScimKey not implemented")
+}
+func (UnimplementedDatabaseServer) RevokeScimKey(context.Context, *RevokeScimKeyRequest) (*ScimKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeScimKey not implemented")
+}
+func (UnimplementedDatabaseServer) ReinstateScimKey(context.Context, *ReinstateScimKeyRequest) (*ScimKey, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReinstateScimKey not implemented")
+}
+func (UnimplementedDatabaseServer) BundleScimKeys(context.Context, *BundleScimKeysRequest) (*BundleScimKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BundleScimKeys not implemented")
+}
+func (UnimplementedDatabaseServer) MarkScimKeyUsed(context.Context, *MarkScimKeyUsedRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method MarkScimKeyUsed not implemented")
+}
+func (UnimplementedDatabaseServer) PruneScimKeys(context.Context, *PruneScimKeysRequest) (*PruneScimKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PruneScimKeys not implemented")
 }
 func (UnimplementedDatabaseServer) NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method NextSecretNonce not implemented")
@@ -4943,6 +5159,168 @@ func _Database_ResetServiceAccountLockout_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CreateScimKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateScimKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateScimKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateScimKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateScimKey(ctx, req.(*CreateScimKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetScimKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetScimKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetScimKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetScimKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetScimKey(ctx, req.(*GetScimKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListScimKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListScimKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListScimKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListScimKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListScimKeys(ctx, req.(*ListScimKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_UpdateScimKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateScimKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).UpdateScimKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_UpdateScimKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).UpdateScimKey(ctx, req.(*UpdateScimKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RevokeScimKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeScimKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RevokeScimKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RevokeScimKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RevokeScimKey(ctx, req.(*RevokeScimKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReinstateScimKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReinstateScimKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReinstateScimKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReinstateScimKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReinstateScimKey(ctx, req.(*ReinstateScimKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_BundleScimKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BundleScimKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).BundleScimKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_BundleScimKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).BundleScimKeys(ctx, req.(*BundleScimKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_MarkScimKeyUsed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkScimKeyUsedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).MarkScimKeyUsed(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_MarkScimKeyUsed_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).MarkScimKeyUsed(ctx, req.(*MarkScimKeyUsedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PruneScimKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PruneScimKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PruneScimKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PruneScimKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PruneScimKeys(ctx, req.(*PruneScimKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_NextSecretNonce_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(NextSecretNonceRequest)
 	if err := dec(in); err != nil {
@@ -6503,6 +6881,42 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetServiceAccountLockout",
 			Handler:    _Database_ResetServiceAccountLockout_Handler,
+		},
+		{
+			MethodName: "CreateScimKey",
+			Handler:    _Database_CreateScimKey_Handler,
+		},
+		{
+			MethodName: "GetScimKey",
+			Handler:    _Database_GetScimKey_Handler,
+		},
+		{
+			MethodName: "ListScimKeys",
+			Handler:    _Database_ListScimKeys_Handler,
+		},
+		{
+			MethodName: "UpdateScimKey",
+			Handler:    _Database_UpdateScimKey_Handler,
+		},
+		{
+			MethodName: "RevokeScimKey",
+			Handler:    _Database_RevokeScimKey_Handler,
+		},
+		{
+			MethodName: "ReinstateScimKey",
+			Handler:    _Database_ReinstateScimKey_Handler,
+		},
+		{
+			MethodName: "BundleScimKeys",
+			Handler:    _Database_BundleScimKeys_Handler,
+		},
+		{
+			MethodName: "MarkScimKeyUsed",
+			Handler:    _Database_MarkScimKeyUsed_Handler,
+		},
+		{
+			MethodName: "PruneScimKeys",
+			Handler:    _Database_PruneScimKeys_Handler,
 		},
 		{
 			MethodName: "NextSecretNonce",

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/models"
 )
 
 // TestSeedBuiltInRoles verifies that seeding inserts the built-in roles and is
@@ -51,6 +52,57 @@ func TestSeedBuiltInRoles(t *testing.T) {
 	}
 	if got := len(resp.GetRoles()); got != 4 {
 		t.Errorf("ListRoles after re-seed = %d roles, want 4 (no duplicates)", got)
+	}
+
+	// The admin role carries the SCIM key permissions (catalog parity).
+	admin, err := s.GetRole(ctx, &dbpb.GetRoleRequest{Name: "admin"})
+	if err != nil {
+		t.Fatalf("GetRole(admin): %v", err)
+	}
+	has := func(p string) bool {
+		for _, x := range admin.GetPermissions() {
+			if x == p {
+				return true
+			}
+		}
+		return false
+	}
+	for _, p := range []string{
+		"scim-keys.can-view", "scim-keys.can-create", "scim-keys.can-edit",
+		"scim-keys.can-revoke", "scim-keys.can-reinstate",
+	} {
+		if !has(p) {
+			t.Errorf("admin role lacks %q (catalog parity)", p)
+		}
+	}
+
+	// Upgrade path: an OLD installation's admin role (predating newer
+	// permissions) converges onto the current catalog at the next seed.
+	var adminRow models.Role
+	if err := db.Where("name = ?", "admin").First(&adminRow).Error; err != nil {
+		t.Fatalf("load admin row: %v", err)
+	}
+	adminRow.Permissions = []string{"pipelines.can-view", "runs.can-trigger"}
+	if err := db.Save(&adminRow).Error; err != nil {
+		t.Fatalf("simulate stale admin: %v", err)
+	}
+	if err := s.SeedBuiltInRoles(ctx); err != nil {
+		t.Fatalf("third SeedBuiltInRoles (upgrade): %v", err)
+	}
+	admin, err = s.GetRole(ctx, &dbpb.GetRoleRequest{Name: "admin"})
+	if err != nil {
+		t.Fatalf("GetRole(admin, after upgrade): %v", err)
+	}
+	if !has("scim-keys.can-reinstate") || !has("pipelines.can-view") {
+		t.Errorf("admin did not converge onto the catalog: %v", admin.GetPermissions())
+	}
+	// Operator/viewer/user are untouched by the reconciliation.
+	op, err := s.GetRole(ctx, &dbpb.GetRoleRequest{Name: "operator"})
+	if err != nil {
+		t.Fatalf("GetRole(operator): %v", err)
+	}
+	if len(op.GetPermissions()) != 7 {
+		t.Errorf("operator permissions perturbed: %v", op.GetPermissions())
 	}
 }
 

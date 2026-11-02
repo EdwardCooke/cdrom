@@ -4126,6 +4126,319 @@ func (s *Server) ResetServiceAccountLockout(ctx context.Context, req *dbpb.Reset
 }
 
 // ---------------------------------------------------------------------------
+// SCIM keys (F-28.2)
+// ---------------------------------------------------------------------------
+
+// scimPoolCap is the maximum number of NON-revoked SCIM keys at any time
+// (F-28.2): the lookup stays tiny and operational sprawl stays sane.
+const scimPoolCap = 5
+
+// scimReinstateWindow is how long a revocation stays undoable (F-28.2):
+// reinstate honours stamps younger than this; the prune sweep deletes rows
+// older than it.
+const scimReinstateWindow = 24 * time.Hour
+
+// parseScimKeyID parses a pool key's wire id (decimal string) into the
+// database's numeric primary key. A malformed id is InvalidArgument.
+func parseScimKeyID(id string) (uint, error) {
+	n, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		return 0, status.Error(codes.InvalidArgument, "invalid scim key id: "+id)
+	}
+	return uint(n), nil
+}
+
+// scimKeyToProto renders a pool row as its wire form. The encoding (Hash) is
+// OMITTED from listings and reads: it is validation material for the IdP
+// (carried by the bundle) and is never meant for the UI. The bundle renderer
+// (below) fills it in explicitly.
+func scimKeyToProto(k *models.ScimKey) *dbpb.ScimKey {
+	out := &dbpb.ScimKey{
+		Id:          strconv.FormatUint(uint64(k.ID), 10),
+		Prefix:      k.Prefix,
+		Description: k.Description,
+		CreatedBy:   k.CreatedBy,
+		CreatedAt:   timestamppb.New(k.CreatedAt),
+		UpdatedAt:   timestamppb.New(k.UpdatedAt),
+	}
+	if k.ExpiresAt != nil {
+		out.ExpiresAt = timestamppb.New(*k.ExpiresAt)
+	}
+	if k.LastUsedAt != nil {
+		out.LastUsedAt = timestamppb.New(*k.LastUsedAt)
+	}
+	if k.RevokedAt != nil {
+		out.RevokedAt = timestamppb.New(*k.RevokedAt)
+	}
+	return out
+}
+
+// getScimKey loads a pool row by id. A missing (or pruned) row is NotFound.
+func (s *Server) getScimKey(ctx context.Context, id string) (*models.ScimKey, error) {
+	num, err := parseScimKeyID(id)
+	if err != nil {
+		return nil, err
+	}
+	var k models.ScimKey
+	if err := s.db.WithContext(ctx).Where("id = ?", num).First(&k).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "scim key not found")
+		}
+		return nil, grpcErr(err)
+	}
+	return &k, nil
+}
+
+// CreateScimKey saves a new pool entry (the caller — the IdP — drew the
+// plaintext and computed the Argon2ID encoding; the database stores the
+// encoding opaquely and never sees the pepper or the plaintext). Creation is
+// capped: when scimPoolCap non-revoked keys already exist it is
+// AlreadyExists (the caller maps it to a conflict).
+func (s *Server) CreateScimKey(ctx context.Context, req *dbpb.CreateScimKeyRequest) (*dbpb.ScimKey, error) {
+	in := req.GetKey()
+	if in == nil || in.GetHash() == "" || in.GetPrefix() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key.encoding and key.prefix are required")
+	}
+	var k models.ScimKey
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Cap check: at most scimPoolCap non-revoked keys at any time.
+		var active int64
+		if err := tx.Model(&models.ScimKey{}).Where("revoked_at IS NULL").Count(&active).Error; err != nil {
+			return err
+		}
+		if active >= scimPoolCap {
+			return status.Error(codes.AlreadyExists, "scim key pool is at capacity")
+		}
+		row := &models.ScimKey{
+			Hash:        in.GetHash(),
+			Prefix:      in.GetPrefix(),
+			Description: in.GetDescription(),
+			CreatedBy:   in.GetCreatedBy(),
+		}
+		if ts := in.GetExpiresAt(); ts != nil {
+			t := ts.AsTime()
+			row.ExpiresAt = &t
+		}
+		if err := tx.Create(row).Error; err != nil {
+			return err
+		}
+		k = *row
+		return nil
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	return scimKeyToProto(&k), nil
+}
+
+// GetScimKey returns one key INCLUDING a revoked-within-window row (so the
+// admin API can distinguish "still reversible" from "gone"). A missing or
+// pruned key is NotFound.
+func (s *Server) GetScimKey(ctx context.Context, req *dbpb.GetScimKeyRequest) (*dbpb.ScimKey, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	k, err := s.getScimKey(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return scimKeyToProto(k), nil
+}
+
+// ListScimKeys lists pool entries, newest first. Without include_revoked only
+// the non-revoked (active) keys are returned.
+func (s *Server) ListScimKeys(ctx context.Context, req *dbpb.ListScimKeysRequest) (*dbpb.ListScimKeysResponse, error) {
+	q := s.db.WithContext(ctx).Order("id DESC")
+	if !req.GetIncludeRevoked() {
+		q = q.Where("revoked_at IS NULL")
+	}
+	var ks []models.ScimKey
+	if err := q.Find(&ks).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	out := &dbpb.ListScimKeysResponse{Keys: make([]*dbpb.ScimKey, 0, len(ks))}
+	for i := range ks {
+		out.Keys = append(out.Keys, scimKeyToProto(&ks[i]))
+	}
+	return out, nil
+}
+
+// UpdateScimKey edits a key's description and/or expiration (partial
+// semantics: an omitted field is unchanged; an explicit clear removes the
+// expiration). The identity columns (hash, prefix, created_at, created_by)
+// are frozen — an edit cannot launder a key's provenance. Acts only on
+// NON-revoked keys: a revoked key is Conflict (reinstate first).
+func (s *Server) UpdateScimKey(ctx context.Context, req *dbpb.UpdateScimKeyRequest) (*dbpb.ScimKey, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	k, err := s.getScimKey(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	if k.RevokedAt != nil {
+		return nil, status.Error(codes.FailedPrecondition, "scim key is revoked (reinstate it before editing)")
+	}
+	changes := map[string]interface{}{}
+	if req.GetHasDescription() {
+		changes["description"] = req.GetDescription()
+	}
+	if req.GetClearExpiresAt() {
+		// Map-based UPDATE writes NULL unconditionally (a struct Save would
+		// skip a zero/nil value).
+		changes["expires_at"] = nil
+	} else if req.GetHasExpiresAt() {
+		t := req.GetExpiresAt().AsTime()
+		changes["expires_at"] = t
+	}
+	if len(changes) == 0 {
+		return scimKeyToProto(k), nil
+	}
+	res := s.db.WithContext(ctx).Model(&models.ScimKey{}).Where("id = ?", k.ID).Updates(changes)
+	if res.Error != nil {
+		return nil, grpcErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return nil, status.Error(codes.NotFound, "scim key not found")
+	}
+	refreshed, err := s.getScimKey(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return scimKeyToProto(refreshed), nil
+}
+
+// RevokeScimKey stamps the revocation (validation stops immediately). It is a
+// compare-and-set on revoked_at: a key that is already revoked (lost the race
+// or doubly clicked) is Conflict; a pruned key is NotFound. Never a silent
+// no-op dressed as success.
+func (s *Server) RevokeScimKey(ctx context.Context, req *dbpb.RevokeScimKeyRequest) (*dbpb.ScimKey, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	num, err := parseScimKeyID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	res := s.db.WithContext(ctx).Model(&models.ScimKey{}).
+		Where("id = ? AND revoked_at IS NULL", num).
+		Updates(map[string]interface{}{"revoked_at": now})
+	if res.Error != nil {
+		return nil, grpcErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		// Distinguish "already revoked" (Conflict) from "gone" (NotFound):
+		// the row may have been pruned, or the revocation raced ahead.
+		if _, err := s.getScimKey(ctx, req.GetId()); err != nil {
+			return nil, err
+		}
+		return nil, status.Error(codes.FailedPrecondition, "scim key is already revoked")
+	}
+	refreshed, err := s.getScimKey(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return scimKeyToProto(refreshed), nil
+}
+
+// ReinstateScimKey recovers an accidental revocation: it clears the
+// revocation stamp, permitted only while the stamp is younger than
+// scimReinstateWindow
+// (compare-and-set). A pruned row is NotFound; a too-old stamp is Conflict.
+func (s *Server) ReinstateScimKey(ctx context.Context, req *dbpb.ReinstateScimKeyRequest) (*dbpb.ScimKey, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	cutoff := time.Now().Add(-scimReinstateWindow)
+	num, err := parseScimKeyID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	res := s.db.WithContext(ctx).Model(&models.ScimKey{}).
+		Where("id = ? AND revoked_at IS NOT NULL AND revoked_at > ?", num, cutoff).
+		Updates(map[string]interface{}{"revoked_at": nil})
+	if res.Error != nil {
+		return nil, grpcErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		if _, err := s.getScimKey(ctx, req.GetId()); err != nil {
+			return nil, err
+		}
+		return nil, status.Error(codes.FailedPrecondition, "scim key's reinstate window has elapsed (it may be pruned)")
+	}
+	refreshed, err := s.getScimKey(ctx, req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return scimKeyToProto(refreshed), nil
+}
+
+// BundleScimKeys pulls the VALIDATION MATERIAL: the non-revoked rows'
+// (id, encoding, expires_at, last_used_at), at most scimPoolCap elements.
+// The IdP memoizes it briefly and verifies the presented key against each
+// encoding LOCALLY — the presented key never travels to the Database service.
+// LEAKAGE OF THE BUNDLE IS HARMLESS: the encodings are openly storable and
+// disclose nothing about any key (a stolen bundle + a stolen database yield
+// material unforgeable offline without the IdP's pepper).
+func (s *Server) BundleScimKeys(ctx context.Context, req *dbpb.BundleScimKeysRequest) (*dbpb.BundleScimKeysResponse, error) {
+	var ks []models.ScimKey
+	if err := s.db.WithContext(ctx).Where("revoked_at IS NULL").Order("id DESC").Find(&ks).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	out := &dbpb.BundleScimKeysResponse{Keys: make([]*dbpb.ScimKey, 0, len(ks))}
+	for i := range ks {
+		entry := scimKeyToProto(&ks[i])
+		entry.Hash = ks[i].Hash // validation material: the encoding travels HERE only.
+		out.Keys = append(out.Keys, entry)
+	}
+	return out, nil
+}
+
+// MarkScimKeyUsed bumps a key's last_used_at on a successful validation,
+// throttled: a bump closer than `throttle` to the previous one is a no-op
+// (keep the table lean under continuous connector traffic). Best-effort —
+// the IdP ignores failures.
+func (s *Server) MarkScimKeyUsed(ctx context.Context, req *dbpb.MarkScimKeyUsedRequest) (*emptypb.Empty, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	throttle := req.GetThrottle().AsDuration()
+	if throttle <= 0 {
+		throttle = time.Minute
+	}
+	now := time.Now()
+	windowStart := now.Add(-throttle)
+	num, err := parseScimKeyID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	res := s.db.WithContext(ctx).Model(&models.ScimKey{}).
+		Where("id = ? AND (last_used_at IS NULL OR last_used_at < ?)", num, windowStart).
+		Updates(map[string]interface{}{"last_used_at": now})
+	if res.Error != nil {
+		return nil, grpcErr(res.Error)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// PruneScimKeys physically deletes rows whose revocation stamp is OLDER THAN
+// NOW − cutoff (the reinstate window elapsed). Called by the API's periodic
+// sweep; the audit trail (F-15) retains the revocations, so deletion costs no
+// accountability.
+func (s *Server) PruneScimKeys(ctx context.Context, req *dbpb.PruneScimKeysRequest) (*dbpb.PruneScimKeysResponse, error) {
+	cutoff := req.GetCutoff().AsDuration()
+	if cutoff <= 0 {
+		cutoff = scimReinstateWindow
+	}
+	horizon := time.Now().Add(-cutoff)
+	res := s.db.WithContext(ctx).Where("revoked_at IS NOT NULL AND revoked_at < ?", horizon).Delete(&models.ScimKey{})
+	if res.Error != nil {
+		return nil, grpcErr(res.Error)
+	}
+	return &dbpb.PruneScimKeysResponse{Deleted: int32(res.RowsAffected)}, nil
+}
+
+// ---------------------------------------------------------------------------
 // Secrets (F-12)
 // ---------------------------------------------------------------------------
 
@@ -6273,6 +6586,8 @@ var builtinRolePermissions = map[string][]string{
 		"source-credentials.can-manage", "packages.can-view",
 		"packages.can-publish", "packages.can-promote",
 		"approvals.can-view", "approvals.can-manage",
+		"scim-keys.can-view", "scim-keys.can-create", "scim-keys.can-edit",
+		"scim-keys.can-revoke", "scim-keys.can-reinstate",
 	},
 	"operator": {
 		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",
@@ -6292,13 +6607,25 @@ var builtinRolePermissions = map[string][]string{
 // SeedBuiltInRoles inserts the built-in roles (admin, operator, viewer, user)
 // into the role catalog if they are not already present. It is idempotent and
 // is called by the database service on startup (after migration) so every API
-// replica sees the same built-in roles. It never overwrites an existing
-// built-in role's permission set (built-in roles are fixed).
+// replica sees the same built-in roles. Custom roles are never touched. The
+// ADMIN role is special: it is DEFINITIONALLY the whole permission catalog
+// (authz.AllPermissions), so seeding RECONCILES its permission set to the
+// current catalog — upgrading an existing installation when a new feature
+// extends the catalog (a role that merely EXISTS is skipped, but admin must
+// converge on "everything").
 func (s *Server) SeedBuiltInRoles(ctx context.Context) error {
 	for name, perms := range builtinRolePermissions {
 		var existing models.Role
 		err := s.db.WithContext(ctx).Where("name = ?", name).First(&existing).Error
 		if err == nil {
+			if name == "admin" && !permsContain(existing.Permissions, perms) {
+				// Converge the admin role onto the current catalog (upgrade
+				// path: a pre-existing admin predates newer permissions).
+				existing.Permissions = nonNilStrings(perms)
+				if serr := s.db.WithContext(ctx).Save(&existing).Error; serr != nil {
+					return grpcErr(serr)
+				}
+			}
 			continue // already present
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -6315,6 +6642,21 @@ func (s *Server) SeedBuiltInRoles(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// permsContain reports whether have CONTAINS every permission in want (order
+// insensitive). Used by the admin-role convergence check in SeedBuiltInRoles.
+func permsContain(have, want []string) bool {
+	set := make(map[string]bool, len(have))
+	for _, p := range have {
+		set[p] = true
+	}
+	for _, p := range want {
+		if !set[p] {
+			return false
+		}
+	}
+	return true
 }
 
 // builtinRoleDescription returns the description of a built-in role.
@@ -6367,7 +6709,9 @@ func knownPermission(p string) bool {
 		"ssh-known-hosts.can-manage", "source-credentials.can-view",
 		"source-credentials.can-manage", "packages.can-view",
 		"packages.can-publish", "packages.can-promote",
-		"approvals.can-view", "approvals.can-manage":
+		"approvals.can-view", "approvals.can-manage",
+		"scim-keys.can-view", "scim-keys.can-create", "scim-keys.can-edit",
+		"scim-keys.can-revoke", "scim-keys.can-reinstate":
 		return true
 	default:
 		return false

@@ -165,6 +165,15 @@ const (
 	ActionServiceAccountAssignRole   = "service-account.assign-role"
 	ActionServiceAccountRemoveRole   = "service-account.remove-role"
 	ActionServiceAccountResetLockout = "service-account.reset-lockout"
+	// ActionScimKey* are the SCIM-key pool management actions (F-28.2):
+	// maintaining the bounded pool of keys that authenticate the corporate
+	// SCIM connector. The plaintext is NEVER recorded (only the 8-char prefix);
+	// the periodic prune sweep audits as a system actor.
+	ActionScimKeyCreate    = "scim-key.create"
+	ActionScimKeyUpdate    = "scim-key.update"
+	ActionScimKeyRevoke    = "scim-key.revoke"
+	ActionScimKeyReinstate = "scim-key.reinstate"
+	ActionScimKeyPrune     = "scim-key.prune"
 	// ActionConcurrencyLimit* are the concurrency-limit management actions
 	// (F-16): creating, updating, or deleting a concurrency limit rule.
 	ActionConcurrencyLimitCreate = "concurrency-limit.create"
@@ -241,6 +250,8 @@ const (
 	TargetLogin          = "login"
 	TargetAPIKey         = "api-key"
 	TargetServiceAccount = "service-account"
+	// TargetScimKey is the target kind of a SCIM connector key (F-28.2).
+	TargetScimKey = "scim-key"
 	// TargetConcurrencyLimit is the target kind of a concurrency limit rule
 	// (F-16).
 	TargetConcurrencyLimit = "concurrency-limit"

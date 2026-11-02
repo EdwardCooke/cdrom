@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/stats"
@@ -274,6 +275,18 @@ func main() {
 		authBundle.SetServiceAccountVerifier(api.NewServiceAccountVerifier(serviceAccountClient), true)
 	}
 
+	// SCIM key pool (F-28.2): the bounded set of keys that authenticate the
+	// corporate SCIM connector against the IdP's /scim/v2 surface. The data
+	// plane speaks to the Database service (rows + pool semantics: cap, CAS,
+	// prune horizon, bundling); only DERIVATION detours to the IdP, the sole
+	// pepper-touching site (it draws the plaintext and computes the Argon2ID
+	// encoding; the pepper never leaves the IdP). The API is a thin
+	// coordinator: it displays the plaintext exactly once (the 201) and never
+	// persists it. Wired unconditionally — the pool is orthogonal to the
+	// OIDC/API-key/service-account switches (managers reach it with a normal
+	// UI credential holding the scim-keys.* permissions).
+	apiServer.SetScimKeyClient(api.NewScimKeyClient(clients.Database, idpClient))
+
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
 	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
 	// endpoint is registered on a parent mux so it is reachable without a
@@ -404,6 +417,12 @@ func main() {
 	// gRPC server shuts down (signal received).
 	auditRecorder.StartPruning(ctx, cfg.Audit.EffectiveRetention(), cfg.Audit.EffectivePruneInterval())
 	defer func() { _ = auditRecorder.Close() }()
+
+	// Physically delete SCIM key rows whose revocation is older than the 24 h
+	// reinstate window (F-28.2), on an approximately hourly sweep started
+	// alongside the audit pruner. The audit trail retains the revocations, so
+	// deletion costs no accountability.
+	apiServer.StartScimKeyPruning(ctx, time.Hour)
 
 	apipb.RegisterAPIServer(grpcSrv, grpcServer)
 
