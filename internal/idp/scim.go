@@ -62,19 +62,58 @@ func (s *Server) mountSCIM(mux *http.ServeMux) {
 
 // scimGuard wraps a SCIM route handler with the obligations every SCIM
 // request shares: Accept-header negotiation (406 when the client refuses
-// the SCIM media type).
-//
-// TODO(F-28.2): enforce the caller credential HERE — one choke point for
-// the whole surface (parse Authorization: Bearer, resolve the key against
-// the database-held SCIM API pool, 401 SCIM-error on miss).
+// the SCIM media type) and CALLER AUTHENTICATION (F-28.2, Slice 3) — one
+// choke point for the whole surface. The caller must present
+// `Authorization: Bearer <key>` resolving against the database-held SCIM
+// key pool; a missing or unrecognized presentation gets the IDENTICAL 401
+// SCIM-error body (unknown, revoked, and expired alike — the response
+// discloses nothing about which category fired), and the attempt is
+// recorded (warning log + audit event, never echoing the key).
 func (s *Server) scimGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !acceptsSCIM(r.Header.Get("Accept")) {
 			s.scimErr(w, r, http.StatusNotAcceptable, "unsupported Accept; this surface speaks "+scimMediaType)
 			return
 		}
+		match, ok := s.authorizeSCIMCaller(r)
+		if !ok {
+			s.scimErr(w, r, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+		// Attribute downstream SCIM activity to the presenting key
+		// ("SCIM connector (#<id>)"): F-28.4/F-28.5 resource handlers read
+		// this for their audit actors.
+		r = r.WithContext(withSCIMCaller(r.Context(), match.attributed))
 		next(w, r)
 	}
+}
+
+// authorizeSCIMCaller resolves the request's Authorization header against
+// the SCIM key pool. Without a validator (surface enabled but the pool
+// backing is unwired — degenerate/test setups) the surface DENIES: the
+// bootstrap ritual assumes a reachable pool, and silently widening access
+// is worse than locking everyone out.
+func (s *Server) authorizeSCIMCaller(r *http.Request) (*scimMatch, bool) {
+	if s.scimAuthorizer == nil {
+		s.logger.Warn("scim: denying request — no key validator attached (misconfigured?)", "remote", r.RemoteAddr, "path", r.URL.Path)
+		return nil, false
+	}
+	// Parse `Authorization: Bearer <key>`: the scheme is case-insensitive
+	// (RFC 6750); the token is everything after the FIRST space (extra
+	// interior spaces make the token unverifiable — keys contain no spaces —
+	// so they fall through to the generic rejection, not a special case).
+	h := r.Header.Get("Authorization")
+	scheme, presented, ok := strings.Cut(h, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || presented == "" {
+		s.scimAuthorizer.RecordFailure(scimFailReasonMissing, r.RemoteAddr, r.URL.Path)
+		return nil, false
+	}
+	match, ok := s.scimAuthorizer.ValidatePresentation(r.Context(), presented)
+	if !ok {
+		s.scimAuthorizer.RecordFailure(scimFailReasonRejected, r.RemoteAddr, r.URL.Path)
+		return nil, false
+	}
+	return match, true
 }
 
 // handleSCIMSubtree answers requests the concrete patterns did not claim:

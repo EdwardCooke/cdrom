@@ -244,9 +244,10 @@ Tick each feature off as it lands.
 - [x] F-27 Approval groups (named approver sets)
 - [ ] F-28 SCIM user provisioning (overview; see F-28.1…F-28.5)
 - [x] F-28.1 SCIM metadata & service configuration
-- [ ] F-28.2 SCIM caller authentication _(slices 1-2 of 3 landed: store +
-      pool semantics + IdP derivation + permissions; admin API + audit +
-      prune sweep)
+- [x] F-28.2 SCIM caller authentication _(all 3 slices landed: store + pool
+      semantics + IdP derivation + permissions; admin API + audit + prune
+      sweep; the IdP guard enforcing the pool on every /scim/v2 route with
+      failure recording)_
 - [ ] F-28.3 User lifecycle foundations (soft delete)
 - [ ] F-28.4 SCIM user management
 - [ ] F-28.5 SCIM group management

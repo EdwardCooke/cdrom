@@ -3081,8 +3081,13 @@ func (s *Server) ListIDPSigningKeys(ctx context.Context, _ *dbpb.ListIDPSigningK
 }
 
 // SetIDPSigningKeys atomically replaces the IdP's signing keyring with the
-// given keys. It runs in a single transaction (delete all, insert the new
-// set) so concurrent IdP replicas never observe a torn keyring.
+// given keys. It runs in a single transaction (delete-all, UPSERT the new
+// set) so concurrent IdP replicas never observe a torn keyring. The upsert
+// (INSERT … ON CONFLICT(kid) UPDATE) makes the replace IDEMPOTENT: two
+// replicas starting moments apart both normalize the same ring and both
+// write it — the loser's conflicting INSERTs converge into UPDATEs instead
+// of violating the UNIQUE(kid) index (without this, the losing replica
+// crashed at startup: "constraint failed: id_p_signing_keys.kid").
 func (s *Server) SetIDPSigningKeys(ctx context.Context, req *dbpb.SetIDPSigningKeysRequest) (*emptypb.Empty, error) {
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("1 = 1").Delete(&models.IDPSigningKey{}).Error; err != nil {
@@ -3093,7 +3098,10 @@ func (s *Server) SetIDPSigningKeys(ctx context.Context, req *dbpb.SetIDPSigningK
 			if err != nil {
 				return err
 			}
-			if err := tx.Create(mk).Error; err != nil {
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "kid"}},
+				UpdateAll: true,
+			}).Create(mk).Error; err != nil {
 				return err
 			}
 		}

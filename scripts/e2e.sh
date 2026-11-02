@@ -171,5 +171,6 @@ run_test 16-artifact-packages.sh
 run_test 17-restoration.sh
 run_test 18-approval-groups.sh
 run_test 19-scim-keys.sh
+run_test 20-scim-replica-parity.sh
 
 log ">> e2e PASSED"

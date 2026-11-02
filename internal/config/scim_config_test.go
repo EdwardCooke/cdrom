@@ -3,7 +3,9 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestScimDefaults(t *testing.T) {
@@ -24,6 +26,12 @@ func TestScimDefaults(t *testing.T) {
 	if scim.EffectiveMaxPageSize() != DefaultSCIMMaxPageSize {
 		t.Errorf("EffectiveMaxPageSize() = %d, want %d", scim.EffectiveMaxPageSize(), DefaultSCIMMaxPageSize)
 	}
+	if scim.MemoTTL != 0 {
+		t.Errorf("Scim.MemoTTL = %v, want 0 (unset)", scim.MemoTTL)
+	}
+	if scim.EffectiveMemoTTL() != time.Second {
+		t.Errorf("EffectiveMemoTTL() = %v, want 1s (default)", scim.EffectiveMemoTTL())
+	}
 }
 
 func TestScimConfigFromFile(t *testing.T) {
@@ -36,6 +44,7 @@ idp:
       admins: admin
       deployers: operator
     max_page_size: 500
+    memo_ttl: 250ms
 `
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
@@ -67,6 +76,12 @@ idp:
 	if scim.EffectiveMaxPageSize() != 500 {
 		t.Errorf("EffectiveMaxPageSize() = %d, want 500", scim.EffectiveMaxPageSize())
 	}
+	if scim.MemoTTL != 250*time.Millisecond {
+		t.Errorf("Scim.MemoTTL = %v, want 250ms", scim.MemoTTL)
+	}
+	if scim.EffectiveMemoTTL() != 250*time.Millisecond {
+		t.Errorf("EffectiveMemoTTL() = %v, want 250ms", scim.EffectiveMemoTTL())
+	}
 	// Other idp keys are unaffected.
 	if cfg.IdP.Issuer != defaultIdPIssuer {
 		t.Errorf("IdP.Issuer = %q, want default", cfg.IdP.Issuer)
@@ -93,12 +108,19 @@ func TestScimPartialMergeKeepsDefaults(t *testing.T) {
 	if scim.MaxPageSize != DefaultSCIMMaxPageSize {
 		t.Errorf("Scim.MaxPageSize = %d, want default %d", scim.MaxPageSize, DefaultSCIMMaxPageSize)
 	}
+	if scim.MemoTTL != 0 {
+		t.Errorf("Scim.MemoTTL = %v, want 0 (partial merge keeps unset)", scim.MemoTTL)
+	}
+	if scim.EffectiveMemoTTL() != time.Second {
+		t.Errorf("EffectiveMemoTTL() = %v, want 1s (default)", scim.EffectiveMemoTTL())
+	}
 }
 
 func TestScimEnvOverrides(t *testing.T) {
 	t.Setenv("CDROM_SCIM_ENABLED", "true")
 	t.Setenv("CDROM_SCIM_PUBLIC_BASE", "https://portal.example.com/ext-idp")
 	t.Setenv("CDROM_SCIM_MAX_PAGE_SIZE", "250")
+	t.Setenv("CDROM_SCIM_MEMO_TTL", "750ms")
 	t.Setenv("CDROM_SCIM_GROUP_ROLE_MAPPINGS", "eng=developer, sre=admin")
 
 	cfg, err := Load()
@@ -114,6 +136,9 @@ func TestScimEnvOverrides(t *testing.T) {
 	}
 	if scim.MaxPageSize != 250 {
 		t.Errorf("Scim.MaxPageSize = %d, want 250 (env)", scim.MaxPageSize)
+	}
+	if scim.MemoTTL != 750*time.Millisecond {
+		t.Errorf("Scim.MemoTTL = %v, want 750ms (env)", scim.MemoTTL)
 	}
 	if got := scim.GroupRoleMappings["eng"]; got != "developer" {
 		t.Errorf("GroupRoleMappings[eng] = %q, want developer", got)
@@ -172,6 +197,39 @@ func TestScimMaxPageSizeClamp(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("EffectiveMaxPageSize(%d) = %d, want %d", tc.configured, got, tc.want)
 		}
+	}
+}
+
+func TestScimMemoTTLNormalization(t *testing.T) {
+	cases := []struct {
+		configured time.Duration
+		want       time.Duration
+	}{
+		{0, time.Second},                                 // unset -> default
+		{-time.Second, time.Second},                      // nonsense -> default
+		{250 * time.Millisecond, 250 * time.Millisecond}, // honored
+		{time.Hour, time.Hour},                           // honored
+	}
+	for _, tc := range cases {
+		got := (&ScimConfig{MemoTTL: tc.configured}).EffectiveMemoTTL()
+		if got != tc.want {
+			t.Errorf("EffectiveMemoTTL(%v) = %v, want %v", tc.configured, got, tc.want)
+		}
+	}
+}
+
+func TestScimInvalidMemoTTLLoadError(t *testing.T) {
+	yaml := "idp:\n  scim:\n    enabled: true\n    memo_ttl: banana\n"
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadWithFile(path)
+	if err == nil {
+		t.Fatal("LoadWithFile(invalid memo_ttl) succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "memo_ttl") {
+		t.Errorf("error %q does not name the offending key", err)
 	}
 }
 

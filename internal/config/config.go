@@ -770,11 +770,6 @@ type ScimConfig struct {
 	// stripping proxies, internal vs. external DNS, pinned branding). Must
 	// be an absolute http(s):// URL when set.
 	PublicBase string
-	// Credential is the SCIM service bearer token the caller must present
-	// (Authorization: Bearer <credential>) — consumed by the F-28.2 auth
-	// guard. It is a secret: never logged, never surfaced through any
-	// API/UI, and compared in constant time.
-	Credential string
 	// GroupRoleMappings maps a SCIM group display name to an F-14 role name,
 	// so corporate group membership drives Cdrom authorization (applied by
 	// F-28.5).
@@ -785,6 +780,22 @@ type ScimConfig struct {
 	// SCIMHardCapMaxPageSize are clamped to the hard cap (defense against
 	// oversized-response abuse).
 	MaxPageSize int
+
+	// MemoTTL is the hot-path memo cadence of the SCIM caller-authentication
+	// guard (F-28.2): presentations older than MemoTTL re-validate against a
+	// freshly pulled credential bundle, so revoked/expired keys lose effect
+	// after at most one interval. Zero (unset) resolves to the 1-second
+	// default via EffectiveMemoTTL.
+	MemoTTL time.Duration
+}
+
+// EffectiveMemoTTL resolves the SCIM guard memo cadence (zero/negative ->
+// the 1-second default).
+func (c ScimConfig) EffectiveMemoTTL() time.Duration {
+	if c.MemoTTL <= 0 {
+		return time.Second
+	}
+	return c.MemoTTL
 }
 
 // SCIMBasePath is the FIXED URL path the SCIM surface is mounted under on
@@ -1409,7 +1420,9 @@ func applyFile(cfg *Config, path string) error {
 		if f.IdP.ScimKeysPepper != nil {
 			cfg.IdP.ScimKeysPepper = *f.IdP.ScimKeysPepper
 		}
-		mergeSCIMConfigFromFile(&cfg.IdP.Scim, f.IdP.Scim)
+		if err := mergeSCIMConfigFromFile(&cfg.IdP.Scim, f.IdP.Scim); err != nil {
+			return err
+		}
 	}
 	if f.IdPGRPCAddress != nil {
 		cfg.IdPGRPCAddress = *f.IdPGRPCAddress
@@ -1661,6 +1674,11 @@ func applyEnv(cfg *Config) {
 			cfg.IdP.Scim.MaxPageSize = n
 		}
 	}
+	if v := os.Getenv("CDROM_SCIM_MEMO_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.IdP.Scim.MemoTTL = d
+		}
+	}
 	if v := os.Getenv("CDROM_SCIM_GROUP_ROLE_MAPPINGS"); v != "" {
 		cfg.IdP.Scim.GroupRoleMappings = parseRoleMappings(v)
 	}
@@ -1766,14 +1784,17 @@ type scimFileSection struct {
 	PublicBase        *string           `yaml:"public_base"`
 	GroupRoleMappings map[string]string `yaml:"group_role_mappings"`
 	MaxPageSize       *int              `yaml:"max_page_size"`
+	MemoTTL           *string           `yaml:"memo_ttl"`
 }
 
 // mergeSCIMConfigFromFile folds the file's idp.scim section (nullable
-// scalars; a present map replaces) into dst (F-28.1). Extracted so the
-// merge is unit-testable in isolation.
-func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) {
+// scalars; a present map replaces) into dst (F-28.1). Returns an error when
+// a present duration isn't parseable (house convention: malformed durations
+// are load-time faults, not silent defaults). Extracted so the merge is
+// unit-testable in isolation.
+func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) error {
 	if src == nil {
-		return
+		return nil
 	}
 	if src.Enabled != nil {
 		dst.Enabled = *src.Enabled
@@ -1787,6 +1808,14 @@ func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) {
 	if src.GroupRoleMappings != nil {
 		dst.GroupRoleMappings = src.GroupRoleMappings
 	}
+	if src.MemoTTL != nil {
+		d, err := time.ParseDuration(strings.TrimSpace(*src.MemoTTL))
+		if err != nil {
+			return fmt.Errorf("invalid idp.scim.memo_ttl %q: %w", *src.MemoTTL, err)
+		}
+		dst.MemoTTL = d
+	}
+	return nil
 }
 
 // defaultAgentName is the default identity of an ephemeral agent: the host

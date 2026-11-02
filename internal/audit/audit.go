@@ -174,6 +174,12 @@ const (
 	ActionScimKeyRevoke    = "scim-key.revoke"
 	ActionScimKeyReinstate = "scim-key.reinstate"
 	ActionScimKeyPrune     = "scim-key.prune"
+	// ActionScimAuthFail is a rejected SCIM caller-authentication attempt
+	// (F-28.2, Slice 3): an unauthenticated probe of the /scim/v2 surface.
+	// The presented key is NEVER echoed (missing, malformed, unknown,
+	// revoked, or expired alike — the response discloses none of that either);
+	// the event carries the attempted path and the reason category only.
+	ActionScimAuthFail = "scim.auth.fail"
 	// ActionConcurrencyLimit* are the concurrency-limit management actions
 	// (F-16): creating, updating, or deleting a concurrency limit rule.
 	ActionConcurrencyLimitCreate = "concurrency-limit.create"
@@ -185,7 +191,7 @@ const (
 	ActionEnvironmentCreate = "environment.create"
 	ActionEnvironmentUpdate = "environment.update"
 	ActionEnvironmentDelete = "environment.delete"
-	// ActionRunProceed is a user's explicit proceed call that releases a run
+	// ActionRunProceed is a user's excuplicit proceed call that releases a run
 	// (or job) held by a `manual` environment (F-17).
 	ActionRunProceed = "run.proceed"
 	// ActionRunRestore is the initiation of a RESUMPTION of a pipeline (F-22):

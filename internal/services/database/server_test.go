@@ -915,6 +915,37 @@ func TestIDPSigningKeys(t *testing.T) {
 		t.Fatal("no key marked current")
 	}
 
+	// Re-setting the SAME ring converges (idempotent upsert): two IdP
+	// replicas starting moments apart both normalize and write the identical
+	// ring; the second writer must NOT violate the UNIQUE(kid) index
+	// (historically it crashed the losing replica at startup).
+	if _, err := client.SetIDPSigningKeys(ctx, &dbpb.SetIDPSigningKeysRequest{
+		Keys: []*dbpb.IDPSigningKey{
+			{Kid: "current", IsCurrent: true, NotBefore: timestamppb.New(now), ExpiresAt: timestamppb.New(now.Add(time.Hour)), Pem: "pem-current-v2"},
+			{Kid: "old", IsCurrent: false, NotBefore: timestamppb.New(now.Add(-time.Hour)), ExpiresAt: timestamppb.New(now.Add(time.Hour)), Pem: "pem-old-v2"},
+		},
+	}); err != nil {
+		t.Fatalf("SetIDPSigningKeys (repeat, same kids): %v", err)
+	}
+	resp, err = client.ListIDPSigningKeys(ctx, &dbpb.ListIDPSigningKeysRequest{})
+	if err != nil {
+		t.Fatalf("ListIDPSigningKeys (after repeat): %v", err)
+	}
+	if got := len(resp.GetKeys()); got != 2 {
+		t.Fatalf("keys after repeat set = %d, want 2", got)
+	}
+	// The upsert UPDATED the existing rows (Pem replaced), not merely
+	// collided-and-survived.
+	upserted := false
+	for _, key := range resp.GetKeys() {
+		if key.GetKid() == "current" && key.GetPem() == "pem-current-v2" {
+			upserted = true
+		}
+	}
+	if !upserted {
+		t.Errorf("repeat set did not update the existing rows: %+v", resp.GetKeys())
+	}
+
 	// Setting again replaces the keyring atomically.
 	if _, err := client.SetIDPSigningKeys(ctx, &dbpb.SetIDPSigningKeysRequest{
 		Keys: []*dbpb.IDPSigningKey{

@@ -211,6 +211,7 @@ db:
 #  #  enabled: false
 #  #  public_base: https://idp.corp.example/ext-idp
 #  #  max_page_size: 100
+#  #  memo_ttl: 1s
 #  #  group_role_mappings:
 #  #    administrators: admin
 #  #    developers: operator

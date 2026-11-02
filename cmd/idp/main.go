@@ -161,6 +161,26 @@ func main() {
 	// keyring-size gauge now that the metric set is available.
 	km.RefreshMetrics()
 
+	// The IdP's audit recorder (F-15, adopted by F-28.2 Slice 3): the SCIM
+	// caller-auth guard records REJECTED presentations here — a warning log
+	// line plus an audit event, written to a local rotating file AND the
+	// shared database audit log (the queryable copy the UI reads via
+	// GET /api/audit). Construction is LAZY: it happens only when the SCIM
+	// surface is enabled, so a SCIM-less IdP opens no audit file at all.
+	// The pruner is owned solely by the API's recorder (retention scheduling
+	// is one-per-table, not one-per-appender).
+	if cfg.IdP.Scim.Enabled {
+		idpAudit, err := idp.NewAuditRecorder(cfg.Audit, dbClient, logger)
+		if err != nil {
+			logger.Error("audit: init", "err", err)
+			os.Exit(1)
+		}
+		defer func() { _ = idpAudit.Close() }()
+		srv.SetScimAuthorizer(idp.NewScimValidator(
+			idp.NewDBScimPoolBackend(dbClient), cfg.IdP.ScimKeysPepper, idpAudit, logger,
+			cfg.IdP.Scim.EffectiveMemoTTL()))
+	}
+
 	go srv.StartRotation(ctx)
 
 	// When TLS is configured the IdP's HTTP server serves HTTPS: it presents

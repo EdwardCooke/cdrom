@@ -122,6 +122,10 @@ type Server struct {
 	codes   AuthCodeStore
 	logger  *slog.Logger
 	metrics *metrics.IDPMetrics
+	// scimAuthorizer resolves SCIM callers against the database-held key pool
+	// (F-28.2, Slice 3). Attached by cmd/idp when the SCIM surface is enabled;
+	// when nil the guarded surface denies every request (deny by default).
+	scimAuthorizer scimAuthorizer
 }
 
 // NewServer creates the IdP HTTP server over the given key manager and
@@ -144,6 +148,13 @@ func NewServer(cfg config.IdPConfig, km *KeyManager, codes AuthCodeStore, logger
 // grant. When left nil (metrics disabled) it is a no-op.
 func (s *Server) SetMetrics(m *metrics.IDPMetrics) {
 	s.metrics = m
+}
+
+// SetScimAuthorizer attaches the SCIM caller-authenticator (F-28.2,
+// Slice 3). Until attached, the guarded /scim/v2 surface denies every
+// request.
+func (s *Server) SetScimAuthorizer(a scimAuthorizer) {
+	s.scimAuthorizer = a
 }
 
 // Handler builds the IdP's HTTP handler (the OIDC surface, plus the SCIM

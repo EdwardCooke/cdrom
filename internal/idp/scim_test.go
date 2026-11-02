@@ -2,20 +2,52 @@ package idp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"cdrom/internal/config"
 )
 
+// scimFrameworkKey is the bearer token the FRAMING tests present to the
+// guarded SCIM surface. Since F-28.2 Slice 3 the guard demands a pooled key
+// on every request; the framing tests exercise routing/negotiation/error-shape
+// concerns, not pool semantics (those live in scimguard_test.go), so the
+// builder attaches a permissive test double that accepts any non-empty
+// bearer.
+const scimFrameworkKey = "test-framework-key"
+
+// scimPermissiveAuthorizer stands in for the F-28.2 pool validator in the
+// framing tests: it accepts ANY non-empty bearer presentation and records
+// the failures it observes (missing header / non-Bearer schemes).
+type scimPermissiveAuthorizer struct {
+	failuresMu sync.Mutex
+	failures   []string
+}
+
+func (a *scimPermissiveAuthorizer) ValidatePresentation(_ context.Context, presented string) (*scimMatch, bool) {
+	if presented == "" {
+		return nil, false
+	}
+	return &scimMatch{attributed: "SCIM connector (#test)"}, true
+}
+
+func (a *scimPermissiveAuthorizer) RecordFailure(reason, _, _ string) {
+	a.failuresMu.Lock()
+	defer a.failuresMu.Unlock()
+	a.failures = append(a.failures, reason)
+}
+
 // scimTestServer builds an IdP HTTP server with the SCIM surface enabled
 // (optionally pinning the public base used in announcements) around a
-// throwaway key manager.
+// throwaway key manager, with the permissive authorizer guarding the pool
+// seam.
 func scimTestServer(t *testing.T, publicBase string) *httptest.Server {
 	t.Helper()
 	return scimTestServerCustom(t, config.ScimConfig{Enabled: true, PublicBase: publicBase})
@@ -32,7 +64,24 @@ func scimTestServerCustom(t *testing.T, scimCfg config.ScimConfig) *httptest.Ser
 		t.Fatalf("NewKeyManager: %v", err)
 	}
 	srv := NewServer(cfg, km, NewMemoryAuthCodeStore(), testLogger())
+	srv.SetScimAuthorizer(&scimPermissiveAuthorizer{})
 	return httptest.NewServer(srv.Handler())
+}
+
+// scimAuthedGet issues an authenticated GET (the guard demands a bearer on
+// every SCIM request since F-28.2 Slice 3) and returns the response.
+func scimAuthedGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+scimFrameworkKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
 }
 
 func scimDisabledTestServer(t *testing.T) *httptest.Server {
@@ -46,13 +95,12 @@ func scimDisabledTestServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(srv.Handler())
 }
 
-// doGetSCIM issues a GET expecting scim+json and returns the decoded body.
+// doGetSCIM issues an AUTHENTICATED GET (the guard demands a bearer on every
+// SCIM request since F-28.2 Slice 3) expecting scim+json and returns the
+// decoded body.
 func doGetSCIM(t *testing.T, ts *httptest.Server, path string) (int, map[string]any) {
 	t.Helper()
-	res, err := http.Get(ts.URL + path)
-	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
-	}
+	res := scimAuthedGet(t, ts.URL+path)
 	defer res.Body.Close()
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -153,10 +201,7 @@ func TestSCIM_Schemas_ListAndIndividual(t *testing.T) {
 	}
 
 	// Unknown URN → 404 SCIM error.
-	res, err := http.Get(ts.URL + "/scim/v2/Schemas/" + strings.ReplaceAll("urn:bogus:nope", "/", "%2F"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := scimAuthedGet(t, ts.URL+"/scim/v2/Schemas/"+strings.ReplaceAll("urn:bogus:nope", "/", "%2F"))
 	io.Copy(io.Discard, res.Body)
 	res.Body.Close()
 	if res.StatusCode != http.StatusNotFound {
@@ -193,10 +238,7 @@ func TestSCIM_ResourceTypes_ListAndIndividual(t *testing.T) {
 		t.Errorf("User.schema = %v, want %s", userType["schema"], scimSchemaUser)
 	}
 
-	res, err := http.Get(ts.URL + "/scim/v2/ResourceTypes/Wibble")
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := scimAuthedGet(t, ts.URL+"/scim/v2/ResourceTypes/Wibble")
 	io.Copy(io.Discard, res.Body)
 	res.Body.Close()
 	if res.StatusCode != http.StatusNotFound {
@@ -208,20 +250,45 @@ func TestSCIM_ErrorBodyShape(t *testing.T) {
 	ts := scimTestServer(t, "")
 	defer ts.Close()
 
+	// Unauthenticated (no bearer): the guard's 401 is RFC 7644-shaped.
 	res, err := http.Get(ts.URL + "/scim/v2/nothing-here")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", res.StatusCode)
-	}
 	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != scimMediaType {
+		t.Errorf("401 Content-Type = %q, want %q", ct, scimMediaType)
+	}
 	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("decode 401 body (%s): %v", body, err)
+	}
+	schemas, _ := doc["schemas"].([]any)
+	if len(schemas) != 1 || schemas[0] != scimSchemaError {
+		t.Errorf("401 error schemas = %#v, want [%s]", doc["schemas"], scimSchemaError)
+	}
+	if doc["status"] != "401" {
+		t.Errorf("401 error status = %v, want \"401\"", doc["status"])
+	}
+	if doc["detail"] != "Unauthorized" {
+		t.Errorf("401 error detail = %v, want Unauthorized", doc["detail"])
+	}
+
+	// Authenticated (framework bearer): the ROUTING 404 is RFC 7644-shaped.
+	authed := scimAuthedGet(t, ts.URL+"/scim/v2/nothing-here")
+	body, _ = io.ReadAll(authed.Body)
+	authed.Body.Close()
+	if authed.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", authed.StatusCode)
+	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		t.Fatalf("decode error body (%s): %v", body, err)
 	}
-	schemas, _ := doc["schemas"].([]any)
+	schemas, _ = doc["schemas"].([]any)
 	if len(schemas) != 1 || schemas[0] != scimSchemaError {
 		t.Errorf("error schemas = %#v, want [%s]", doc["schemas"], scimSchemaError)
 	}
@@ -241,6 +308,7 @@ func TestSCIM_MethodNotAllowedAndGetOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	post.Header.Set("Authorization", "Bearer "+scimFrameworkKey)
 	res, err := http.DefaultClient.Do(post)
 	if err != nil {
 		t.Fatal(err)
@@ -264,6 +332,7 @@ func TestSCIM_AcceptNegotiation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		req.Header.Set("Authorization", "Bearer "+scimFrameworkKey)
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
@@ -312,20 +381,29 @@ func TestSCIM_DisabledByDefault(t *testing.T) {
 	}
 }
 
-func TestSCIM_BareBasePathStock404(t *testing.T) {
+func TestSCIM_BareBasePathRequiresAuth(t *testing.T) {
 	ts := scimTestServer(t, "")
 	defer ts.Close()
 
-	// The bare base path (no trailing slash) matches no SCIM registration:
-	// the mux answers its stock 404. SCIM clients address the subtree
-	// (/scim/v2/...), so this is informational, not a SCIM-dialect error.
+	// The bare base path (no trailing slash) is folded INTO the guarded
+	// subtree (the mux 301s it to /scim/v2/, which the guard fronts): since
+	// F-28.2 Slice 3 authentication precedes routing, an UNAUTHENTICATED
+	// visitor gets the guard's 401 — the surface leaks no routing detail
+	// before the credential check.
 	res, err := http.Get(ts.URL + "/scim/v2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusNotFound {
-		t.Fatalf("bare base path status = %d, want 404", res.StatusCode)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bare base path status = %d, want 401", res.StatusCode)
+	}
+	// …but a valid bearer proceeds to the subtree's own 404.
+	authed := scimAuthedGet(t, ts.URL+"/scim/v2")
+	io.Copy(io.Discard, authed.Body)
+	authed.Body.Close()
+	if authed.StatusCode != http.StatusNotFound {
+		t.Fatalf("bare base path (authed) status = %d, want 404", authed.StatusCode)
 	}
 }
 
@@ -356,6 +434,7 @@ func TestSCIM_WrongVerbOnKnownResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Authorization", "Bearer "+scimFrameworkKey)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -385,10 +464,7 @@ func TestSCIM_UnnestedUnknownResources404(t *testing.T) {
 		"/scim/v2/Nothing",       // unknown resource
 		"/scim/v2/Schemas/a/b/c", // over-nested under a known resource
 	} {
-		res, err := http.Get(ts.URL + p)
-		if err != nil {
-			t.Fatal(err)
-		}
+		res := scimAuthedGet(t, ts.URL+p)
 		io.Copy(io.Discard, res.Body)
 		res.Body.Close()
 		if res.StatusCode != http.StatusNotFound {
@@ -456,10 +532,7 @@ func TestSCIM_PaginationBounds(t *testing.T) {
 		t.Errorf("itemsPerPage = %v, want 0", items)
 	}
 	// Invalid startIndex → 400.
-	res, err := http.Get(ts.URL + "/scim/v2/Schemas?startIndex=bogus")
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := scimAuthedGet(t, ts.URL+"/scim/v2/Schemas?startIndex=bogus")
 	io.Copy(io.Discard, res.Body)
 	res.Body.Close()
 	if res.StatusCode != http.StatusBadRequest {

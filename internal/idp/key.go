@@ -173,12 +173,47 @@ func (k *KeyManager) load() error {
 	k.current = current
 	k.mu.Unlock()
 
-	if err := k.persist(); err != nil {
-		return err
+	// Persist ONLY WHEN SOMETHING CHANGED: a replica coming up against an
+	// already-populated ring (another IdP instance beat it to the key) would
+	// otherwise rewrite the identical ring, and the Database service's
+	// replace-transaction races the winner's insert into a UNIQUE(kid)
+	// violation that crashes the losing replica at startup. Skipping the
+	// no-change write eliminates the race at its source (mutations —
+	// rotation, a fresh key — still persist).
+	if !storedRingEquals(stored, keys) {
+		if err := k.persist(); err != nil {
+			return err
+		}
 	}
 	k.updateKeyMetrics()
 	k.RotateIfNeeded()
 	return nil
+}
+
+// storedRingEquals reports whether the STORED keyring equals the normalized
+// ring (modulo the expired-drop load() performs): same kids, same currents,
+// same validity windows. Private keys are compared implicitly — a ring that
+// differs only in its (undecodable-from-metadata) pem cannot arise from
+// normalization alone.
+func storedRingEquals(stored, norm []*signingKey) bool {
+	if len(stored) != len(norm) {
+		return false
+	}
+	byKid := make(map[string]*signingKey, len(norm))
+	for _, nk := range norm {
+		byKid[nk.kid] = nk
+	}
+	for _, sk := range stored {
+		nk, ok := byKid[sk.kid]
+		if !ok {
+			return false
+		}
+		if sk.isCurrent != nk.isCurrent ||
+			!sk.notBefore.Equal(nk.notBefore) || !sk.expiresAt.Equal(nk.expiresAt) {
+			return false
+		}
+	}
+	return true
 }
 
 // updateKeyMetrics sets the signing-keyring size gauge (F-20) from the

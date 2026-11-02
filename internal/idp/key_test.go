@@ -1,9 +1,11 @@
 package idp
 
 import (
+	"context"
 	"crypto/rsa"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +66,64 @@ func TestKeyManagerPersistsAcrossRestart(t *testing.T) {
 	keys2, _ := km2.JWKS()
 	if len(keys2) != 1 || keys2[0].KeyID != kid1 {
 		t.Fatalf("reload JWKS = %+v, want the same kid %q", keys2, kid1)
+	}
+}
+
+// countingKeyStore spies on SetKeys calls (counts them, delegates the rest).
+type countingKeyStore struct {
+	mu    sync.Mutex
+	inner KeyStore
+	sets  int
+}
+
+func (c *countingKeyStore) ListKeys(ctx context.Context) ([]*signingKey, error) {
+	return c.inner.ListKeys(ctx)
+}
+
+func (c *countingKeyStore) SetKeys(ctx context.Context, keys []*signingKey) error {
+	c.mu.Lock()
+	c.sets++
+	c.mu.Unlock()
+	return c.inner.SetKeys(ctx, keys)
+}
+
+func (c *countingKeyStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sets
+}
+
+// TestKeyManagerSkipsRedundantPersist guards the multi-replica startup race
+// (F-28.2 Slice 3 exposure): a second IdP replica coming up against an
+// already-populated ring must NOT rewrite the unchanged ring — the
+// Database service's replace-transaction raced the winner's insert into a
+// UNIQUE(kid) violation that crashed the losing replica at startup.
+func TestKeyManagerSkipsRedundantPersist(t *testing.T) {
+	cfg := testConfig(time.Hour, 30*time.Minute)
+	spy := &countingKeyStore{inner: NewMemoryKeyStore()}
+
+	km1, err := NewKeyManager(cfg, spy, testLogger())
+	if err != nil {
+		t.Fatalf("NewKeyManager (first): %v", err)
+	}
+	keys1, _ := km1.JWKS()
+	kid1 := keys1[0].KeyID
+	if got := spy.count(); got != 1 {
+		t.Fatalf("persists after first boot = %d, want 1 (fresh ring)", got)
+	}
+
+	// A second manager (replica) over the SAME store: the ring is unchanged,
+	// so load() must skip the persist entirely.
+	km2, err := NewKeyManager(cfg, spy, testLogger())
+	if err != nil {
+		t.Fatalf("NewKeyManager (second replica): %v", err)
+	}
+	if got := spy.count(); got != 1 {
+		t.Fatalf("persists after second boot = %d, want 1 (unchanged ring must not be rewritten)", got)
+	}
+	keys2, _ := km2.JWKS()
+	if len(keys2) != 1 || keys2[0].KeyID != kid1 {
+		t.Fatalf("second replica JWKS = %+v, want the same kid %q", keys2, kid1)
 	}
 }
 

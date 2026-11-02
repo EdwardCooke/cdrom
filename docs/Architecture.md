@@ -1212,7 +1212,10 @@ of `groupName=roleName` pairs translating corporate group membership into F-14
 roles (applied by F-28.5). `CDROM_SCIM_MAX_PAGE_SIZE` raises the page bound
 the surface advertises and honors (default 100; RFC 7644 mandates no universal
 ceiling — the provider declares its own — values above the 10000 hard cap are
-clamped).
+clamped). `CDROM_SCIM_MEMO_TTL` tunes the caller-auth guard's hot-path memo
+interval (F-28.2; default 1 s): how long verdicts stay cached and how often
+the encoding bundle is repulled — hence the worst-case delay before a
+revoked/expired key stops authenticating.
 
 ### Secrets (F-12)
 
