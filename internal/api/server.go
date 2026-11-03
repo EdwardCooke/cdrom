@@ -2543,6 +2543,15 @@ func userPassStatus(err error) int {
 			return http.StatusNotFound
 		case codes.AlreadyExists:
 			return http.StatusConflict
+		case codes.FailedPrecondition:
+			// The gRPC analogue of 409 (cf. F-28.2): a precondition
+			// violated, e.g. refusing a password on a provisioned user
+			// (F-28.3 channel lockdown).
+			return http.StatusConflict
+		case codes.PermissionDenied:
+			// A DEFINITE refusal (F-28.3 sign-in enforcement: deactivated,
+			// deprovisioned, or SSO-only) — not an infrastructure fault.
+			return http.StatusForbidden
 		case codes.InvalidArgument:
 			return http.StatusBadRequest
 		case codes.Unimplemented:
@@ -2551,6 +2560,15 @@ func userPassStatus(err error) int {
 		return http.StatusBadGateway
 	}
 	return http.StatusBadGateway
+}
+
+// userPassMessage unwraps a user-pass error to the IdP's own message (dropping
+// the transport framing) so a definite refusal can be relayed verbatim.
+func userPassMessage(err error) string {
+	if e, ok := err.(*userPassError); ok && e.msg != "" {
+		return e.msg
+	}
+	return err.Error()
 }
 
 // requireAdmin verifies the caller may manage users (used by the user
@@ -2613,6 +2631,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		})
 		if userPassStatus(err) == http.StatusUnauthorized {
 			httpError(w, http.StatusUnauthorized, "invalid credentials")
+			return
+		}
+		// Definite denials (F-28.3: deactivated / deprovisioned /
+		// provisioned-SSO-only) carry distinct messages the user must see.
+		if userPassStatus(err) == http.StatusForbidden {
+			httpError(w, http.StatusForbidden, "%s", userPassMessage(err))
 			return
 		}
 		httpError(w, userPassStatus(err), "login: %v", err)
@@ -2686,8 +2710,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 
-// listUsers returns all registered users. It requires an authenticated admin
-// caller.
+// listUsers returns registered users. It requires an authenticated admin
+// caller. By default tombstoned (deprovisioned) users are omitted; the
+// admin-only ?include_deleted=true view returns them flagged (F-28.3),
+// exposing all four lifecycle states.
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireUserPass(w) {
 		return
@@ -2695,7 +2721,8 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	users, err := s.userpass.ListUsers(r.Context())
+	includeDeleted := r.URL.Query().Get("include_deleted") == "true"
+	users, err := s.userpass.ListUsers(r.Context(), includeDeleted)
 	if err != nil {
 		httpError(w, userPassStatus(err), "list users: %v", err)
 		return
@@ -2777,9 +2804,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// Fetch the user's current profile so the audit event can record what
 	// changed (old value vs new value, F-15). A failure to fetch it does not
-	// block the update.
+	// block the update. Tombstoned users are readable here (include_deleted)
+	// so the audit OldValue stays informative; the update itself still
+	// refuses them (below).
 	oldValue := ""
-	if users, err := s.userpass.ListUsers(r.Context()); err == nil {
+	if users, err := s.userpass.ListUsers(r.Context(), true); err == nil {
 		for i := range users {
 			if users[i].ID == id {
 				oldValue = auditJSON(map[string]any{"email": users[i].Email, "roles": users[i].Roles})
@@ -2791,6 +2820,12 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if userPassStatus(err) == http.StatusNotFound {
 			httpError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		if userPassStatus(err) == http.StatusConflict && req.Password != "" {
+			// Write-side channel lockdown (F-28.3): a provisioned user's
+			// password cannot be set administratively.
+			httpError(w, http.StatusConflict, "cannot set a password on a provisioned user; it is managed by the identity provider")
 			return
 		}
 		httpError(w, userPassStatus(err), "update user: %v", err)
@@ -2821,11 +2856,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "user id is required")
 		return
 	}
-	// Fetch the user's profile before deleting it so the audit event can
-	// record the user that was removed (F-15). A failure to fetch it does not
-	// block the delete.
+	// Fetch the user's profile before deprovisioning it so the audit event
+	// can record the user that was removed (F-15). A failure to fetch it does
+	// not block the delete.
 	oldValue := ""
-	if users, err := s.userpass.ListUsers(r.Context()); err == nil {
+	if users, err := s.userpass.ListUsers(r.Context(), true); err == nil {
 		for i := range users {
 			if users[i].ID == id {
 				oldValue = auditJSON(map[string]any{"email": users[i].Email, "roles": users[i].Roles})
@@ -2847,8 +2882,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		TargetID:   id,
 		Outcome:    audit.OutcomeSuccess,
 		OldValue:   oldValue,
+		Details:    auditJSON(map[string]any{"kind": "deprovisioned"}),
 	})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deprovisioned"})
 }
 
 // ---------------------------------------------------------------------------
@@ -2893,7 +2929,7 @@ func (s *Server) apiKeyOwnerEmail(ctx context.Context, ownerID string) string {
 	if s.userpass == nil || ownerID == "" {
 		return ""
 	}
-	users, err := s.userpass.ListUsers(ctx)
+	users, err := s.userpass.ListUsers(ctx, true)
 	if err != nil {
 		return ""
 	}
@@ -2911,7 +2947,7 @@ func (s *Server) fillAPIKeyOwnerEmails(ctx context.Context, keys []APIKeyResult)
 	if s.userpass == nil {
 		return
 	}
-	users, err := s.userpass.ListUsers(ctx)
+	users, err := s.userpass.ListUsers(ctx, true)
 	if err != nil {
 		return
 	}

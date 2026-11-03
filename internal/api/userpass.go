@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -25,8 +26,11 @@ type UserPassClient interface {
 	Login(ctx context.Context, email, password string) (*LoginResult, error)
 	// Register creates a new user from the request's profile and password.
 	Register(ctx context.Context, req RegisterRequest) (*UserResult, error)
-	// ListUsers returns all registered users (profile + roles, no password).
-	ListUsers(ctx context.Context) ([]UserResult, error)
+	// ListUsers returns registered users (profile + roles, no password).
+	// When includeDeleted is true, tombstoned (deprovisioned) users are
+	// included (flagged via DeletedAt); by default they are excluded
+	// (F-28.3).
+	ListUsers(ctx context.Context, includeDeleted bool) ([]UserResult, error)
 	// CreateUser creates a user (the same as Register, also usable to create
 	// a user with an explicit role set).
 	CreateUser(ctx context.Context, req RegisterRequest) (*UserResult, error)
@@ -59,6 +63,15 @@ type UserResult struct {
 	LastName  string   `json:"last_name"`
 	Email     string   `json:"email"`
 	Roles     []string `json:"roles"`
+	// Active is the user's activated state (F-28.3); false means deactivated
+	// ("on leave").
+	Active bool `json:"active"`
+	// DeletedAt is the deprovisioning tombstone (F-28.3); non-nil means the
+	// user is deprovisioned (shown only in the include_deleted view).
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// Provisioned marks an externally-sourced record (SCIM/JIT) (F-28.3);
+	// such users sign in via SSO only.
+	Provisioned bool `json:"provisioned"`
 }
 
 // RegisterRequest is the request to create a user: the required profile
@@ -145,8 +158,8 @@ func (c *grpcUserPassClient) Register(ctx context.Context, req RegisterRequest) 
 	return userResult(u), nil
 }
 
-func (c *grpcUserPassClient) ListUsers(ctx context.Context) ([]UserResult, error) {
-	resp, err := c.idp.ListUsers(ctx, &idppb.ListUsersRequest{})
+func (c *grpcUserPassClient) ListUsers(ctx context.Context, includeDeleted bool) ([]UserResult, error) {
+	resp, err := c.idp.ListUsers(ctx, &idppb.ListUsersRequest{IncludeDeleted: includeDeleted})
 	if err != nil {
 		return nil, &userPassError{code: status.Code(err), msg: status.Convert(err).Message()}
 	}
@@ -196,13 +209,20 @@ func (c *grpcUserPassClient) DeleteUser(ctx context.Context, id string) error {
 
 // userResult renders a user's profile (never the password hash).
 func userResult(u *dbpb.IDPUser) *UserResult {
-	return &UserResult{
-		ID:        u.GetId(),
-		FirstName: u.GetFirstName(),
-		LastName:  u.GetLastName(),
-		Email:     u.GetEmail(),
-		Roles:     nonNil(u.GetRoles()),
+	result := &UserResult{
+		ID:          u.GetId(),
+		FirstName:   u.GetFirstName(),
+		LastName:    u.GetLastName(),
+		Email:       u.GetEmail(),
+		Roles:       nonNil(u.GetRoles()),
+		Active:      u.GetActive(),
+		Provisioned: u.GetProvisioned(),
 	}
+	if ts := u.GetDeletedAt(); ts != nil {
+		t := ts.AsTime()
+		result.DeletedAt = &t
+	}
+	return result
 }
 
 // userPassError is an error from the IdP's userpass surface, carrying the

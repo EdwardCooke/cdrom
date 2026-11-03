@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 
@@ -54,9 +55,18 @@ func (f *fakeUserPass) Register(_ context.Context, req RegisterRequest) (*UserRe
 	return f.registerResult, nil
 }
 
-func (f *fakeUserPass) ListUsers(_ context.Context) ([]UserResult, error) {
+func (f *fakeUserPass) ListUsers(_ context.Context, includeDeleted bool) ([]UserResult, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
+	}
+	if !includeDeleted {
+		filtered := make([]UserResult, 0, len(f.users))
+		for _, u := range f.users {
+			if u.DeletedAt == nil {
+				filtered = append(filtered, u)
+			}
+		}
+		return filtered, nil
 	}
 	return f.users, nil
 }
@@ -281,4 +291,129 @@ func hasRoleStr(roles []string, role string) bool {
 		}
 	}
 	return false
+}
+
+// TestAPISignInDefinitesRelay checks that the login endpoint RELAYS the IdP's
+// definite denials (F-28.3) as 403 with the distinct message, while unknown
+// users still collapse to the generic 401.
+func TestAPISignInDefinitesRelay(t *testing.T) {
+	definite := map[string]error{
+		"deactivated":   &userPassError{code: codes.PermissionDenied, msg: "account is deactivated; contact an administrator"},
+		"deprovisioned": &userPassError{code: codes.PermissionDenied, msg: "account has been deprovisioned"},
+		"sso-only":      &userPassError{code: codes.PermissionDenied, msg: "account is managed by the identity provider; sign in via SSO"},
+	}
+	for name, defErr := range definite {
+		fake := &fakeUserPass{loginErr: defErr}
+		ts := userPassServer(t, fake, auth.User{})
+		code, body := postJSONBody(t, ts.URL+"/api/login", `{"email":"a@example.com","password":"x"}`)
+		if code != http.StatusForbidden {
+			t.Errorf("[%s] status = %d, want 403", name, code)
+		}
+		if !strings.Contains(strings.ToLower(string(body)), strings.ToLower(statusMsg(defErr))) {
+			t.Errorf("[%s] body %q does not relay the distinct message %q", name, body, statusMsg(defErr))
+		}
+	}
+
+	// Unknown user: generic 401, no enumeration.
+	fakeUnknown := &fakeUserPass{loginErr: &userPassError{code: codes.Unauthenticated, msg: "invalid credentials"}}
+	tsUnknown := userPassServer(t, fakeUnknown, auth.User{})
+	code, body := postJSONBody(t, tsUnknown.URL+"/api/login", `{"email":"ghost@example.com","password":"x"}`)
+	if code != http.StatusUnauthorized {
+		t.Errorf("[unknown] status = %d, want 401", code)
+	}
+	if !strings.Contains(string(body), "invalid credentials") {
+		t.Errorf("[unknown] body %q, want the generic message", body)
+	}
+}
+
+func statusMsg(e error) string {
+	if ue, ok := e.(*userPassError); ok {
+		return ue.msg
+	}
+	return e.Error()
+}
+
+// TestAPIListIncludeDeleted checks GET /api/users: tombstoned users are hidden
+// by default and revealed (flagged) with ?include_deleted=true.
+func TestAPIListIncludeDeleted(t *testing.T) {
+	now := time.Now()
+	fake := &fakeUserPass{users: []UserResult{
+		{ID: "u-live", Email: "live@example.com", Active: true},
+		{ID: "u-dead", Email: "dead@example.com", Active: false, DeletedAt: &now},
+	}}
+	admin := auth.User{Subject: "admin-1", Roles: []string{"admin"}}
+	ts := userPassServer(t, fake, admin)
+
+	code, body := doRequest(t, http.MethodGet, ts.URL+"/api/users", "")
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200 (body %s)", code, body)
+	}
+	var users []UserResult
+	if err := json.Unmarshal(body, &users); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != "u-live" {
+		t.Errorf("default list = %+v, want only u-live", users)
+	}
+
+	code, body = doRequest(t, http.MethodGet, ts.URL+"/api/users?include_deleted=true", "")
+	if code != http.StatusOK {
+		t.Fatalf("include_deleted list status = %d, want 200", code)
+	}
+	if err := json.Unmarshal(body, &users); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("include_deleted list = %d users, want 2", len(users))
+	}
+	var dead *UserResult
+	for i := range users {
+		if users[i].ID == "u-dead" {
+			dead = &users[i]
+		}
+	}
+	if dead == nil || dead.DeletedAt == nil {
+		t.Errorf("tombstoned user missing or unflagged: %+v", dead)
+	}
+}
+
+// TestAPIUpdateProvisionedPasswordRefusal checks PUT /api/users/{id}: attaching
+// a password to a provisioned user is refused with 409 and the lockdown
+// message; a profile-only update on the same user succeeds.
+func TestAPIUpdateProvisionedPasswordRefusal(t *testing.T) {
+	admin := auth.User{Subject: "admin-1", Roles: []string{"admin"}}
+
+	fake := &fakeUserPass{
+		updateErr: &userPassError{code: codes.FailedPrecondition, msg: "cannot set a password on a provisioned user; it is managed by the identity provider"},
+	}
+	ts := userPassServer(t, fake, admin)
+	code, body := doRequest(t, http.MethodPut, ts.URL+"/api/users/uprov", `{"password":"snatched"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("password update status = %d, want 409 (body %s)", code, body)
+	}
+	if !strings.Contains(string(body), "provisioned") {
+		t.Errorf("body %q, want the lockdown message", body)
+	}
+
+	okFake := &fakeUserPass{updateResult: &UserResult{ID: "uprof", FirstName: "New"}}
+	tsOk := userPassServer(t, okFake, admin)
+	code, _ = doRequest(t, http.MethodPut, tsOk.URL+"/api/users/uprof", `{"first_name":"New"}`)
+	if code != http.StatusOK {
+		t.Fatalf("profile update status = %d, want 200", code)
+	}
+}
+
+// TestAPIDeprovevisionResponseShape checks DELETE /api/users/{id} responds with
+// the deprovisioned status (F-28.3 soft delete, not a physical removal).
+func TestAPIDeprovisionResponseShape(t *testing.T) {
+	admin := auth.User{Subject: "admin-1", Roles: []string{"admin"}}
+	fake := &fakeUserPass{}
+	ts := userPassServer(t, fake, admin)
+	code, body := doRequest(t, http.MethodDelete, ts.URL+"/api/users/udead", "")
+	if code != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200", code)
+	}
+	if !strings.Contains(string(body), "deprovisioned") {
+		t.Errorf("body %q, want the deprovisioned acknowledgement", body)
+	}
 }

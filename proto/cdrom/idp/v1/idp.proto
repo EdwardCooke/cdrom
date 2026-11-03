@@ -211,8 +211,12 @@ message RegisterRequest {
   repeated string roles = 5;
 }
 
-// ListUsersRequest is the request to list all registered users.
-message ListUsersRequest {}
+// ListUsersRequest is the request to list registered users. When
+// include_deleted is true, tombstoned (deprovisioned) users are included
+// (flagged via deleted_at); by default they are excluded (F-28.3).
+message ListUsersRequest {
+  bool include_deleted = 1;
+}
 
 // ListUsersResponse is the set of registered users.
 message ListUsersResponse {

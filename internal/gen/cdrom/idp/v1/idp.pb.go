@@ -443,11 +443,14 @@ func (x *RegisterRequest) GetRoles() []string {
 	return nil
 }
 
-// ListUsersRequest is the request to list all registered users.
+// ListUsersRequest is the request to list registered users. When
+// include_deleted is true, tombstoned (deprovisioned) users are included
+// (flagged via deleted_at); by default they are excluded (F-28.3).
 type ListUsersRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	IncludeDeleted bool                   `protobuf:"varint,1,opt,name=include_deleted,json=includeDeleted,proto3" json:"include_deleted,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ListUsersRequest) Reset() {
@@ -478,6 +481,13 @@ func (x *ListUsersRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ListUsersRequest.ProtoReflect.Descriptor instead.
 func (*ListUsersRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ListUsersRequest) GetIncludeDeleted() bool {
+	if x != nil {
+		return x.IncludeDeleted
+	}
+	return false
 }
 
 // ListUsersResponse is the set of registered users.
@@ -2856,8 +2866,9 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\tlast_name\x18\x02 \x01(\tR\blastName\x12\x14\n" +
 	"\x05email\x18\x03 \x01(\tR\x05email\x12\x1a\n" +
 	"\bpassword\x18\x04 \x01(\tR\bpassword\x12\x14\n" +
-	"\x05roles\x18\x05 \x03(\tR\x05roles\"\x12\n" +
-	"\x10ListUsersRequest\"?\n" +
+	"\x05roles\x18\x05 \x03(\tR\x05roles\";\n" +
+	"\x10ListUsersRequest\x12'\n" +
+	"\x0finclude_deleted\x18\x01 \x01(\bR\x0eincludeDeleted\"?\n" +
 	"\x11ListUsersResponse\x12*\n" +
 	"\x05users\x18\x01 \x03(\v2\x14.cdrom.db.v1.IDPUserR\x05users\"\x97\x01\n" +
 	"\x11CreateUserRequest\x12\x1d\n" +

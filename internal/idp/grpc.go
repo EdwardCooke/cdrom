@@ -168,6 +168,30 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 		}
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
+	// Sign-in enforcement (F-28.3): state-based rejections fire BEFORE any
+	// hash comparison, with distinct messages (the spec mandates them) so
+	// the user learns why sign-in is refused. Unknown users still collapse
+	// to the generic "invalid credentials" above (no enumeration).
+	switch {
+	case user.DeletedAt != nil:
+		if s.metrics != nil {
+			s.metrics.RecordLogin("deprovisioned")
+		}
+		return nil, status.Error(codes.PermissionDenied, "account has been deprovisioned")
+	case !user.Active:
+		if s.metrics != nil {
+			s.metrics.RecordLogin("deactivated")
+		}
+		return nil, status.Error(codes.PermissionDenied, "account is deactivated; contact an administrator")
+	case user.Provisioned:
+		// Channel lockdown (F-28.3): a provisioned user signs in via SSO
+		// only — the password channel is closed even if a hash somehow
+		// exists (smuggled by legacy state or defect).
+		if s.metrics != nil {
+			s.metrics.RecordLogin("sso_only")
+		}
+		return nil, status.Error(codes.PermissionDenied, "account is managed by the identity provider; sign in via SSO")
+	}
 	if !VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword()) {
 		if s.metrics != nil {
 			s.metrics.RecordLogin("invalid_password")
@@ -298,12 +322,14 @@ func (s *GRPCServer) refreshUserMetrics(ctx context.Context) {
 	s.metrics.SetUsers(len(users))
 }
 
-// ListUsers returns all registered users (profile + roles, no password hash).
-func (s *GRPCServer) ListUsers(ctx context.Context, _ *idppb.ListUsersRequest) (*idppb.ListUsersResponse, error) {
+// ListUsers returns registered users (profile + roles, no password hash).
+// Tombstoned (deprovisioned) users are excluded unless include_deleted is
+// set (F-28.3).
+func (s *GRPCServer) ListUsers(ctx context.Context, req *idppb.ListUsersRequest) (*idppb.ListUsersResponse, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
 	}
-	users, err := s.users.List(ctx, false)
+	users, err := s.users.List(ctx, req.GetIncludeDeleted())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: list users: %v", err)
 	}
@@ -357,6 +383,21 @@ func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserReques
 	id := req.GetId()
 	if id == "" {
 		return nil, status.Error(codes.InvalidArgument, "user id is required")
+	}
+	// Resolve the target FIRST (F-28.3): the write-side channel lockdown
+	// needs to know the user's provenance before deciding whether a
+	// password may be attached at all.
+	target, err := s.users.GetByID(ctx, id, false)
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, status.Errorf(codes.Internal, "idp: look up user: %v", err)
+	}
+	if req.GetPassword() != "" && target.Provisioned {
+		// No write path may attach a password to a provisioned user (F-28.3
+		// channel lockdown): the password channel is closed at both doors.
+		return nil, status.Error(codes.FailedPrecondition, "cannot set a password on a provisioned user; it is managed by the identity provider")
 	}
 	update := &User{ID: id, FirstName: req.GetFirstName(), LastName: req.GetLastName(), Email: req.GetEmail(), Roles: req.GetRoles()}
 	if pw := req.GetPassword(); pw != "" {
