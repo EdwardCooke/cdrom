@@ -1111,9 +1111,12 @@ func TestIDPUsers(t *testing.T) {
 	if _, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Id: id}); status.Code(err) != codes.NotFound {
 		t.Errorf("get after delete = %v, want NotFound", err)
 	}
-	// Deleting again is a NotFound.
-	if _, err := client.DeleteIDPUser(ctx, &dbpb.DeleteIDPUserRequest{Id: id}); status.Code(err) != codes.NotFound {
-		t.Errorf("re-delete = %v, want NotFound", err)
+	// Deleting again is IDEMPOTENT (F-28.3): the tombstoned row is returned
+	// unchanged, not an error.
+	if again, err := client.DeleteIDPUser(ctx, &dbpb.DeleteIDPUserRequest{Id: id}); err != nil {
+		t.Errorf("re-delete = %v, want idempotent success", err)
+	} else if again.GetId() != id || again.GetDeletedAt() == nil {
+		t.Errorf("re-delete row = id:%q tombstone:nil?, want the tombstoned original", again.GetId())
 	}
 }
 

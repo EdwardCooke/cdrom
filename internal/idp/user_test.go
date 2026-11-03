@@ -79,7 +79,7 @@ func TestUserRegisterAndLogin(t *testing.T) {
 	}
 
 	// The user is stored with a password hash, not the plaintext.
-	stored, err := users.GetByEmail(ctx, "ada@example.com")
+	stored, err := users.GetByEmail(ctx, "ada@example.com", true)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
@@ -170,14 +170,42 @@ func TestUserRolesManagement(t *testing.T) {
 		t.Errorf("updated roles = %v, want to include admin", updated.GetRoles())
 	}
 
-	// Delete bob.
+	// Delete bob (F-28.3 soft delete: tombstone, not physical removal).
 	if _, err := idp.client.DeleteUser(ctx, &idppb.DeleteUserRequest{Id: bob.GetId()}); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 
-	// A second delete is a NotFound.
-	if _, err := idp.client.DeleteUser(ctx, &idppb.DeleteUserRequest{Id: bob.GetId()}); status.Code(err) != codes.NotFound {
-		t.Errorf("second delete code = %v, want NotFound", status.Code(err))
+	// Bob is now HIDDEN from the regular list (tombstoned)…
+	listedAfter, err := idp.client.ListUsers(ctx, &idppb.ListUsersRequest{})
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(listedAfter.GetUsers()) != 1 {
+		t.Errorf("list after delete = %d users, want 1 (bob tombstoned)", len(listedAfter.GetUsers()))
+	}
+
+	// …but his row SURVIVES: a second delete is idempotent (OK, not an
+	// error), and the store still knows him via the tombstone-aware lookup.
+	if _, err := idp.client.DeleteUser(ctx, &idppb.DeleteUserRequest{Id: bob.GetId()}); err != nil {
+		t.Errorf("second delete = %v, want idempotent OK", err)
+	}
+	store := idp.users.(*MemoryUserStore)
+	alive, err := store.GetByID(ctx, bob.GetId(), true)
+	if err != nil {
+		t.Fatalf("tombstone-aware lookup: %v", err)
+	}
+	if alive.DeletedAt == nil {
+		t.Errorf("survivor lacks the tombstone")
+	}
+	if alive.Active {
+		t.Errorf("survivor active = true, want false")
+	}
+	if alive.PasswordHash != "" {
+		t.Errorf("survivor password hash = %q, want zeroed", alive.PasswordHash)
+	}
+	// Without the tombstone-aware flag he is NotFound.
+	if _, err := store.GetByID(ctx, bob.GetId(), false); status.Code(err) != codes.NotFound {
+		t.Errorf("ordinary lookup = %v, want NotFound", err)
 	}
 }
 

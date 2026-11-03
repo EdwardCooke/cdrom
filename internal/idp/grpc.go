@@ -159,7 +159,7 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 	if req.GetEmail() == "" || req.GetPassword() == "" {
 		return nil, status.Error(codes.Unauthenticated, "email and password are required")
 	}
-	user, err := s.users.GetByEmail(ctx, req.GetEmail())
+	user, err := s.users.GetByEmail(ctx, req.GetEmail(), true)
 	if err != nil {
 		// Unknown user: fail with the same response as a bad password so the
 		// endpoint does not reveal which emails are registered.
@@ -242,8 +242,12 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 	if req.GetEmail() == "" || req.GetPassword() == "" {
 		return nil, status.Error(codes.InvalidArgument, "email and password are required")
 	}
-	if _, err := s.users.GetByEmail(ctx, req.GetEmail()); err == nil {
+	// Reservation (F-28.3): a tombstoned email is refused, not recreated —
+	// the identity is reserved for restoration via reactivation.
+	if _, err := s.users.GetByEmail(ctx, req.GetEmail(), true); err == nil {
 		return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
+	} else if status.Code(err) != codes.NotFound {
+		return nil, status.Errorf(codes.Internal, "idp: look up user: %v", err)
 	}
 	hash, err := HashPassword(s.cfg.PasswordPepper, req.GetPassword())
 	if err != nil {
@@ -273,7 +277,7 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 // admin (so a local run has a way in), and every later user gets the default
 // "user" role.
 func (s *GRPCServer) defaultRoles(ctx context.Context) []string {
-	users, err := s.users.List(ctx)
+	users, err := s.users.List(ctx, false)
 	if err == nil && len(users) == 0 {
 		return []string{"admin"}
 	}
@@ -287,7 +291,7 @@ func (s *GRPCServer) refreshUserMetrics(ctx context.Context) {
 	if s.metrics == nil || s.users == nil {
 		return
 	}
-	users, err := s.users.List(ctx)
+	users, err := s.users.List(ctx, false)
 	if err != nil {
 		return
 	}
@@ -299,7 +303,7 @@ func (s *GRPCServer) ListUsers(ctx context.Context, _ *idppb.ListUsersRequest) (
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
 	}
-	users, err := s.users.List(ctx)
+	users, err := s.users.List(ctx, false)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: list users: %v", err)
 	}
@@ -320,8 +324,10 @@ func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserReques
 	if req.GetEmail() == "" || req.GetPassword() == "" {
 		return nil, status.Error(codes.InvalidArgument, "email and password are required")
 	}
-	if _, err := s.users.GetByEmail(ctx, req.GetEmail()); err == nil {
+	if _, err := s.users.GetByEmail(ctx, req.GetEmail(), true); err == nil {
 		return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
+	} else if status.Code(err) != codes.NotFound {
+		return nil, status.Errorf(codes.Internal, "idp: look up user: %v", err)
 	}
 	hash, err := HashPassword(s.cfg.PasswordPepper, req.GetPassword())
 	if err != nil {
@@ -333,6 +339,7 @@ func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserReques
 		Email:        req.GetEmail(),
 		PasswordHash: hash,
 		Roles:        req.GetRoles(),
+		Active:       true,
 	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: create user: %v", err)
@@ -370,7 +377,9 @@ func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserReques
 	return userToProto(user), nil
 }
 
-// DeleteUser removes a user by ID. A missing user is NotFound.
+// DeleteUser deprovisions a user by ID (F-28.3 soft delete): the row is
+// retained (tombstone, active=false, password hash zeroed) so historical
+// actor references stay resolvable. A missing user is NotFound.
 func (s *GRPCServer) DeleteUser(ctx context.Context, req *idppb.DeleteUserRequest) (*idppb.DeleteUserResponse, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
@@ -379,7 +388,7 @@ func (s *GRPCServer) DeleteUser(ctx context.Context, req *idppb.DeleteUserReques
 	if id == "" {
 		return nil, status.Error(codes.InvalidArgument, "user id is required")
 	}
-	if err := s.users.Delete(ctx, id); err != nil {
+	if err := s.users.SoftDelete(ctx, id); err != nil {
 		if status.Code(err) == codes.NotFound {
 			return nil, status.Error(codes.NotFound, "user not found")
 		}
@@ -572,9 +581,11 @@ func (s *GRPCServer) ResetAPIKeyLockout(ctx context.Context, req *idppb.ResetAPI
 	return &idppb.ResetAPIKeyLockoutResponse{Status: "reset"}, nil
 }
 
-// userToProto renders a user as its protobuf form.
+// userToProto renders a user as its protobuf form (mirrors the
+// Database-service representation; the password hash is included because the
+// API relays profiles to the UI minus the hash via its own shaping).
 func userToProto(u *User) *dbpb.IDPUser {
-	return &dbpb.IDPUser{
+	out := &dbpb.IDPUser{
 		Id:           u.ID,
 		FirstName:    u.FirstName,
 		LastName:     u.LastName,
@@ -582,7 +593,14 @@ func userToProto(u *User) *dbpb.IDPUser {
 		PasswordHash: u.PasswordHash,
 		Roles:        u.Roles,
 		CreatedAt:    timestamppb.New(u.CreatedAt),
+		Active:       u.Active,
+		ExternalId:   u.ExternalID,
+		Provisioned:  u.Provisioned,
 	}
+	if u.DeletedAt != nil {
+		out.DeletedAt = timestamppb.New(*u.DeletedAt)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

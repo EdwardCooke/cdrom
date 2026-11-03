@@ -1668,13 +1668,26 @@ type IDPAuthCode struct {
 // the user's role names (e.g. "admin", "user"); they are stamped onto the
 // user's tokens so the API can enforce role-based access.
 //
+// Lifecycle (F-28.3): a user is active (full access), deactivated
+// (Active=false — temporarily off, credentials suspended but retained), or
+// deprovisioned (DeletedAt tombstone — gone; credentials destroyed, identity
+// and history retained). Deprovisioning is a SOFT delete: the row is kept so
+// every historical actor reference (audit, approvals, triggers) stays
+// resolvable, and re-provisioning reactivates the same stable-ID row.
+//
+// Provenance (F-28.3): Provisioned marks an externally-sourced record (SCIM
+// push or JIT on first OIDC login) versus a locally registered one; it drives
+// the authentication-channel lockdown (provisioned users sign in via SSO
+// only). ExternalID is the corporate directory's stable identifier (e.g. the
+// Azure object ID), the re-provisioning match key.
+//
 // The user directory is stored in the database (not on the IdP's local
 // filesystem) so multiple IdP replicas share the same users and can run
 // behind a load balancer.
 //
 // The model uses a numeric, database-assigned primary key (auto-increment),
 // like the other entities. It does not embed gorm.Model (so there is no
-// soft-delete column); the timestamps are declared explicitly instead.
+// soft-delete column); the tombstone is declared explicitly instead.
 type IDPUser struct {
 	// ID is the user's stable identifier (the token's subject); it is the
 	// table's primary key, assigned by the database (auto-increment).
@@ -1685,13 +1698,42 @@ type IDPUser struct {
 	Email string `gorm:"uniqueIndex;not null" json:"email"`
 	// PasswordHash is the Argon2ID encoding of the user's password (pepper
 	// prepended to the KDF input; the salt is embedded in the encoding). It is
-	// never returned to the UI; the IdP uses it only to verify logins.
+	// never returned to the UI; the IdP uses it only to verify logins. It is
+	// zeroed on deprovisioning (and on reactivation), so a tombstoned record
+	// cannot be revived with leftover credentials.
 	PasswordHash string `gorm:"column:password_hash;type:text" json:"-"`
 	// Roles are the user's role names, serialized to a JSON document in a
 	// text column (portable across SQLite and PostgreSQL).
 	Roles     []string  `gorm:"type:text;serializer:json" json:"roles"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// Active is the user's activated state (F-28.3): false means deactivated
+	// ("on leave") — authentication is refused while the row (and its
+	// credentials) is retained. Newly created users are active.
+	Active bool `gorm:"not null;default:true" json:"active"`
+	// DeletedAt is the deprovisioning tombstone (F-28.3): once set the user
+	// is "gone" — hidden from regular listings, unable to authenticate, and
+	// reservable for re-provisioning (which clears the tombstone and reuses
+	// the same ID). Explicit (not gorm.Model's soft delete) so the entity
+	// controls its own lifecycle.
+	DeletedAt *time.Time `gorm:"column:deleted_at;index" json:"deleted_at,omitempty"`
+	// ExternalID is the corporate directory's stable identifier for the user
+	// (e.g. the Azure object ID) carried by SCIM provisioning (F-28.3/F-28.4);
+	// it is the re-provisioning match key. Empty for locally registered users.
+	ExternalID string `gorm:"column:external_id;index" json:"external_id,omitempty"`
+	// Provisioned marks an externally-sourced record (SCIM push or JIT on
+	// first OIDC login) versus a locally registered one (F-28.3). Drives the
+	// authentication-channel lockdown: provisioned users sign in via SSO only.
+	Provisioned bool `gorm:"not null;default:false" json:"provisioned"`
+	// TemporaryPasswordHash is the Argon2ID encoding of a SHORT-LIVED password
+	// (F-28.3 break-glass): unlike PasswordHash it carries an expiry and is
+	// evaluated only inside its window. Distinct from the permanent hash so a
+	// temporal credential never masks (or leaks into) the user's standing
+	// one.
+	TemporaryPasswordHash string `gorm:"column:temporary_password_hash;type:text" json:"-"`
+	// TemporaryPasswordValidUntil bounds the temporal password's usability
+	// (F-28.3); nil means there is no temporal credential.
+	TemporaryPasswordValidUntil *time.Time `gorm:"column:temporary_password_valid_until" json:"temporary_password_valid_until,omitempty"`
 	// APIKeyFailedCount is the number of consecutive failed API-key
 	// verification attempts for this user (F-25). It is reset to zero on a
 	// successful verification and is separate from any password-attempt

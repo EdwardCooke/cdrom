@@ -282,12 +282,39 @@ service Database {
   // hash, and roles) here so multiple IdP replicas share the same user
   // directory. Passwords are stored only as a salted hash; the plaintext is
   // never persisted. CreateUser is idempotent on email (it upserts the
-  // profile and roles); GetUser/UpdateUser/DeleteUser key on the user id.
+  // profile and roles); GetUser/UpdateUser key on the user id.
+  //
+  // Lifecycle (F-28.3): DeleteIDPUser DEPROVISIONS (soft-deletes): the row
+  // is retained (tombstone, active=false, password hash zeroed) so
+  // historical actor references stay resolvable; re-provisioning reactivates
+  // the same stable-id row. ActivateIDPUser/DeactivateIDPUser move the user
+  // between the active and deactivated states ("on leave"); ReactivateIDPUser
+  // lifts the tombstone (rehire). ListIDPUsers excludes tombstoned rows
+  // unless include_deleted is set.
   rpc CreateUser(CreateIDPUserRequest) returns (IDPUser);
   rpc GetIDPUser(GetIDPUserRequest) returns (IDPUser);
   rpc ListIDPUsers(ListIDPUsersRequest) returns (ListIDPUsersResponse);
   rpc UpdateIDPUser(UpdateIDPUserRequest) returns (IDPUser);
-  rpc DeleteIDPUser(DeleteIDPUserRequest) returns (google.protobuf.Empty);
+  // DeleteIDPUser deprovisions a user by id (F-28.3 soft delete): it sets
+  // the tombstone, marks the user inactive, and zeroes the password hash so
+  // no leftover credential can revive the record. The row (identity, roles,
+  // history) is retained. A missing user returns NotFound; repeating the
+  // delete is idempotent.
+  rpc DeleteIDPUser(DeleteIDPUserRequest) returns (IDPUser);
+  // ActivateIDPUser activates a deactivated user (active=true), restoring
+  // authentication eligibility (credentials are untouched). A missing user
+  // returns NotFound; activating an already-active user is idempotent.
+  rpc ActivateIDPUser(UserStateChangeRequest) returns (IDPUser);
+  // DeactivateIDPUser deactivates an active user ("on leave"): active=false,
+  // the row and its credentials are retained. A missing user returns
+  // NotFound; deactivating an already-deactivated user is idempotent.
+  rpc DeactivateIDPUser(UserStateChangeRequest) returns (IDPUser);
+  // ReactivateIDPUser clears a deprovisioned user's tombstone (rehire):
+  // active=true, the password hash is zeroed (fresh credentials must be
+  // reinstated by the rightful source), and the same stable id and all
+  // history are preserved. A missing user returns NotFound; reactivating a
+  // non-tombstoned user is idempotent (it merely activates).
+  rpc ReactivateIDPUser(UserStateChangeRequest) returns (IDPUser);
 
   // IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
   // metadata, and the owner's lockout state) here so multiple IdP replicas
@@ -3120,6 +3147,31 @@ message IDPUser {
   // api_key_locked_until is when the user's API-key lockout expires (F-25);
   // unset means the user is not locked out.
   google.protobuf.Timestamp api_key_locked_until = 9;
+  // active is the user's activated state (F-28.3): false means deactivated
+  // ("on leave" — authentication refused, credentials retained). Default
+  // true.
+  bool active = 10;
+  // deleted_at is the deprovisioning tombstone (F-28.3 soft delete); set
+  // means the user is deprovisioned (hidden from regular listings, unable to
+  // authenticate). Unset means the user is not tombstoned.
+  google.protobuf.Timestamp deleted_at = 11;
+  // external_id is the corporate directory's stable identifier for the user
+  // (e.g. the Azure object ID) carried by SCIM provisioning (F-28.3/F-28.4);
+  // it is the re-provisioning match key. Empty for locally registered users.
+  string external_id = 12;
+  // provisioned marks an externally-sourced record (SCIM push or JIT on
+  // first OIDC login) versus a locally registered one (F-28.3); it drives
+  // the authentication-channel lockdown (provisioned users sign in via SSO
+  // only). Default false.
+  bool provisioned = 13;
+  // temporary_password_hash is the Argon2ID encoding of a SHORT-LIVED
+  // password (F-28.3 break-glass); distinct from password_hash so a temporal
+  // credential never masks (or leaks into) the user's standing one. Never
+  // returned to the UI.
+  string temporary_password_hash = 14;
+  // temporary_password_valid_until bounds the temporal password's usability
+  // (F-28.3 break-glass); unset means there is no temporal credential.
+  google.protobuf.Timestamp temporary_password_valid_until = 15;
 }
 
 // CreateIDPUserRequest registers (or updates) a user. Email is the unique
@@ -3133,9 +3185,18 @@ message GetIDPUserRequest {
   // id is the user's identifier; when empty, email is used.
   string id = 1;
   string email = 2;
+  // include_deleted, when true, returns a tombstoned (deprovisioned) user
+  // (flagged via deleted_at); by default such users are reported NotFound
+  // (F-28.3).
+  bool include_deleted = 3;
 }
 
-message ListIDPUsersRequest {}
+// ListIDPUsersRequest lists registered users. When include_deleted is true,
+// tombstoned (deprovisioned) users are included (flagged via deleted_at);
+// by default they are excluded.
+message ListIDPUsersRequest {
+  bool include_deleted = 1;
+}
 
 message ListIDPUsersResponse {
   repeated IDPUser users = 1;
@@ -3149,6 +3210,12 @@ message UpdateIDPUserRequest {
 }
 
 message DeleteIDPUserRequest {
+  string id = 1;
+}
+
+// UserStateChangeRequest addresses a user by id for the lifecycle state RPCs
+// (ActivateIDPUser, DeactivateIDPUser, ReactivateIDPUser).
+message UserStateChangeRequest {
   string id = 1;
 }
 

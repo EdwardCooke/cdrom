@@ -130,6 +130,10 @@ func (s *MemoryUserStore) Create(_ context.Context, user *User) (*User, error) {
 	if user.CreatedAt.IsZero() {
 		user.CreatedAt = time.Now()
 	}
+	// Born active and non-tombstoned (F-28.3): the tombstone and deactivation
+	// belong solely to the lifecycle verbs.
+	user.Active = true
+	user.DeletedAt = nil
 	stored := copyUser(user)
 	s.byID[stored.ID] = stored
 	s.byMail[key] = stored
@@ -137,35 +141,40 @@ func (s *MemoryUserStore) Create(_ context.Context, user *User) (*User, error) {
 }
 
 // GetByEmail returns the user with the given email (case-insensitive). A
-// missing user returns a NotFound error.
-func (s *MemoryUserStore) GetByEmail(_ context.Context, email string) (*User, error) {
+// missing user — or a tombstoned one when includeDeleted is false — returns
+// a NotFound error.
+func (s *MemoryUserStore) GetByEmail(_ context.Context, email string, includeDeleted bool) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, ok := s.byMail[strings.ToLower(email)]
-	if !ok {
+	if !ok || (!includeDeleted && u.DeletedAt != nil) {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
 	return copyUser(u), nil
 }
 
-// GetByID returns the user with the given ID. A missing user returns a
-// NotFound error.
-func (s *MemoryUserStore) GetByID(_ context.Context, id string) (*User, error) {
+// GetByID returns the user with the given ID. A missing user — or a
+// tombstoned one when includeDeleted is false — returns a NotFound error.
+func (s *MemoryUserStore) GetByID(_ context.Context, id string, includeDeleted bool) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, ok := s.byID[id]
-	if !ok {
+	if !ok || (!includeDeleted && u.DeletedAt != nil) {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
 	return copyUser(u), nil
 }
 
-// List returns all registered users, ordered by ID.
-func (s *MemoryUserStore) List(_ context.Context) ([]*User, error) {
+// List returns registered users, ordered by ID. When includeDeleted is false
+// (the default) tombstoned users are excluded (F-28.3).
+func (s *MemoryUserStore) List(_ context.Context, includeDeleted bool) ([]*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	users := make([]*User, 0, len(s.byID))
 	for _, u := range s.byID {
+		if !includeDeleted && u.DeletedAt != nil {
+			continue
+		}
 		users = append(users, copyUser(u))
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].ID < users[j].ID })
@@ -173,12 +182,13 @@ func (s *MemoryUserStore) List(_ context.Context) ([]*User, error) {
 }
 
 // Update updates a user's profile and/or roles, keyed by ID. A missing user
-// returns a NotFound error.
+// — or a tombstoned one (revival is exclusively Reactivate's job) — returns
+// a NotFound error.
 func (s *MemoryUserStore) Update(_ context.Context, user *User) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	existing, ok := s.byID[user.ID]
-	if !ok {
+	if !ok || existing.DeletedAt != nil {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
 	if user.FirstName != "" {
@@ -201,17 +211,63 @@ func (s *MemoryUserStore) Update(_ context.Context, user *User) (*User, error) {
 	return copyUser(existing), nil
 }
 
-// Delete removes a user by ID. A missing user returns a NotFound error.
-func (s *MemoryUserStore) Delete(_ context.Context, id string) error {
+// SoftDelete deprovisions a user by ID (F-28.3): it sets the tombstone,
+// marks the user inactive, and zeroes the password hash so no leftover
+// credential can revive the record. The row (identity, roles, history) is
+// retained. A missing user returns a NotFound error; repeating the delete is
+// idempotent.
+func (s *MemoryUserStore) SoftDelete(_ context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, ok := s.byID[id]
 	if !ok {
 		return status.Error(codes.NotFound, "user not found")
 	}
-	delete(s.byID, id)
-	delete(s.byMail, strings.ToLower(u.Email))
+	if u.DeletedAt == nil {
+		now := time.Now()
+		u.DeletedAt = &now
+		u.Active = false
+		u.PasswordHash = ""
+	}
 	return nil
+}
+
+// setState applies a lifecycle transition to a user by ID (missing user is
+// NotFound).
+func (s *MemoryUserStore) setState(id string, prepare func(*User)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[id]
+	if !ok {
+		return status.Error(codes.NotFound, "user not found")
+	}
+	prepare(u)
+	return nil
+}
+
+// Activate activates a deactivated user (active=true), restoring
+// authentication eligibility; credentials are untouched (F-28.3). Idempotent.
+func (s *MemoryUserStore) Activate(ctx context.Context, id string) error {
+	return s.setState(id, func(u *User) { u.Active = true })
+}
+
+// Deactivate deactivates an active user ("on leave"): active=false, the row
+// and its credentials are retained (F-28.3). Idempotent.
+func (s *MemoryUserStore) Deactivate(ctx context.Context, id string) error {
+	return s.setState(id, func(u *User) { u.Active = false })
+}
+
+// Reactivate clears a deprovisioned user's tombstone (rehire): active=true,
+// the password hash is zeroed (fresh credentials must be reinstated by the
+// rightful source), and the same stable ID and all history are preserved
+// (F-28.3). Reactivating a non-tombstoned user is idempotent (it merely
+// activates).
+func (s *MemoryUserStore) Reactivate(ctx context.Context, id string) error {
+	return s.setState(id, func(u *User) {
+		u.DeletedAt = nil
+		u.Active = true
+		u.PasswordHash = ""
+	})
 }
 
 // newUserID returns a random 16-hex-character user identifier (the token's
@@ -224,12 +280,20 @@ func newUserID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// copyUser returns a shallow copy of user (with a copied Roles slice) so
-// callers cannot mutate the store's state.
+// copyUser returns a copy of user (with a copied Roles slice and cloned
+// lifecycle-pointer fields) so callers cannot mutate the store's state.
 func copyUser(u *User) *User {
 	out := *u
 	if u.Roles != nil {
 		out.Roles = append([]string(nil), u.Roles...)
+	}
+	if u.DeletedAt != nil {
+		t := *u.DeletedAt
+		out.DeletedAt = &t
+	}
+	if u.TempPasswordValidUntil != nil {
+		t := *u.TempPasswordValidUntil
+		out.TempPasswordValidUntil = &t
 	}
 	return &out
 }
@@ -239,8 +303,8 @@ func copyUser(u *User) *User {
 // share state across processes, so it does not support multiple IdP replicas.
 // It holds a UserStore (users) so it can resolve a key's owner by email.
 type MemoryAPIKeyStore struct {
-	mu    sync.Mutex
-	keys  map[string]*APIKey
+	mu   sync.Mutex
+	keys map[string]*APIKey
 	// lockout tracks a user's API-key lockout state, keyed by user ID.
 	lockout map[string]*apiKeyLockout
 	users   UserStore
@@ -287,7 +351,7 @@ func (s *MemoryAPIKeyStore) Create(ctx context.Context, ownerEmail, description 
 	if !expiresAt.IsZero() && expiresAt.After(time.Now().Add(maxAPIKeyLifetime)) {
 		return nil, "", status.Error(codes.InvalidArgument, "expiration is more than one year in the future")
 	}
-	owner, err := s.users.GetByEmail(ctx, ownerEmail)
+	owner, err := s.users.GetByEmail(ctx, ownerEmail, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -390,7 +454,7 @@ func (s *MemoryAPIKeyStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *MemoryAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper string, maxFailures int, lockoutDuration time.Duration) (*APIKey, *User, error) {
-	owner, err := s.users.GetByEmail(ctx, username)
+	owner, err := s.users.GetByEmail(ctx, username, true)
 	if err != nil {
 		return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
@@ -438,7 +502,7 @@ func (s *MemoryAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper
 }
 
 func (s *MemoryAPIKeyStore) ResetLockout(ctx context.Context, userID string) error {
-	if _, err := s.users.GetByID(ctx, userID); err != nil {
+	if _, err := s.users.GetByID(ctx, userID, true); err != nil {
 		return err
 	}
 	s.mu.Lock()

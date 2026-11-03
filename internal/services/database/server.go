@@ -3181,64 +3181,81 @@ func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCo
 // IdP users
 // ---------------------------------------------------------------------------
 
-// CreateUser registers (or updates) a user. Email is the unique key: when a
+// createUser registers (or updates) a user. Email is the unique key: when a
 // user with the email already exists the profile and roles are updated (and
 // the password hash replaced when a new one is supplied). A new user is given
 // a stable string ID (the token's subject). The password is stored only as
 // the supplied hash; the plaintext is never persisted by the database service.
-func (s *Server) CreateUser(ctx context.Context, req *dbpb.CreateIDPUserRequest) (*dbpb.IDPUser, error) {
-	u := req.GetUser()
-	if u == nil || u.GetEmail() == "" {
-		return nil, status.Error(codes.InvalidArgument, "email is required")
-	}
+//
+// Lifecycle (F-28.3): a NEW user is born active and non-tombstoned; the
+// tombstone and deactivation belong solely to the lifecycle RPCs
+// (DeleteIDPUser / DeactivateIDPUser / ReactivateIDPUser), so registering
+// can never resurrect a deprovisioned identity.
+func (s *Server) createUser(ctx context.Context, u *dbpb.IDPUser) (*dbpb.IDPUser, error) {
 	var existing models.IDPUser
 	err := s.db.WithContext(ctx).Where("email = ?", u.GetEmail()).First(&existing).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, grpcErr(err)
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
 		// New user: the database assigns the ID (auto-increment primary key).
 		user := &models.IDPUser{
-			FirstName:    u.GetFirstName(),
-			LastName:     u.GetLastName(),
-			Email:        u.GetEmail(),
-			PasswordHash: u.GetPasswordHash(),
-			Roles:        nonNilRoles(u.GetRoles()),
-			CreatedAt:    time.Now(),
-			UpdatedAt:    time.Now(),
+			FirstName:                   u.GetFirstName(),
+			LastName:                    u.GetLastName(),
+			Email:                       u.GetEmail(),
+			PasswordHash:                u.GetPasswordHash(),
+			Roles:                       nonNilRoles(u.GetRoles()),
+			Active:                      true,
+			ExternalID:                  u.GetExternalId(),
+			Provisioned:                 u.GetProvisioned(),
+			TemporaryPasswordHash:       u.GetTemporaryPasswordHash(),
+			TemporaryPasswordValidUntil: tsOrNil(u.GetTemporaryPasswordValidUntil()),
+			CreatedAt:                   time.Now(),
+			UpdatedAt:                   time.Now(),
 		}
 		if err := s.db.WithContext(ctx).Create(user).Error; err != nil {
 			return nil, grpcErr(err)
 		}
 		return toProtoIDPUser(user), nil
-	}
-	// Existing user: update the profile and roles; replace the password hash
-	// only when a new one is supplied.
-	existing.FirstName = u.GetFirstName()
-	existing.LastName = u.GetLastName()
-	existing.Roles = nonNilRoles(u.GetRoles())
-	if u.GetPasswordHash() != "" {
-		existing.PasswordHash = u.GetPasswordHash()
-	}
-	existing.UpdatedAt = time.Now()
-	if err := s.db.WithContext(ctx).Save(&existing).Error; err != nil {
+	case err != nil:
 		return nil, grpcErr(err)
+	default:
+		// Existing user: update the profile and roles; replace the password
+		// hash only when a new one is supplied.
+		existing.FirstName = u.GetFirstName()
+		existing.LastName = u.GetLastName()
+		existing.Roles = nonNilRoles(u.GetRoles())
+		if u.GetPasswordHash() != "" {
+			existing.PasswordHash = u.GetPasswordHash()
+		}
+		existing.UpdatedAt = time.Now()
+		if err := s.db.WithContext(ctx).Save(&existing).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+		return toProtoIDPUser(&existing), nil
 	}
-	return toProtoIDPUser(&existing), nil
 }
 
-// GetIDPUser returns a user by ID, or by email when the ID is empty. A
-// missing user returns NotFound.
-func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*dbpb.IDPUser, error) {
+// CreateUser registers (or updates) a user (see createUser).
+func (s *Server) CreateUser(ctx context.Context, req *dbpb.CreateIDPUserRequest) (*dbpb.IDPUser, error) {
+	u := req.GetUser()
+	if u == nil || u.GetEmail() == "" {
+		return nil, status.Error(codes.InvalidArgument, "email is required")
+	}
+	return s.createUser(ctx, u)
+}
+
+// getUser loads a user by ID, or by email when the ID is empty. When
+// includeDeleted is false a tombstoned (deprovisioned) user is treated as
+// NotFound (F-28.3). A missing user returns NotFound.
+func (s *Server) getUser(ctx context.Context, idStr, email string, includeDeleted bool) (*models.IDPUser, error) {
 	query := s.db.WithContext(ctx).Model(&models.IDPUser{})
-	if req.GetId() != "" {
-		id, err := parseUserID(req.GetId())
+	if idStr != "" {
+		id, err := parseUserID(idStr)
 		if err != nil {
 			return nil, err
 		}
 		query = query.Where("id = ?", id)
-	} else if req.GetEmail() != "" {
-		query = query.Where("email = ?", req.GetEmail())
+	} else if email != "" {
+		query = query.Where("email = ?", email)
 	} else {
 		return nil, status.Error(codes.InvalidArgument, "id or email is required")
 	}
@@ -3249,13 +3266,32 @@ func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*
 		}
 		return nil, grpcErr(err)
 	}
-	return toProtoIDPUser(&user), nil
+	if !includeDeleted && user.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+	return &user, nil
 }
 
-// ListIDPUsers returns all registered users, ordered by ID.
-func (s *Server) ListIDPUsers(ctx context.Context, _ *dbpb.ListIDPUsersRequest) (*dbpb.ListIDPUsersResponse, error) {
+// GetIDPUser returns a user by ID, or by email when the ID is empty. A
+// missing user returns NotFound. Tombstoned (deprovisioned) users are
+// reported as NotFound unless include_deleted is set (F-28.3).
+func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*dbpb.IDPUser, error) {
+	user, err := s.getUser(ctx, req.GetId(), req.GetEmail(), req.GetIncludeDeleted())
+	if err != nil {
+		return nil, err
+	}
+	return toProtoIDPUser(user), nil
+}
+
+// ListIDPUsers returns all registered users, ordered by ID. Tombstoned
+// (deprovisioned) users are excluded unless include_deleted is set (F-28.3).
+func (s *Server) ListIDPUsers(ctx context.Context, req *dbpb.ListIDPUsersRequest) (*dbpb.ListIDPUsersResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.IDPUser{})
+	if !req.GetIncludeDeleted() {
+		query = query.Where("deleted_at IS NULL")
+	}
 	var users []models.IDPUser
-	if err := s.db.WithContext(ctx).Order("id").Find(&users).Error; err != nil {
+	if err := query.Order("id").Find(&users).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	response := &dbpb.ListIDPUsersResponse{}
@@ -3265,9 +3301,17 @@ func (s *Server) ListIDPUsers(ctx context.Context, _ *dbpb.ListIDPUsersRequest) 
 	return response, nil
 }
 
-// UpdateIDPUser updates a user's profile and/or roles. Only the fields set on
-// the request's user are changed; an empty password_hash leaves the existing
-// password untouched. A missing user returns NotFound.
+// UpdateIDPUser updates a user's PROFILE fields. Supplied-value semantics
+// (matching the historic behaviour): a non-empty field is applied; an empty
+// one leaves the current value untouched. A tombstoned user (F-28.3) is
+// reported NotFound — revival is exclusively ReactivateIDPUser's job.
+//
+// Ownership of the lifecycle fields (F-28.3): `active` and the tombstone
+// belong to the state RPCs (Activate/Deactivate/Delete/Reactivate),
+// `provisioned` is settled at birth (sticky through deprovisioning), and the
+// temporal-credential pair is written by the break-glass coinage and the
+// hygiene sweep. None of them is editable here — proto3's omitted-means-zero
+// would otherwise let a routine profile update silently flip them.
 func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserRequest) (*dbpb.IDPUser, error) {
 	u := req.GetUser()
 	if u == nil || u.GetId() == "" {
@@ -3284,6 +3328,9 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 		}
 		return nil, grpcErr(err)
 	}
+	if user.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
 	if u.GetFirstName() != "" {
 		user.FirstName = u.GetFirstName()
 	}
@@ -3299,6 +3346,9 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 	if u.GetPasswordHash() != "" {
 		user.PasswordHash = u.GetPasswordHash()
 	}
+	if ext := u.GetExternalId(); ext != "" {
+		user.ExternalID = ext
+	}
 	user.UpdatedAt = time.Now()
 	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
 		return nil, grpcErr(err)
@@ -3306,8 +3356,13 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 	return toProtoIDPUser(&user), nil
 }
 
-// DeleteIDPUser removes a user by ID. A missing user returns NotFound.
-func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserRequest) (*emptypb.Empty, error) {
+// DeleteIDPUser deprovisions a user by ID (F-28.3 soft delete): it sets the
+// tombstone, marks the user inactive, and zeroes the password hash so no
+// leftover credential can revive the record. The row — identity, roles,
+// history — is retained so every historical actor reference stays resolvable,
+// and re-provisioning reactivates the same stable-id row. A missing user
+// returns NotFound; repeating the delete is idempotent.
+func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserRequest) (*dbpb.IDPUser, error) {
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
@@ -3322,10 +3377,85 @@ func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserReque
 		}
 		return nil, grpcErr(err)
 	}
-	if err := s.db.WithContext(ctx).Delete(&user).Error; err != nil {
+	// Idempotent: an already-deprovisioned user is returned unchanged.
+	if user.DeletedAt != nil {
+		return toProtoIDPUser(&user), nil
+	}
+	now := time.Now()
+	user.DeletedAt = &now
+	user.Active = false
+	user.PasswordHash = ""
+	user.UpdatedAt = now
+	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	return &emptypb.Empty{}, nil
+	return toProtoIDPUser(&user), nil
+}
+
+// setUserState applies a lifecycle transition to a user by ID (missing user
+// is NotFound) and saves it. The caller prepares the desired state on user.
+func (s *Server) setUserState(ctx context.Context, id uint, prepare func(*models.IDPUser)) (*dbpb.IDPUser, error) {
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	prepare(&user)
+	user.UpdatedAt = time.Now()
+	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPUser(&user), nil
+}
+
+// ActivateIDPUser activates a deactivated user (active=true), restoring
+// authentication eligibility; credentials are untouched (F-28.3). Activating
+// an already-active user is idempotent.
+func (s *Server) ActivateIDPUser(ctx context.Context, req *dbpb.UserStateChangeRequest) (*dbpb.IDPUser, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseUserID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return s.setUserState(ctx, id, func(user *models.IDPUser) { user.Active = true })
+}
+
+// DeactivateIDPUser deactivates an active user ("on leave"): active=false,
+// the row and its credentials are retained (F-28.3). Deactivating an
+// already-deactivated user is idempotent.
+func (s *Server) DeactivateIDPUser(ctx context.Context, req *dbpb.UserStateChangeRequest) (*dbpb.IDPUser, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseUserID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return s.setUserState(ctx, id, func(user *models.IDPUser) { user.Active = false })
+}
+
+// ReactivateIDPUser clears a deprovisioned user's tombstone (rehire):
+// active=true, the password hash is zeroed (fresh credentials must be
+// reinstated by the rightful source), and the same stable ID and all history
+// are preserved (F-28.3). Reactivating a non-tombstoned user is idempotent
+// (it merely activates).
+func (s *Server) ReactivateIDPUser(ctx context.Context, req *dbpb.UserStateChangeRequest) (*dbpb.IDPUser, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseUserID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	return s.setUserState(ctx, id, func(user *models.IDPUser) {
+		user.DeletedAt = nil
+		user.Active = true
+		user.PasswordHash = ""
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -6344,19 +6474,39 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 
 func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
 	out := &dbpb.IDPUser{
-		Id:                strconv.FormatUint(uint64(user.ID), 10),
-		FirstName:         user.FirstName,
-		LastName:          user.LastName,
-		Email:             user.Email,
-		PasswordHash:      user.PasswordHash,
-		Roles:             nonNilRoles(user.Roles),
-		CreatedAt:         timestamppb.New(user.CreatedAt),
-		ApiKeyFailedCount: int32(user.APIKeyFailedCount),
+		Id:                    strconv.FormatUint(uint64(user.ID), 10),
+		FirstName:             user.FirstName,
+		LastName:              user.LastName,
+		Email:                 user.Email,
+		PasswordHash:          user.PasswordHash,
+		Roles:                 nonNilRoles(user.Roles),
+		CreatedAt:             timestamppb.New(user.CreatedAt),
+		ApiKeyFailedCount:     int32(user.APIKeyFailedCount),
+		Active:                user.Active,
+		ExternalId:            user.ExternalID,
+		Provisioned:           user.Provisioned,
+		TemporaryPasswordHash: user.TemporaryPasswordHash,
 	}
 	if user.APIKeyLockedUntil != nil {
 		out.ApiKeyLockedUntil = timestamppb.New(*user.APIKeyLockedUntil)
 	}
+	if user.DeletedAt != nil {
+		out.DeletedAt = timestamppb.New(*user.DeletedAt)
+	}
+	if user.TemporaryPasswordValidUntil != nil {
+		out.TemporaryPasswordValidUntil = timestamppb.New(*user.TemporaryPasswordValidUntil)
+	}
 	return out
+}
+
+// tsOrNil converts a protobuf timestamp to a *time.Time (nil when absent),
+// keeping "unset" representable on the wire for nullable instants.
+func tsOrNil(ts *timestamppb.Timestamp) *time.Time {
+	if ts == nil {
+		return nil
+	}
+	t := ts.AsTime()
+	return &t
 }
 
 // toProtoIDPAPIKey renders an API key as its Database-service form. The key

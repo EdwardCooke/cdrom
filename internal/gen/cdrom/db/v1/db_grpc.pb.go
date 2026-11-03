@@ -80,6 +80,9 @@ const (
 	Database_ListIDPUsers_FullMethodName                   = "/cdrom.db.v1.Database/ListIDPUsers"
 	Database_UpdateIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/UpdateIDPUser"
 	Database_DeleteIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/DeleteIDPUser"
+	Database_ActivateIDPUser_FullMethodName                = "/cdrom.db.v1.Database/ActivateIDPUser"
+	Database_DeactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/DeactivateIDPUser"
+	Database_ReactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/ReactivateIDPUser"
 	Database_CreateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/CreateAPIKey"
 	Database_GetAPIKey_FullMethodName                      = "/cdrom.db.v1.Database/GetAPIKey"
 	Database_ListAPIKeys_FullMethodName                    = "/cdrom.db.v1.Database/ListAPIKeys"
@@ -446,12 +449,39 @@ type DatabaseClient interface {
 	// hash, and roles) here so multiple IdP replicas share the same user
 	// directory. Passwords are stored only as a salted hash; the plaintext is
 	// never persisted. CreateUser is idempotent on email (it upserts the
-	// profile and roles); GetUser/UpdateUser/DeleteUser key on the user id.
+	// profile and roles); GetUser/UpdateUser key on the user id.
+	//
+	// Lifecycle (F-28.3): DeleteIDPUser DEPROVISIONS (soft-deletes): the row
+	// is retained (tombstone, active=false, password hash zeroed) so
+	// historical actor references stay resolvable; re-provisioning reactivates
+	// the same stable-id row. ActivateIDPUser/DeactivateIDPUser move the user
+	// between the active and deactivated states ("on leave"); ReactivateIDPUser
+	// lifts the tombstone (rehire). ListIDPUsers excludes tombstoned rows
+	// unless include_deleted is set.
 	CreateUser(ctx context.Context, in *CreateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	GetIDPUser(ctx context.Context, in *GetIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	ListIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error)
 	UpdateIDPUser(ctx context.Context, in *UpdateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
-	DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// DeleteIDPUser deprovisions a user by id (F-28.3 soft delete): it sets
+	// the tombstone, marks the user inactive, and zeroes the password hash so
+	// no leftover credential can revive the record. The row (identity, roles,
+	// history) is retained. A missing user returns NotFound; repeating the
+	// delete is idempotent.
+	DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	// ActivateIDPUser activates a deactivated user (active=true), restoring
+	// authentication eligibility (credentials are untouched). A missing user
+	// returns NotFound; activating an already-active user is idempotent.
+	ActivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	// DeactivateIDPUser deactivates an active user ("on leave"): active=false,
+	// the row and its credentials are retained. A missing user returns
+	// NotFound; deactivating an already-deactivated user is idempotent.
+	DeactivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	// ReactivateIDPUser clears a deprovisioned user's tombstone (rehire):
+	// active=true, the password hash is zeroed (fresh credentials must be
+	// reinstated by the rightful source), and the same stable id and all
+	// history are preserved. A missing user returns NotFound; reactivating a
+	// non-tombstoned user is idempotent (it merely activates).
+	ReactivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	// IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
 	// metadata, and the owner's lockout state) here so multiple IdP replicas
 	// share it. The Database service stores the key hash opaquely and never
@@ -1532,10 +1562,40 @@ func (c *databaseClient) UpdateIDPUser(ctx context.Context, in *UpdateIDPUserReq
 	return out, nil
 }
 
-func (c *databaseClient) DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *databaseClient) DeleteIDPUser(ctx context.Context, in *DeleteIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
+	out := new(IDPUser)
 	err := c.cc.Invoke(ctx, Database_DeleteIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ActivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_ActivateIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeactivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_DeactivateIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReactivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_ReactivateIDPUser_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2770,12 +2830,39 @@ type DatabaseServer interface {
 	// hash, and roles) here so multiple IdP replicas share the same user
 	// directory. Passwords are stored only as a salted hash; the plaintext is
 	// never persisted. CreateUser is idempotent on email (it upserts the
-	// profile and roles); GetUser/UpdateUser/DeleteUser key on the user id.
+	// profile and roles); GetUser/UpdateUser key on the user id.
+	//
+	// Lifecycle (F-28.3): DeleteIDPUser DEPROVISIONS (soft-deletes): the row
+	// is retained (tombstone, active=false, password hash zeroed) so
+	// historical actor references stay resolvable; re-provisioning reactivates
+	// the same stable-id row. ActivateIDPUser/DeactivateIDPUser move the user
+	// between the active and deactivated states ("on leave"); ReactivateIDPUser
+	// lifts the tombstone (rehire). ListIDPUsers excludes tombstoned rows
+	// unless include_deleted is set.
 	CreateUser(context.Context, *CreateIDPUserRequest) (*IDPUser, error)
 	GetIDPUser(context.Context, *GetIDPUserRequest) (*IDPUser, error)
 	ListIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error)
 	UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error)
-	DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*emptypb.Empty, error)
+	// DeleteIDPUser deprovisions a user by id (F-28.3 soft delete): it sets
+	// the tombstone, marks the user inactive, and zeroes the password hash so
+	// no leftover credential can revive the record. The row (identity, roles,
+	// history) is retained. A missing user returns NotFound; repeating the
+	// delete is idempotent.
+	DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*IDPUser, error)
+	// ActivateIDPUser activates a deactivated user (active=true), restoring
+	// authentication eligibility (credentials are untouched). A missing user
+	// returns NotFound; activating an already-active user is idempotent.
+	ActivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error)
+	// DeactivateIDPUser deactivates an active user ("on leave"): active=false,
+	// the row and its credentials are retained. A missing user returns
+	// NotFound; deactivating an already-deactivated user is idempotent.
+	DeactivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error)
+	// ReactivateIDPUser clears a deprovisioned user's tombstone (rehire):
+	// active=true, the password hash is zeroed (fresh credentials must be
+	// reinstated by the rightful source), and the same stable id and all
+	// history are preserved. A missing user returns NotFound; reactivating a
+	// non-tombstoned user is idempotent (it merely activates).
+	ReactivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error)
 	// IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
 	// metadata, and the owner's lockout state) here so multiple IdP replicas
 	// share it. The Database service stores the key hash opaquely and never
@@ -3443,8 +3530,17 @@ func (UnimplementedDatabaseServer) ListIDPUsers(context.Context, *ListIDPUsersRe
 func (UnimplementedDatabaseServer) UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateIDPUser not implemented")
 }
-func (UnimplementedDatabaseServer) DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*emptypb.Empty, error) {
+func (UnimplementedDatabaseServer) DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*IDPUser, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) ActivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method ActivateIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) DeactivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeactivateIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) ReactivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReactivateIDPUser not implemented")
 }
 func (UnimplementedDatabaseServer) CreateAPIKey(context.Context, *CreateIDPAPIKeyRequest) (*IDPAPIKey, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateAPIKey not implemented")
@@ -4831,6 +4927,60 @@ func _Database_DeleteIDPUser_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).DeleteIDPUser(ctx, req.(*DeleteIDPUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ActivateIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UserStateChangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ActivateIDPUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ActivateIDPUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ActivateIDPUser(ctx, req.(*UserStateChangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeactivateIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UserStateChangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeactivateIDPUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeactivateIDPUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeactivateIDPUser(ctx, req.(*UserStateChangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReactivateIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UserStateChangeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReactivateIDPUser(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReactivateIDPUser_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReactivateIDPUser(ctx, req.(*UserStateChangeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6809,6 +6959,18 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteIDPUser",
 			Handler:    _Database_DeleteIDPUser_Handler,
+		},
+		{
+			MethodName: "ActivateIDPUser",
+			Handler:    _Database_ActivateIDPUser_Handler,
+		},
+		{
+			MethodName: "DeactivateIDPUser",
+			Handler:    _Database_DeactivateIDPUser_Handler,
+		},
+		{
+			MethodName: "ReactivateIDPUser",
+			Handler:    _Database_ReactivateIDPUser_Handler,
 		},
 		{
 			MethodName: "CreateAPIKey",
