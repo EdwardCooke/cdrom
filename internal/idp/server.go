@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"cdrom/internal/audit"
 	"cdrom/internal/config"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/metrics"
@@ -126,6 +128,19 @@ type Server struct {
 	// (F-28.2, Slice 3). Attached by cmd/idp when the SCIM surface is enabled;
 	// when nil the guarded surface denies every request (deny by default).
 	scimAuthorizer scimAuthorizer
+	// bgc coins break-glass admins (F-28.3, Slice 3). Attached by cmd/idp;
+	// when nil the /emergency/break-glass route denies every request.
+	bgc breakGlassCoiner
+	// bgUsers is the user store the break-glass HYGIENE SWEEP operates on
+	// (retiring expired credentials). May be nil (sweep is a no-op).
+	bgUsers UserStore
+	// bgRoots is the TRUSTED ROOT-CERTIFICATE pool the break-glass peer-chain
+	// check verifies presenters against (the CA bundle; nil when TLS is not
+	// configured — the route then denies uniformly).
+	bgRoots *x509.CertPool
+	// bgAuditor records break-glass invocations (F-15). May be nil (unit
+	// tests without an audit sink).
+	bgAuditor *audit.Recorder
 }
 
 // NewServer creates the IdP HTTP server over the given key manager and
@@ -165,6 +180,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /jwks", s.handleJWKS)
 	mux.HandleFunc("GET /auth", s.handleAuthorize)
 	mux.HandleFunc("POST /token", s.handleToken)
+	// Break-glass escape hatch (F-28.3, Slice 3): mounted unconditionally so
+	// the ROUTE always exists (predictable drill); the HANDLER enforces the
+	// method, the enablement toggle, and the mTLS peer-chain check —
+	// denying uniformly (403) at every rung, so no probe (wrong method,
+	// no cert, disabled toggle) observes a different answer. Mounted for
+	// ALL methods (not "POST …") precisely so the handler, not the mux,
+	// produces the denial.
+	mux.HandleFunc(breakGlassRoute, s.handleEmergencyBreakGlass)
 	if s.cfg.Scim.Enabled {
 		s.mountSCIM(mux)
 	}

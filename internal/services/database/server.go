@@ -3458,6 +3458,44 @@ func (s *Server) ReactivateIDPUser(ctx context.Context, req *dbpb.UserStateChang
 	})
 }
 
+// ExpireTemporaryPassword zeros a user's TEMPORAL (short-lived) credential
+// (F-28.3 break-glass hygiene): the hash and its validity window are cleared
+// WITHOUT touching the user's active state or standing password. A missing
+// user returns NotFound; expiring a user with no temporal credential is a
+// no-op. Map-based update so the empties actually persist (a struct Save
+// skips zero values, including the nil window pointer).
+func (s *Server) ExpireTemporaryPassword(ctx context.Context, req *dbpb.ExpireTemporaryPasswordRequest) (*dbpb.IDPUser, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseUserID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if user.TemporaryPasswordHash == "" && user.TemporaryPasswordValidUntil == nil {
+		// No temporal credential: nothing to expire.
+		return toProtoIDPUser(&user), nil
+	}
+	result := s.db.WithContext(ctx).Model(&user).Where("id = ?", user.ID).Updates(map[string]any{
+		"temporary_password_hash":        "",
+		"temporary_password_valid_until": nil, // write the NULL
+		"updated_at":                     time.Now(),
+	})
+	if result.Error != nil {
+		return nil, grpcErr(result.Error)
+	}
+	user.TemporaryPasswordHash = ""
+	user.TemporaryPasswordValidUntil = nil
+	return toProtoIDPUser(&user), nil
+}
+
 // ---------------------------------------------------------------------------
 // IdP API keys (F-25)
 // ---------------------------------------------------------------------------

@@ -192,7 +192,38 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 		}
 		return nil, status.Error(codes.PermissionDenied, "account is managed by the identity provider; sign in via SSO")
 	}
-	if !VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword()) {
+	// Credential match (F-28.3): the STANDING hash decides, PLUS a
+	// TEMPORAL (break-glass) password is accepted only INSIDE its window.
+	// Evaluation is CONSTANT-WORK: whichever hash(es) exist are ALWAYS
+	// verified (the wall clock only gates ACCEPTANCE, never WHETHER we
+	// verify), so a lapse contributes no observable timing difference.
+	temporalWindow := user.TempPasswordValidUntil != nil && time.Now().Before(*user.TempPasswordValidUntil)
+	var matched bool
+	switch {
+	case user.PasswordHash != "" && user.TempPasswordHash != "":
+		// Standing + temporal: accept EITHER (temporal only inside its
+		// window). Both are verified.
+		matched = VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword())
+		if !matched {
+			matched = temporalWindow && VerifyPassword(s.cfg.PasswordPepper, user.TempPasswordHash, req.GetPassword())
+		}
+	case user.PasswordHash != "":
+		matched = VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword())
+	default:
+		// Temporal-only (the break-glass shape): accept iff the presented
+		// password matches AND the window holds.
+		temporalMatches := VerifyPassword(s.cfg.PasswordPepper, user.TempPasswordHash, req.GetPassword())
+		matched = temporalWindow && temporalMatches
+		if temporalMatches && !temporalWindow {
+			// Lazy hygiene: the window LAPSED — void the credential now so
+			// the periodic sweep (the backstop) catches up promptly.
+			// Detached context: a cancelling client must not strand it.
+			if serr := s.users.ExpireTemporaryPassword(context.WithoutCancel(ctx), user.ID); serr != nil {
+				s.logger.Warn("idp: expire lapsed temporal password", "id", user.ID, "err", serr)
+			}
+		}
+	}
+	if !matched {
 		if s.metrics != nil {
 			s.metrics.RecordLogin("invalid_password")
 		}

@@ -215,6 +215,24 @@ db:
 #  #  group_role_mappings:
 #  #    administrators: admin
 #  #    developers: operator
+#
+#  # Break-glass escape hatch (F-28.3). ON BY DEFAULT: the IdP's HTTP
+#  # listener serves POST /emergency/break-glass, admitting ONLY presenters
+#  # of a CA-signed client certificate (mTLS — the API's client cert is the
+#  # intended one; the drill is a plain curl with --cert/--key). Each call
+#  # COINS an ephemeral, random-identity admin (breakglass-…@invalid) with a
+#  # TEMPORAL password that self-expires: the request's ttl_seconds
+#  # overrides default_ttl, clamped to max_ttl. Coinage is strictly additive
+#  # (never modifies an existing user) and capped at live_cap concurrent
+#  # live credentials (429 beyond it). Every invocation is audited with the
+#  # caller's certificate attributed; the password is shown exactly once.
+#  # Deployments with a trusted alternative recovery may set enabled: false.
+#  # Env: CDROM_IDP_BREAK_GLASS_ENABLED / _DEFAULT_TTL / _MAX_TTL / _LIVE_CAP.
+#  #break_glass:
+#  #  enabled: true
+#  #  default_ttl: 24h
+#  #  max_ttl: 168h
+#  #  live_cap: 3
 
 # gRPC address of the IdP's API-only surface (job-token minting and user
 # management). The API dials it (over mTLS when the tls section is set) to

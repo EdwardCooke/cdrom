@@ -315,6 +315,13 @@ service Database {
   // history are preserved. A missing user returns NotFound; reactivating a
   // non-tombstoned user is idempotent (it merely activates).
   rpc ReactivateIDPUser(UserStateChangeRequest) returns (IDPUser);
+  // ExpireTemporaryPassword zeros a user's TEMPORAL (short-lived) credential
+  // (F-28.3 break-glass hygiene): the hash and its validity window are
+  // cleared WITHOUT touching the user's active state or standing password.
+  // The IdP invokes it from its hygiene sweep (and lazily at login) once the
+  // window lapses. A missing user returns NotFound; expiring a user with no
+  // temporal credential is a no-op.
+  rpc ExpireTemporaryPassword(ExpireTemporaryPasswordRequest) returns (IDPUser);
 
   // IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
   // metadata, and the owner's lockout state) here so multiple IdP replicas
@@ -3216,6 +3223,12 @@ message DeleteIDPUserRequest {
 // UserStateChangeRequest addresses a user by id for the lifecycle state RPCs
 // (ActivateIDPUser, DeactivateIDPUser, ReactivateIDPUser).
 message UserStateChangeRequest {
+  string id = 1;
+}
+
+// ExpireTemporaryPasswordRequest addresses a user by id for the temporal-
+// credential expiry (F-28.3 break-glass hygiene).
+message ExpireTemporaryPasswordRequest {
   string id = 1;
 }
 

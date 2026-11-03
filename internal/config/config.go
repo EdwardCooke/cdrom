@@ -751,6 +751,68 @@ type IdPConfig struct {
 	// Scim configures the SCIM 2.0 user-provisioning surface (F-28.1). When
 	// Enabled is false (the default) the IdP serves no /scim/v2 routes.
 	Scim ScimConfig
+	// BreakGlassEnabled turns on the break-glass escape hatch (F-28.3): the
+	// mTLS-guarded POST /emergency/break-glass route on the IdP's HTTP
+	// listener that coins an ephemeral random-identity admin. DEFAULT TRUE —
+	// the hatch is the guarantee that an operator can get back in when
+	// SSO/SCIM is the broken link; deployments with a trusted alternative
+	// recovery may disable it.
+	BreakGlassEnabled bool
+	// BreakGlassDefaultTTL is the TEMPORAL password's lifetime when a
+	// break-glass invocation does not supply ttl_seconds (F-28.3). Zero
+	// (unset) resolves to the 24-hour default via EffectiveBreakGlassDefaultTTL.
+	BreakGlassDefaultTTL time.Duration
+	// BreakGlassMaxTTL is the CEILING on a break-glass temporal password's
+	// lifetime (F-28.3): a request's ttl_seconds is clamped to it. Zero
+	// (unset) resolves to the 7-day default via EffectiveBreakGlassMaxTTL.
+	BreakGlassMaxTTL time.Duration
+	// BreakGlassLiveCap bounds the POOL of LIVE (unexpired) break-glass
+	// admins (F-28.3, borrowing the F-28.2 key-pool shape): coinage beyond it
+	// is refused with 429 until some expire. Zero (unset) resolves to the
+	// default of 3 via EffectiveBreakGlassLiveCap.
+	BreakGlassLiveCap int
+}
+
+// DefaultBreakGlassEnabled is the break-glass hatch's default ON state
+// (F-28.3): the escape hatch is assumed present unless explicitly disabled.
+const DefaultBreakGlassEnabled = true
+
+// DefaultBreakGlassTTL is the default temporal-password lifetime (F-28.3).
+const DefaultBreakGlassTTL = 24 * time.Hour
+
+// MaxBreakGlassTTL is the default ceiling on a temporal-password lifetime
+// (F-28.3).
+const MaxBreakGlassTTL = 7 * 24 * time.Hour
+
+// DefaultBreakGlassLiveCap is the default bound on live break-glass admins
+// (F-28.3).
+const DefaultBreakGlassLiveCap = 3
+
+// EffectiveBreakGlassDefaultTTL resolves the default temporal-password
+// lifetime (zero/negative -> the 24-hour default).
+func (c IdPConfig) EffectiveBreakGlassDefaultTTL() time.Duration {
+	if c.BreakGlassDefaultTTL <= 0 {
+		return DefaultBreakGlassTTL
+	}
+	return c.BreakGlassDefaultTTL
+}
+
+// EffectiveBreakGlassMaxTTL resolves the temporal-password lifetime ceiling
+// (zero/negative -> the 7-day default).
+func (c IdPConfig) EffectiveBreakGlassMaxTTL() time.Duration {
+	if c.BreakGlassMaxTTL <= 0 {
+		return MaxBreakGlassTTL
+	}
+	return c.BreakGlassMaxTTL
+}
+
+// EffectiveBreakGlassLiveCap resolves the live-pool bound (<=0 -> the default
+// of 3).
+func (c IdPConfig) EffectiveBreakGlassLiveCap() int {
+	if c.BreakGlassLiveCap <= 0 {
+		return DefaultBreakGlassLiveCap
+	}
+	return c.BreakGlassLiveCap
 }
 
 // ScimConfig configures the SCIM 2.0 (RFC 7643/7644) service-provider
@@ -1022,6 +1084,13 @@ func LoadWithFile(file string) (*Config, error) {
 			// bound defaults to 100 and its public base is request-derived
 			// (unset).
 			Scim: ScimConfig{MaxPageSize: DefaultSCIMMaxPageSize},
+			// The break-glass escape hatch (F-28.3) is ENABLED by default:
+			// the temporal-password lifetime defaults to 24 hours, capped at
+			// 7 days, with a live-pool bound of 3.
+			BreakGlassEnabled:    DefaultBreakGlassEnabled,
+			BreakGlassDefaultTTL: DefaultBreakGlassTTL,
+			BreakGlassMaxTTL:     MaxBreakGlassTTL,
+			BreakGlassLiveCap:    DefaultBreakGlassLiveCap,
 		},
 		IdPGRPCAddress: DefaultIdPGRPCAddress,
 		GRPCAuth:       GRPCAuthConfig{},
@@ -1161,6 +1230,12 @@ type fileConfig struct {
 		PasswordPepper *string          `yaml:"password_pepper"`
 		ScimKeysPepper *string          `yaml:"scim_keys_pepper"`
 		Scim           *scimFileSection `yaml:"scim"`
+		BreakGlass     *struct {
+			Enabled    *bool   `yaml:"enabled"`
+			DefaultTTL *string `yaml:"default_ttl"`
+			MaxTTL     *string `yaml:"max_ttl"`
+			LiveCap    *int    `yaml:"live_cap"`
+		} `yaml:"break_glass"`
 	} `yaml:"idp"`
 	IdPGRPCAddress *string `yaml:"idp_grpc_address"`
 	GRPCAuth       *struct {
@@ -1423,6 +1498,28 @@ func applyFile(cfg *Config, path string) error {
 		if err := mergeSCIMConfigFromFile(&cfg.IdP.Scim, f.IdP.Scim); err != nil {
 			return err
 		}
+		if bg := f.IdP.BreakGlass; bg != nil {
+			if bg.Enabled != nil {
+				cfg.IdP.BreakGlassEnabled = *bg.Enabled
+			}
+			if bg.DefaultTTL != nil {
+				d, err := time.ParseDuration(*bg.DefaultTTL)
+				if err != nil {
+					return fmt.Errorf("config: parse idp.break_glass.default_ttl %q: %w", *bg.DefaultTTL, err)
+				}
+				cfg.IdP.BreakGlassDefaultTTL = d
+			}
+			if bg.MaxTTL != nil {
+				d, err := time.ParseDuration(*bg.MaxTTL)
+				if err != nil {
+					return fmt.Errorf("config: parse idp.break_glass.max_ttl %q: %w", *bg.MaxTTL, err)
+				}
+				cfg.IdP.BreakGlassMaxTTL = d
+			}
+			if bg.LiveCap != nil {
+				cfg.IdP.BreakGlassLiveCap = *bg.LiveCap
+			}
+		}
 	}
 	if f.IdPGRPCAddress != nil {
 		cfg.IdPGRPCAddress = *f.IdPGRPCAddress
@@ -1663,6 +1760,25 @@ func applyEnv(cfg *Config) {
 	}
 	cfg.IdP.PasswordPepper = envOr("CDROM_IDP_PASSWORD_PEPPER", cfg.IdP.PasswordPepper)
 	cfg.IdP.ScimKeysPepper = envOr("CDROM_IDP_SCIM_KEYS_PEPPER", cfg.IdP.ScimKeysPepper)
+	// Break-glass escape hatch (F-28.3).
+	if v := os.Getenv("CDROM_IDP_BREAK_GLASS_ENABLED"); v != "" {
+		cfg.IdP.BreakGlassEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("CDROM_IDP_BREAK_GLASS_DEFAULT_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.IdP.BreakGlassDefaultTTL = d
+		}
+	}
+	if v := os.Getenv("CDROM_IDP_BREAK_GLASS_MAX_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.IdP.BreakGlassMaxTTL = d
+		}
+	}
+	if v := os.Getenv("CDROM_IDP_BREAK_GLASS_LIVE_CAP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.IdP.BreakGlassLiveCap = n
+		}
+	}
 	// SCIM provisioning surface (F-28.1). CDROM_SCIM_GROUP_ROLE_MAPPINGS is a
 	// comma-separated list of "groupName=roleName" pairs.
 	if v := os.Getenv("CDROM_SCIM_ENABLED"); v != "" {

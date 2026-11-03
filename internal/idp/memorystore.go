@@ -270,6 +270,17 @@ func (s *MemoryUserStore) Reactivate(ctx context.Context, id string) error {
 	})
 }
 
+// ExpireTemporaryPassword zeros a user's TEMPORAL (short-lived) credential
+// (F-28.3 break-glass hygiene): the hash and its validity window are cleared
+// without touching the user's active state or standing password. A no-op when
+// the user has no temporal credential.
+func (s *MemoryUserStore) ExpireTemporaryPassword(ctx context.Context, id string) error {
+	return s.setState(id, func(u *User) {
+		u.TempPasswordHash = ""
+		u.TempPasswordValidUntil = nil
+	})
+}
+
 // newUserID returns a random 16-hex-character user identifier (the token's
 // subject).
 func newUserID() (string, error) {

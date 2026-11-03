@@ -174,6 +174,12 @@ const (
 	ActionScimKeyRevoke    = "scim-key.revoke"
 	ActionScimKeyReinstate = "scim-key.reinstate"
 	ActionScimKeyPrune     = "scim-key.prune"
+	// ActionBreakGlassCoin is a break-glass escape-hatch invocation (F-28.3):
+	// an ephemeral random-identity admin was coined (or coinage was refused).
+	// The actor is the CALLER'S CERTIFICATE LEAF (CN, SAN, serial) — the
+	// mTLS peer that presented the API's client certificate — never the
+	// coined user (the password is the secret, the certificate is the blame).
+	ActionBreakGlassCoin = "break-glass.coin"
 	// ActionScimAuthFail is a rejected SCIM caller-authentication attempt
 	// (F-28.2, Slice 3): an unauthenticated probe of the /scim/v2 surface.
 	// The presented key is NEVER echoed (missing, malformed, unknown,

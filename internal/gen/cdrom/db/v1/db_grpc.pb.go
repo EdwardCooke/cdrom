@@ -83,6 +83,7 @@ const (
 	Database_ActivateIDPUser_FullMethodName                = "/cdrom.db.v1.Database/ActivateIDPUser"
 	Database_DeactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/DeactivateIDPUser"
 	Database_ReactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/ReactivateIDPUser"
+	Database_ExpireTemporaryPassword_FullMethodName        = "/cdrom.db.v1.Database/ExpireTemporaryPassword"
 	Database_CreateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/CreateAPIKey"
 	Database_GetAPIKey_FullMethodName                      = "/cdrom.db.v1.Database/GetAPIKey"
 	Database_ListAPIKeys_FullMethodName                    = "/cdrom.db.v1.Database/ListAPIKeys"
@@ -482,6 +483,13 @@ type DatabaseClient interface {
 	// history are preserved. A missing user returns NotFound; reactivating a
 	// non-tombstoned user is idempotent (it merely activates).
 	ReactivateIDPUser(ctx context.Context, in *UserStateChangeRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	// ExpireTemporaryPassword zeros a user's TEMPORAL (short-lived) credential
+	// (F-28.3 break-glass hygiene): the hash and its validity window are
+	// cleared WITHOUT touching the user's active state or standing password.
+	// The IdP invokes it from its hygiene sweep (and lazily at login) once the
+	// window lapses. A missing user returns NotFound; expiring a user with no
+	// temporal credential is a no-op.
+	ExpireTemporaryPassword(ctx context.Context, in *ExpireTemporaryPasswordRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	// IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
 	// metadata, and the owner's lockout state) here so multiple IdP replicas
 	// share it. The Database service stores the key hash opaquely and never
@@ -1596,6 +1604,16 @@ func (c *databaseClient) ReactivateIDPUser(ctx context.Context, in *UserStateCha
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(IDPUser)
 	err := c.cc.Invoke(ctx, Database_ReactivateIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ExpireTemporaryPassword(ctx context.Context, in *ExpireTemporaryPasswordRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_ExpireTemporaryPassword_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2863,6 +2881,13 @@ type DatabaseServer interface {
 	// history are preserved. A missing user returns NotFound; reactivating a
 	// non-tombstoned user is idempotent (it merely activates).
 	ReactivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error)
+	// ExpireTemporaryPassword zeros a user's TEMPORAL (short-lived) credential
+	// (F-28.3 break-glass hygiene): the hash and its validity window are
+	// cleared WITHOUT touching the user's active state or standing password.
+	// The IdP invokes it from its hygiene sweep (and lazily at login) once the
+	// window lapses. A missing user returns NotFound; expiring a user with no
+	// temporal credential is a no-op.
+	ExpireTemporaryPassword(context.Context, *ExpireTemporaryPasswordRequest) (*IDPUser, error)
 	// IdP API keys (F-25). The IdP persists the API-key directory (key hashes,
 	// metadata, and the owner's lockout state) here so multiple IdP replicas
 	// share it. The Database service stores the key hash opaquely and never
@@ -3541,6 +3566,9 @@ func (UnimplementedDatabaseServer) DeactivateIDPUser(context.Context, *UserState
 }
 func (UnimplementedDatabaseServer) ReactivateIDPUser(context.Context, *UserStateChangeRequest) (*IDPUser, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReactivateIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) ExpireTemporaryPassword(context.Context, *ExpireTemporaryPasswordRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExpireTemporaryPassword not implemented")
 }
 func (UnimplementedDatabaseServer) CreateAPIKey(context.Context, *CreateIDPAPIKeyRequest) (*IDPAPIKey, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateAPIKey not implemented")
@@ -4981,6 +5009,24 @@ func _Database_ReactivateIDPUser_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).ReactivateIDPUser(ctx, req.(*UserStateChangeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ExpireTemporaryPassword_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpireTemporaryPasswordRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ExpireTemporaryPassword(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ExpireTemporaryPassword_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ExpireTemporaryPassword(ctx, req.(*ExpireTemporaryPasswordRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6971,6 +7017,10 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReactivateIDPUser",
 			Handler:    _Database_ReactivateIDPUser_Handler,
+		},
+		{
+			MethodName: "ExpireTemporaryPassword",
+			Handler:    _Database_ExpireTemporaryPassword_Handler,
 		},
 		{
 			MethodName: "CreateAPIKey",

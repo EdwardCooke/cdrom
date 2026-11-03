@@ -217,7 +217,15 @@ flowchart TB
   authorization codes, and its user directory are persisted through the
   Database service, so multiple IdP replicas share the same keys, codes, and
   users and can run behind a load balancer (the IdP requires the db service to
-  be running).
+  be running). Its HTTP listener, when a TLS CA is configured, negotiates with
+  `RequestClientCert` (requested, not demanded — handshake-transparent to
+  browsers); exactly one route, the **break-glass escape hatch**
+  (`POST /emergency/break-glass`, F-28.3), verifies the presenter's
+  certificate chain against the CA and admits only holders of a CA-signed
+  client certificate (the API's). Such a call coins an ephemeral,
+  random-identity admin with a self-expiring temporal password (strictly
+  additive; capped; audited with the caller's certificate attributed) — the
+  guaranteed local foothold when SSO/SCIM is the broken link.
 
 ### gRPC conventions
 

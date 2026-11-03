@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -161,25 +162,42 @@ func main() {
 	// keyring-size gauge now that the metric set is available.
 	km.RefreshMetrics()
 
-	// The IdP's audit recorder (F-15, adopted by F-28.2 Slice 3): the SCIM
-	// caller-auth guard records REJECTED presentations here — a warning log
-	// line plus an audit event, written to a local rotating file AND the
-	// shared database audit log (the queryable copy the UI reads via
-	// GET /api/audit). Construction is LAZY: it happens only when the SCIM
-	// surface is enabled, so a SCIM-less IdP opens no audit file at all.
-	// The pruner is owned solely by the API's recorder (retention scheduling
-	// is one-per-table, not one-per-appender).
+	// The IdP's audit recorder (F-15, adopted by F-28.2 Slice 3 and
+	// F-28.3 Slice 3): the SCIM caller-auth guard records REJECTED
+	// presentations here, and the break-glass endpoint records every
+	// invocation — a warning log line plus an audit event, written to a
+	// local rotating file AND the shared database audit log (the queryable
+	// copy the UI reads via GET /api/audit). The pruner is owned solely by
+	// the API's recorder (retention scheduling is one-per-table, not
+	// one-per-appender).
+	idpAudit, err := idp.NewAuditRecorder(cfg.Audit, dbClient, logger)
+	if err != nil {
+		logger.Error("audit: init", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = idpAudit.Close() }()
 	if cfg.IdP.Scim.Enabled {
-		idpAudit, err := idp.NewAuditRecorder(cfg.Audit, dbClient, logger)
-		if err != nil {
-			logger.Error("audit: init", "err", err)
-			os.Exit(1)
-		}
-		defer func() { _ = idpAudit.Close() }()
 		srv.SetScimAuthorizer(idp.NewScimValidator(
 			idp.NewDBScimPoolBackend(dbClient), cfg.IdP.ScimKeysPepper, idpAudit, logger,
 			cfg.IdP.Scim.EffectiveMemoTTL()))
 	}
+	// Break-glass escape hatch (F-28.3, Slice 3): coins ephemeral
+	// random-identity admins for holders of a CA-signed client certificate
+	// (strictly additive; temporal password self-expires). The hygiene sweep
+	// retires expired credentials on its cadence. The peer-chain check
+	// trusts the CA bundle (nil when TLS is off — the route then denies
+	// uniformly, advertising nothing).
+	var bgRoots *x509.CertPool
+	if cfg.TLS.Enabled() {
+		bgRoots, err = idp.LoadCACertPool(cfg.TLS.CAFile)
+		if err != nil {
+			logger.Error("idp: break-glass root pool", "err", err)
+			os.Exit(1)
+		}
+	}
+	srv.SetBreakGlass(idp.NewBreakGlassCoiner(cfg.IdP, userStore, logger), userStore, bgRoots)
+	srv.SetBreakGlassAuditor(idpAudit)
+	go srv.StartBreakGlassSweep(ctx)
 
 	go srv.StartRotation(ctx)
 

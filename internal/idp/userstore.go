@@ -99,6 +99,12 @@ type UserStore interface {
 	// history are preserved. Reactivating a non-tombstoned user is idempotent
 	// (it merely activates).
 	Reactivate(ctx context.Context, id string) error
+	// ExpireTemporaryPassword zeros a user's TEMPORAL (short-lived) credential
+	// (F-28.3 break-glass hygiene): the hash and its validity window are
+	// cleared without touching the user's active state or standing password.
+	// Called by the hygiene sweep and lazily at login once the window lapses.
+	// A no-op when the user has no temporal credential.
+	ExpireTemporaryPassword(ctx context.Context, id string) error
 }
 
 // dbUserStore is a UserStore backed by the Database service.
@@ -182,6 +188,14 @@ func (s *dbUserStore) Deactivate(ctx context.Context, id string) error {
 
 func (s *dbUserStore) Reactivate(ctx context.Context, id string) error {
 	_, err := s.db.ReactivateIDPUser(ctx, &dbpb.UserStateChangeRequest{Id: id})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *dbUserStore) ExpireTemporaryPassword(ctx context.Context, id string) error {
+	_, err := s.db.ExpireTemporaryPassword(ctx, &dbpb.ExpireTemporaryPasswordRequest{Id: id})
 	if err != nil {
 		return err
 	}
