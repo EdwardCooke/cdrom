@@ -42,6 +42,31 @@ E2E_WEBHOOK_FAIL_PORT=10081
 # --- logging -----------------------------------------------------------------
 log() { printf '%s\n' "$*"; }
 
+# --- log archiving -------------------------------------------------------------
+# E2E_LOG_HOME is where the suite PERSISTS the stack logs + database for
+# post-mortems instead of losing them with $WORK. It lives under the repo's
+# gitignored .local/ directory (and is excluded from Copilot's workspace
+# search via .vscode/settings.json); the ten newest archives are retained.
+E2E_LOG_HOME="${E2E_LOG_HOME:-$E2E_REPO/.local/e2e}"
+
+# e2e_archive_logs <tag>
+# Snapshots $WORK's logs + the SQLite database into
+# E2E_LOG_HOME/<utc-timestamp>-<tag>/ and prunes older archives beyond the
+# retention window. Invoked from the cleanup paths (standalone: this script's
+# e2e_cleanup; shared-stack: scripts/e2e.sh's cleanup) so the logs survive the
+# WORK-directory removal — on success AND on failure alike.
+e2e_archive_logs() {
+  local tag="${1:-adhoc}" dest
+  [ -n "${WORK:-}" ] && [ -d "${WORK:-}" ] || return 0
+  dest="$E2E_LOG_HOME/$(date -u +%Y%m%d-%H%M%S)-$tag"
+  mkdir -p "$dest"
+  cp -a "$WORK"/*.log "$dest/" 2>/dev/null || true
+  if [ -f "$WORK/cdrom.db" ]; then cp -a "$WORK/cdrom.db" "$dest/" 2>/dev/null || true; fi
+  # Retention: keep the ten newest archives.
+  ls -1dt "$E2E_LOG_HOME"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf 2>/dev/null || true
+  echo ">> e2e logs archived to $dest"
+}
+
 # --- stack lifecycle ---------------------------------------------------------
 # e2e_cleanup kills every process this script started and, when this script
 # booted the stack itself, removes the temp directory. It is installed as an
@@ -56,6 +81,7 @@ e2e_cleanup() {
     for pid in "${PIDS[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
   fi
   if [ "$E2E_OWN_STACK" = "1" ] && [ -n "$WORK" ]; then
+    e2e_archive_logs "${0##*/}"
     rm -rf "$WORK"
   fi
   if [ "$code" -ne 0 ]; then
@@ -94,7 +120,23 @@ e2e_boot_stack() {
   mkdir -p "$WORK/artifacts" "$WORKDIR"
   trap e2e_cleanup EXIT
 
-  e2e_start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db" CDROM_LOG_FORMAT=text -- "$BIN/db"
+  # The SQLite DSN carries two pragmas (the pure-Go driver, modernc.org/sqlite
+  # via glebarez/sqlite, applies them on EVERY connection it opens):
+  #   journal_mode=wal — switch the file to write-ahead logging: READERS then
+  #     proceed CONCURRENTLY with writers (the legacy rollback journal blocks
+  #     all readers for the whole write transaction). The local stack funnels
+  #     many concurrent connections onto one file (the db service's own pool,
+  #     the API's event-log tail, worker heartbeats, telemetry), so WAL is the
+  #     difference between smooth concurrency and lock storms.
+  #   busy_timeout=5000 — when a statement DOES meet a lock, WAIT up to 5 s
+  #     for the holder to release it instead of failing immediately with
+  #     SQLITE_BUSY ("database is locked"). It is per-CONNECTION (not
+  #     persistent), which is why it travels in the DSN rather than being
+  #     issued once.
+  # Needed together: at peak e2e load the unlocked default surfaced SQLITE_BUSY
+  # on the API's event tail and worker heartbeats, stretching the scheduler's
+  # 5 s ticks and starving the test waits (the 17-restoration flake).
+  e2e_start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db?_pragma=busy_timeout=5000&_pragma=journal_mode=wal" CDROM_LOG_FORMAT=text -- "$BIN/db"
   e2e_start scheduler "$WORK/scheduler.log" 'serving'    CDROM_LOG_FORMAT=text -- "$BIN/scheduler"
   e2e_start artifacts "$WORK/artifacts.log" 'serving'    CDROM_ARTIFACTS_ROOT="$WORK/artifacts" CDROM_LOG_FORMAT=text -- "$BIN/artifacts"
   # The IdP mints the job tokens the API hands to execution targets (and the

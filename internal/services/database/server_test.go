@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"gorm.io/gorm"
 
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
+	"cdrom/internal/models"
 )
 
 // startServer opens an in-memory SQLite database, migrates it, and serves the
@@ -4088,5 +4090,110 @@ func TestAuditPrune(t *testing.T) {
 	}
 	if resp.GetPruned() != 0 {
 		t.Errorf("pruned = %d, want 0 (cutoff in the past)", resp.GetPruned())
+	}
+}
+
+// TestClaimStepOnceSequential verifies the basic claim contract (F-01): the
+// first caller wins, later callers in the same attempt lose (reported as
+// claimed=false, NOT as an error — the executor folds a claim error into a
+// STEP FAILURE, which must not happen to the expected losers of a race), and
+// a new attempt claims a fresh slot.
+func TestClaimStepOnceSequential(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+
+	first, err := client.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{JobId: 1, StepName: "notify", Attempt: 1})
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if !first.GetClaimed() {
+		t.Fatal("first claim = false, want true")
+	}
+	second, err := client.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{JobId: 1, StepName: "notify", Attempt: 1})
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if second.GetClaimed() {
+		t.Fatal("second claim = true, want false (slot already held)")
+	}
+	third, err := client.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{JobId: 1, StepName: "OTHERSTEP", Attempt: 1})
+	if err != nil {
+		t.Fatalf("different-step claim: %v", err)
+	}
+	if !third.GetClaimed() {
+		t.Fatal("different-step claim = false, want true (disjoint slot)")
+	}
+	nextAttempt, err := client.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{JobId: 1, StepName: "notify", Attempt: 2})
+	if err != nil {
+		t.Fatalf("next-attempt claim: %v", err)
+	}
+	if !nextAttempt.GetClaimed() {
+		t.Fatal("next-attempt claim = false, want true (a retry claims afresh)")
+	}
+}
+
+// TestClaimStepOnceConcurrentStorm is the regression guard for the e2e
+// SQLITE_BUSY flake: many targets reaching the same once step SIMULTANEOUSLY
+// hammer the claim. Over SQLite the contenders meet database locks and
+// rolled-back unique violations; the contract is:
+//
+//   - NO caller receives an error (an error makes the executor FAIL the step
+//     instead of skipping it — the original flake: a healthy fan-out folded
+//     into a spurious job failure).
+//   - AT MOST ONE caller reports claimed=true. Double-certification is the
+//     forbidden twin: it means two targets both send the notification.
+//
+// (Reporting ZERO winners is legal under absurd contention — every attempt
+// rolled back and the contest stayed unsettled — and is cross-checked below
+// against the slot row: zero winners must coincide with an EMPTY slot, since
+// a recorded claim can only originate from a committed, certified winner.)
+func TestClaimStepOnceConcurrentStorm(t *testing.T) {
+	client, db := startServerDB(t)
+	ctx := context.Background()
+
+	const racers = 24
+	errCh := make(chan error, racers)
+	claims := make(chan bool, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.ClaimStepOnce(ctx, &dbpb.ClaimStepOnceRequest{JobId: 7, StepName: "mail", Attempt: 1})
+			if err != nil {
+				errCh <- err
+				return
+			}
+			claims <- resp.GetClaimed()
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	close(claims)
+
+	var winners int
+	for err := range errCh {
+		t.Errorf("claim returned an error (losers must report claimed=false, not fail): %v", err)
+	}
+	for won := range claims {
+		if won {
+			winners++
+		}
+	}
+	if winners > 1 {
+		t.Fatalf("winners = %d, want at most 1 (double-send hazard, racers=%d)", winners, racers)
+	}
+	if winners == 0 {
+		// Legal only if the slot row is indeed empty (nobody committed).
+		var n int64
+		if err := db.Model(&models.StepOnceClaim{}).
+			Where("job_id = ? AND step_name = ? AND attempt = ?", 7, "mail", 1).
+			Count(&n).Error; err != nil {
+			t.Fatalf("slot-row cross-check: %v", err)
+		}
+		if n > 0 {
+			t.Fatalf("winners = 0 but the slot row exists: a certified winner must have reported true")
+		}
+		t.Logf("contest unsettled (all attempts rolled back); slot empty — consistent")
 	}
 }

@@ -4671,36 +4671,114 @@ func (s *Server) NextSecretNonce(ctx context.Context, _ *dbpb.NextSecretNonceReq
 // step_name, attempt) index: at most one concurrent caller can create the row,
 // so the dedup is correct across every API replica and worker process. The
 // created flag (RowsAffected == 1) reports whether this call won the claim.
+//
+// ERROR SEMANTICS MATTER HERE, in BOTH directions:
+//
+//   - Losers of a simultaneous claim are EXPECTED (the other target won the
+//     race and will run the step), so a lost race must surface as
+//     claimed=false — never as an error. An error makes the executor treat
+//     the step as FAILED instead of skipped, turning a healthy fan-out into a
+//     spurious job failure (observed in the e2e suite: a loser racing the
+//     winner over SQLite reported "database is locked (SQLITE_BUSY)" and the
+//     job's failure_mode=all folded that into a job failure).
+//   - Wins must be CERTAIN: only a FirstOrCreate that COMMITTED and reports
+//     RowsAffected==1 certifies this caller as the holder. Inferring a win
+//     from the slot row's ABSENCE is unsafe — two racers whose inserts both
+//     rolled back on a lock each see "absent" and would both send (double
+//     notification), which is worse than skipping.
+//
+// So when the atomic attempt errors, the slot row arbitrates: PRESENT,
+// somebody else holds the claim (report the loss); ABSENT, nothing was
+// recorded (retry, backed off, bounded by the request context). If the
+// contest stays unsettled through the budget, the caller reports a
+// consistent LOSS: at most one target may believe it holds the claim, and
+// under-notification beats over-notification.
 func (s *Server) ClaimStepOnce(ctx context.Context, req *dbpb.ClaimStepOnceRequest) (*dbpb.ClaimStepOnceResponse, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	resp := &dbpb.ClaimStepOnceResponse{}
-	claim := &models.StepOnceClaim{
-		JobID:    uint(req.GetJobId()),
-		StepName: req.GetStepName(),
-		Attempt:  int(req.GetAttempt()),
+	const maxAttempts = 5
+	delay := 10 * time.Millisecond
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		claimed, err := s.claimStepOnceTx(ctx, req)
+		if err == nil {
+			// Certain outcome: the attempt committed (win) or found the slot
+			// already held (loss).
+			return &dbpb.ClaimStepOnceResponse{Claimed: claimed}, nil
+		}
+		if ctx.Err() != nil {
+			return nil, grpcErr(ctx.Err())
+		}
+		// The atomic attempt errored (typically a lock or a rolled-back unique
+		// violation). Arbitrate against the slot row: a present row means
+		// somebody's claim is recorded — this caller lost the race.
+		exists, ferr := s.stepOnceExists(ctx, req)
+		if ferr == nil && exists {
+			return &dbpb.ClaimStepOnceResponse{Claimed: false}, nil
+		}
+		// Row absent (or the lookup itself contended): nothing was recorded,
+		// so this attempt neither won nor lost — back off and try again.
+		if attempt == maxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, grpcErr(ctx.Err())
+		case <-time.After(delay):
+		}
+		delay *= 2
 	}
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	// Unsettled through the whole budget: report a consistent loss (above).
+	return &dbpb.ClaimStepOnceResponse{Claimed: false}, nil
+}
+
+// claimStepOnceTx performs one attempt of the atomic claim: a FirstOrCreate on
+// the unique (job_id, step_name, attempt) index inside a transaction. It
+// returns (claimed, nil) on a definite outcome and (false, err) when the
+// attempt hit a database error (outcome undecided — the caller settles it).
+func (s *Server) claimStepOnceTx(ctx context.Context, req *dbpb.ClaimStepOnceRequest) (bool, error) {
+	claimed := false
+	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// FirstOrCreate is atomic against the unique index: the first caller
 		// creates the row (RowsAffected == 1, it won the claim); a later
 		// caller in the same attempt finds it already created (RowsAffected
 		// == 0, it lost and should skip the step).
 		result := tx.Where(&models.StepOnceClaim{
-			JobID:    claim.JobID,
-			StepName: claim.StepName,
-			Attempt:  claim.Attempt,
-		}).FirstOrCreate(claim)
+			JobID:    uint(req.GetJobId()),
+			StepName: req.GetStepName(),
+			Attempt:  int(req.GetAttempt()),
+		}).FirstOrCreate(&models.StepOnceClaim{
+			JobID:    uint(req.GetJobId()),
+			StepName: req.GetStepName(),
+			Attempt:  int(req.GetAttempt()),
+		})
 		if result.Error != nil {
 			return result.Error
 		}
-		resp.Claimed = result.RowsAffected == 1
+		claimed = result.RowsAffected == 1
 		return nil
 	})
-	if err != nil {
-		return nil, grpcErr(err)
+	if txErr != nil {
+		return false, txErr
 	}
-	return resp, nil
+	return claimed, nil
+}
+
+// stepOnceExists reports whether the once slot row exists RIGHT NOW. It is the
+// authoritative arbiter for a claim attempt that errored: a present row means
+// some target holds the claim (the caller must lose and skip the step); an
+// absent row means the claim was never recorded (the caller may retry — and
+// cannot have falsely announced a win, because announcing one requires the
+// row to be absent WHILE nobody else created it, which the unique index makes
+// impossible for two creators).
+func (s *Server) stepOnceExists(ctx context.Context, req *dbpb.ClaimStepOnceRequest) (bool, error) {
+	var n int64
+	err := s.db.WithContext(ctx).
+		Model(&models.StepOnceClaim{}).
+		Where("job_id = ? AND step_name = ? AND attempt = ?",
+			uint(req.GetJobId()), req.GetStepName(), int(req.GetAttempt())).
+		Count(&n).Error
+	return n > 0, err
 }
 
 // ---------------------------------------------------------------------------

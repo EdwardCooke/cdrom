@@ -55,8 +55,17 @@
 # Requires: the built binaries in ./bin (run `make build` first), curl, and
 # jq.
 #
-# The script always tears the stack down and removes its temp directory on
-# exit, even on failure.
+# The stack's SQLite file opens with journal_mode=wal + busy_timeout=5000
+# (encoded in the CDROM_DB_SQLITE_PATH DSN; the annotated db start below and
+# scripts/e2e/lib.sh carry the full rationale): the suite funnels many
+# concurrent connections onto one file, and without WAL plus a per-connection
+# wait budget the peaks surface as SQLITE_BUSY ("database is locked") errors
+# that stretch the scheduler's 5 s ticks and starve the tests' waits.
+#
+# Teardown: the stack is torn down on exit, but its logs + database are
+# ARCHIVED first under .local/e2e/<UTC-timestamp>-shared/ (ten-newest
+# retention) so a failure stays investigable; .local/ is gitignored and
+# excluded from Copilot's analysis (.vscode/settings.json).
 
 set -euo pipefail
 
@@ -77,6 +86,7 @@ cleanup() {
     sleep 1
     for pid in "${PIDS[@]}"; do kill -9 "$pid" 2>/dev/null || true; done
   fi
+  e2e_archive_logs shared
   rm -rf "$WORK"
   if [ "$code" -ne 0 ]; then
     echo ">> e2e FAILED (exit $code)" >&2
@@ -86,7 +96,11 @@ cleanup() {
 trap cleanup EXIT
 
 log ">> booting shared stack in $WORK"
-e2e_start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db" CDROM_LOG_FORMAT=text -- "$BIN/db"
+# The SQLite DSN carries the same pragmas as lib.sh's e2e_boot_stack
+# (journal_mode=wal + busy_timeout=5000, applied per connection by the
+# pure-Go driver) — see the annotated db start in scripts/e2e/lib.sh for why
+# the shared stack needs them.
+e2e_start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db?_pragma=busy_timeout=5000&_pragma=journal_mode=wal" CDROM_LOG_FORMAT=text -- "$BIN/db"
 e2e_start scheduler "$WORK/scheduler.log" 'serving'    CDROM_LOG_FORMAT=text -- "$BIN/scheduler"
 e2e_start artifacts "$WORK/artifacts.log" 'serving'    CDROM_ARTIFACTS_ROOT="$WORK/artifacts" CDROM_LOG_FORMAT=text -- "$BIN/artifacts"
 # The IdP mints the job tokens the API hands to the worker (and the exchanged

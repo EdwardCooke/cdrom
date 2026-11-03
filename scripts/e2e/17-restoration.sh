@@ -40,6 +40,19 @@ DEAD_PORT=10091
 
 e2e_boot_stack with-worker
 
+# Per-instance log baselines: on the SHARED stack (make e2e) the component
+# logs ACCUMULATE across suite members, so the log-driven waits below must
+# consider only what was written AFTER this incarnation began — otherwise a
+# stale line from an earlier member satisfies a grep early (or correlates the
+# WRONG run). Standalone mode: the logs are fresh, so the baseline is ~0.
+WORKER_LOG_BASE=$(stat -c%s "$WORK/worker.log" 2>/dev/null || echo 0)
+API_LOG_BASE=$(stat -c%s "$WORK/api.log" 2>/dev/null || echo 0)
+AUDIT_BOOT_BASE=$(stat -c%s "$WORK/audit.log" 2>/dev/null || echo 0)
+# newpart FILE OFFSET DEST copies the bytes of FILE from OFFSET onwards (the
+# per-incarnation slice) into DEST. A file COPY (not a pipe) sidesteps the
+# grep -q SIGPIPE-under-pipefail pitfall documented in lib.sh's neighbours.
+newpart() { tail -c +"$2" "$1" > "$3" 2>/dev/null || : > "$3"; }
+
 # --- the probe endpoint: healthy (200) --------------------------------------
 python3 - "$HEALTH_PORT" "$WORK/health.log" <<'PY' &
 import http.server, sys
@@ -64,6 +77,11 @@ for i in $(seq 1 50); do
 done
 
 # --- create the pipeline ------------------------------------------------------
+# Unique PER PROCESS INSTANCE: the pipeline name is globally unique, and this
+# script runs MULTIPLE TIMES against the shared stack (make e2e) — a fixed
+# name would collide with our own earlier incarnation (UNIQUE constraint).
+# $$ (the script's PID) is unique per run and unset-safe under set -u.
+PIPE_NAME="e2e-restoration-$$"
 # The DAG: build → deploy → verify → rollback. verify PROBES the endpoint
 # named by the run PARAMETER probe_target (good run: the healthy port; bad
 # run: the dead port). rollback is a BRANCH job (slice A): it is released
@@ -73,7 +91,7 @@ done
 log ">> creating the pipeline"
 PIPE_BODY=$(cat <<EOF
 {
-  "name": "e2e-restoration",
+  "name": "$PIPE_NAME",
   "params": [
     {"name": "port", "default": "$HEALTH_PORT", "description": "the probe endpoint port (a run supplies the healthy or dead port)"}
   ],
@@ -148,8 +166,13 @@ log ">> good run id: $GOOD_RUN_ID"
 # condition is FALSE (verify succeeded) so it condition-skips and the job
 # reports skipped-with-no-work → the run still succeeds). NOTE: the API
 # serializes proto enums as NUMBERS (plain json.Encode): run status 3 =
-# succeeded, 4 = failed, 5 = cancelled.
-for i in $(seq 1 150); do
+# succeeded, 4 = failed, 5 = cancelled. The budget is GENEROUS (symmetrical
+# with the resumption wait below): the DAG advances strictly on the
+# scheduler's 5 s ticks (resolver → admission → job-status → run-status), so
+# a nominal ~30 s run routinely doubles when the shared stack is loaded with
+# the residue of the preceding suites — a tight budget turns routine load
+# into a flake.
+for i in $(seq 1 300); do
   STATUS=$(curl -s --max-time 5 "http://127.0.0.1:8080/api/runs/$GOOD_RUN_ID" | jq -r '.status' || true)
   if [ "$STATUS" = "3" ]; then break; fi
   if [ "$STATUS" = "4" ] || [ "$STATUS" = "5" ]; then
@@ -185,33 +208,71 @@ log ">> bad run id: $BAD_RUN_ID"
 # + dispatch easily exceeds the library's 20s wait, so poll longer here.
 #
 # On any assertion failure, dump_failure preserves the stack logs and DB
-# BEYOND the teardown ($WORK is removed on exit) for offline inspection.
+# BEYOND the teardown ($WORK is removed on exit) for offline inspection. It
+# ALSO dumps the DATABASE'S VIEW OF THE WORLD (every job/run/execution with
+# its timestamps) straight from the SQLite file, so a stall that predates the
+# resumption (e.g. the good run never finishing) is diagnosable from the dump
+# alone: which job sat where, since when, and whether the worker acknowledged
+# it at all.
 dump_failure() {
   echo "> $*" >&2
   if [ -n "${NEW_RUN_ID:-}" ]; then
     echo "--- resumption jobs:" >&2
     curl -s --max-time 5 "http://127.0.0.1:8080/api/jobs" 2>/dev/null | jq -c --argjson rid "$NEW_RUN_ID" '[.[] | select(.run_id==$rid)]' >&2 || true
   fi
+  if [ -n "${GOOD_RUN_ID:-}" ]; then
+    echo "--- good run ($GOOD_RUN_ID) jobs (straight from the db):" >&2
+    sqlite3 -batch -separator ' | ' "$WORK/cdrom.db" \
+      "SELECT 'job '||id||' key='||key||' status='||status||' attempt='||COALESCE(attempt,0)||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');
+       SELECT 'exe '||id||' job='||job_id||' worker='||worker_name||' status='||status||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');" \
+      2>/dev/null | grep -E "^job|^exe" >&2 || true
+    echo "--- good run row:" >&2
+    sqlite3 -batch -separator ' | ' "$WORK/cdrom.db" \
+      "SELECT 'run '||id||' status='||status||' trigger='||COALESCE(trigger,'-')||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');" \
+      2>/dev/null | grep "^run" >&2 || true
+  fi
+  echo "--- worker.log (full):" >&2
+  cat "$WORK/worker.log" >&2 2>/dev/null || true
+  echo "--- scheduler.log (tail 40):" >&2
+  tail -n 40 "$WORK/scheduler.log" >&2 2>/dev/null || true
+  echo "--- api.log (tail 40):" >&2
+  tail -n 40 "$WORK/api.log" >&2 2>/dev/null || true
   mkdir -p /tmp/f22-logs && cp "$WORK"/*.log /tmp/f22-logs/ 2>/dev/null || true
   cp "$WORK/cdrom.db" /tmp/f22-db.sqlite3 2>/dev/null || true
   echo "--- logs preserved to /tmp/f22-logs, db to /tmp/f22-db.sqlite3" >&2
 }
 
-# Budget: the bad run's jobs release SEQUENTIALLY on the resolver's 5s tick
-# (build → deploy → verify-fail → rollback release ≈ 30s+), so allow a minute.
+# Budget: the bad run's jobs advance STRICTLY ON THE SCHEDULER'S 5 s TICKS
+# (resolver → admission → job-status, one hop each: build → deploy →
+# verify-fail → rollback release ≈ 30 s nominal). Allow TWO minutes: the
+# nominal figure assumes an unloaded scheduler, and in shared-stack mode
+# (make e2e) the components absorb the residue of the preceding suites, so
+# the ticks stretch. A tight budget here is a standing invitation to flake.
+SLICE_W="$WORK/.worker.slice" SLICE_A="$WORK/.api.slice"
 i=0
-until grep -qF 'executor: rollback initiated' "$WORK/worker.log" 2>/dev/null; do
+until newpart "$WORK/worker.log" "$WORKER_LOG_BASE" "$SLICE_W" && grep -qF 'executor: rollback initiated' "$SLICE_W" 2>/dev/null; do
   i=$((i+1))
-  [ $i -le 300 ] || { dump_failure "timed out waiting for the armed rollback step to fire"; exit 1; }
-  if [ $((i % 10)) -eq 0 ]; then echo "   ...waiting for the armed rollback to fire (iteration $i)"; fi
+  [ $i -le 600 ] || { dump_failure "timed out waiting for the armed rollback step to fire"; exit 1; }
+  if [ $((i % 10)) -eq 0 ]; then echo "...waiting for the armed rollback to fire (iteration $i)"; fi
   sleep 0.2
 done
 log ">> armed rollback step fired"
-# The API logs the mediation (containing the anchor and the new run).
-e2e_wait_for "$WORK/api.log" 'resumption initiated (armed)' 'the API mediated the restoration'
+# The API logs the mediation (containing the anchor and the new run). Give it a
+# LONGER budget than the library's e2e_wait_for (20 s): in shared-stack mode
+# (make e2e) the components absorb the residue of the earlier suites, so the
+# mediation can legitimately take tens of seconds. A tight budget here turned
+# routine load into a flake.
+i=0
+until newpart "$WORK/api.log" "$API_LOG_BASE" "$SLICE_A" && grep -qF 'resumption initiated (armed)' "$SLICE_A" 2>/dev/null; do
+  i=$((i+1))
+  [ $i -le 300 ] || { dump_failure "timed out waiting for the API to mediate the restoration"; exit 1; }
+  if [ $((i % 10)) -eq 0 ]; then echo "   ...waiting for the API mediation (iteration $i)"; fi
+  sleep 0.2
+done
 
-# Extract the resumption run id from the API log line.
-RESTORE_LINE=$(grep -F 'resumption initiated (armed)' "$WORK/api.log" | tail -n 1)
+# Extract the resumption run id from the API log line (THIS incarnation's
+# slice: on the shared stack an earlier member's mediation line precedes ours).
+RESTORE_LINE=$(grep -F 'resumption initiated (armed)' "$SLICE_A" | tail -n 1)
 NEW_RUN_ID=$(sed -n 's/.*new_run=\([^ ]*\).*/\1/p' <<<"$RESTORE_LINE")
 ANCHORED_AT=$(sed -n 's/.*anchor=\([^ ]*\).*/\1/p' <<<"$RESTORE_LINE")
 [ -n "$NEW_RUN_ID" ] || { echo ">> could not parse the new run id from: $RESTORE_LINE" >&2; exit 1; }
@@ -226,8 +287,10 @@ log ">> resumption run id: $NEW_RUN_ID (anchored at $ANCHORED_AT)"
 # anchor's verify step probed the HEALTHY endpoint (its params are the
 # anchor's), so the resumption's verify SUCCEEDS and the resumption succeeds.
 # (The rollback step set wait=false, so it does not block on the verdict;
-# run status numerals: 3 = succeeded, 4 = failed, 5 = cancelled.)
-for i in $(seq 1 150); do
+# run status numerals: 3 = succeeded, 4 = failed, 5 = cancelled.) Generous
+# budget, symmetric with the good-run wait: the resumption re-drives a full
+# DAG on the 5 s scheduler ticks.
+for i in $(seq 1 300); do
   RS=$(curl -s --max-time 5 "http://127.0.0.1:8080/api/runs/$NEW_RUN_ID" | jq -r '.status' || true)
   if [ "$RS" = "3" ] || [ "$RS" = "4" ] || [ "$RS" = "5" ]; then break; fi
   if [ $((i % 5)) -eq 0 ]; then echo "   ...resumption status: $RS (iteration $i)"; fi
@@ -277,9 +340,13 @@ fi
 # --- the AUDIT TRAIL (F-15) ---------------------------------------------------
 # The armed initiation is audited (run.restore, door=armed); the manual door's
 # initiation is audited too (door=manual). Match loosely (the audit log's JSON
-# formatting varies).
-grep -qF 'run.restore' "$WORK/audit.log" 2>/dev/null || { echo ">> audit log has no run.restore entry" >&2; cat "$WORK/audit.log" >&2; exit 1; }
-grep -F 'run.restore' "$WORK/audit.log" | grep -qiF 'armed' || { echo ">> audit run.restore entry lacks door=armed" >&2; exit 1; }
+# formatting varies). Judge against THIS incarnation's slice (from the boot
+# baseline): on the shared stack an earlier member's run.restore entry would
+# otherwise satisfy the check vacuously.
+AUDIT_SLICE="$WORK/.audit.slice"
+newpart "$WORK/audit.log" "$AUDIT_BOOT_BASE" "$AUDIT_SLICE"
+grep -qF 'run.restore' "$AUDIT_SLICE" 2>/dev/null || { echo ">> audit log gained no run.restore entry this incarnation" >&2; tail -n 20 "$WORK/audit.log" >&2; exit 1; }
+grep -F 'run.restore' "$AUDIT_SLICE" | grep -qiF 'armed' || { echo ">> audit run.restore entry lacks door=armed" >&2; exit 1; }
 log ">> audit trail verified (run.restore, door=armed)"
 
 # --- the MANUAL DOOR: a bad cut point is rejected cleanly --------------------
@@ -295,5 +362,34 @@ MANUAL_GOOD=$(curl -s -X POST "http://127.0.0.1:8080/api/pipelines/$PIPE_ID/rest
 MANUAL_NEW_RUN=$(jq -r '.id // empty' <<<"$MANUAL_GOOD")
 [ -n "$MANUAL_NEW_RUN" ] || { echo ">> manual restart failed: $MANUAL_GOOD" >&2; exit 1; }
 log ">> manual door spawned resumption run $MANUAL_NEW_RUN (operator-initiated)"
+
+# CLEANUP: the manual-door assertion deliberately stops at SPAWN (the armed
+# door already proved the full restore arc). Leaving the manual resumption
+# LIVE abandons work on the shared stack: its jobs tie up the lone worker and
+# inflate the scheduler's per-tick scans for every SUITE MEMBER THAT RUNS NEXT
+# (classic self-inflicted flake source). Cancel the run's jobs and VERIFY THEY
+# SETTLE: the job list can race the row creation (and a partial cancel leaves
+# survivors that keep running), so loop until ZERO of the run's jobs is
+# non-terminal, judged against the DATABASE (the authoritative source; the
+# run-row status alone lies while survivor jobs linger). Cancelling a
+# finished job is a documented no-op (F-05), so blanket re-cancelling is safe.
+SETTLED=no
+for attempt in $(seq 1 40); do
+  MANUAL_JIDS=$(curl -s --max-time 5 "http://127.0.0.1:8080/api/jobs" | jq -c --argjson rid "$MANUAL_NEW_RUN" '[.[] | select(.run_id==$rid) | .id] // []' 2>/dev/null || echo '[]')
+  NJ=$(printf '%s' "$MANUAL_JIDS" | jq 'length' 2>/dev/null || echo 0)
+  if [ "$NJ" -ge 1 ]; then
+    for jid in $(printf '%s' "$MANUAL_JIDS" | jq -r '.[]'); do
+      curl -s -o /dev/null --max-time 5 -X POST "http://127.0.0.1:8080/api/jobs/$jid/cancel" || true
+    done
+  fi
+  ACTIVE=$(sqlite3 -batch "$WORK/cdrom.db" "SELECT COUNT(*) FROM jobs WHERE run_id=$MANUAL_NEW_RUN AND status IN ('pending','running','awaiting_approval','awaiting_proceed');" 2>/dev/null || echo '?')
+  if [ "$ACTIVE" = "0" ]; then SETTLED=yes; break; fi
+  sleep 0.5
+done
+if [ "$SETTLED" = "yes" ]; then
+  log ">> manual resumption cancelled and settled (the stack is left quiet)"
+else
+  log "!! manual resumption did not settle within 20s (active=$ACTIVE); continuing anyway"
+fi
 
 log ">> PASSED"

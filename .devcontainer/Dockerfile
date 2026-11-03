@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler
 
 RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+RUN ln -sf /home/vscode/.vscode-server /workspace/cdrom/.local/vscode-server
 
 # Set up the user
 # The base image already has a 'vscode' user

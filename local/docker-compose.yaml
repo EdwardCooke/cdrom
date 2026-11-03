@@ -34,64 +34,6 @@ services:
     depends_on:
       - mailcrab
 
-  database:
-    build:
-      context: ../
-      dockerfile: Dockerfile
-      target: db
-    env_file:
-    - env
-    environment:
-    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
-    - CDROM_METRICS_ADDR=0.0.0.0:9101
-    ports:
-    - 9101:9101
-    volumes:
-    - database:/data
-  idp:
-    build:
-      context: ../
-      dockerfile: Dockerfile
-      target: idp
-    depends_on:
-    - database
-    env_file:
-    - env
-    environment:
-    - CDROM_IDP_GRPC_ADDR=0.0.0.0:8081
-    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
-    - CDROM_METRICS_ADDR=0.0.0.0:9105
-    ports:
-    - 9105:9105
-  artifacts:
-    build:
-      context: ../
-      dockerfile: Dockerfile
-      target: artifacts
-    env_file:
-    - env
-    environment:
-    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
-    - CDROM_METRICS_ADDR=0.0.0.0:9103
-    ports:
-    - 9103:9103
-    volumes:
-    - artifacts:/data
-  scheduler:
-    build:
-      context: ../
-      dockerfile: Dockerfile
-      target: scheduler
-    depends_on:
-    - database
-    - api
-    env_file:
-    - env
-    environment:
-    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
-    - CDROM_METRICS_ADDR=0.0.0.0:9102
-    ports:
-    - 9102:9102
   api:
     build:
       context: ../
@@ -104,9 +46,81 @@ services:
     - env
     environment:
     # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
+    - CDROM_METRICS_ADDR=0.0.0.0:9100
+    ports:
+    - 9100:9100
+  artifacts:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      target: artifacts
+    depends_on:
+    - database
+    env_file:
+    - env
+    environment:
+    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
+    - CDROM_METRICS_ADDR=0.0.0.0:9101
+    ports:
+    - 9101:9101
+    volumes:
+    - artifacts:/data
+  database:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      target: db
+    env_file:
+    - env
+    environment:
+    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
+    - CDROM_METRICS_ADDR=0.0.0.0:9102
+    ports:
+    - 9102:9102
+    volumes:
+    - database:/data
+  idp:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      target: idp
+    depends_on:
+    - database
+    env_file:
+    - env
+    environment:
+    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
+    - CDROM_METRICS_ADDR=0.0.0.0:9103
+    ports:
+    - 9103:9103
+  pipelinesource:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      target: pipelinesource
+    env_file:
+    - env
+    environment:
+    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
     - CDROM_METRICS_ADDR=0.0.0.0:9104
     ports:
     - 9104:9104
+  scheduler:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      target: scheduler
+    depends_on:
+    - database
+    - api
+    env_file:
+    - env
+    environment:
+    # Metrics (F-20): serve /metrics + /healthz on a dedicated port.
+    - CDROM_METRICS_ADDR=0.0.0.0:9105
+    ports:
+    - 9105:9105
+
 volumes:
   data:
   artifacts:

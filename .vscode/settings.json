@@ -1,0 +1,24 @@
+{
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "SQLite",
+            "name": "local",
+            "database": "${workspaceFolder:cdrom}/bin/cdrom.db"
+        }
+    ],
+    "go.lintTool": "golangci-lint",
+    "go.lintOnSave": "off",
+    "go.lintFlags": [
+        "--fast"
+    ],
+    // The e2e suite archives its stack logs + SQLite snapshots under
+    // .local/e2e/ (bulk, regenerable) — keep them out of Copilot's analysis
+    // and out of search results.
+    "chat.disableAnalysis": [
+        ".local/**"
+    ],
+    "search.exclude": {
+        "**/.local": true
+    }
+}

@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -79,6 +80,8 @@ func NewHandler(w io.Writer) (slog.Handler, error) {
 		}
 		options.Level = parsed
 	}
+	options.ReplaceAttr = replaceAttrWithStackTrace
+
 	switch strings.ToLower(os.Getenv(EnvFormat)) {
 	case "", "json":
 		return slog.NewJSONHandler(w, options), nil
@@ -87,6 +90,26 @@ func NewHandler(w io.Writer) (slog.Handler, error) {
 	default:
 		return nil, fmt.Errorf("logging: unknown %s %q (want json or text)", EnvFormat, os.Getenv(EnvFormat))
 	}
+}
+
+func getStackTrace() string {
+	buf := make([]byte, 1024)
+	n := runtime.Stack(buf, false)
+	return string(buf[:n])
+}
+
+func replaceAttrWithStackTrace(groups []string, a slog.Attr) slog.Attr {
+	// Only add stack trace for warnings and errors
+	if a.Key == slog.LevelKey {
+		level := a.Value.Any().(slog.Level)
+		if level >= slog.LevelWarn {
+			return slog.Attr{
+				Key:   "stack",
+				Value: slog.StringValue(getStackTrace()),
+			}
+		}
+	}
+	return a
 }
 
 // NewWithHandler creates a logger from a fully custom handler, for callers
