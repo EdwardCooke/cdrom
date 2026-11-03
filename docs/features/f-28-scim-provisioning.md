@@ -121,6 +121,21 @@ provisioning both flow from the same corporate IdP.
   fields are rejected (or overridden on the next sync) so the corporate
   directory stays the source of truth. Locally-registered users (F-24) are
   managed manually and are not touched by SCIM.
+- **Authentication channels are locked by provenance** (F-28.3). A
+  `provisioned=true` user signs in via SSO/OIDC only: the password channel is
+  closed at both doors — the F-24 login path refuses provisioned users before
+  any hash compare, and no write path (admin `UpdateUser`, SCIM) may attach
+  a password to them. Forking identity authority between the corporate
+  directory and a local password is impossible by construction. Delegated
+  machine credentials (F-25 user API keys, F-26 service accounts) are
+  unaffected.
+- **A guaranteed local foothold survives SSO/SCIM loss** (F-28.3). The
+  IdP's `POST /emergency/break-glass` — on the HTTP listener but demanding a
+  CA-signed client certificate (mTLS, curl-native for the emergency drill)
+  — coins an ephemeral random-identity local admin
+  (`breakglass-…@invalid`, `provisioned=false`, request-TTL-bound password
+  shown once, default 24 h) that modifies nothing existing; every call is
+  audited (F-15) with the caller's certificate attributed.
 - **The SCIM caller is a privileged, authenticated service** (F-28.2). The
   SCIM surface is protected by a rotated pool of SCIM API keys —
   database-held, hashed at rest, administered through the API server, and
