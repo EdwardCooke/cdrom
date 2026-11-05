@@ -9,6 +9,9 @@
 *.sqlite
 *.sqlite3
 
+# Runtime-generated local audit dumps (CDROM_AUDIT_FILE pointed at the cwd)
+/audit.log
+
 # Environment / local config
 .env
 .env.*
