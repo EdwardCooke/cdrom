@@ -143,7 +143,9 @@ PIDS+=($!)
 # FS_DEAD is a CLOSED port (nothing listens there) — the broken-source half.
 for i in $(seq 1 50); do
   if (exec 3<>"/dev/tcp/127.0.0.1/$FS_HTTP") 2>/dev/null; then
-    exec 3>&- 2>/dev/null || true
+    # See lib.sh: the probe's fd 3 dies with its subshell; a bare `exec` here
+    # would PERMANENTLY rewrite this script's stderr (silent-death plague,
+    # 2026-11-05). Nothing to close.
     break
   fi
   sleep 0.1

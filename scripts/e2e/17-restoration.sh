@@ -72,7 +72,12 @@ HEALTH_PID=$!
 PIDS+=("$HEALTH_PID")
 # Wait for the healthy endpoint to listen.
 for i in $(seq 1 50); do
-  if (exec 3<>"/dev/tcp/127.0.0.1/$HEALTH_PORT") 2>/dev/null; then exec 3>&- 2>/dev/null || true; break; fi
+  # Probe in a SUBSHELL (its fd 3 dies with it). Do NOT add a bare `exec`
+  # cleanup here: with no command, `exec` applies its redirections
+  # persistently to THIS shell, and `exec 3>&- 2>/dev/null` rewired the whole
+  # script's stderr to /dev/null for the rest of the run (silent-death
+  # plague, 2026-11-05; see lib.sh's POISON RULE).
+  if (exec 3<>"/dev/tcp/127.0.0.1/$HEALTH_PORT") 2>/dev/null; then break; fi
   sleep 0.1
 done
 

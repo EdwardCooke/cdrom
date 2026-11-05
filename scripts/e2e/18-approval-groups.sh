@@ -35,10 +35,16 @@ e2e_start_rbac_api
 OPEN=http://127.0.0.1:8080   # open API (synthetic admin): job submission + reads
 AUTH=http://127.0.0.1:8081   # RBAC-enabled API: decisions + gated group mgmt
 
-# want <code> <what> — assert the last e2e_*_request HTTP_CODE.
+# want <code> <what> — assert the last e2e_*_request HTTP_CODE. A TRANSPORT
+# failure (empty HTTP_CODE — the helpers swallow curl faults so set -e never
+# dies silently) is distinguished from a mere wrong status.
 want() {
   local code="$1" what="$2"
-  [ "$HTTP_CODE" = "$code" ] || { echo ">> $what: got $HTTP_CODE, want $code ($HTTP_BODY)" >&2; exit 1; }
+  if [ -z "$HTTP_CODE" ]; then
+    echo ">> $what: TRANSPORT FAULT — no HTTP response at all (helper rescued a curl failure; body: ${HTTP_BODY:-<empty>}); check the archived api(-rbac).log for resets/errors"
+    exit 1
+  fi
+  [ "$HTTP_CODE" = "$code" ] || { echo ">> $what: got $HTTP_CODE, want $code ($HTTP_BODY)"; exit 1; }
 }
 
 # --- fixtures: users with distinct roles -------------------------------------
@@ -70,9 +76,21 @@ e2e_authed_request POST "$AUTH/api/approval-groups" "$BOB_TOKEN" '{"name":"nope"
 want 403 "bob create group (denied)"
 e2e_authed_request POST "$AUTH/api/approval-groups" "$ADA_TOKEN" '{"name":"scratch"}'
 want 201 "admin create group scratch"
-AUDIT=$(curl -s "$OPEN/api/audit?action=approval-group.create" -H "Authorization: Bearer $ADA_TOKEN")
-printf '%s' "$AUDIT" | jq -e '[.[] | select(.action=="approval-group.create")] | length >= 1' >/dev/null \
-  || { echo ">> approval-group.create not found in audit log: $AUDIT" >&2; exit 1; }
+# The durable audit log is written SYNCHRONOUSLY inside the mutating handler,
+# so the event is present by the time the request above returned. Still poll
+# briefly with a bounded, rescued curl: under load the QUERY can meet a
+# transient transport blip, and a retry is cheaper than a flaked suite.
+AUDIT_FOUND=no
+for i in $(seq 1 10); do
+  AUDIT=$(curl -s --max-time 10 "$OPEN/api/audit?action=approval-group.create" -H "Authorization: Bearer $ADA_TOKEN" || true)
+  if printf '%s' "$AUDIT" | jq -e '[.[] | select(.action=="approval-group.create")] | length >= 1' >/dev/null 2>&1; then
+    AUDIT_FOUND=yes
+    break
+  fi
+  sleep 0.3
+done
+[ "$AUDIT_FOUND" = "yes" ] \
+  || { echo ">> approval-group.create not found in audit log: $AUDIT"; exit 1; }
 e2e_authed_request DELETE "$AUTH/api/approval-groups/scratch" "$ADA_TOKEN"
 want 200 "admin delete group scratch"
 
@@ -110,7 +128,7 @@ submit_gate_job() {
   # Validate the generated body BEFORE submitting: a malformed body would
   # otherwise surface deep in the API's error path.
   printf '%s' "$body" | jq -e '.' >/dev/null 2>&1 \
-    || { echo ">> invalid job body for $name: $body" >&2; return 1; }
+    || { echo ">> invalid job body for $name: $body"; return 1; }
   local id
   id=$(e2e_submit_job "$body")
   # log() writes to STDOUT — and this function runs inside $( ), so ANY
@@ -120,10 +138,15 @@ submit_gate_job() {
   # STDERR so only the id reaches the caller. On timeout, dump the job for
   # diagnosis before the helper exits non-zero.
   local cur
-  if ! cur=$(e2e_wait_for_status "$id" 8 "ag-$suffix awaiting approval" 2>/dev/null); then
-    echo "   DIAG ag-$suffix: job never reached awaiting_approval; current state:" >&2
-    curl -s "$OPEN/api/jobs/$id" >&2 || true
-    echo >&2
+  # Formerly silenced with 2>/dev/null, which hid the very diagnostics that
+  # explain a stuck gate (lesson from the 18-approval-groups silent-death
+  # incident, 2026-11-05). Heartbeat chatter travels stderr (safe: stderr
+  # never leaks into the caller's $( ) capture — only stdout does); the
+  # terminal timeout VERDICT travels stdout (see lib.sh's POISON RULE).
+  if ! cur=$(e2e_wait_for_status "$id" 8 "ag-$suffix awaiting approval"); then
+    echo "   DIAG ag-$suffix: job never reached awaiting_approval; current state:"
+    curl -s --max-time 10 "$OPEN/api/jobs/$id" || true
+    echo
     return 1
   fi
   printf '%s' "$cur" >&2
@@ -138,7 +161,7 @@ e2e_authed_request POST "$AUTH/api/jobs/$JA/approve" "$ERIN_TOK" '{}';    want 4
 e2e_authed_request POST "$AUTH/api/approval-groups/eng/members" "$ADA_TOKEN" '{"member":"cara"}'; want 200 "A: add cara to eng"
 e2e_authed_request POST "$AUTH/api/jobs/$JA/approve" "$CARA_TOK" '{"reason":"signed off"}'; want 200 "A: cara (member+permission)"
 FA=$(e2e_wait_for_status "$JA" 3 "A succeeded after approval")
-printf '%s' "$FA" | jq -e '.approval_decision=="approved"' >/dev/null || { echo ">> A decision not approved" >&2; exit 1; }
+printf '%s' "$FA" | jq -e '.approval_decision=="approved"' >/dev/null || { echo ">> A decision not approved"; exit 1; }
 e2e_wait_for_job "$JA" 'ag-A-done' 'A post-gate step ran'
 
 # --- AC5(remove): job R (group:eng) — remove a member; bite on the same gate ---
@@ -166,11 +189,11 @@ e2e_wait_for_status "$JC" 3 "C succeeded after approval" >/dev/null
 log ">> Q (role:operator, quorum 2): first approval holds the gate, second resolves it"
 JQ=$(submit_gate_job Q '["role:operator"]' 2)
 e2e_authed_request POST "$AUTH/api/jobs/$JQ/approve" "$CARA_TOK" '{}'; want 200 "Q: cara approve (1st of 2)"
-STILL_Q=$(curl -s "$OPEN/api/jobs/$JQ" -H "Authorization: Bearer $ADA_TOKEN")
+STILL_Q=$(curl -s --max-time 10 "$OPEN/api/jobs/$JQ" -H "Authorization: Bearer $ADA_TOKEN" || true)
 [ "$(printf '%s' "$STILL_Q" | jq -r '.status')" = "8" ] \
-  || { echo ">> Q advanced past the gate after 1 of 2 approvals ($(printf '%s' "$STILL_Q" | jq -r '.status'))" >&2; exit 1; }
+  || { echo ">> Q advanced past the gate after 1 of 2 approvals ($(printf '%s' "$STILL_Q" | jq -r '.status'))"; exit 1; }
 printf '%s' "$STILL_Q" | jq -e '.approval_quorum==2 and ((.approval_votes|length)>=1)' >/dev/null \
-  || { echo ">> Q job view missing quorum/votes: $(printf '%s' "$STILL_Q" | jq -c '{approval_quorum,approval_votes}')" >&2; exit 1; }
+  || { echo ">> Q job view missing quorum/votes: $(printf '%s' "$STILL_Q" | jq -c '{approval_quorum,approval_votes}')"; exit 1; }
 e2e_authed_request POST "$AUTH/api/jobs/$JQ/approve" "$MALLORY_TOK" '{}'; want 200 "Q: mallory approve (2nd of 2)"
 e2e_wait_for_status "$JQ" 3 "Q succeeded after quorum met" >/dev/null
 
@@ -180,7 +203,7 @@ JW=$(submit_gate_job W '["role:operator"]' 3)
 e2e_authed_request POST "$AUTH/api/jobs/$JW/approve" "$CARA_TOK" '{}'; want 200 "W: cara approve (held at quorum 3)"
 e2e_authed_request POST "$AUTH/api/jobs/$JW/reject" "$MALLORY_TOK" '{"reason":"stop"}'; want 200 "W: mallory reject (fails immediately)"
 FW=$(e2e_wait_for_status "$JW" 4 "W failed after rejection")
-printf '%s' "$FW" | jq -e '.approval_decision=="rejected"' >/dev/null || { echo ">> W decision not rejected" >&2; exit 1; }
+printf '%s' "$FW" | jq -e '.approval_decision=="rejected"' >/dev/null || { echo ">> W decision not rejected"; exit 1; }
 
 # --- AC9: pipeline default approvers/quorum merge into the saved definition ---
 log ">> PD: a pipeline's default approvers/quorum merge into an approval step that sets neither (saved definition)"
@@ -192,13 +215,13 @@ PD_PIPE=$(jq -nc '{name:"pd-pipe",
 e2e_http_request POST "$OPEN/api/pipelines" "$PD_PIPE"
 want 201 "create pipeline with default approvers/quorum"
 PD_PID=$(printf '%s' "$HTTP_BODY" | jq -r '.id')
-PD_VIEW=$(curl -s "$OPEN/api/pipelines/$PD_PID" -H "Authorization: Bearer $ADA_TOKEN")
+PD_VIEW=$(curl -s --max-time 10 "$OPEN/api/pipelines/$PD_PID" -H "Authorization: Bearer $ADA_TOKEN" || true)
 # The saved job definition's approval step must carry the MERGED params.
 MERGED_APPROVERS=$(printf '%s' "$PD_VIEW" | jq -rc '[.. | objects | select(has("approvers")) | .approvers.strings // empty] | first // empty')
 MERGED_QUORUM=$(printf '%s' "$PD_VIEW" | jq -rc '[.. | objects | select(has("quorum")) | .quorum.string // empty] | first // empty')
 [ "$MERGED_APPROVERS" = '["group:eng"]' ] \
-  || { echo ">> pipeline default approvers not merged into the step (got: $MERGED_APPROVERS; view: $PD_VIEW)" >&2; exit 1; }
+  || { echo ">> pipeline default approvers not merged into the step (got: $MERGED_APPROVERS; view: $PD_VIEW)"; exit 1; }
 [ "$MERGED_QUORUM" = '2' ] \
-  || { echo ">> pipeline default quorum not merged into the step (got: $MERGED_QUORUM)" >&2; exit 1; }
+  || { echo ">> pipeline default quorum not merged into the step (got: $MERGED_QUORUM)"; exit 1; }
 
 log ">> 18-approval-groups PASSED"
