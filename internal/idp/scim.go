@@ -57,6 +57,15 @@ func (s *Server) mountSCIM(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+base+"/Schemas/{urn}", s.scimGuard(s.handleSCIMSchema))
 	mux.HandleFunc("GET "+base+"/ResourceTypes", s.scimGuard(s.handleSCIMResourceTypes))
 	mux.HandleFunc("GET "+base+"/ResourceTypes/{rtype}", s.scimGuard(s.handleSCIMResourceType))
+	// The /Users resource (F-28.4, Slice 2): the concrete User endpoints
+	// under the same guard (Accept + key pool + connector attribution).
+	// /Groups lands with F-28.5.
+	mux.HandleFunc("GET "+base+"/Users", s.scimGuard(s.handleSCIMUsersList))
+	mux.HandleFunc("POST "+base+"/Users", s.scimGuard(s.handleSCIMUsersCreate))
+	mux.HandleFunc("GET "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserGet))
+	mux.HandleFunc("PUT "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserPut))
+	mux.HandleFunc("PATCH "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserPatch))
+	mux.HandleFunc("DELETE "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserDelete))
 	mux.Handle(base+"/", s.scimGuard(http.HandlerFunc(s.handleSCIMSubtree)))
 }
 
@@ -130,25 +139,33 @@ func (s *Server) handleSCIMSubtree(w http.ResponseWriter, r *http.Request) {
 	switch elems[0] {
 	case "ServiceProviderConfig":
 		if len(elems) == 1 {
-			s.scimWrongVerb(w, r)
+			s.scimWrongVerb(w, r, http.MethodGet)
 			return
 		}
 	case "Schemas", "ResourceTypes":
 		// Depth 1 (the collection) and depth 2 (item) are the GET shapes;
 		// anything arriving here had the wrong verb.
 		if len(elems) <= 2 {
-			s.scimWrongVerb(w, r)
+			s.scimWrongVerb(w, r, http.MethodGet)
+			return
+		}
+	case "Users":
+		// Depth 1 (collection: GET/POST) and depth 2 (item: GET/PUT/PATCH/
+		// DELETE) are the legal shapes; anything arriving here had the wrong
+		// verb (F-28.4, Slice 2).
+		if len(elems) <= 2 {
+			s.scimWrongVerb(w, r, "GET, OPTIONS, POST, PUT, PATCH, DELETE")
 			return
 		}
 	}
-	// Unknown resource (today: /Users and /Groups land with F-28.4/F-28.5)
-	// or over-nested junk.
+	// Unknown resource (/Groups lands with F-28.5) or over-nested junk.
 	s.scimErr(w, r, http.StatusNotFound, "unknown SCIM resource "+r.URL.Path)
 }
 
-// scimWrongVerb answers a known-resource request with the wrong method.
-func (s *Server) scimWrongVerb(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Allow", http.MethodGet)
+// scimWrongVerb answers a known-resource request with the wrong method,
+// advertising the ALLOWED methods for the resource.
+func (s *Server) scimWrongVerb(w http.ResponseWriter, r *http.Request, allow string) {
+	w.Header().Set("Allow", allow)
 	s.scimErr(w, r, http.StatusMethodNotAllowed, "method "+r.Method+" not allowed on this resource")
 }
 

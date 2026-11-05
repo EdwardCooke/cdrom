@@ -197,8 +197,43 @@ func (s *MemoryUserStore) GetByID(_ context.Context, id string, includeDeleted b
 }
 
 // List returns registered users, ordered by ID. When includeDeleted is false
-// (the default) tombstoned users are excluded (F-28.3).
-func (s *MemoryUserStore) List(_ context.Context, includeDeleted bool) ([]*User, error) {
+// (the default) tombstoned users are excluded (F-28.3). Equalities, when
+// non-nil, constrains the result IN MEMORY (mirror-image of the Database
+// service's pushdown — same vocabulary, same semantics, same rejections).
+// validateEqualities rejects illegal constraint INPUTS UPFRONT (the Database
+// service enforces the IDENTICAL rules — the two backends must agree on every
+// input): unknown attributes and non-literal boolean constants are
+// InvalidArgument.
+func validateEqualities(equalities *EqualityConstraints) error {
+	if equalities == nil {
+		return nil
+	}
+	for _, ec := range *equalities {
+		if !isValidCanonicalAttribute(ec.Attribute) {
+			return status.Errorf(codes.InvalidArgument, "unknown user filter attribute: %q", ec.Attribute)
+		}
+		if isBooleanAttribute(ec.Attribute) && ec.Value != "true" && ec.Value != "false" {
+			return status.Errorf(codes.InvalidArgument, "boolean predicate %q expects \"true\" or \"false\", got %q", ec.Attribute, ec.Value)
+		}
+	}
+	return nil
+}
+
+func (s *MemoryUserStore) List(_ context.Context, includeDeleted bool, equalities *EqualityConstraints) ([]*User, error) {
+	if err := validateEqualities(equalities); err != nil {
+		return nil, err
+	}
+	matchAll := func(u *User) bool {
+		if equalities == nil {
+			return true
+		}
+		for _, ec := range *equalities {
+			if !matchesEquality(ec, u) {
+				return false
+			}
+		}
+		return true
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	users := make([]*User, 0, len(s.byID))
@@ -206,10 +241,98 @@ func (s *MemoryUserStore) List(_ context.Context, includeDeleted bool) ([]*User,
 		if !includeDeleted && u.DeletedAt != nil {
 			continue
 		}
+		if !matchAll(u) {
+			continue
+		}
 		users = append(users, copyUser(u))
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].ID < users[j].ID })
 	return users, nil
+}
+
+// Count measures the directory IN MEMORY (walks the index under the lock —
+// the memory store IS the database; the production store defers the aggregate
+// to the Database service). Conditions mirror List exactly.
+func (s *MemoryUserStore) Count(_ context.Context, includeDeleted bool, equalities *EqualityConstraints) (int, error) {
+	if err := validateEqualities(equalities); err != nil {
+		return 0, err
+	}
+	matchAll := func(u *User) bool {
+		if equalities == nil {
+			return true
+		}
+		for _, ec := range *equalities {
+			if !matchesEquality(ec, u) {
+				return false
+			}
+		}
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, u := range s.byID {
+		if !includeDeleted && u.DeletedAt != nil {
+			continue
+		}
+		if !matchAll(u) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+// canonicalAttributes is the GENERIC EQUALITY VOCABULARY (finite by design —
+// mirroring the Database service's pushdown alphabet, so both backends
+// reject the same inputs).
+var canonicalAttributes = map[string]bool{
+	"username":    true,
+	"external_id": true,
+	"email":       true,
+	"first_name":  true,
+	"last_name":   true,
+	"active":      true,
+	"provisioned": true,
+}
+
+// isValidCanonicalAttribute reports membership in the vocabulary.
+func isValidCanonicalAttribute(attr string) bool { return canonicalAttributes[attr] }
+
+// isBooleanAttribute reports whether the attribute HOLDS BOOLEANS (compared
+// literally against the "true"/"false" constants).
+func isBooleanAttribute(attr string) bool { return attr == "active" || attr == "provisioned" }
+
+// matchesEquality evaluates one VALIDATED generic equality constraint
+// against a user (validation precedes — see List).
+func matchesEquality(ec EqualityConstraint, u *User) bool {
+	var col string
+	boolCol := false
+	switch ec.Attribute {
+	case "username":
+		col = u.Username
+	case "external_id":
+		col = u.ExternalID
+	case "email":
+		col = u.Email
+	case "first_name":
+		col = u.FirstName
+	case "last_name":
+		col = u.LastName
+	case "active":
+		col = strconv.FormatBool(u.Active)
+		boolCol = true
+	case "provisioned":
+		col = strconv.FormatBool(u.Provisioned)
+		boolCol = true
+	}
+	if boolCol {
+		return col == ec.Value
+	}
+	if ec.CaseSensitive {
+		return col == ec.Value
+	}
+	return strings.EqualFold(col, ec.Value)
 }
 
 // Update updates a user's profile and/or roles, keyed by ID. A missing user
@@ -246,6 +369,49 @@ func (s *MemoryUserStore) Update(_ context.Context, user *User) (*User, error) {
 	if user.PasswordHash != "" {
 		existing.PasswordHash = user.PasswordHash
 	}
+	return copyUser(existing), nil
+}
+
+// ReplaceProfile DEFINITELY replaces the tracked profile fields (F-28.4
+// Slice 2, the SCIM PUT semantics): every field is SET to the supplied value
+// (omitted names/email take ""; an omitted role set resets to none; an
+// omitted active takes the default, true). Parity with the Database
+// service's ReplaceIDPUserProfile: username required, external_id immutable,
+// tombstoned users NotFound.
+func (s *MemoryUserStore) ReplaceProfile(_ context.Context, p *ProfileReplacement) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p.Username == "" {
+		return nil, status.Error(codes.InvalidArgument, "username is required")
+	}
+	existing, ok := s.byID[p.ID]
+	if !ok || existing.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+	if ext := p.ExternalID; ext != "" && ext != existing.ExternalID {
+		return nil, status.Error(codes.InvalidArgument, "external_id is immutable")
+	}
+	existing.FirstName = p.FirstName
+	existing.LastName = p.LastName
+	existing.Email = p.Email
+	existing.Roles = p.Roles
+	if p.ActiveSignaled != nil {
+		existing.Active = *p.ActiveSignaled
+	} else {
+		existing.Active = true
+	}
+	if !strings.EqualFold(p.Username, existing.Username) {
+		if other, taken := s.byUser[strings.ToLower(p.Username)]; taken && other.ID != existing.ID {
+			return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
+		}
+		// DROP the stale index entry for the OLD username before adopting the
+		// new one (index() adds; it never removes — leaving the old key would
+		// let the retired name keep resolving to the renamed row).
+		delete(s.byUser, strings.ToLower(existing.Username))
+		existing.Username = p.Username
+	}
+	existing.UpdatedAt = time.Now()
+	s.index(existing)
 	return copyUser(existing), nil
 }
 

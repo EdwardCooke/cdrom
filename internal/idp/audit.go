@@ -25,6 +25,9 @@ type dbAuditSink struct {
 }
 
 func (s *dbAuditSink) Append(ctx context.Context, e audit.Event) error {
+	// Mirror of the API's sink: the durable store carries the values as
+	// SELF-CONTAINED STRINGS, so structured values are compact-encoded HERE —
+	// the single stringification point for this sink.
 	_, err := s.db.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{
 		Actor:      e.Actor,
 		ActorKind:  e.ActorKind,
@@ -36,9 +39,9 @@ func (s *dbAuditSink) Append(ctx context.Context, e audit.Event) error {
 		RunId:      e.RunID,
 		Outcome:    e.Outcome,
 		SourceIp:   e.SourceIP,
-		OldValue:   e.OldValue,
-		NewValue:   e.NewValue,
-		Details:    e.Details,
+		OldValue:   audit.EncodeFieldValue(e.OldValue),
+		NewValue:   audit.EncodeFieldValue(e.NewValue),
+		Details:    audit.EncodeFieldValue(e.Details),
 	})
 	return err
 }

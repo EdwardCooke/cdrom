@@ -571,12 +571,12 @@ func TestScimValidator_FailuresRecordedWithoutEchoingTheKey(t *testing.T) {
 	if last.TargetKind != audit.TargetScimKey {
 		t.Errorf("event target = %s, want scim-key", last.TargetKind)
 	}
-	if strings.Contains(last.Details, probe) || strings.Contains(last.Actor, probe) {
+	if strings.Contains(audit.EncodeFieldValue(last.Details), probe) || strings.Contains(last.Actor, probe) {
 		t.Errorf("audit event echoed the presented key: %+v", last)
 	}
-	var det map[string]any
-	if err := json.Unmarshal([]byte(last.Details), &det); err != nil {
-		t.Fatalf("details not JSON: %s", last.Details)
+	det, ok := last.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("details = %v (%T), want a structured document", last.Details, last.Details)
 	}
 	if det["reason"] != scimFailReasonRejected || det["path"] != "/scim/v2/ServiceProviderConfig" {
 		t.Errorf("details = %#v, want reason=rejected + the path", det)
@@ -594,8 +594,9 @@ func TestScimValidator_FailuresRecordedWithoutEchoingTheKey(t *testing.T) {
 		t.Fatalf("missing-header status = %d, want 401", st)
 	}
 	evs = aud.byAction(audit.ActionScimAuthFail)
-	if err := json.Unmarshal([]byte(evs[len(evs)-1].Details), &det); err != nil {
-		t.Fatal(err)
+	det, ok = evs[len(evs)-1].Details.(map[string]any)
+	if !ok {
+		t.Fatalf("details = %v (%T), want a structured document", evs[len(evs)-1].Details, evs[len(evs)-1].Details)
 	}
 	if det["reason"] != scimFailReasonMissing {
 		t.Errorf("missing-header reason = %v, want %s", det["reason"], scimFailReasonMissing)

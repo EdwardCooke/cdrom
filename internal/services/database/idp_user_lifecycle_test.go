@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -438,4 +439,130 @@ func describeUsers(users []*dbpb.IDPUser) []string {
 		out = append(out, u.GetId()+"("+u.GetUsername()+")")
 	}
 	return out
+}
+
+// TestIDPUserListPushdown certifies the generic equality pushdown (F-28.4
+// Slice 2 refinement): predicates evaluate IN THE DATABASE (the caller sees
+// only matching rows), case sensitivity is pinned per predicate, booleans
+// compare literally, and unknown attributes are InvalidArgument.
+func TestIDPUserListPushdown(t *testing.T) {
+	client, _ := startServerDB(t)
+	ctx := context.Background()
+	// All THREE are born active (creation semantics); β is driven inactive
+	// afterwards through the OWNING channel (below).
+	seed := []dbpb.IDPUser{
+		{Username: "alpha.one", FirstName: "Ann", LastName: "Alpha", Email: "ann@a.x", ExternalId: "EXT-A", Provisioned: true},
+		{Username: "beta.two", FirstName: "Bob", LastName: "Beta", Email: "bob@b.x", ExternalId: "EXT-B"},
+		{Username: "gamma.three", FirstName: "Cy", LastName: "Gamma", Email: "cy@c.x", ExternalId: "EXT-C"},
+	}
+	for si := range seed {
+		if _, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{User: &seed[si]}); err != nil {
+			t.Fatalf("CreateUser(%s): %v", seed[si].Username, err)
+		}
+	}
+	// Creation settles EVERYONE active (birth semantics — the state RPCs own
+	// the active bit); drive β's deactivation through ITS owning channel.
+	deactivated, err := client.DeactivateIDPUser(ctx, &dbpb.UserStateChangeRequest{Id: userIdOf(t, client, ctx, "beta.two")})
+	if err != nil || deactivated.GetActive() {
+		t.Fatalf("drive β inactive via DeactivateIDPUser: %v (active=%v)", err, deactivated.GetActive())
+	}
+	pred := func(attr string, cs bool, val string) *dbpb.ListIDPUsersRequest_Predicate {
+		return &dbpb.ListIDPUsersRequest_Predicate{Attribute: attr, CaseSensitive: cs, Value: val}
+	}
+	listWith := func(ps ...*dbpb.ListIDPUsersRequest_Predicate) []string {
+		resp, err := client.ListIDPUsers(ctx, &dbpb.ListIDPUsersRequest{GenericPredicate: ps})
+		if err != nil {
+			t.Fatalf("ListIDPUsers(%v): %v", ps, err)
+		}
+		got := map[string]bool{}
+		for _, u := range resp.GetUsers() {
+			got[u.GetUsername()] = true
+		}
+		return sortedKeys(got)
+	}
+	check := func(label string, want []string, ps ...*dbpb.ListIDPUsersRequest_Predicate) {
+		t.Run(label, func(t *testing.T) {
+			if got := listWith(ps...); !sliceEq(got, want) {
+				t.Errorf("pushdown %s: got %v, want %v", label, got, want)
+			}
+		})
+	}
+	// Baseline: no predicate ⇒ everyone (ordered by id).
+	check("none", []string{"alpha.one", "beta.two", "gamma.three"})
+	// Case-INSENSITIVE username (loose, the directory default).
+	check("username-loose", []string{"alpha.one"}, pred("username", false, "ALPHA.ONE"))
+	// Case-SENSITIVE username (tight — misses the differently-cased posting).
+	check("username-tight-miss", []string{}, pred("username", true, "Alpha.One"))
+	// Exact externalId (always literal).
+	check("external-id", []string{"beta.two"}, pred("external_id", true, "EXT-B"))
+	// Boolean literalness: "true" ≡ the constant; ANYTHING ELSE is
+	// InvalidArgument (garbage must not silently widen the scan).
+	check("active-true", []string{"alpha.one", "gamma.three"}, pred("active", false, "true"))
+	if _, err := client.ListIDPUsers(ctx, &dbpb.ListIDPUsersRequest{GenericPredicate: []*dbpb.ListIDPUsersRequest_Predicate{pred("active", false, "True")}}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("non-literal boolean constant: err=%v, want InvalidArgument", err)
+	}
+	// Compound AND.
+	check("compound-and", []string{"alpha.one"}, pred("active", false, "true"), pred("provisioned", false, "true"))
+	// Name-column pushdown (still evaluated in the database).
+	check("first-name", []string{"gamma.three"}, pred("first_name", false, "CY"))
+	// Unknown attribute ⇒ InvalidArgument (loud, not a widened scan).
+	if _, err := client.ListIDPUsers(ctx, &dbpb.ListIDPUsersRequest{GenericPredicate: []*dbpb.ListIDPUsersRequest_Predicate{pred("bogus_attr", false, "x")}}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("unknown attribute: err=%v, want InvalidArgument", err)
+	}
+	// COUNT RIDES THE SAME CONDITIONS (aggregate — no rows transferred):
+	// the tally must agree with the list's narrowing on every predicate.
+	countOf := func(ps ...*dbpb.ListIDPUsersRequest_Predicate) int32 {
+		resp, err := client.CountIDPUsers(ctx, &dbpb.ListIDPUsersRequest{GenericPredicate: ps})
+		if err != nil {
+			t.Fatalf("CountIDPUsers(%v): %v", ps, err)
+		}
+		return resp.GetCount()
+	}
+	if got := countOf(); got != 3 {
+		t.Errorf("count(all) = %d, want 3", got)
+	}
+	if got := countOf(pred("active", false, "true")); got != 2 {
+		t.Errorf("count(active=true) = %d, want 2 (α γ)", got)
+	}
+	if got := countOf(pred("active", false, "true"), pred("provisioned", false, "true")); got != 1 {
+		t.Errorf("count(compound AND) = %d, want 1 (α)", got)
+	}
+	if got := countOf(pred("username", false, "GAMMA.THREE")); got != 1 {
+		t.Errorf("count(casefolded username) = %d, want 1 (γ)", got)
+	}
+	if got := countOf(pred("external_id", true, "EXT-B")); got != 1 {
+		t.Errorf("count(exact externalId) = %d, want 1 (β)", got)
+	}
+}
+
+// userIdOf resolves a username to its stable id (through the PUBLIC getter —
+// the test exercises the wire, not the ORM).
+func userIdOf(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, username string) string {
+	t.Helper()
+	resp, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Username: username})
+	if err != nil {
+		t.Fatalf("lookup %s: %v", username, err)
+	}
+	return resp.GetId()
+}
+
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sliceEq(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

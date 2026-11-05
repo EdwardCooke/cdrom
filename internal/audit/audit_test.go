@@ -20,7 +20,9 @@ func TestLoggerJSON(t *testing.T) {
 	}
 	defer l.Close()
 
-	e := Event{
+	// EVENT 1: a STRING that is itself a JSON document — promoted to a nested
+	// object (backward-compatible with producers that pre-render documents).
+	e1 := Event{
 		Time:       time.Date(2026, 10, 9, 14, 30, 0, 0, time.UTC),
 		Actor:      "alice",
 		ActorKind:  ActorKindUser,
@@ -33,8 +35,19 @@ func TestLoggerJSON(t *testing.T) {
 		SourceIP:   "10.0.0.1",
 		NewValue:   `{"name":"build"}`,
 	}
-	if err := l.Log(e); err != nil {
+	if err := l.Log(e1); err != nil {
 		t.Fatalf("Log: %v", err)
+	}
+	// EVENT 2: a STRUCTURED value — embedded natively (the parser-friendly
+	// form producers should aim for).
+	e2 := Event{
+		Actor:    "svc",
+		Action:   ActionUserUpdate,
+		Outcome:  OutcomeSuccess,
+		NewValue: map[string]any{"username": "ada", "roles": []string{"admin"}},
+	}
+	if err := l.Log(e2); err != nil {
+		t.Fatalf("Log structured: %v", err)
 	}
 
 	data, err := os.ReadFile(path)
@@ -42,8 +55,8 @@ func TestLoggerJSON(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("lines = %d, want 1", len(lines))
+	if len(lines) != 2 {
+		t.Fatalf("lines = %d, want 2", len(lines))
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &m); err != nil {
@@ -55,12 +68,25 @@ func TestLoggerJSON(t *testing.T) {
 	if m["target_name"] != "build" || m["source_ip"] != "10.0.0.1" {
 		t.Errorf("target_name/source_ip = %v/%v", m["target_name"], m["source_ip"])
 	}
+	// The string-valued JSON document arrived NESted (not escaped).
+	nv, ok := m["new_value"].(map[string]any)
+	if !ok || nv["name"] != "build" {
+		t.Errorf("new_value = %v (%T), want a nested object naming build", m["new_value"], m["new_value"])
+	}
 	// Empty fields are omitted.
 	if _, ok := m["run_id"]; ok {
 		t.Errorf("run_id present, want omitted (zero)")
 	}
 	if _, ok := m["old_value"]; ok {
 		t.Errorf("old_value present, want omitted (empty)")
+	}
+	// EVENT 2's structured value is a native object too.
+	var m2 map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &m2); err != nil {
+		t.Fatalf("line 2 not valid JSON: %v (%s)", err, lines[1])
+	}
+	if nv2, ok := m2["new_value"].(map[string]any); !ok || nv2["username"] != "ada" {
+		t.Errorf("structured new_value = %v (%T), want a nested object with username ada", m2["new_value"], m2["new_value"])
 	}
 }
 

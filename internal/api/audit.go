@@ -39,6 +39,9 @@ type auditSink struct {
 }
 
 func (s *auditSink) Append(ctx context.Context, e audit.Event) error {
+	// The durable store carries the values as SELF-CONTAINED STRINGS (the
+	// proto's columns are textual): structured values are compact-encoded
+	// HERE — the single stringification point for this sink.
 	_, err := s.db.AppendAuditEvent(ctx, &dbpb.AppendAuditEventRequest{
 		Actor:      e.Actor,
 		ActorKind:  e.ActorKind,
@@ -50,9 +53,9 @@ func (s *auditSink) Append(ctx context.Context, e audit.Event) error {
 		RunId:      e.RunID,
 		Outcome:    e.Outcome,
 		SourceIp:   e.SourceIP,
-		OldValue:   e.OldValue,
-		NewValue:   e.NewValue,
-		Details:    e.Details,
+		OldValue:   audit.EncodeFieldValue(e.OldValue),
+		NewValue:   audit.EncodeFieldValue(e.NewValue),
+		Details:    audit.EncodeFieldValue(e.Details),
 	})
 	return err
 }

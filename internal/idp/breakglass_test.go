@@ -246,7 +246,7 @@ func TestBreakGlassAdmissionLadder(t *testing.T) {
 	// NOTHING was coined: the directory is unchanged (still just the benign
 	// user), and no audit event was emitted (denials are logged, not audited
 	// as coinage).
-	if ls, _ := users.List(ctx, true); len(ls) != 1 || ls[0].ID != seed.ID {
+	if ls, _ := users.List(ctx, true, nil); len(ls) != 1 || ls[0].ID != seed.ID {
 		t.Errorf("directory after denials = %d users, want only the seed", len(ls))
 	}
 	if n := len(sink.events()); n != 0 {
@@ -267,7 +267,7 @@ func TestBreakGlassCoinsStrictlyAdditiveAdmin(t *testing.T) {
 	srv.SetBreakGlassAuditor(audit.NewRecorder(nil, sink, nil, capLog))
 	ctx := context.Background()
 
-	before, err := users.List(ctx, true)
+	before, err := users.List(ctx, true, nil)
 	if err != nil {
 		t.Fatalf("list before: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestBreakGlassCoinsStrictlyAdditiveAdmin(t *testing.T) {
 
 	// STRICTLY ADDITIVE: exactly one new row; every pre-existing row
 	// untouched (diff asserted).
-	after, err := users.List(ctx, true)
+	after, err := users.List(ctx, true, nil)
 	if err != nil {
 		t.Fatalf("list after: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestBreakGlassCoinsStrictlyAdditiveAdmin(t *testing.T) {
 	if ev.Outcome != audit.OutcomeSuccess {
 		t.Errorf("outcome = %q, want success", ev.Outcome)
 	}
-	if blob := ev.Actor + ev.TargetID + ev.Details; strings.Contains(blob, resp.Password) {
+	if blob := ev.Actor + ev.TargetID + audit.EncodeFieldValue(ev.Details); strings.Contains(blob, resp.Password) {
 		t.Error("AUDIT RECORD CONTAINS THE PLAINTEXT PASSWORD")
 	}
 
@@ -472,7 +472,7 @@ func TestBreakGlassLivePoolCap(t *testing.T) {
 
 func mustList(t *testing.T, users UserStore, ctx context.Context) []*User {
 	t.Helper()
-	us, err := users.List(ctx, true)
+	us, err := users.List(ctx, true, nil)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

@@ -27,7 +27,6 @@ package idp
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net"
 	"sort"
@@ -338,10 +337,6 @@ func (v *scimValidator) RecordFailure(reason, remoteAddr, path string) {
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		ip = host
 	}
-	details, _ := json.Marshal(map[string]any{
-		"reason": reason,
-		"path":   path,
-	})
 	v.auditor.Record(audit.Event{
 		Actor:      scimAuditorIdentity,
 		ActorKind:  audit.ActorKindSystem,
@@ -349,7 +344,7 @@ func (v *scimValidator) RecordFailure(reason, remoteAddr, path string) {
 		TargetKind: audit.TargetScimKey,
 		Outcome:    audit.OutcomeFailure,
 		SourceIP:   ip,
-		Details:    string(details),
+		Details:    map[string]any{"reason": reason, "path": path},
 	})
 }
 

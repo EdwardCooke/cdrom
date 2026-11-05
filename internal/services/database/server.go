@@ -3305,12 +3305,74 @@ func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*
 	return toProtoIDPUser(user), nil
 }
 
-// ListIDPUsers returns all registered users, ordered by ID. Tombstoned
-// (deprovisioned) users are excluded unless include_deleted is set (F-28.3).
-func (s *Server) ListIDPUsers(ctx context.Context, req *dbpb.ListIDPUsersRequest) (*dbpb.ListIDPUsersResponse, error) {
+// idpUserColumnRule describes one pushdown-capable column of the user table:
+// its NAME and whether it HOLDS BOOLEANS (compared literally) or STRINGS
+// (subject to the predicate's case sensitivity).
+type idpUserColumnRule struct {
+	column  string
+	boolean bool
+}
+
+// idpUserPushdownColumns closes the generic equality algebra (F-28.4 Slice 2
+// refinement): the attributes a ListIDPUsers predicate may constrain, mapped
+// to their columns. Deliberately FINITE — an unknown attribute is
+// InvalidArgument, so typos fail loudly instead of silently widening the
+// scan; extending the alphabet is a conscious addition here and in the
+// translators upstream. Indexed columns (username, external_id, email)
+// yield usable WHERE clauses.
+var idpUserPushdownColumns = map[string]idpUserColumnRule{
+	"username":    {column: "username"},
+	"external_id": {column: "external_id"},
+	"email":       {column: "email"},
+	"first_name":  {column: "first_name"},
+	"last_name":   {column: "last_name"},
+	"active":      {column: "active", boolean: true},
+	"provisioned": {column: "provisioned", boolean: true},
+}
+
+// idpUserListingQuery builds the CONDITIONAL query for user listings/counts:
+// the tombstone exclusion (unless include_deleted) plus the generic equality
+// predicates EVALUATED HERE (server-side pushdown — callers deal only with
+// matching rows, so the transfer scales with the answer, not the population;
+// F-28.4 Slice 2 refinement). Ordering is LEFT TO THE CALLER (lists order by
+// id; the count aggregates).
+func (s *Server) idpUserListingQuery(ctx context.Context, req *dbpb.ListIDPUsersRequest) (*gorm.DB, error) {
 	query := s.db.WithContext(ctx).Model(&models.IDPUser{})
 	if !req.GetIncludeDeleted() {
 		query = query.Where("deleted_at IS NULL")
+	}
+	for _, pred := range req.GetGenericPredicate() {
+		rule, ok := idpUserPushdownColumns[pred.GetAttribute()]
+		if !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "unknown user filter attribute: %q", pred.GetAttribute())
+		}
+		if rule.boolean {
+			// Boolean predicates demand the LITERAL constants (silent
+			// coercion of garbage to false would widen scans invisibly).
+			bv := pred.GetValue()
+			if bv != "true" && bv != "false" {
+				return nil, status.Errorf(codes.InvalidArgument, "boolean predicate %q expects \"true\" or \"false\", got %q", pred.GetAttribute(), bv)
+			}
+			query = query.Where(rule.column+" = ?", bv == "true")
+			continue
+		}
+		if pred.GetCaseSensitive() {
+			query = query.Where(rule.column+" = ?", pred.GetValue())
+		} else {
+			// Directory convention: loose (casefolded) string matching.
+			query = query.Where("LOWER("+rule.column+") = LOWER(?)", pred.GetValue())
+		}
+	}
+	return query, nil
+}
+
+// ListIDPUsers returns registered users ORDERED BY ID, narrowed by the
+// request's conditions (see idpUserListingQuery). Tombstoned (deprovisioned)
+// users are excluded unless include_deleted is set (F-28.3).
+func (s *Server) ListIDPUsers(ctx context.Context, req *dbpb.ListIDPUsersRequest) (*dbpb.ListIDPUsersResponse, error) {
+	query, err := s.idpUserListingQuery(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 	var users []models.IDPUser
 	if err := query.Order("id").Find(&users).Error; err != nil {
@@ -3321,6 +3383,23 @@ func (s *Server) ListIDPUsers(ctx context.Context, req *dbpb.ListIDPUsersRequest
 		response.Users = append(response.Users, toProtoIDPUser(&users[i]))
 	}
 	return response, nil
+}
+
+// CountIDPUsers tallies the users satisfying the request's conditions (SAME
+// conditions as ListIDPUsers — tombstone inclusion + generic predicates)
+// WITHOUT transferring the rows: a single COUNT(*) aggregate computed in the
+// database (F-28.4 Slice 2 refinement — callers measuring the directory or
+// a filtered slice pay for one integer, not the population).
+func (s *Server) CountIDPUsers(ctx context.Context, req *dbpb.ListIDPUsersRequest) (*dbpb.ListIDPUsersResponse, error) {
+	query, err := s.idpUserListingQuery(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return &dbpb.ListIDPUsersResponse{Count: int32(count)}, nil
 }
 
 // UpdateIDPUser updates a user's PROFILE fields. Supplied-value semantics
@@ -3387,6 +3466,86 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 	}
 	if ext := u.GetExternalId(); ext != "" {
 		user.ExternalID = ext
+	}
+	user.UpdatedAt = time.Now().UTC()
+	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPUser(&user), nil
+}
+
+// ReplaceIDPUserProfile DEFINITELY replaces a user's tracked profile fields
+// (F-28.4 Slice 2 — the SCIM PUT semantics). Unlike UpdateIDPUser's
+// supplied-value semantics (omitted ⇒ leave unchanged), here every flat field
+// is SET to the supplied value and an omitted field takes its DEFAULT:
+// names/email ⇒ "", roles ⇒ reset to none, active ⇒ true (signaled by the
+// optional's presence). This is what makes PUT expressible over proto3, whose
+// omitted-means-zero otherwise conflates "absent" with "the zero value".
+//
+// Guards:
+//   - username is REQUIRED (InvalidArgument when empty); renaming onto another
+//     user's username is AlreadyExists (case-folded, mirroring the lookups).
+//   - external_id is IMMUTABLE: a supplied value differing from the row's
+//     current one is InvalidArgument (the corporate link is sticky — altering
+//     it would orphan the re-provisioning match key). Equal or absent is a
+//     no-op.
+//   - a tombstoned (deprovisioned) user is NotFound — revival is exclusively
+//     ReactivateIDPUser's job.
+//
+// Never touched here (owned elsewhere, F-28.3): the tombstone, `provisioned`,
+// the password/temporal credentials, and the lockout state.
+func (s *Server) ReplaceIDPUserProfile(ctx context.Context, req *dbpb.ReplaceIDPUserProfileRequest) (*dbpb.IDPUser, error) {
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "id is required")
+	}
+	id, err := parseUserID(req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	if req.GetUsername() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username is required")
+	}
+	var user models.IDPUser
+	if err := s.db.WithContext(ctx).Where("id = ?", id).First(&user).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		return nil, grpcErr(err)
+	}
+	if user.DeletedAt != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+	// external_id is immutable: a differing supplied value is rejected. Exact
+	// comparison (corporate identifiers are case-sensitive links).
+	if ext := req.GetExternalId(); ext != "" && ext != user.ExternalID {
+		return nil, status.Error(codes.InvalidArgument, "external_id is immutable")
+	}
+	// Definite replace of the flat fields (omitted ⇒ default).
+	user.FirstName = req.GetFirstName()
+	user.LastName = req.GetLastName()
+	user.Email = req.GetEmail()
+	user.Roles = nonNilRoles(req.GetRoles())
+	// active: presence-signaled (the optional generates a *bool field);
+	// omitted ⇒ the default (true).
+	if a := req.Active; a != nil {
+		user.Active = *a
+	} else {
+		user.Active = true
+	}
+	// Username rename with the uniqueness guard (case-folded).
+	if nu := req.GetUsername(); !strings.EqualFold(nu, user.Username) {
+		var clash models.IDPUser
+		cerr := s.db.WithContext(ctx).
+			Where("lower(username) = ? AND id <> ?", strings.ToLower(nu), id).
+			First(&clash).Error
+		switch {
+		case errors.Is(cerr, gorm.ErrRecordNotFound):
+			user.Username = nu
+		case cerr != nil:
+			return nil, grpcErr(cerr)
+		default:
+			return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
+		}
 	}
 	user.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
@@ -6637,6 +6796,7 @@ func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
 		PasswordHash:          user.PasswordHash,
 		Roles:                 nonNilRoles(user.Roles),
 		CreatedAt:             timestamppb.New(user.CreatedAt),
+		UpdatedAt:             timestamppb.New(user.UpdatedAt),
 		ApiKeyFailedCount:     int32(user.APIKeyFailedCount),
 		Active:                user.Active,
 		ExternalId:            user.ExternalID,

@@ -128,6 +128,15 @@ type Server struct {
 	// (F-28.2, Slice 3). Attached by cmd/idp when the SCIM surface is enabled;
 	// when nil the guarded surface denies every request (deny by default).
 	scimAuthorizer scimAuthorizer
+	// scimUsers is the user directory the SCIM /Users resource (F-28.4,
+	// Slice 2) manages. Attached by cmd/idp; when nil the /Users routes
+	// answer 503 (the surface is mounted but its backing is unwired — a
+	// misconfiguration, degraded rather than guessed at).
+	scimUsers UserStore
+	// scimUsersAuditor records SCIM /Users mutations (F-15, F-28.4 Slice 2),
+	// attributed to the presenting connector. May be nil (mutations then
+	// skip the durable audit copy — unit tests without an audit sink).
+	scimUsersAuditor scimAuditor
 	// bgc coins break-glass admins (F-28.3, Slice 3). Attached by cmd/idp;
 	// when nil the /emergency/break-glass route denies every request.
 	bgc breakGlassCoiner
@@ -170,6 +179,14 @@ func (s *Server) SetMetrics(m *metrics.IDPMetrics) {
 // request.
 func (s *Server) SetScimAuthorizer(a scimAuthorizer) {
 	s.scimAuthorizer = a
+}
+
+// SetScimUserBacking attaches the user directory (and, optionally, the audit
+// recorder) the SCIM /Users resource (F-28.4, Slice 2) manages. Until the
+// directory is attached, the /Users routes degrade to 503.
+func (s *Server) SetScimUserBacking(store UserStore, auditor scimAuditor) {
+	s.scimUsers = store
+	s.scimUsersAuditor = auditor
 }
 
 // Handler builds the IdP's HTTP handler (the OIDC surface, plus the SCIM

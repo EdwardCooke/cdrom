@@ -294,7 +294,23 @@ service Database {
   rpc CreateUser(CreateIDPUserRequest) returns (IDPUser);
   rpc GetIDPUser(GetIDPUserRequest) returns (IDPUser);
   rpc ListIDPUsers(ListIDPUsersRequest) returns (ListIDPUsersResponse);
+  // CountIDPUsers tallies the users THAT WOULD BE RETURNED by ListIDPUsers
+  // (same include_deleted + generic_predicate conditions) WITHOUT transferring
+  // the rows: a single aggregate computed in the database. The request reuses
+  // the list's shape (conditions); the response's count is the tally (users
+  // is empty).
+  rpc CountIDPUsers(ListIDPUsersRequest) returns (ListIDPUsersResponse);
   rpc UpdateIDPUser(UpdateIDPUserRequest) returns (IDPUser);
+  // ReplaceIDPUserProfile DEFINITELY replaces a user's tracked profile fields
+  // (F-28.4 Slice 2, the SCIM PUT semantics): every field is SET to the
+  // supplied value — omitted means the FIELD'S DEFAULT (names "", email ""),
+  // unlike UpdateIDPUser's supplied-value semantics (omitted means
+  // "leave unchanged"), which proto3's omitted-means-zero makes unfit for
+  // PUT. active is optional-signaled (presence) because its default (true)
+  // differs from its zero value. userName is required; externalId is
+  // IMMUTABLE (changing it is InvalidArgument); the row's lifecycle fields
+  // (tombstone, provisioned, temporal credential) are never touched here.
+  rpc ReplaceIDPUserProfile(ReplaceIDPUserProfileRequest) returns (IDPUser);
   // DeleteIDPUser deprovisions a user by id (F-28.3 soft delete): it sets
   // the tombstone, marks the user inactive, and zeroes the password hash so
   // no leftover credential can revive the record. The row (identity, roles,
@@ -3185,6 +3201,10 @@ message IDPUser {
   // subject claim and the SCIM userName both land here. It is the anchor all
   // lookups run through (never email).
   string username = 16;
+  // updated_at is the row's last modification (F-28.4 Slice 2): the SCIM
+  // resource's meta.modified echoes THIS instant (the row's actual
+  // timestamp), not the emission time. Mirrors created_at (field 7).
+  google.protobuf.Timestamp updated_at = 17;
 }
 
 // CreateIDPUserRequest registers (or updates) a user. Username is the unique
@@ -3215,13 +3235,33 @@ message GetIDPUserRequest {
 
 // ListIDPUsersRequest lists registered users. When include_deleted is true,
 // tombstoned (deprovisioned) users are included (flagged via deleted_at);
-// by default they are excluded.
+// by default they are excluded. Equality filters (generic_predicate) narrow
+// the RESULT SET SERVER-SIDE (pushdown): the callers never receive rows that
+// do not match, so the network transfer scales with the ANSWER, not the
+// population. Multiple predicates are AND-ed; an unknown attribute is
+// InvalidArgument (callers translate unsupported expressions upstream).
 message ListIDPUsersRequest {
   bool include_deleted = 1;
+  // Generic EQUALITY predicate (attribute, case_sensitive, value):
+  // attribute is one of username, external_id, email, first_name,
+  // last_name, active, provisioned; case_sensitive governs the string
+  // comparisons (booleans compare literally regardless); value is the
+  // compared constant. Predicates are evaluated IN THE DATABASE (indexed
+  // columns produce WHERE clauses).
+  message Predicate {
+    string attribute = 1;
+    bool case_sensitive = 2;
+    string value = 3;
+  }
+  repeated Predicate generic_predicate = 2;
 }
 
 message ListIDPUsersResponse {
   repeated IDPUser users = 1;
+  // count is the TOTAL NUMBER of users satisfying the request's conditions.
+  // Authoritative in CountIDPUsers (where users is empty); ListIDPUsers
+  // leaves it unset (the page's length is derivable from users).
+  int32 count = 2;
 }
 
 // UpdateIDPUserRequest updates a user's profile and/or roles. Only the
@@ -3229,6 +3269,41 @@ message ListIDPUsersResponse {
 // password untouched. The user is addressed by id.
 message UpdateIDPUserRequest {
   IDPUser user = 1;
+}
+
+// ReplaceIDPUserProfileRequest DEFINITELY replaces the tracked profile fields
+// of the user addressed by id (F-28.4 Slice 2 — the SCIM PUT semantics).
+// Flat fields (not an embedded IDPUser) so each is independently expressible:
+//   - first_name / last_name / email: OMITTED means the field's DEFAULT
+//     (""), not "leave unchanged" (PUT replaces the whole resource).
+//   - active: `optional` signals PRESENCE — omitted means the default (true);
+//     present-but-false deactivates. Its default differs from its zero value,
+//     so a plain field could not express "omit".
+//   - roles: omitted (empty) RESETS the role set to none (PUT semantics).
+//   - username: REQUIRED (InvalidArgument when empty). Renaming onto another
+//     user's username is AlreadyExists.
+//   - external_id: IMMUTABLE — supplying a value differing from the row's
+//     current one is InvalidArgument (the corporate link is sticky; changing
+//     it would orphan the re-provisioning match key). Equal-or-absent is a
+//     no-op.
+// Untouched by this RPC (owned elsewhere, F-28.3): the tombstone, `active`'s
+// counterpart lifecycle transitions, `provisioned`, the password/temporal
+// credentials, and the lockout state.
+message ReplaceIDPUserProfileRequest {
+  // id is the user's stable identifier (addressed by id, as UpdateIDPUser).
+  string id = 1;
+  string first_name = 2;
+  string last_name = 3;
+  string email = 4;
+  repeated string roles = 5;
+  // username is the new unique login identifier (REQUIRED).
+  string username = 6;
+  // active, when PRESENT, is the desired activated state; omitted means the
+  // default (true).
+  optional bool active = 7;
+  // external_id, when PRESENT and DIFFERING from the row's current value, is
+  // InvalidArgument (immutable); equal or absent is a no-op.
+  string external_id = 8;
 }
 
 message DeleteIDPUserRequest {

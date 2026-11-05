@@ -117,16 +117,18 @@ type Event struct {
 	// SourceIP is the client's IP address; empty when the action did not come
 	// from a network client.
 	SourceIP string
-	// OldValue is the resource's state before the action, as a compact JSON
-	// document (secret values redacted); empty when the action has no
-	// before-state.
-	OldValue string
-	// NewValue is the resource's state after the action, as a compact JSON
-	// document (secret values redacted); empty when the action has no
-	// after-state.
-	NewValue string
-	// Details is a free-form JSON document carrying action-specific context.
-	Details string
+	// OldValue is the resource's state before the action (secret values
+	// redacted); typically a STRUCTURED DOCUMENT (map/slice) the renderers
+	// marshal to compact JSON, or a plain string for terse values; nil/""
+	// when the action has no before-state. Carrying the value (not a
+	// pre-rendered string) keeps the producers parser-friendly: the
+	// stringification happens exactly once, at the render/store boundary.
+	OldValue any
+	// NewValue is the resource's state after the action (see OldValue).
+	NewValue any
+	// Details is a free-form document carrying action-specific context that
+	// does not fit the structured fields (see OldValue).
+	Details any
 }
 
 // Action names (F-15). Every audited action has a stable, namespaced name
@@ -433,27 +435,29 @@ func (l *Logger) render(e Event) string {
 
 // jsonEvent is the on-the-wire shape of an audit record in JSON format. The
 // field order is the stable key order of the output. old_value, new_value, and
-// details are embedded as nested JSON objects (json.RawMessage) rather than as
-// escaped strings, so a record is a single self-describing JSON document that
+// details are embedded as NATIVE JSON VALUES (nested objects/documents, never
+// escaped strings), so a record is a single self-describing JSON document that
 // is easy to pretty-print and query.
 type jsonEvent struct {
-	Time       string          `json:"time"`
-	Actor      string          `json:"actor"`
-	ActorKind  string          `json:"actor_kind,omitempty"`
-	Action     string          `json:"action"`
-	TargetKind string          `json:"target_kind,omitempty"`
-	TargetID   string          `json:"target_id,omitempty"`
-	TargetName string          `json:"target_name,omitempty"`
-	PipelineID int64           `json:"pipeline_id,omitempty"`
-	RunID      int64           `json:"run_id,omitempty"`
-	Outcome    string          `json:"outcome"`
-	SourceIP   string          `json:"source_ip,omitempty"`
-	OldValue   json.RawMessage `json:"old_value,omitempty"`
-	NewValue   json.RawMessage `json:"new_value,omitempty"`
-	Details    json.RawMessage `json:"details,omitempty"`
+	Time       string `json:"time"`
+	Actor      string `json:"actor"`
+	ActorKind  string `json:"actor_kind,omitempty"`
+	Action     string `json:"action"`
+	TargetKind string `json:"target_kind,omitempty"`
+	TargetID   string `json:"target_id,omitempty"`
+	TargetName string `json:"target_name,omitempty"`
+	PipelineID int64  `json:"pipeline_id,omitempty"`
+	RunID      int64  `json:"run_id,omitempty"`
+	Outcome    string `json:"outcome"`
+	SourceIP   string `json:"source_ip,omitempty"`
+	OldValue   any    `json:"old_value,omitempty"`
+	NewValue   any    `json:"new_value,omitempty"`
+	Details    any    `json:"details,omitempty"`
 }
 
-// renderJSON renders e as a single-line JSON object.
+// renderJSON renders e as a single-line JSON object. Structured old/new/details
+// values are embedded as NATIVE JSON documents (never escaped strings), so the
+// emitted line is directly consumable by a JSON parser.
 func (l *Logger) renderJSON(e Event) string {
 	je := jsonEvent{
 		Time:       e.Time.UTC().Format(time.RFC3339Nano),
@@ -467,21 +471,15 @@ func (l *Logger) renderJSON(e Event) string {
 		RunID:      e.RunID,
 		Outcome:    e.Outcome,
 		SourceIP:   e.SourceIP,
-	}
-	if e.OldValue != "" {
-		je.OldValue = rawOrString(e.OldValue)
-	}
-	if e.NewValue != "" {
-		je.NewValue = rawOrString(e.NewValue)
-	}
-	if e.Details != "" {
-		je.Details = rawOrString(e.Details)
+		OldValue:   jsonNativeValue(e.OldValue),
+		NewValue:   jsonNativeValue(e.NewValue),
+		Details:    jsonNativeValue(e.Details),
 	}
 	b, err := json.Marshal(je)
 	if err != nil {
-		// The struct only holds strings, ints, and validated raw JSON, so
-		// marshaling cannot fail; fall back to a best-effort string rather
-		// than dropping the record.
+		// Marshaling fails only on pathological values (reference cycles,
+		// NaN floats); fall back to a best-effort rendering rather than
+		// dropping the record.
 		return fmt.Sprintf("%+v\n", je)
 	}
 	return string(b) + "\n"
@@ -513,14 +511,14 @@ func (l *Logger) renderText(e Event) string {
 	if e.SourceIP != "" {
 		fmt.Fprintf(&b, " source_ip=%s", e.SourceIP)
 	}
-	if e.OldValue != "" {
-		fmt.Fprintf(&b, " old_value=%s", e.OldValue)
+	if encoded := EncodeFieldValue(e.OldValue); encoded != "" {
+		fmt.Fprintf(&b, " old_value=%s", encoded)
 	}
-	if e.NewValue != "" {
-		fmt.Fprintf(&b, " new_value=%s", e.NewValue)
+	if encoded := EncodeFieldValue(e.NewValue); encoded != "" {
+		fmt.Fprintf(&b, " new_value=%s", encoded)
 	}
-	if e.Details != "" {
-		fmt.Fprintf(&b, " details=%s", e.Details)
+	if encoded := EncodeFieldValue(e.Details); encoded != "" {
+		fmt.Fprintf(&b, " details=%s", encoded)
 	}
 	b.WriteByte('\n')
 	return b.String()
@@ -544,13 +542,63 @@ func rotationFromInterval(d time.Duration) Rotation {
 	return RotationDaily
 }
 
-// rawOrString returns v as a json.RawMessage when v is itself valid JSON, so
-// it is embedded as a nested object; otherwise it returns v as a JSON string,
-// so a malformed value can never make the whole record invalid JSON.
-func rawOrString(v string) json.RawMessage {
-	if json.Valid([]byte(v)) {
-		return json.RawMessage(v)
+// jsonNativeValue prepares one OLD/NEW/DETAILS value for a JSON-NATIVE sink
+// (the JSON-format audit log): structured values (map/slice/etc.) pass
+// through to be embedded as native JSON documents, and a STRING that is
+// itself a JSON document (object/array) is promoted to that document (so a
+// producer handing a pre-rendered document still gets native nesting, not an
+// escaped string). Plain strings and empty values degrade gracefully.
+func jsonNativeValue(v any) any {
+	switch sv := v.(type) {
+	case nil:
+		return nil
+	case string:
+		if sv == "" {
+			return nil
+		}
+		var doc any
+		if err := json.Unmarshal([]byte(sv), &doc); err == nil {
+			switch doc.(type) {
+			case map[string]any, []any:
+				return doc
+			}
+		}
+		return sv
+	default:
+		return v
 	}
-	b, _ := json.Marshal(v)
-	return b
+}
+
+// EncodeFieldValue renders one OLD/NEW/DETAILS value for a TEXTUAL sink (the
+// text-format audit log, the durable store's string columns, and any other
+// destination that must carry the value as a SELF-CONTAINED STRING):
+//
+//   - a nil / empty-string value ⇒ "" (the field is omitted);
+//   - a string that is ITSELF a valid JSON document ⇒ that document verbatim
+//     (already compact; emitting it as-is avoids needless re-encoding);
+//   - any other string ⇒ the string as-is (terse values stay terse);
+//   - a structured value (map/slice/etc.) ⇒ its compact JSON encoding.
+//
+// Encoding never loses the value: a marshal failure (pathological input)
+// degrades to the value's fmt representation so the record is still written.
+// Callers persisting to a JSON-native destination should embed the structured
+// value DIRECTLY (native nesting) instead of calling this.
+func EncodeFieldValue(v any) string {
+	switch tv := v.(type) {
+	case nil:
+		return ""
+	case string:
+		if tv == "" {
+			return ""
+		}
+		// A string that is already a JSON document travels verbatim (it is
+		// the producer's rendered form); a plain string stays plain.
+		return tv
+	default:
+		b, err := json.Marshal(tv)
+		if err != nil {
+			return fmt.Sprint(tv)
+		}
+		return string(b)
+	}
 }

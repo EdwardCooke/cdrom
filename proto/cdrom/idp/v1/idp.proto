@@ -220,8 +220,21 @@ message RegisterRequest {
 // ListUsersRequest is the request to list registered users. When
 // include_deleted is true, tombstoned (deprovisioned) users are included
 // (flagged via deleted_at); by default they are excluded (F-28.3).
+// generic_filter narrows the result set SERVER-SIDE (equality predicates,
+// AND-ed; forwarded to the Database service's pushdown) so callers pay for
+// the answer, not the population.
 message ListUsersRequest {
   bool include_deleted = 1;
+  // Generic EQUALITY filter (attribute, case_insensitive, value): attribute
+  // is one of userName, externalId, email, firstName, lastName, active,
+  // provisioned; case_insensitive loosens the string comparisons (booleans
+  // compare literally regardless); value is the compared constant.
+  message FilterPredicate {
+    string attribute = 1;
+    bool case_insensitive = 2;
+    string value = 3;
+  }
+  repeated FilterPredicate generic_filter = 2;
 }
 
 // ListUsersResponse is the set of registered users.

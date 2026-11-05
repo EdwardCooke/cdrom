@@ -248,9 +248,16 @@ Tick each feature off as it lands.
       semantics + IdP derivation + permissions; admin API + audit + prune
       sweep; the IdP guard enforcing the pool on every /scim/v2 route with
       failure recording)_
-- [ ] F-28.3 User lifecycle foundations (soft delete)
+- [x] F-28.3 User lifecycle foundations (soft delete)
 - [ ] F-28.4 SCIM user management _(S1 identity anchors landed: unique
       `username` keying, optional `email`, mutually-exclusive locators,
-      subject-claim=username token minting)_
+      subject-claim=username token minting; S2 `/Users` resource landed:
+      provision/re-provision/got-married conflict matrix, definite-replace
+      PUT, filter subset + `count` pagination, connector-attributed audit,
+      `cdrom_scim_operations_total`; list filtering PUSHED DOWN into the
+      database via a generic equality algebra — the listing service accepts
+      canonical-attribute predicates (case sensitivity pinned per predicate,
+      booleans literal, unknown attributes InvalidArgument), also exposed on
+      the IdP gRPC `ListUsers.generic_filter` for future admin user-search)_
 - [ ] F-28.5 SCIM group management
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

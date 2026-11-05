@@ -115,7 +115,7 @@ func (c *coinBreakGlass) coin(ctx context.Context, ttl time.Duration) (*breakGla
 	liveCap := c.cfg.EffectiveBreakGlassLiveCap()
 	// Live-pool cap (anti-spam, F-28.2 pool shape): count the LIVE
 	// (unexpired) break-glass admins among the tombstone-aware listing.
-	users, err := c.users.List(ctx, true)
+	users, err := c.users.List(ctx, true, nil)
 	if err != nil {
 		return nil, fmt.Errorf("break glass: list users: %w", err)
 	}
@@ -213,7 +213,7 @@ func (s *Server) SweepExpiredBreakGlass(ctx context.Context) int {
 	if s.bgUsers == nil {
 		return 0
 	}
-	users, err := s.bgUsers.List(ctx, true)
+	users, err := s.bgUsers.List(ctx, true, nil)
 	if err != nil {
 		s.logger.Warn("break glass: sweep list", "err", err)
 		return 0

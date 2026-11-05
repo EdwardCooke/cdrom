@@ -254,7 +254,7 @@ func TestScimKeyCreateShowsPlaintextOnce(t *testing.T) {
 	if evs[0].TargetName != fk.derivePrefix {
 		t.Errorf("audit target_name = %q, want the prefix", evs[0].TargetName)
 	}
-	if strings.Contains(evs[0].NewValue, plain) {
+	if strings.Contains(audit.EncodeFieldValue(evs[0].NewValue), plain) {
 		t.Error("the plaintext leaked into the audit event")
 	}
 }

@@ -152,7 +152,14 @@ e2e_http_request POST http://127.0.0.1:8080/api/pipelines \
 [ "$HTTP_CODE" = "201" ] || { echo ">> create secret pipeline returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 
 AUDIT_SECRET=$(curl -s "http://127.0.0.1:8080/api/audit?action=pipeline.create&target_kind=pipeline")
-NEW_VALUE=$(printf '%s' "$AUDIT_SECRET" | jq -r '.[] | select(.target_name=="audit-secret-pipeline") | .new_value' | head -n 1)
+# The read edge NESTS stored JSON documents: new_value is a JSON OBJECT, so
+# extract it COMPACTLY (-c) — -r alone would pretty-print it across lines and
+# truncate under head.
+NEW_VALUE=$(printf '%s' "$AUDIT_SECRET" | jq -cr '.[] | select(.target_name=="audit-secret-pipeline") | .new_value' | head -n 1)
+# Lock the parser-friendly contract: the value is a nested object (queriable
+# as .new_value.<field>), not an escaped string.
+printf '%s' "$AUDIT_SECRET" | jq -e '.[] | select(.target_name=="audit-secret-pipeline") | .new_value | type == "object"' >/dev/null \
+  || { echo ">> audit new_value is not a nested object: $AUDIT_SECRET" >&2; exit 1; }
 [ -n "$NEW_VALUE" ] && [ "$NEW_VALUE" != "null" ] \
   || { echo ">> no pipeline.create audit event for the secret pipeline: $AUDIT_SECRET" >&2; exit 1; }
 printf '%s' "$NEW_VALUE" | grep -q 'api_token' \

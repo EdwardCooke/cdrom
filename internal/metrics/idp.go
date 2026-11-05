@@ -24,6 +24,10 @@ type IDPMetrics struct {
 	KeyRotations prometheus.Counter
 	// Users is the user directory's size.
 	Users prometheus.Gauge
+	// ScimOperations counts SCIM /Users resource operations (F-28.4 Slice 2)
+	// by operation (provision / reprovision / update / activate / deactivate
+	// / deprovision) and outcome (success / failure). Reads are not counted.
+	ScimOperations *prometheus.CounterVec
 }
 
 // NewIDPMetrics builds the IdP metric set, registering its collectors with
@@ -50,8 +54,12 @@ func NewIDPMetrics(reg prometheus.Registerer) *IDPMetrics {
 			Name: Prefix + "_idp_users",
 			Help: "User directory size.",
 		}),
+		ScimOperations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: Prefix + "_scim_operations_total",
+			Help: "SCIM /Users resource operations, by operation and outcome.",
+		}, []string{"op", "result"}),
 	}
-	reg.MustRegister(m.TokensMinted, m.Logins, m.Keys, m.KeyRotations, m.Users)
+	reg.MustRegister(m.TokensMinted, m.Logins, m.Keys, m.KeyRotations, m.Users, m.ScimOperations)
 	return m
 }
 
@@ -93,4 +101,15 @@ func (m *IDPMetrics) SetUsers(n int) {
 		return
 	}
 	m.Users.Set(float64(n))
+}
+
+// RecordScimOperation counts a SCIM /Users operation by outcome (F-28.4
+// Slice 2). Op/result are low-cardinality enums (operation vocabulary:
+// provision/reprovision/update/activate/deactivate/deprovision; outcome:
+// success/failure).
+func (m *IDPMetrics) RecordScimOperation(op, result string) {
+	if m == nil || op == "" || result == "" {
+		return
+	}
+	m.ScimOperations.WithLabelValues(op, result).Inc()
 }

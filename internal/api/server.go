@@ -2510,7 +2510,74 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 		grpcError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(response.GetEvents()))
+	// Render the durable rows PARSE-FRIENDLY: old_value/new_value/details are
+	// stored as self-contained strings (usually compact JSON documents); a
+	// value that is itself a JSON DOCUMENT is NESTED as a native value (so
+	// consumers query .new_value.username directly — no double-decoding),
+	// while plain strings stay strings.
+	rows := make([]auditRow, 0, len(response.GetEvents()))
+	for _, ev := range response.GetEvents() {
+		row := auditRow{
+			Id:         ev.GetId(),
+			Actor:      ev.GetActor(),
+			ActorKind:  ev.GetActorKind(),
+			Action:     ev.GetAction(),
+			TargetKind: ev.GetTargetKind(),
+			TargetId:   ev.GetTargetId(),
+			TargetName: ev.GetTargetName(),
+			PipelineId: ev.GetPipelineId(),
+			RunId:      ev.GetRunId(),
+			Outcome:    ev.GetOutcome(),
+			SourceIp:   ev.GetSourceIp(),
+			OldValue:   nestJSONDocument(ev.GetOldValue()),
+			NewValue:   nestJSONDocument(ev.GetNewValue()),
+			Details:    nestJSONDocument(ev.GetDetails()),
+		}
+		if ca := ev.GetCreatedAt(); ca != nil {
+			row.CreatedAt = ca.AsTime().UTC().Format(time.RFC3339)
+		}
+		rows = append(rows, row)
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// auditRow is the READ EDGE's rendering of a durable audit event: the proto's
+// textual value columns are promoted to native JSON documents when they hold
+// one (see nestJSONDocument), so the response is directly queryable.
+type auditRow struct {
+	Id         int64  `json:"id"`
+	Actor      string `json:"actor"`
+	ActorKind  string `json:"actor_kind,omitempty"`
+	Action     string `json:"action"`
+	TargetKind string `json:"target_kind,omitempty"`
+	TargetId   string `json:"target_id,omitempty"`
+	TargetName string `json:"target_name,omitempty"`
+	PipelineId int64  `json:"pipeline_id,omitempty"`
+	RunId      int64  `json:"run_id,omitempty"`
+	Outcome    string `json:"outcome"`
+	SourceIp   string `json:"source_ip,omitempty"`
+	OldValue   any    `json:"old_value,omitempty"`
+	NewValue   any    `json:"new_value,omitempty"`
+	Details    any    `json:"details,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+}
+
+// nestJSONDocument promotes a stored value that is itself a JSON DOCUMENT
+// (object/array) to a native value; plain strings and empty values pass
+// through unchanged (scalar-valid JSON like "123" deliberately STAYS a
+// string — only documents nest).
+func nestJSONDocument(stored string) any {
+	if stored == "" {
+		return nil
+	}
+	var doc any
+	if err := json.Unmarshal([]byte(stored), &doc); err == nil {
+		switch doc.(type) {
+		case map[string]any, []any:
+			return doc
+		}
+	}
+	return stored
 }
 
 // ---------------------------------------------------------------------------

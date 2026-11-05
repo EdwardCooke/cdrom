@@ -78,7 +78,9 @@ const (
 	Database_CreateUser_FullMethodName                     = "/cdrom.db.v1.Database/CreateUser"
 	Database_GetIDPUser_FullMethodName                     = "/cdrom.db.v1.Database/GetIDPUser"
 	Database_ListIDPUsers_FullMethodName                   = "/cdrom.db.v1.Database/ListIDPUsers"
+	Database_CountIDPUsers_FullMethodName                  = "/cdrom.db.v1.Database/CountIDPUsers"
 	Database_UpdateIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/UpdateIDPUser"
+	Database_ReplaceIDPUserProfile_FullMethodName          = "/cdrom.db.v1.Database/ReplaceIDPUserProfile"
 	Database_DeleteIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/DeleteIDPUser"
 	Database_ActivateIDPUser_FullMethodName                = "/cdrom.db.v1.Database/ActivateIDPUser"
 	Database_DeactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/DeactivateIDPUser"
@@ -462,7 +464,23 @@ type DatabaseClient interface {
 	CreateUser(ctx context.Context, in *CreateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	GetIDPUser(ctx context.Context, in *GetIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	ListIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error)
+	// CountIDPUsers tallies the users THAT WOULD BE RETURNED by ListIDPUsers
+	// (same include_deleted + generic_predicate conditions) WITHOUT transferring
+	// the rows: a single aggregate computed in the database. The request reuses
+	// the list's shape (conditions); the response's count is the tally (users
+	// is empty).
+	CountIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error)
 	UpdateIDPUser(ctx context.Context, in *UpdateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error)
+	// ReplaceIDPUserProfile DEFINITELY replaces a user's tracked profile fields
+	// (F-28.4 Slice 2, the SCIM PUT semantics): every field is SET to the
+	// supplied value — omitted means the FIELD'S DEFAULT (names "", email ""),
+	// unlike UpdateIDPUser's supplied-value semantics (omitted means
+	// "leave unchanged"), which proto3's omitted-means-zero makes unfit for
+	// PUT. active is optional-signaled (presence) because its default (true)
+	// differs from its zero value. userName is required; externalId is
+	// IMMUTABLE (changing it is InvalidArgument); the row's lifecycle fields
+	// (tombstone, provisioned, temporal credential) are never touched here.
+	ReplaceIDPUserProfile(ctx context.Context, in *ReplaceIDPUserProfileRequest, opts ...grpc.CallOption) (*IDPUser, error)
 	// DeleteIDPUser deprovisions a user by id (F-28.3 soft delete): it sets
 	// the tombstone, marks the user inactive, and zeroes the password hash so
 	// no leftover credential can revive the record. The row (identity, roles,
@@ -1560,10 +1578,30 @@ func (c *databaseClient) ListIDPUsers(ctx context.Context, in *ListIDPUsersReque
 	return out, nil
 }
 
+func (c *databaseClient) CountIDPUsers(ctx context.Context, in *ListIDPUsersRequest, opts ...grpc.CallOption) (*ListIDPUsersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListIDPUsersResponse)
+	err := c.cc.Invoke(ctx, Database_CountIDPUsers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *databaseClient) UpdateIDPUser(ctx context.Context, in *UpdateIDPUserRequest, opts ...grpc.CallOption) (*IDPUser, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(IDPUser)
 	err := c.cc.Invoke(ctx, Database_UpdateIDPUser_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReplaceIDPUserProfile(ctx context.Context, in *ReplaceIDPUserProfileRequest, opts ...grpc.CallOption) (*IDPUser, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPUser)
+	err := c.cc.Invoke(ctx, Database_ReplaceIDPUserProfile_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2860,7 +2898,23 @@ type DatabaseServer interface {
 	CreateUser(context.Context, *CreateIDPUserRequest) (*IDPUser, error)
 	GetIDPUser(context.Context, *GetIDPUserRequest) (*IDPUser, error)
 	ListIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error)
+	// CountIDPUsers tallies the users THAT WOULD BE RETURNED by ListIDPUsers
+	// (same include_deleted + generic_predicate conditions) WITHOUT transferring
+	// the rows: a single aggregate computed in the database. The request reuses
+	// the list's shape (conditions); the response's count is the tally (users
+	// is empty).
+	CountIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error)
 	UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error)
+	// ReplaceIDPUserProfile DEFINITELY replaces a user's tracked profile fields
+	// (F-28.4 Slice 2, the SCIM PUT semantics): every field is SET to the
+	// supplied value — omitted means the FIELD'S DEFAULT (names "", email ""),
+	// unlike UpdateIDPUser's supplied-value semantics (omitted means
+	// "leave unchanged"), which proto3's omitted-means-zero makes unfit for
+	// PUT. active is optional-signaled (presence) because its default (true)
+	// differs from its zero value. userName is required; externalId is
+	// IMMUTABLE (changing it is InvalidArgument); the row's lifecycle fields
+	// (tombstone, provisioned, temporal credential) are never touched here.
+	ReplaceIDPUserProfile(context.Context, *ReplaceIDPUserProfileRequest) (*IDPUser, error)
 	// DeleteIDPUser deprovisions a user by id (F-28.3 soft delete): it sets
 	// the tombstone, marks the user inactive, and zeroes the password hash so
 	// no leftover credential can revive the record. The row (identity, roles,
@@ -3552,8 +3606,14 @@ func (UnimplementedDatabaseServer) GetIDPUser(context.Context, *GetIDPUserReques
 func (UnimplementedDatabaseServer) ListIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListIDPUsers not implemented")
 }
+func (UnimplementedDatabaseServer) CountIDPUsers(context.Context, *ListIDPUsersRequest) (*ListIDPUsersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CountIDPUsers not implemented")
+}
 func (UnimplementedDatabaseServer) UpdateIDPUser(context.Context, *UpdateIDPUserRequest) (*IDPUser, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateIDPUser not implemented")
+}
+func (UnimplementedDatabaseServer) ReplaceIDPUserProfile(context.Context, *ReplaceIDPUserProfileRequest) (*IDPUser, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReplaceIDPUserProfile not implemented")
 }
 func (UnimplementedDatabaseServer) DeleteIDPUser(context.Context, *DeleteIDPUserRequest) (*IDPUser, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteIDPUser not implemented")
@@ -4923,6 +4983,24 @@ func _Database_ListIDPUsers_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Database_CountIDPUsers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListIDPUsersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CountIDPUsers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CountIDPUsers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CountIDPUsers(ctx, req.(*ListIDPUsersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Database_UpdateIDPUser_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateIDPUserRequest)
 	if err := dec(in); err != nil {
@@ -4937,6 +5015,24 @@ func _Database_UpdateIDPUser_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).UpdateIDPUser(ctx, req.(*UpdateIDPUserRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReplaceIDPUserProfile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplaceIDPUserProfileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReplaceIDPUserProfile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReplaceIDPUserProfile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReplaceIDPUserProfile(ctx, req.(*ReplaceIDPUserProfileRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6999,8 +7095,16 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_ListIDPUsers_Handler,
 		},
 		{
+			MethodName: "CountIDPUsers",
+			Handler:    _Database_CountIDPUsers_Handler,
+		},
+		{
 			MethodName: "UpdateIDPUser",
 			Handler:    _Database_UpdateIDPUser_Handler,
+		},
+		{
+			MethodName: "ReplaceIDPUserProfile",
+			Handler:    _Database_ReplaceIDPUserProfile_Handler,
 		},
 		{
 			MethodName: "DeleteIDPUser",

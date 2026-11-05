@@ -343,8 +343,12 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 // admin (so a local run has a way in), and every later user gets the default
 // "user" role.
 func (s *GRPCServer) defaultRoles(ctx context.Context) []string {
-	users, err := s.users.List(ctx, false)
-	if err == nil && len(users) == 0 {
+	// MEASURE, DON'T FETCH: the directory size is a single aggregate counted
+	// in the database (CountIDPUsers) — hauling the whole user table across
+	// gRPC just to peek at its length wastes bandwidth proportional to the
+	// population.
+	count, err := s.users.Count(ctx, false, nil)
+	if err == nil && count == 0 {
 		return []string{"admin"}
 	}
 	return []string{"user"}
@@ -352,26 +356,69 @@ func (s *GRPCServer) defaultRoles(ctx context.Context) []string {
 
 // refreshUserMetrics sets the user-directory size gauge (F-20) from the
 // current user directory. It is a no-op when metrics are disabled or the user
-// store is not configured.
+// store is not configured. The measurement is a database COUNT (one integer
+// crosses the wire, never the population).
 func (s *GRPCServer) refreshUserMetrics(ctx context.Context) {
 	if s.metrics == nil || s.users == nil {
 		return
 	}
-	users, err := s.users.List(ctx, false)
+	count, err := s.users.Count(ctx, false, nil)
 	if err != nil {
 		return
 	}
-	s.metrics.SetUsers(len(users))
+	s.metrics.SetUsers(count)
+}
+
+// grpcUserFilterAlphabet translates the IdP gRPC's camelCase filter
+// attributes onto the store's CANONICAL vocabulary (snake_case), pinning
+// the case folding per attribute (directory convention: usernames fold;
+// externalIds are exact; booleans compare literally regardless). Finite by
+// design — an unknown attribute is InvalidArgument.
+var grpcUserFilterAlphabet = map[string]struct {
+	canonical     string
+	caseSensitive bool
+}{
+	"userName":    {canonical: "username", caseSensitive: false},
+	"externalId":  {canonical: "external_id", caseSensitive: true},
+	"email":       {canonical: "email", caseSensitive: false},
+	"firstName":   {canonical: "first_name", caseSensitive: false},
+	"lastName":    {canonical: "last_name", caseSensitive: false},
+	"active":      {canonical: "active", caseSensitive: false},
+	"provisioned": {canonical: "provisioned", caseSensitive: false},
+}
+
+// translateGrpcUserFilter maps one gRPC filter attribute to its canonical
+// counterpart (ok=false ⇒ unknown attribute).
+func translateGrpcUserFilter(attribute string) (canonical string, caseSensitive bool, ok bool) {
+	entry, found := grpcUserFilterAlphabet[attribute]
+	if !found {
+		return "", false, false
+	}
+	return entry.canonical, entry.caseSensitive, true
 }
 
 // ListUsers returns registered users (profile + roles, no password hash).
 // Tombstoned (deprovisioned) users are excluded unless include_deleted is
-// set (F-28.3).
+// set (F-28.3). generic_filter narrows the result set SERVER-SIDE (equality
+// predicates, AND-ed — translated to the store's canonical vocabulary and
+// pushed down into the backend; unknown attributes are InvalidArgument).
 func (s *GRPCServer) ListUsers(ctx context.Context, req *idppb.ListUsersRequest) (*idppb.ListUsersResponse, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
 	}
-	users, err := s.users.List(ctx, req.GetIncludeDeleted())
+	var constraints *EqualityConstraints
+	if gf := req.GetGenericFilter(); len(gf) > 0 {
+		translated := EqualityConstraints{}
+		for _, fp := range gf {
+			canon, cs, ok := translateGrpcUserFilter(fp.GetAttribute())
+			if !ok {
+				return nil, status.Errorf(codes.InvalidArgument, "unknown user filter attribute: %q", fp.GetAttribute())
+			}
+			translated = append(translated, EqualityConstraint{Attribute: canon, Value: fp.GetValue(), CaseSensitive: cs})
+		}
+		constraints = &translated
+	}
+	users, err := s.users.List(ctx, req.GetIncludeDeleted(), constraints)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: list users: %v", err)
 	}

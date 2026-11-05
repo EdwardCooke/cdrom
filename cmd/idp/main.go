@@ -180,6 +180,10 @@ func main() {
 		srv.SetScimAuthorizer(idp.NewScimValidator(
 			idp.NewDBScimPoolBackend(dbClient), cfg.IdP.ScimKeysPepper, idpAudit, logger,
 			cfg.IdP.Scim.EffectiveMemoTTL()))
+		// The /Users resource (F-28.4, Slice 2) manages the SHARED user
+		// directory (the same store the gRPC surface and break-glass use),
+		// and audits its mutations to the same recorder the guard uses.
+		srv.SetScimUserBacking(userStore, idpAudit)
 	}
 	// Break-glass escape hatch (F-28.3, Slice 3): coins ephemeral
 	// random-identity admins for holders of a CA-signed client certificate

@@ -38,6 +38,20 @@ shared database log is the cross-replica store the UI queries.
 - `cmd/api` — builds the recorder from config, attaches it to both servers,
   and runs the background prune loop.
 
+**Value contract (parser-friendly, refined 2026-11-05).** `Event.OldValue` /
+`NewValue` / `Details` carry STRUCTURED values (documents/maps, or plain
+strings for terse values) — never pre-rendered JSON strings. The
+stringification happens exactly once, at the render/store boundary: the
+JSON-format local log embeds the values as NATIVE nested documents (a
+string-that-is-a-JSON-document is promoted to its object form), the text
+format and the durable store's textual columns use `audit.EncodeFieldValue`
+(compact JSON for structured values, verbatim for strings). On the READ
+edge, `GET /api/audit` re-nests stored values that are JSON documents
+(objects/arrays) into native values, so consumers query
+`.new_value.<field>` directly — no double-decoding. Consumers extracting a
+whole value as text must use compact JSON (`jq -cr`), since a nested value
+pretty-prints across lines.
+
 **Configuration** (`audit` section / `CDROM_AUDIT_*`):
 
 | Key | Env | Default | Meaning |

@@ -42,6 +42,10 @@ type User struct {
 	PasswordHash string
 	Roles        []string
 	CreatedAt    time.Time
+	// UpdatedAt is the row's last modification (F-28.4 Slice 2): the SCIM
+	// resource's meta.modified echoes this instant (the row's actual
+	// timestamp), not the emission time.
+	UpdatedAt time.Time
 	// Active is the user's activated state (F-28.3); false means deactivated
 	// ("on leave").
 	Active bool
@@ -61,6 +65,47 @@ type User struct {
 	// means there is no temporal credential.
 	TempPasswordValidUntil *time.Time
 }
+
+// ProfileReplacement expresses the DESIRED state for a definite profile
+// replace (F-28.4 Slice 2, the SCIM PUT semantics). It is intentionally a
+// SEPARATE type from User so the presence/default distinctions are explicit
+// rather than overloaded onto User's zero-values:
+//   - Username is REQUIRED (empty ⇒ the store returns InvalidArgument).
+//   - FirstName/LastName/Email are SET to the given value ("" clears them).
+//   - Roles is SET to the given slice (nil/empty resets the role set).
+//   - ActiveSignaled, when non-nil, is the desired active state; when nil the
+//     default (true) applies. A pointer is used because active's default
+//     (true) differs from its zero value (false), so a plain bool cannot
+//     express "omit".
+//   - ExternalID is IMMUTABLE: a non-empty value differing from the row's
+//     current external ID is InvalidArgument; empty or equal is a no-op.
+type ProfileReplacement struct {
+	ID             string
+	Username       string
+	FirstName      string
+	LastName       string
+	Email          string
+	Roles          []string
+	ActiveSignaled *bool
+	ExternalID     string
+}
+
+// EqualityConstraint is one GENERIC EQUALITY CONSTRAINT expressed in the
+// store-neutral ATTRIBUTE VOCABULARY (the canonical lowercase snake_case
+// column names: username, external_id, email, first_name, last_name, active,
+// provisioned). Translating FROM a caller's dialect (SCIM camelCase, the
+// IdP gRPC's camelCase) happens UPSTREAM of the store; translating TO the
+// backend (the Database service's pushdown, the memory evaluator) happens
+// downstream. Booleans compare literally regardless of CaseSensitive.
+type EqualityConstraint struct {
+	Attribute     string
+	Value         string
+	CaseSensitive bool
+}
+
+// EqualityConstraints is the AND-ed set of generic equality constraints a
+// listing may carry (nil/empty ⇒ unconstrained).
+type EqualityConstraints []EqualityConstraint
 
 // UserStore persists the IdP's user directory (registered users, their
 // password hashes, and roles) so that multiple IdP replicas share the same
@@ -91,12 +136,37 @@ type UserStore interface {
 	// status.Code == codes.NotFound.
 	GetByID(ctx context.Context, id string, includeDeleted bool) (*User, error)
 	// List returns registered users. When includeDeleted is false (the
-	// default) tombstoned users are excluded.
-	List(ctx context.Context, includeDeleted bool) ([]*User, error)
+	// default) tombstoned users are excluded. Equalities, when non-nil, adds
+	// GENERIC EQUALITY CONSTRAINTS pushed down INTO THE STORE (evaluated
+	// server-side, AND-ed): Attribute is a canonical lowercase snake_case
+	// name (username, external_id, email, first_name, last_name, active,
+	// provisioned); Value the compared constant; CaseSensitive governs the
+	// string comparisons (booleans compare literally regardless). An unknown
+	// attribute is an InvalidArgument error (the caller translates its own
+	// dialect's unsupported expressions upstream).
+	List(ctx context.Context, includeDeleted bool, equalities *EqualityConstraints) ([]*User, error)
+	// Count tallies the users THAT WOULD BE RETURNED by List (same
+	// includeDeleted + equalities conditions) WITHOUT transferring them:
+	// the production store computes the aggregate in the Database service
+	// (one integer crosses the wire, not the population); the memory store
+	// walks its own index. Measuring the directory (gauges, first-admin
+	// roll-outs) must use this.
+	Count(ctx context.Context, includeDeleted bool, equalities *EqualityConstraints) (int, error)
 	// Update updates a user's profile and/or roles, keyed by ID. A missing
 	// user — or a tombstoned one — returns an error with status.Code ==
 	// codes.NotFound.
 	Update(ctx context.Context, user *User) (*User, error)
+	// ReplaceProfile DEFINITELY replaces the user's tracked profile fields
+	// (F-28.4 Slice 2, the SCIM PUT semantics): unlike Update's supplied-
+	// value semantics (empty ⇒ leave unchanged), every field is SET to the
+	// supplied value — omitted names/email take "" and an omitted role set
+	// resets to none. Profile carries the desired state: Username (required),
+	// FirstName, LastName, Email, Roles, and ActiveSignaled (present ⇒ the
+	// desired active state; absent ⇒ the default, true). ExternalID is
+	// immutable: a non-empty Profile.ExternalID differing from the row's
+	// current value is an InvalidArgument error. A missing user — or a
+	// tombstoned one — returns codes.NotFound. Returns the stored user.
+	ReplaceProfile(ctx context.Context, profile *ProfileReplacement) (*User, error)
 	// SoftDelete deprovisions a user by ID (F-28.3): it sets the tombstone,
 	// marks the user inactive, and zeroes the password hash so no leftover
 	// credential can revive the record. The row (identity, roles, history)
@@ -166,8 +236,28 @@ func (s *dbUserStore) GetByID(ctx context.Context, id string, includeDeleted boo
 	return userFromProto(resp), nil
 }
 
-func (s *dbUserStore) List(ctx context.Context, includeDeleted bool) ([]*User, error) {
-	resp, err := s.db.ListIDPUsers(ctx, &dbpb.ListIDPUsersRequest{IncludeDeleted: includeDeleted})
+// dbUserListingRequest renders the store-neutral listing conditions into the
+// Database service's request shape (SHARED by List and Count — the count
+// must obey EXACTLY the conditions the list would). The store-neutral
+// constraints ARE the service's canonical vocabulary (verbatim translation);
+// a NIL set is simply unconstrained (most internal callers — sweeps, gauges,
+// roll-outs — operate without constraints).
+func dbUserListingRequest(includeDeleted bool, equalities *EqualityConstraints) *dbpb.ListIDPUsersRequest {
+	preds := []*dbpb.ListIDPUsersRequest_Predicate{}
+	if equalities != nil {
+		for _, ec := range *equalities {
+			preds = append(preds, &dbpb.ListIDPUsersRequest_Predicate{
+				Attribute:     ec.Attribute,
+				CaseSensitive: ec.CaseSensitive,
+				Value:         ec.Value,
+			})
+		}
+	}
+	return &dbpb.ListIDPUsersRequest{IncludeDeleted: includeDeleted, GenericPredicate: preds}
+}
+
+func (s *dbUserStore) List(ctx context.Context, includeDeleted bool, equalities *EqualityConstraints) ([]*User, error) {
+	resp, err := s.db.ListIDPUsers(ctx, dbUserListingRequest(includeDeleted, equalities))
 	if err != nil {
 		return nil, fmt.Errorf("idp: list users: %w", err)
 	}
@@ -178,10 +268,44 @@ func (s *dbUserStore) List(ctx context.Context, includeDeleted bool) ([]*User, e
 	return users, nil
 }
 
+// Count measures the directory THROUGH THE DATABASE (aggregate — one integer
+// crosses the wire, never the population).
+func (s *dbUserStore) Count(ctx context.Context, includeDeleted bool, equalities *EqualityConstraints) (int, error) {
+	resp, err := s.db.CountIDPUsers(ctx, dbUserListingRequest(includeDeleted, equalities))
+	if err != nil {
+		return 0, fmt.Errorf("idp: count users: %w", err)
+	}
+	return int(resp.GetCount()), nil
+}
+
 func (s *dbUserStore) Update(ctx context.Context, user *User) (*User, error) {
 	resp, err := s.db.UpdateIDPUser(ctx, &dbpb.UpdateIDPUserRequest{User: user.toProto()})
 	if err != nil {
 		return nil, fmt.Errorf("idp: update user: %w", err)
+	}
+	return userFromProto(resp), nil
+}
+
+// ReplaceProfile delegates to the Database service's definite-replace RPC
+// (F-28.4 Slice 2). Presence of the active state is conveyed by the optional
+// field (nil ⇒ the default, true).
+func (s *dbUserStore) ReplaceProfile(ctx context.Context, p *ProfileReplacement) (*User, error) {
+	req := &dbpb.ReplaceIDPUserProfileRequest{
+		Id:         p.ID,
+		Username:   p.Username,
+		FirstName:  p.FirstName,
+		LastName:   p.LastName,
+		Email:      p.Email,
+		Roles:      p.Roles,
+		ExternalId: p.ExternalID,
+	}
+	if p.ActiveSignaled != nil {
+		a := *p.ActiveSignaled
+		req.Active = &a
+	}
+	resp, err := s.db.ReplaceIDPUserProfile(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 	return userFromProto(resp), nil
 }
@@ -268,6 +392,9 @@ func userFromProto(u *dbpb.IDPUser) *User {
 	}
 	if ts := u.GetCreatedAt(); ts != nil {
 		user.CreatedAt = ts.AsTime()
+	}
+	if ts := u.GetUpdatedAt(); ts != nil {
+		user.UpdatedAt = ts.AsTime()
 	}
 	if ts := u.GetDeletedAt(); ts != nil {
 		t := ts.AsTime()

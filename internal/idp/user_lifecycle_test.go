@@ -285,7 +285,7 @@ func TestUserRegisterReservation(t *testing.T) {
 	if _, err := users.GetByUsername(ctx, "departed", true); err != nil {
 		t.Fatalf("look up survivor: %v", err)
 	}
-	list, err := users.List(ctx, true)
+	list, err := users.List(ctx, true, nil)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
