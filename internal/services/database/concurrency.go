@@ -168,7 +168,7 @@ func (s *Server) limitRulesCached(ctx context.Context) (*limitRules, error) {
 	}
 	s.limitsMu.Lock()
 	s.limitsCache = rules
-	s.limitsAt = time.Now()
+	s.limitsAt = time.Now().UTC()
 	s.limitsMu.Unlock()
 	return rules, nil
 }
@@ -356,13 +356,13 @@ func (s *Server) AcquireJobSlots(ctx context.Context, req *dbpb.AcquireJobSlotsR
 				return errConcurrencyBlocked
 			}
 		}
-		now := time.Now()
+		now := time.Now().UTC()
 		if err := tx.Model(&models.Job{}).
 			Where("id = ?", jobID).
 			Updates(map[string]any{
 				"concurrency_admitted":    true,
 				"concurrency_admitted_at": &now,
-				"updated_at":              time.Now(),
+				"updated_at":              time.Now().UTC(),
 			}).Error; err != nil {
 			return grpcErr(err)
 		}
@@ -419,7 +419,7 @@ func (s *Server) releaseJobSlots(ctx context.Context, jobID uint) error {
 			Updates(map[string]any{
 				"concurrency_admitted":    false,
 				"concurrency_admitted_at": nil,
-				"updated_at":              time.Now(),
+				"updated_at":              time.Now().UTC(),
 			}).Error; err != nil {
 			return grpcErr(err)
 		}

@@ -104,7 +104,7 @@ func storageObjValidateCoordinates(namespace, name string) error {
 // so a crashed uploader's leftovers age out without a dedicated janitor).
 // Best-effort: a failure here never affects the caller's operation.
 func pruneStaleProvisionals(db *gorm.DB) {
-	db.Where("confirmed = ? AND created_at < ?", false, time.Now().Add(-staleProvisionalTTL)).
+	db.Where("confirmed = ? AND created_at < ?", false, time.Now().UTC().Add(-staleProvisionalTTL)).
 		Delete(&models.StorageObject{})
 }
 
@@ -170,7 +170,7 @@ func (s *Server) AllocateStorageObject(ctx context.Context, req *dbpb.AllocateSt
 	// keep for IMMUTABLE artifacts (a half-uploaded filing must not be
 	// downloadable); for logs the provisional window is worthless.
 	autoConfirm := kind == models.StorageObjKindLog
-	now := time.Now()
+	now := time.Now().UTC()
 	obj = models.StorageObject{
 		UID:           uuid.NewString(),
 		Kind:          kind,
@@ -236,7 +236,7 @@ func (s *Server) ConfirmStorageObject(ctx context.Context, req *dbpb.ConfirmStor
 	obj.ContentSHA256 = req.GetContentSha256()
 	obj.Confirmed = true
 	// Settlement instant = the record's birth (visibility began now).
-	obj.CreatedAt = time.Now()
+	obj.CreatedAt = time.Now().UTC()
 	if err := db.Save(&obj).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -306,7 +306,7 @@ func (s *Server) TouchStorageObject(ctx context.Context, req *dbpb.TouchStorageO
 		return nil, status.Error(codes.NotFound, "storage object not found")
 	}
 	db.Model(&models.StorageObject{}).Where("uid = ?", req.GetUid()).
-		UpdateColumn("last_downloaded_at", time.Now())
+		UpdateColumn("last_downloaded_at", time.Now().UTC())
 	var obj models.StorageObject
 	if err := db.Where("uid = ?", req.GetUid()).First(&obj).Error; err != nil {
 		return nil, grpcErr(err)

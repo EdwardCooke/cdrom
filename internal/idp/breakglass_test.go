@@ -294,7 +294,7 @@ func TestBreakGlassCoinsStrictlyAdditiveAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expires_at %q: %v", resp.ExpiresAt, err)
 	}
-	if delta := expiresAt.Sub(time.Now()); delta < 23*time.Hour || delta > 25*time.Hour {
+	if delta := time.Until(expiresAt); delta < 23*time.Hour || delta > 25*time.Hour {
 		t.Errorf("default ttl ≈ %v, want ≈24h", delta)
 	}
 
@@ -384,7 +384,7 @@ func TestBreakGlassTTLRidesRequestClamped(t *testing.T) {
 	var shortResp breakGlassCoinResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &shortResp)
 	shortExp, _ := time.Parse(time.RFC3339, shortResp.ExpiresAt)
-	if d := shortExp.Sub(time.Now()); d < 14*time.Minute || d > 16*time.Minute {
+	if d := time.Until(shortExp); d < 14*time.Minute || d > 16*time.Minute {
 		t.Errorf("short ttl ≈ %v, want ≈15m", d)
 	}
 	shortUser, _ := users.GetByUsername(ctx, shortResp.Username, true)
@@ -398,7 +398,7 @@ func TestBreakGlassTTLRidesRequestClamped(t *testing.T) {
 	var longResp breakGlassCoinResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &longResp)
 	longExp, _ := time.Parse(time.RFC3339, longResp.ExpiresAt)
-	if d := longExp.Sub(time.Now()); d < 6*24*time.Hour || d > 8*24*time.Hour {
+	if d := time.Until(longExp); d < 6*24*time.Hour || d > 8*24*time.Hour {
 		t.Errorf("clamped ttl ≈ %v, want ≤7d", d)
 	}
 	longUser, _ := users.GetByUsername(ctx, longResp.Username, true)

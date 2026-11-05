@@ -1492,7 +1492,7 @@ func (s *Server) findDuplicateTriggerRun(tx *gorm.DB, pipelineID uint, req *dbpb
 	if window := req.GetDedupWindow().AsDuration(); window > 0 {
 		// A cron trigger: a run started by the same trigger within the window
 		// (its cron period) suppresses a duplicate.
-		since := time.Now().Add(-window)
+		since := time.Now().UTC().Add(-window)
 		query = query.Where("created_at >= ?", since)
 	} else if sourceRunID := sourceRunIDFromParams(req.GetParams()); sourceRunID != nil {
 		// An event trigger: the same source run can never start the same
@@ -1581,10 +1581,9 @@ func (s *Server) ListRuns(ctx context.Context, req *dbpb.ListRunsRequest) (*dbpb
 	}
 	if finishedAfter := req.GetFinishedAfter(); finishedAfter != nil {
 		// A run that has not finished (finished_at is null) is excluded.
-		// .Local(): timezone normalization for the mixed-zone lexical datetime
-		// comparison (see ListAuditEvents) — a UTC bound wrongly excluded
-		// recently-finished runs in non-UTC process zones.
-		query = query.Where("finished_at IS NOT NULL AND finished_at >= ?", finishedAfter.AsTime().Local())
+		// .UTC(): storage-zone bound (timestamp standard; see
+		// ListAuditEvents' annotation for the driver quirk).
+		query = query.Where("finished_at IS NOT NULL AND finished_at >= ?", finishedAfter.AsTime().UTC())
 	}
 	// Preload each run's pipeline so the response carries the pipeline's name
 	// (F-09): the scheduler's event loop matches a finished run against the
@@ -1630,7 +1629,7 @@ func (s *Server) UpdateRun(ctx context.Context, req *dbpb.UpdateRunRequest) (*db
 		updates["finished_at"] = &instant
 	}
 	if len(updates) > 0 {
-		updates["updated_at"] = time.Now()
+		updates["updated_at"] = time.Now().UTC()
 		if err := s.db.WithContext(ctx).Model(&models.PipelineRun{}).
 			Where("id = ?", req.GetId()).
 			Updates(updates).Error; err != nil {
@@ -1895,7 +1894,7 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 		// When a target reports the job awaiting_approval (F-13), stamp when it
 		// entered the gate so the UI can show how long it has been waiting.
 		if modelStatus == models.JobStatusAwaitingApproval {
-			now := time.Now()
+			now := time.Now().UTC()
 			updates["approval_requested_at"] = &now
 		}
 	}
@@ -2020,7 +2019,7 @@ func (s *Server) UpdateJob(ctx context.Context, req *dbpb.UpdateJobRequest) (*db
 		}
 	}
 	if len(updates) > 0 {
-		updates["updated_at"] = time.Now()
+		updates["updated_at"] = time.Now().UTC()
 		// A status report from a target must not clobber a job that has
 		// already reached a terminal state (F-05): once a job is succeeded,
 		// failed, cancelled, or timed_out, a late report (e.g. a target that
@@ -2073,7 +2072,7 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
 	}
-	finishedAt := time.Now()
+	finishedAt := time.Now().UTC()
 	if timestamp := req.GetFinishedAt(); timestamp != nil {
 		finishedAt = timestamp.AsTime()
 	}
@@ -2083,7 +2082,7 @@ func (s *Server) ReapJob(ctx context.Context, req *dbpb.ReapJobRequest) (*dbpb.R
 		Updates(map[string]any{
 			"status":      models.JobStatusTimedOut,
 			"finished_at": &finishedAt,
-			"updated_at":  time.Now(),
+			"updated_at":  time.Now().UTC(),
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2111,7 +2110,7 @@ func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*db
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
 	}
-	finishedAt := time.Now()
+	finishedAt := time.Now().UTC()
 	if timestamp := req.GetFinishedAt(); timestamp != nil {
 		finishedAt = timestamp.AsTime()
 	}
@@ -2121,7 +2120,7 @@ func (s *Server) CancelJob(ctx context.Context, req *dbpb.CancelJobRequest) (*db
 		Updates(map[string]any{
 			"status":      models.JobStatusCancelled,
 			"finished_at": &finishedAt,
-			"updated_at":  time.Now(),
+			"updated_at":  time.Now().UTC(),
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2148,7 +2147,7 @@ func (s *Server) SkipJob(ctx context.Context, req *dbpb.SkipJobRequest) (*dbpb.S
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
 	}
-	finishedAt := time.Now()
+	finishedAt := time.Now().UTC()
 	if timestamp := req.GetFinishedAt(); timestamp != nil {
 		finishedAt = timestamp.AsTime()
 	}
@@ -2158,7 +2157,7 @@ func (s *Server) SkipJob(ctx context.Context, req *dbpb.SkipJobRequest) (*dbpb.S
 		Updates(map[string]any{
 			"status":      models.JobStatusSkipped,
 			"finished_at": &finishedAt,
-			"updated_at":  time.Now(),
+			"updated_at":  time.Now().UTC(),
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2188,7 +2187,7 @@ func (s *Server) ResolveApproval(ctx context.Context, req *dbpb.ResolveApprovalR
 	if req.GetDecision() != "approved" && req.GetDecision() != "rejected" {
 		return nil, status.Error(codes.InvalidArgument, "decision must be \"approved\" or \"rejected\"")
 	}
-	decidedAt := time.Now()
+	decidedAt := time.Now().UTC()
 	if timestamp := req.GetDecidedAt(); timestamp != nil {
 		decidedAt = timestamp.AsTime()
 	}
@@ -2203,7 +2202,7 @@ func (s *Server) ResolveApproval(ctx context.Context, req *dbpb.ResolveApprovalR
 		"approval_actor":      req.GetActor(),
 		"approval_decided_at": &decidedAt,
 		"approval_reason":     req.GetReason(),
-		"updated_at":          time.Now(),
+		"updated_at":          time.Now().UTC(),
 	}
 	if req.GetDecision() == "approved" {
 		updates["status"] = models.JobStatusRunning
@@ -2232,7 +2231,7 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 	if req.GetId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job id is required")
 	}
-	startedAt := time.Now()
+	startedAt := time.Now().UTC()
 	if timestamp := req.GetStartedAt(); timestamp != nil {
 		startedAt = timestamp.AsTime()
 	}
@@ -2242,7 +2241,7 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 		Updates(map[string]any{
 			"status":     models.JobStatusRunning,
 			"started_at": &startedAt,
-			"updated_at": time.Now(),
+			"updated_at": time.Now().UTC(),
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2362,7 +2361,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		// a no-op.
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	startedAt := time.Now()
+	startedAt := time.Now().UTC()
 	if timestamp := req.GetStartedAt(); timestamp != nil {
 		startedAt = timestamp.AsTime()
 	}
@@ -2393,7 +2392,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	}
 	// Mark the job running (best-effort: it is already running if another
 	// worker started it first; the conditional update is a no-op then).
-	now := time.Now()
+	now := time.Now().UTC()
 	db.Model(&models.Job{}).
 		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusPending).
 		Updates(map[string]any{
@@ -2485,7 +2484,7 @@ func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExec
 	}
 	updates := map[string]any{
 		"status":     modelStatus,
-		"updated_at": time.Now(),
+		"updated_at": time.Now().UTC(),
 	}
 	if timestamp := req.GetFinishedAt(); timestamp != nil {
 		instant := timestamp.AsTime()
@@ -2539,7 +2538,7 @@ func (s *Server) AbandonWorkerExecutions(ctx context.Context, req *dbpb.AbandonW
 	if req.GetWorkerName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	result := s.db.WithContext(ctx).
 		Model(&models.JobExecution{}).
 		Where("worker_name = ? AND status = ?", req.GetWorkerName(), models.JobStatusRunning).
@@ -2621,7 +2620,7 @@ func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrie
 		return nil, grpcErr(err)
 	}
 	// A worker is alive when its last_seen_at is within the liveness window.
-	now := time.Now()
+	now := time.Now().UTC()
 	alive := make([]string, 0, len(workers))
 	for i := range workers {
 		lastSeen := workers[i].LastSeenAt
@@ -2700,7 +2699,7 @@ func (s *Server) ClaimJobRetry(ctx context.Context, req *dbpb.ClaimJobRetryReque
 			"status":      models.JobStatusPending,
 			"attempt":     nextAttempt,
 			"finished_at": nil, // clear the previous attempt's finished timestamp
-			"updated_at":  time.Now(),
+			"updated_at":  time.Now().UTC(),
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2746,7 +2745,7 @@ func (s *Server) RerunJob(ctx context.Context, req *dbpb.RerunJobRequest) (*dbpb
 			"status":      models.JobStatusPending,
 			"attempt":     1,
 			"finished_at": nil, // clear the previous attempt's finished timestamp
-			"updated_at":  time.Now(),
+			"updated_at":  time.Now().UTC(),
 		})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -2797,7 +2796,7 @@ func (s *Server) RegisterWorker(ctx context.Context, req *dbpb.RegisterWorkerReq
 	// (configurable, multiple). Re-registration (e.g. after a restart) updates
 	// it: the worker's declared environments replace its stored list.
 	worker.Environments = req.GetEnvironments()
-	now := time.Now()
+	now := time.Now().UTC()
 	worker.LastSeenAt = &now
 	if err := s.db.WithContext(ctx).Save(worker).Error; err != nil {
 		return nil, grpcErr(err)
@@ -2844,7 +2843,7 @@ func (s *Server) ListWorkers(ctx context.Context, req *dbpb.ListWorkersRequest) 
 }
 
 func (s *Server) HeartbeatWorker(ctx context.Context, req *dbpb.HeartbeatWorkerRequest) (*dbpb.Worker, error) {
-	now := time.Now()
+	now := time.Now().UTC()
 	result := s.db.WithContext(ctx).Model(&models.Worker{}).Where("name = ?", req.GetName()).Update("last_seen_at", now)
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -3025,7 +3024,7 @@ func (s *Server) ProceedJob(ctx context.Context, req *dbpb.ProceedJobRequest) (*
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	result := s.db.WithContext(ctx).
 		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusAwaitingProceed).
 		Updates(map[string]any{
@@ -3170,11 +3169,11 @@ func (s *Server) ConsumeIDPAuthCode(ctx context.Context, req *dbpb.ConsumeIDPAut
 func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCodesRequest) (*emptypb.Empty, error) {
 	query := s.db.WithContext(ctx).Model(&models.IDPAuthCode{})
 	if ts := req.GetCreatedBefore(); ts != nil {
-		// .Local(): timezone normalization for the mixed-zone lexical datetime
-		// comparison (see ListAuditEvents). Over-pruning is tolerable, but
-		// UNDER-pruning retains expired auth codes past their expiry — a
-		// security smell, hence the same care.
-		query = query.Where("created_at < ?", ts.AsTime().Local())
+		// .UTC(): storage-zone bound (timestamp standard; see
+		// ListAuditEvents' annotation). Security-relevant: a mixed-zone
+		// bound can UNDER-prune, retaining expired auth codes past their
+		// expiry.
+		query = query.Where("created_at < ?", ts.AsTime().UTC())
 	} else {
 		query = query.Where("1 = 1")
 	}
@@ -3216,8 +3215,8 @@ func (s *Server) createUser(ctx context.Context, u *dbpb.IDPUser) (*dbpb.IDPUser
 			Provisioned:                 u.GetProvisioned(),
 			TemporaryPasswordHash:       u.GetTemporaryPasswordHash(),
 			TemporaryPasswordValidUntil: tsOrNil(u.GetTemporaryPasswordValidUntil()),
-			CreatedAt:                   time.Now(),
-			UpdatedAt:                   time.Now(),
+			CreatedAt:                   time.Now().UTC(),
+			UpdatedAt:                   time.Now().UTC(),
 		}
 		if err := s.db.WithContext(ctx).Create(user).Error; err != nil {
 			return nil, grpcErr(err)
@@ -3236,7 +3235,7 @@ func (s *Server) createUser(ctx context.Context, u *dbpb.IDPUser) (*dbpb.IDPUser
 		if u.GetPasswordHash() != "" {
 			existing.PasswordHash = u.GetPasswordHash()
 		}
-		existing.UpdatedAt = time.Now()
+		existing.UpdatedAt = time.Now().UTC()
 		if err := s.db.WithContext(ctx).Save(&existing).Error; err != nil {
 			return nil, grpcErr(err)
 		}
@@ -3389,7 +3388,7 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 	if ext := u.GetExternalId(); ext != "" {
 		user.ExternalID = ext
 	}
-	user.UpdatedAt = time.Now()
+	user.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -3421,7 +3420,7 @@ func (s *Server) DeleteIDPUser(ctx context.Context, req *dbpb.DeleteIDPUserReque
 	if user.DeletedAt != nil {
 		return toProtoIDPUser(&user), nil
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	user.DeletedAt = &now
 	user.Active = false
 	user.PasswordHash = ""
@@ -3443,7 +3442,7 @@ func (s *Server) setUserState(ctx context.Context, id uint, prepare func(*models
 		return nil, grpcErr(err)
 	}
 	prepare(&user)
-	user.UpdatedAt = time.Now()
+	user.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&user).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -3526,7 +3525,7 @@ func (s *Server) ExpireTemporaryPassword(ctx context.Context, req *dbpb.ExpireTe
 	result := s.db.WithContext(ctx).Model(&user).Where("id = ?", user.ID).Updates(map[string]any{
 		"temporary_password_hash":        "",
 		"temporary_password_valid_until": nil, // write the NULL
-		"updated_at":                     time.Now(),
+		"updated_at":                     time.Now().UTC(),
 	})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -3659,7 +3658,7 @@ func (s *Server) UpdateAPIKey(ctx context.Context, req *dbpb.UpdateIDPAPIKeyRequ
 	if req.GetHasPipelineScope() {
 		key.PipelineScope = uintsFromInt64(k.GetPipelineScope())
 	}
-	key.UpdatedAt = time.Now()
+	key.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&key).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -3690,7 +3689,7 @@ func (s *Server) RotateAPIKey(ctx context.Context, req *dbpb.RotateIDPAPIKeyRequ
 	}
 	key.KeyHash = req.GetKeyHash()
 	key.KeyPrefix = req.GetKeyPrefix()
-	key.UpdatedAt = time.Now()
+	key.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&key).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -3752,7 +3751,7 @@ func (s *Server) AdjustAPIKeyLockout(ctx context.Context, req *dbpb.AdjustAPIKey
 	} else {
 		cols["api_key_locked_until"] = nil // write the NULL
 	}
-	cols["updated_at"] = time.Now()
+	cols["updated_at"] = time.Now().UTC()
 	result := s.db.WithContext(ctx).Model(&user).Where("id = ?", user.ID).Updates(cols)
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -3788,7 +3787,7 @@ func (s *Server) ResetAPIKeyLockout(ctx context.Context, req *dbpb.ResetIDPAPIKe
 	result := s.db.WithContext(ctx).Model(&user).Where("id = ?", user.ID).Updates(map[string]any{
 		"api_key_failed_count": 0,
 		"api_key_locked_until": nil,
-		"updated_at":           time.Now(),
+		"updated_at":           time.Now().UTC(),
 	})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
@@ -4015,7 +4014,7 @@ func (s *Server) CreateServiceAccount(ctx context.Context, req *dbpb.CreateServi
 				KeyHash:          k.GetKeyHash(),
 				KeyPrefix:        k.GetKeyPrefix(),
 				Generation:       1,
-				RotatedAt:        time.Now(),
+				RotatedAt:        time.Now().UTC(),
 			}
 			if err := tx.Create(slot).Error; err != nil {
 				return err
@@ -4110,7 +4109,7 @@ func (s *Server) UpdateServiceAccount(ctx context.Context, req *dbpb.UpdateServi
 	}
 	account.Revision++
 	account.UpdatedBy = req.GetUpdatedBy()
-	account.UpdatedAt = time.Now()
+	account.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -4153,13 +4152,13 @@ func (s *Server) RotateServiceAccountKey(ctx context.Context, req *dbpb.RotateSe
 		slot.KeyHash = req.GetKeyHash()
 		slot.KeyPrefix = req.GetKeyPrefix()
 		slot.Generation++
-		slot.RotatedAt = time.Now()
+		slot.RotatedAt = time.Now().UTC()
 		if err := tx.Save(&slot).Error; err != nil {
 			return err
 		}
 		account.Revision++
 		account.UpdatedBy = req.GetUpdatedBy()
-		account.UpdatedAt = time.Now()
+		account.UpdatedAt = time.Now().UTC()
 		return tx.Save(&account).Error
 	}); err != nil {
 		return nil, grpcErr(err)
@@ -4207,7 +4206,7 @@ func (s *Server) setServiceAccountDisabled(ctx context.Context, req *dbpb.Servic
 	account.Disabled = disabled
 	account.Revision++
 	account.UpdatedBy = req.GetUpdatedBy()
-	account.UpdatedAt = time.Now()
+	account.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -4238,7 +4237,7 @@ func (s *Server) DeleteServiceAccount(ctx context.Context, req *dbpb.DeleteServi
 	if account.DeletedAt != nil {
 		return s.serviceAccountToProto(ctx, &account)
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		account.DeletedAt = &now
 		account.Disabled = true
@@ -4282,7 +4281,7 @@ func (s *Server) RecordServiceAccountKeyAttempt(ctx context.Context, req *dbpb.R
 		}
 		return nil, grpcErr(err)
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	if req.GetSuccess() {
 		if account.KeyFailedCount != 0 {
 			account.KeyFailedCount = 0
@@ -4334,7 +4333,7 @@ func (s *Server) ResetServiceAccountLockout(ctx context.Context, req *dbpb.Reset
 	}
 	account.KeyFailedCount = 0
 	account.KeyLockedUntil = time.Time{}
-	account.UpdatedAt = time.Now()
+	account.UpdatedAt = time.Now().UTC()
 	if err := s.db.WithContext(ctx).Save(&account).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -4535,7 +4534,7 @@ func (s *Server) RevokeScimKey(ctx context.Context, req *dbpb.RevokeScimKeyReque
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	res := s.db.WithContext(ctx).Model(&models.ScimKey{}).
 		Where("id = ? AND revoked_at IS NULL", num).
 		Updates(map[string]interface{}{"revoked_at": now})
@@ -4565,7 +4564,7 @@ func (s *Server) ReinstateScimKey(ctx context.Context, req *dbpb.ReinstateScimKe
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
-	cutoff := time.Now().Add(-scimReinstateWindow)
+	cutoff := time.Now().UTC().Add(-scimReinstateWindow)
 	num, err := parseScimKeyID(req.GetId())
 	if err != nil {
 		return nil, err
@@ -4622,7 +4621,7 @@ func (s *Server) MarkScimKeyUsed(ctx context.Context, req *dbpb.MarkScimKeyUsedR
 	if throttle <= 0 {
 		throttle = time.Minute
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	windowStart := now.Add(-throttle)
 	num, err := parseScimKeyID(req.GetId())
 	if err != nil {
@@ -4646,7 +4645,7 @@ func (s *Server) PruneScimKeys(ctx context.Context, req *dbpb.PruneScimKeysReque
 	if cutoff <= 0 {
 		cutoff = scimReinstateWindow
 	}
-	horizon := time.Now().Add(-cutoff)
+	horizon := time.Now().UTC().Add(-cutoff)
 	res := s.db.WithContext(ctx).Where("revoked_at IS NOT NULL AND revoked_at < ?", horizon).Delete(&models.ScimKey{})
 	if res.Error != nil {
 		return nil, grpcErr(res.Error)
@@ -5053,7 +5052,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *dbpb.AcquireLeaseRequest
 	if heartbeatTTL <= 0 {
 		heartbeatTTL = defaultLeaseHeartbeatTTL
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	expires := now.Add(ttl)
 	// A lease held by another replica is stale (and thus take-over-able) when
 	// its TTL backstop has lapsed or its last heartbeat is older than the
@@ -6602,8 +6601,8 @@ func signingKeyFromProto(key *dbpb.IDPSigningKey) (*models.IDPSigningKey, error)
 	mk := &models.IDPSigningKey{
 		Kid:       key.GetKid(),
 		IsCurrent: key.GetIsCurrent(),
-		NotBefore: time.Now(),
-		ExpiresAt: time.Now(),
+		NotBefore: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC(),
 		Pem:       key.GetPem(),
 	}
 	if ts := key.GetNotBefore(); ts != nil {
@@ -7567,7 +7566,7 @@ func (s *Server) CastApprovalVote(ctx context.Context, req *dbpb.CastApprovalVot
 	if req.GetDecision() != "approved" && req.GetDecision() != "rejected" {
 		return nil, status.Error(codes.InvalidArgument, "decision must be \"approved\" or \"rejected\"")
 	}
-	at := time.Now()
+	at := time.Now().UTC()
 	recorded := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Conditional on the job still being awaiting approval: a late vote on a
@@ -7749,22 +7748,21 @@ func (s *Server) ListAuditEvents(ctx context.Context, req *dbpb.ListAuditEventsR
 	if req.GetPipelineId() > 0 {
 		query = query.Where("pipeline_id = ?", req.GetPipelineId())
 	}
-	// TIMEZONE NORMALIZATION (driver quirk, 2026-11-05): created_at columns are
-	// WRITTEN in the process-local zone (GORM autotimestamps bind time.Now(),
-	// Location=Local) and rendered lexically with that offset ("-07:00"), but
-	// prost's AsTime() ALWAYS returns Location=UTC ("Z"). The pure-Go sqlite
-	// driver (modernc.org/sqlite via glebarez) compares DATETIME operands
-	// lexically and mixes the two zones incorrectly — a UTC-bound ">" against
-	// local-offset stored values can yield inverted results (verified:
-	// ">= now-1h" matched 0-of-3 fresh rows when the bound was UTC, 3-of-3
-	// when local). Binding the bound in the WRITER's zone (Local) makes the
-	// textual ordering agree with chronological ordering. Harmless in a UTC
-	// deployment (zones coincide); mandatory wherever the process TZ differs.
+	// STORAGE-ZONE BOUND (timestamp standard, 2026-11-05): created_at is
+	// stored in UTC (see database.Open's NowFunc pin), and the pure-Go
+	// sqlite driver (modernc.org/sqlite via glebarez) compares DATETIME
+	// operands LEXICALLY — so a bound must be encoded in the SAME zone as
+	// the stored values or past-bound predicates invert (mixed-zone
+	// comparison verified to yield wrong orderings; the five "pre-existing"
+	// audit test failures were exactly this). ts.AsTime() is already UTC;
+	// the explicit .UTC() documents the invariant. Legacy rows written
+	// before the standard (local-encoded) transition harmlessly toward
+	// inclusion.
 	if ts := req.GetFrom(); ts != nil {
-		query = query.Where("created_at >= ?", ts.AsTime().Local())
+		query = query.Where("created_at >= ?", ts.AsTime().UTC())
 	}
 	if ts := req.GetTo(); ts != nil {
-		query = query.Where("created_at < ?", ts.AsTime().Local())
+		query = query.Where("created_at < ?", ts.AsTime().UTC())
 	}
 	var events []models.AuditEvent
 	if err := query.Order("id DESC").Limit(limit).Find(&events).Error; err != nil {
@@ -7785,10 +7783,9 @@ func (s *Server) ListAuditEvents(ctx context.Context, req *dbpb.ListAuditEventsR
 func (s *Server) PruneAuditEvents(ctx context.Context, req *dbpb.PruneAuditEventsRequest) (*dbpb.PruneAuditEventsResponse, error) {
 	query := s.db.WithContext(ctx).Model(&models.AuditEvent{})
 	if ts := req.GetCreatedBefore(); ts != nil {
-		// .Local(): same timezone-normalization requirement as ListAuditEvents
-		// (see there) — a UTC bound compared against local-rendered created_at
-		// values can prune rows NEWER than the cutoff.
-		query = query.Where("created_at < ?", ts.AsTime().Local())
+		// .UTC(): storage-zone bound — created_at is stored UTC (timestamp
+		// standard; see ListAuditEvents' annotation for the driver quirk).
+		query = query.Where("created_at < ?", ts.AsTime().UTC())
 	}
 	result := query.Delete(&models.AuditEvent{})
 	if result.Error != nil {
