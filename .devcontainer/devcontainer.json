@@ -31,7 +31,7 @@
         "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind",
         "source=${localEnv:HOME}/.azure,target=/home/vscode/.azure,type=bind",
         "source=${localEnv:HOME}/.config/ggshield,target=/home/vscode/.config/ggshield,type=bind",
-        "source=/etc/timezone,target=/etc/timezone,type=bind"
+        "source=/etc/localtime,target=/etc/localtime,type=bind"
     ],
     "remoteUser": "vscode",
     "features": {
