@@ -44,8 +44,8 @@ type fakeAPIKey struct {
 	verifiedUser, verifiedKey                 string
 }
 
-func (f *fakeAPIKey) CreateAPIKey(_ context.Context, ownerEmail, description, expiresIn string, pipelineScope []uint) (*APIKeyResult, string, error) {
-	f.createdOwner, f.createdDesc, f.createdExpires, f.createdScope = ownerEmail, description, expiresIn, pipelineScope
+func (f *fakeAPIKey) CreateAPIKey(_ context.Context, ownerUsername, description, expiresIn string, pipelineScope []uint) (*APIKeyResult, string, error) {
+	f.createdOwner, f.createdDesc, f.createdExpires, f.createdScope = ownerUsername, description, expiresIn, pipelineScope
 	if f.createErr != nil {
 		return nil, "", f.createErr
 	}
@@ -128,8 +128,8 @@ func (f *fakeAPIKey) VerifyAPIKey(_ context.Context, username, apiKey string) (a
 	if f.verifyErr != nil {
 		return auth.User{}, f.verifyErr
 	}
-	if f.verifyResult.Email == "" {
-		f.verifyResult = auth.User{Subject: "u1", Email: username, Roles: []string{"user"}}
+	if f.verifyResult.Username == "" {
+		f.verifyResult = auth.User{Subject: "u1", Username: username, UserID: "u1", Roles: []string{"user"}}
 	}
 	return f.verifyResult, nil
 }
@@ -196,17 +196,18 @@ func TestAPIKeyCRUD(t *testing.T) {
 			{ID: "k2", OwnerID: "u2", Description: "other", KeyPrefix: "cdrom-xy"},
 		},
 	}
-	// Attach a userpass client so the owner's email can be filled in.
+	// Attach a userpass client so the owner's username can be filled in.
 	srv := New(Clients{}, nil)
 	srv.SetAPIKeyClient(fake)
 	srv.SetUserPassClient(&fakeUserPass{users: []UserResult{
-		{ID: "u1", Email: "ada@example.com"},
-		{ID: "u2", Email: "bob@example.com"},
+		{ID: "u1", Username: "ada", Email: "ada@example.com"},
+		{ID: "u2", Username: "bob", Email: "bob@example.com"},
 	}})
 	handler := srv.Handler()
-	// Serve every request as the user u1 (ada@example.com) so the own-keys
-	// list is filtered to the caller's own keys.
-	testUser := auth.User{Subject: "u1", Email: "ada@example.com"}
+	// Serve every request as the user u1 (ada) so the own-keys list is
+	// filtered to the caller's own keys. Ownership scoping runs on the
+	// USER ID (the key's owner_id), hence UserID (F-28.4).
+	testUser := auth.User{Subject: "ada", Username: "ada", UserID: "u1", Email: "ada@example.com"}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(auth.WithUser(r.Context(), testUser))
 		handler.ServeHTTP(w, r)
@@ -215,7 +216,7 @@ func TestAPIKeyCRUD(t *testing.T) {
 
 	// Create a key: the plaintext is returned exactly once. No user is in the
 	// context (RBAC off), so the owner is taken from the body.
-	code, body := postJSONBody(t, ts.URL+"/api/api-keys", `{"owner_email":"ada@example.com","description":"ci key","expires_in":"24h","pipeline_scope":[1,2]}`)
+	code, body := postJSONBody(t, ts.URL+"/api/api-keys", `{"owner_username":"ada","description":"ci key","expires_in":"24h","pipeline_scope":[1,2]}`)
 	if code != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201 (body %s)", code, body)
 	}
@@ -244,9 +245,9 @@ func TestAPIKeyCRUD(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != "k1" {
 		t.Errorf("list = %+v, want only k1 (the caller's own key)", listed)
 	}
-	// The owner's email is filled in from the user directory.
-	if len(listed) > 0 && listed[0].OwnerEmail != "ada@example.com" {
-		t.Errorf("list[0].owner_email = %q, want ada@example.com", listed[0].OwnerEmail)
+	// The owner's username is filled in from the user directory.
+	if len(listed) > 0 && listed[0].OwnerUsername != "ada" {
+		t.Errorf("list[0].owner_username = %q, want ada", listed[0].OwnerUsername)
 	}
 
 	// Get a single key.
@@ -351,8 +352,9 @@ func TestAPIKeyRBAC(t *testing.T) {
 		t.Errorf("viewer list status = %d, want 403", code)
 	}
 
-	// A user (self-service) can list only their own keys.
-	user := auth.User{Subject: "u1", Email: "u1@example.com", Roles: []string{authz.RoleUser}}
+	// A user (self-service) can list only their own keys. Ownership scoping
+	// runs on the USER ID (F-28.4), hence UserID.
+	user := auth.User{Subject: "u1", Username: "u1", UserID: "u1", Email: "u1@example.com", Roles: []string{authz.RoleUser}}
 	userHandler := apiKeyRBACServer(t, user, fake)
 	code, body := rbacDoRequestWithBody(t, userHandler, http.MethodGet, "/api/api-keys", "")
 	if code != http.StatusOK {
@@ -378,7 +380,7 @@ func TestAPIKeyRBAC(t *testing.T) {
 		t.Errorf("user get other key status = %d, want 403", code)
 	}
 	// A user cannot create a key for another user (403).
-	if code := rbacDoRequest(t, userHandler, http.MethodPost, "/api/api-keys", `{"owner_email":"u2@example.com","description":"x"}`); code != http.StatusForbidden {
+	if code := rbacDoRequest(t, userHandler, http.MethodPost, "/api/api-keys", `{"owner_username":"somebody-else","description":"x"}`); code != http.StatusForbidden {
 		t.Errorf("user create-for-other status = %d, want 403", code)
 	}
 	// A user cannot update/rotate/delete another user's key (403).
@@ -399,7 +401,8 @@ func TestAPIKeyRBAC(t *testing.T) {
 	}
 
 	// An admin's own-keys list shows only their own keys (admin-1 owns none).
-	adminHandler := apiKeyRBACServer(t, auth.User{Subject: "admin-1", Roles: []string{authz.RoleAdmin}}, fake)
+	// UserID plays the numeric-ID role in the ownership filter (F-28.4).
+	adminHandler := apiKeyRBACServer(t, auth.User{Subject: "admin-1", Username: "admin-1", UserID: "admin-1", Roles: []string{authz.RoleAdmin}}, fake)
 	code, body = rbacDoRequestWithBody(t, adminHandler, http.MethodGet, "/api/api-keys", "")
 	if code != http.StatusOK {
 		t.Fatalf("admin own-list status = %d, want 200 (body %s)", code, body)
@@ -430,7 +433,7 @@ func TestAPIKeyRBAC(t *testing.T) {
 		t.Errorf("admin get other key status = %d, want 200", code)
 	}
 	// An admin can create a key for another user (api-keys.can-manage-all).
-	if code := rbacDoRequest(t, adminHandler, http.MethodPost, "/api/api-keys", `{"owner_email":"u2@example.com","description":"x"}`); code != http.StatusCreated {
+	if code := rbacDoRequest(t, adminHandler, http.MethodPost, "/api/api-keys", `{"owner_username":"bob","description":"x"}`); code != http.StatusCreated {
 		t.Errorf("admin create-for-other status = %d, want 201", code)
 	}
 	// An admin can update/rotate/delete another user's key.

@@ -213,9 +213,10 @@ func (x *MintJobTokenResponse) GetExpiresIn() int64 {
 
 // LoginRequest is the request to sign in with a username and password.
 type LoginRequest struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	Email    string                 `protobuf:"bytes,1,opt,name=email,proto3" json:"email,omitempty"`
-	Password string                 `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// username is the user's unique login identifier (the anchor; F-28.4).
+	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	Password string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
 	// audience is the audience to stamp on the minted token (the caller's
 	// verifier audience, e.g. its client_id or token_audience); empty makes the
 	// IdP use its default audience.
@@ -257,9 +258,9 @@ func (*LoginRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *LoginRequest) GetEmail() string {
+func (x *LoginRequest) GetUsername() string {
 	if x != nil {
-		return x.Email
+		return x.Username
 	}
 	return ""
 }
@@ -366,14 +367,19 @@ func (x *LoginResponse) GetUser() *v1.IDPUser {
 }
 
 // RegisterRequest is the request to create a user: the required profile
-// fields (first/last/email) and password, plus an optional initial role set.
+// fields (username, first/last) and password, plus an optional email and
+// initial role set.
 type RegisterRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FirstName     string                 `protobuf:"bytes,1,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
-	LastName      string                 `protobuf:"bytes,2,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
-	Email         string                 `protobuf:"bytes,3,opt,name=email,proto3" json:"email,omitempty"`
-	Password      string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
-	Roles         []string               `protobuf:"bytes,5,rep,name=roles,proto3" json:"roles,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	FirstName string                 `protobuf:"bytes,1,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
+	LastName  string                 `protobuf:"bytes,2,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
+	Password  string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
+	Roles     []string               `protobuf:"bytes,5,rep,name=roles,proto3" json:"roles,omitempty"`
+	// username is the user's unique login identifier (REQUIRED; F-28.4).
+	Username string `protobuf:"bytes,6,opt,name=username,proto3" json:"username,omitempty"`
+	// email is the user's OPTIONAL electronic-mail address (informational;
+	// never a lookup key).
+	Email         string `protobuf:"bytes,7,opt,name=email,proto3" json:"email,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -422,13 +428,6 @@ func (x *RegisterRequest) GetLastName() string {
 	return ""
 }
 
-func (x *RegisterRequest) GetEmail() string {
-	if x != nil {
-		return x.Email
-	}
-	return ""
-}
-
 func (x *RegisterRequest) GetPassword() string {
 	if x != nil {
 		return x.Password
@@ -441,6 +440,20 @@ func (x *RegisterRequest) GetRoles() []string {
 		return x.Roles
 	}
 	return nil
+}
+
+func (x *RegisterRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *RegisterRequest) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
 }
 
 // ListUsersRequest is the request to list registered users. When
@@ -538,12 +551,16 @@ func (x *ListUsersResponse) GetUsers() []*v1.IDPUser {
 // CreateUserRequest is the request to create a user (profile, password, and
 // roles).
 type CreateUserRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	FirstName     string                 `protobuf:"bytes,1,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
-	LastName      string                 `protobuf:"bytes,2,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
-	Email         string                 `protobuf:"bytes,3,opt,name=email,proto3" json:"email,omitempty"`
-	Password      string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
-	Roles         []string               `protobuf:"bytes,5,rep,name=roles,proto3" json:"roles,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	FirstName string                 `protobuf:"bytes,1,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
+	LastName  string                 `protobuf:"bytes,2,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
+	Password  string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
+	Roles     []string               `protobuf:"bytes,5,rep,name=roles,proto3" json:"roles,omitempty"`
+	// username is the user's unique login identifier (REQUIRED; F-28.4).
+	Username string `protobuf:"bytes,6,opt,name=username,proto3" json:"username,omitempty"`
+	// email is the user's OPTIONAL electronic-mail address (informational;
+	// never a lookup key).
+	Email         string `protobuf:"bytes,7,opt,name=email,proto3" json:"email,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -592,13 +609,6 @@ func (x *CreateUserRequest) GetLastName() string {
 	return ""
 }
 
-func (x *CreateUserRequest) GetEmail() string {
-	if x != nil {
-		return x.Email
-	}
-	return ""
-}
-
 func (x *CreateUserRequest) GetPassword() string {
 	if x != nil {
 		return x.Password
@@ -613,17 +623,33 @@ func (x *CreateUserRequest) GetRoles() []string {
 	return nil
 }
 
+func (x *CreateUserRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *CreateUserRequest) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
+
 // UpdateUserRequest is the request to update a user's profile and/or roles.
 // Empty fields are left unchanged; an empty password leaves the existing
 // password untouched.
 type UpdateUserRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	FirstName     string                 `protobuf:"bytes,2,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
-	LastName      string                 `protobuf:"bytes,3,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
-	Email         string                 `protobuf:"bytes,4,opt,name=email,proto3" json:"email,omitempty"`
-	Password      string                 `protobuf:"bytes,5,opt,name=password,proto3" json:"password,omitempty"`
-	Roles         []string               `protobuf:"bytes,6,rep,name=roles,proto3" json:"roles,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Id        string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	FirstName string                 `protobuf:"bytes,2,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
+	LastName  string                 `protobuf:"bytes,3,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
+	Email     string                 `protobuf:"bytes,4,opt,name=email,proto3" json:"email,omitempty"`
+	Password  string                 `protobuf:"bytes,5,opt,name=password,proto3" json:"password,omitempty"`
+	Roles     []string               `protobuf:"bytes,6,rep,name=roles,proto3" json:"roles,omitempty"`
+	// username is the user's unique login identifier (mutable; F-28.4).
+	Username      string `protobuf:"bytes,7,opt,name=username,proto3" json:"username,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -698,6 +724,13 @@ func (x *UpdateUserRequest) GetRoles() []string {
 		return x.Roles
 	}
 	return nil
+}
+
+func (x *UpdateUserRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
 }
 
 // DeleteUserRequest is the request to remove a user by ID.
@@ -791,13 +824,13 @@ func (x *DeleteUserResponse) GetStatus() string {
 }
 
 // CreateAPIKeyRequest is the request to create an API key for a user. The
-// owner is identified by email (the user's unique login identifier); the key
-// is generated by the IdP (a `cdrom-…` secret) and its plaintext is returned
-// exactly once in the response.
+// owner is identified by USERNAME (the user's unique login identifier); the
+// key is generated by the IdP (a `cdrom-…` secret) and its plaintext is
+// returned exactly once in the response.
 type CreateAPIKeyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// owner_email is the user the key belongs to (their email).
-	OwnerEmail string `protobuf:"bytes,1,opt,name=owner_email,json=ownerEmail,proto3" json:"owner_email,omitempty"`
+	// owner_username is the user the key belongs to (their username).
+	OwnerUsername string `protobuf:"bytes,1,opt,name=owner_username,json=ownerUsername,proto3" json:"owner_username,omitempty"`
 	// description is a human-readable label for the key.
 	Description string `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
 	// expires_in is the key's lifetime (a duration string, e.g. "24h"); empty
@@ -847,9 +880,9 @@ func (*CreateAPIKeyRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{11}
 }
 
-func (x *CreateAPIKeyRequest) GetOwnerEmail() string {
+func (x *CreateAPIKeyRequest) GetOwnerUsername() string {
 	if x != nil {
-		return x.OwnerEmail
+		return x.OwnerUsername
 	}
 	return ""
 }
@@ -1390,7 +1423,7 @@ func (x *DeleteAPIKeyResponse) GetStatus() string {
 // lockout_duration) from its auth.api_key config.
 type VerifyAPIKeyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// username is the owner's email (the user's unique login identifier).
+	// username is the owner's username (the user's unique login identifier).
 	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
 	// api_key is the presented key's plaintext (the `cdrom-…` value).
 	ApiKey string `protobuf:"bytes,2,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
@@ -2846,9 +2879,9 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\n" +
 	"token_type\x18\x02 \x01(\tR\ttokenType\x12\x1d\n" +
 	"\n" +
-	"expires_in\x18\x03 \x01(\x03R\texpiresIn\"t\n" +
-	"\fLoginRequest\x12\x14\n" +
-	"\x05email\x18\x01 \x01(\tR\x05email\x12\x1a\n" +
+	"expires_in\x18\x03 \x01(\x03R\texpiresIn\"z\n" +
+	"\fLoginRequest\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\x12\x1a\n" +
 	"\baudience\x18\x03 \x01(\tR\baudience\x12\x16\n" +
 	"\x06issuer\x18\x04 \x01(\tR\x06issuer\"\xb5\x01\n" +
@@ -2859,25 +2892,27 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\n" +
 	"expires_in\x18\x03 \x01(\x03R\texpiresIn\x12\x19\n" +
 	"\bid_token\x18\x04 \x01(\tR\aidToken\x12(\n" +
-	"\x04user\x18\x05 \x01(\v2\x14.cdrom.db.v1.IDPUserR\x04user\"\x95\x01\n" +
+	"\x04user\x18\x05 \x01(\v2\x14.cdrom.db.v1.IDPUserR\x04user\"\xb1\x01\n" +
 	"\x0fRegisterRequest\x12\x1d\n" +
 	"\n" +
 	"first_name\x18\x01 \x01(\tR\tfirstName\x12\x1b\n" +
-	"\tlast_name\x18\x02 \x01(\tR\blastName\x12\x14\n" +
-	"\x05email\x18\x03 \x01(\tR\x05email\x12\x1a\n" +
+	"\tlast_name\x18\x02 \x01(\tR\blastName\x12\x1a\n" +
 	"\bpassword\x18\x04 \x01(\tR\bpassword\x12\x14\n" +
-	"\x05roles\x18\x05 \x03(\tR\x05roles\";\n" +
+	"\x05roles\x18\x05 \x03(\tR\x05roles\x12\x1a\n" +
+	"\busername\x18\x06 \x01(\tR\busername\x12\x14\n" +
+	"\x05email\x18\a \x01(\tR\x05email\";\n" +
 	"\x10ListUsersRequest\x12'\n" +
 	"\x0finclude_deleted\x18\x01 \x01(\bR\x0eincludeDeleted\"?\n" +
 	"\x11ListUsersResponse\x12*\n" +
-	"\x05users\x18\x01 \x03(\v2\x14.cdrom.db.v1.IDPUserR\x05users\"\x97\x01\n" +
+	"\x05users\x18\x01 \x03(\v2\x14.cdrom.db.v1.IDPUserR\x05users\"\xb3\x01\n" +
 	"\x11CreateUserRequest\x12\x1d\n" +
 	"\n" +
 	"first_name\x18\x01 \x01(\tR\tfirstName\x12\x1b\n" +
-	"\tlast_name\x18\x02 \x01(\tR\blastName\x12\x14\n" +
-	"\x05email\x18\x03 \x01(\tR\x05email\x12\x1a\n" +
+	"\tlast_name\x18\x02 \x01(\tR\blastName\x12\x1a\n" +
 	"\bpassword\x18\x04 \x01(\tR\bpassword\x12\x14\n" +
-	"\x05roles\x18\x05 \x03(\tR\x05roles\"\xa7\x01\n" +
+	"\x05roles\x18\x05 \x03(\tR\x05roles\x12\x1a\n" +
+	"\busername\x18\x06 \x01(\tR\busername\x12\x14\n" +
+	"\x05email\x18\a \x01(\tR\x05email\"\xc3\x01\n" +
 	"\x11UpdateUserRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -2885,14 +2920,14 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\tlast_name\x18\x03 \x01(\tR\blastName\x12\x14\n" +
 	"\x05email\x18\x04 \x01(\tR\x05email\x12\x1a\n" +
 	"\bpassword\x18\x05 \x01(\tR\bpassword\x12\x14\n" +
-	"\x05roles\x18\x06 \x03(\tR\x05roles\"#\n" +
+	"\x05roles\x18\x06 \x03(\tR\x05roles\x12\x1a\n" +
+	"\busername\x18\a \x01(\tR\busername\"#\n" +
 	"\x11DeleteUserRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\",\n" +
 	"\x12DeleteUserResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status\"\xb6\x01\n" +
-	"\x13CreateAPIKeyRequest\x12\x1f\n" +
-	"\vowner_email\x18\x01 \x01(\tR\n" +
-	"ownerEmail\x12 \n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\"\xbc\x01\n" +
+	"\x13CreateAPIKeyRequest\x12%\n" +
+	"\x0eowner_username\x18\x01 \x01(\tR\rownerUsername\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\x03 \x01(\tR\texpiresIn\x12%\n" +

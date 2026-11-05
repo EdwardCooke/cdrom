@@ -12,15 +12,16 @@ import (
 	idppb "cdrom/internal/gen/cdrom/idp/v1"
 )
 
-// registerTestUser registers a user with the given email and password through
-// the IdP's gRPC surface (so the user exists in the user store the API-key
-// store resolves owners against).
-func registerTestUser(t *testing.T, idp *testIDP, email, password string) {
+// registerTestUser registers a user with the given username and password
+// through the IdP's gRPC surface (so the user exists in the user store the
+// API-key store resolves owners against). The email is derived mechanically
+// (<username>@example.com) for realism.
+func registerTestUser(t *testing.T, idp *testIDP, username, password string) {
 	t.Helper()
 	if _, err := idp.client.Register(context.Background(), &idppb.RegisterRequest{
-		Email: email, Password: password,
+		Username: username, Email: username + "@example.com", Password: password,
 	}); err != nil {
-		t.Fatalf("register %s: %v", email, err)
+		t.Fatalf("register %s: %v", username, err)
 	}
 }
 
@@ -92,11 +93,11 @@ func TestAPIKeyCRUD(t *testing.T) {
 	keys := NewMemoryAPIKeyStore(users)
 	idp := startTestIDPWithKeys(t, testConfig(time.Hour, 30*time.Minute), users, keys)
 	ctx := context.Background()
-	registerTestUser(t, idp, "ada@example.com", "pw")
+	registerTestUser(t, idp, "ada", "pw")
 
 	// Create a key: the plaintext is returned once and has the key shape.
 	created, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{
-		OwnerEmail:    "ada@example.com",
+		OwnerUsername: "ada",
 		Description:   "ci",
 		PipelineScope: []int64{1, 2},
 	})
@@ -136,7 +137,7 @@ func TestAPIKeyCRUD(t *testing.T) {
 	}
 
 	// Create a second key (a user can have any number of keys).
-	if _, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{OwnerEmail: "ada@example.com", Description: "second"}); err != nil {
+	if _, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{OwnerUsername: "ada", Description: "second"}); err != nil {
 		t.Fatalf("CreateAPIKey second: %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestAPIKeyCRUD(t *testing.T) {
 		t.Errorf("hash after renew = %q, want unchanged", updated.GetKeyHash())
 	}
 	// The same plaintext still verifies after a renew.
-	if _, _, err := keys.Verify(ctx, "ada@example.com", plaintext, "", 0, 0); err != nil {
+	if _, _, err := keys.Verify(ctx, "ada", plaintext, "", 0, 0); err != nil {
 		t.Errorf("verify after renew = %v, want success", err)
 	}
 
@@ -197,10 +198,10 @@ func TestAPIKeyCRUD(t *testing.T) {
 		t.Error("rotated hash equals the old one")
 	}
 	// The new plaintext verifies; the old one no longer does.
-	if _, _, err := keys.Verify(ctx, "ada@example.com", newPlaintext, "", 0, 0); err != nil {
+	if _, _, err := keys.Verify(ctx, "ada", newPlaintext, "", 0, 0); err != nil {
 		t.Errorf("verify new key = %v, want success", err)
 	}
-	if _, _, err := keys.Verify(ctx, "ada@example.com", plaintext, "", 0, 0); err == nil {
+	if _, _, err := keys.Verify(ctx, "ada", plaintext, "", 0, 0); err == nil {
 		t.Error("old key still verifies after rotation")
 	}
 
@@ -224,9 +225,9 @@ func TestAPIKeyVerifyAndLockout(t *testing.T) {
 	keys := NewMemoryAPIKeyStore(users)
 	idp := startTestIDPWithKeys(t, testConfig(time.Hour, 30*time.Minute), users, keys)
 	ctx := context.Background()
-	registerTestUser(t, idp, "ada@example.com", "pw")
+	registerTestUser(t, idp, "ada", "pw")
 
-	created, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{OwnerEmail: "ada@example.com"})
+	created, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{OwnerUsername: "ada"})
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
 	}
@@ -234,15 +235,18 @@ func TestAPIKeyVerifyAndLockout(t *testing.T) {
 
 	// A correct key verifies (returns the key and the owner).
 	verified, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "ada@example.com",
+		Username:    "ada",
 		ApiKey:      plaintext,
 		MaxFailures: 3,
 	})
 	if err != nil {
 		t.Fatalf("VerifyAPIKey: %v", err)
 	}
+	if verified.GetOwner().GetUsername() != "ada" {
+		t.Errorf("owner = %q, want ada", verified.GetOwner().GetUsername())
+	}
 	if verified.GetOwner().GetEmail() != "ada@example.com" {
-		t.Errorf("owner = %q, want ada@example.com", verified.GetOwner().GetEmail())
+		t.Errorf("owner email = %q, want ada@example.com", verified.GetOwner().GetEmail())
 	}
 	if !hasRole(verified.GetOwner().GetRoles(), "admin") {
 		t.Errorf("owner roles = %v, want to include admin", verified.GetOwner().GetRoles())
@@ -250,7 +254,7 @@ func TestAPIKeyVerifyAndLockout(t *testing.T) {
 
 	// A wrong key is Unauthenticated and increments the failure counter.
 	if _, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "ada@example.com",
+		Username:    "ada",
 		ApiKey:      apiKeyPrefix + "wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong",
 		MaxFailures: 3,
 	}); status.Code(err) != codes.Unauthenticated {
@@ -259,7 +263,7 @@ func TestAPIKeyVerifyAndLockout(t *testing.T) {
 
 	// A key presented with the wrong username (owner mismatch) is a miss.
 	if _, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "nobody@example.com",
+		Username:    "nobody",
 		ApiKey:      plaintext,
 		MaxFailures: 3,
 	}); status.Code(err) != codes.Unauthenticated {
@@ -270,14 +274,14 @@ func TestAPIKeyVerifyAndLockout(t *testing.T) {
 	// (permanently, since lockout_duration is 0); a correct key is rejected
 	// while locked.
 	if _, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "ada@example.com",
+		Username:    "ada",
 		ApiKey:      apiKeyPrefix + "wrong",
 		MaxFailures: 1,
 	}); status.Code(err) != codes.Unauthenticated {
 		t.Errorf("lockout trigger = %v, want Unauthenticated", err)
 	}
 	if _, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "ada@example.com",
+		Username:    "ada",
 		ApiKey:      plaintext,
 		MaxFailures: 1,
 	}); status.Code(err) != codes.Unauthenticated {
@@ -289,7 +293,7 @@ func TestAPIKeyVerifyAndLockout(t *testing.T) {
 		t.Fatalf("ResetAPIKeyLockout: %v", err)
 	}
 	if _, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "ada@example.com",
+		Username:    "ada",
 		ApiKey:      plaintext,
 		MaxFailures: 1,
 	}); err != nil {
@@ -309,20 +313,20 @@ func TestAPIKeyExpiration(t *testing.T) {
 	keys := NewMemoryAPIKeyStore(users)
 	idp := startTestIDPWithKeys(t, testConfig(time.Hour, 30*time.Minute), users, keys)
 	ctx := context.Background()
-	registerTestUser(t, idp, "ada@example.com", "pw")
+	registerTestUser(t, idp, "ada", "pw")
 
 	// An expiration more than one year in the future is rejected.
 	if _, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{
-		OwnerEmail: "ada@example.com",
-		ExpiresIn:  "400d",
+		OwnerUsername: "ada",
+		ExpiresIn:     "400d",
 	}); status.Code(err) != codes.InvalidArgument {
 		t.Errorf("create with >1y expiration = %v, want InvalidArgument", err)
 	}
 
 	// A key that expires immediately is rejected on verification.
 	created, err := idp.client.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{
-		OwnerEmail: "ada@example.com",
-		ExpiresIn:  "1ns",
+		OwnerUsername: "ada",
+		ExpiresIn:     "1ns",
 	})
 	if err != nil {
 		t.Fatalf("CreateAPIKey: %v", err)
@@ -330,7 +334,7 @@ func TestAPIKeyExpiration(t *testing.T) {
 	// Give the (already-expired) key a moment to be past its expiry.
 	time.Sleep(2 * time.Millisecond)
 	if _, err := idp.client.VerifyAPIKey(ctx, &idppb.VerifyAPIKeyRequest{
-		Username:    "ada@example.com",
+		Username:    "ada",
 		ApiKey:      created.GetPlaintext(),
 		MaxFailures: 0,
 	}); status.Code(err) != codes.Unauthenticated {

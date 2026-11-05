@@ -30,9 +30,9 @@ func TestIDPUserMigrationDefaults(t *testing.T) {
 	client, db := startServerDB(t)
 	ctx := context.Background()
 
-	email := "migration-defaults@example.com"
+	username := "migdefaults"
 	created, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: email, PasswordHash: "h", Roles: []string{"user"}},
+		User: &dbpb.IDPUser{Username: username, Email: "migration-defaults@example.com", PasswordHash: "h", Roles: []string{"user"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -40,10 +40,13 @@ func TestIDPUserMigrationDefaults(t *testing.T) {
 	assertWireBaseline(t, created)
 
 	var row models.IDPUser
-	if err := db.Where("email = ?", email).First(&row).Error; err != nil {
+	if err := db.Where("username = ?", username).First(&row).Error; err != nil {
 		t.Fatalf("load row: %v", err)
 	}
 	assertRowBaseline(t, &row)
+	if row.Username != username {
+		t.Errorf("row username = %q, want %q", row.Username, username)
+	}
 }
 
 func assertWireBaseline(t *testing.T, u *dbpb.IDPUser) {
@@ -105,9 +108,10 @@ func TestIDPUserLifecycleGraph(t *testing.T) {
 	client, db := startServerDB(t)
 	ctx := context.Background()
 
+	const username = "lifecycler"
 	const email = "life-cycle@example.com"
 	created, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: email, PasswordHash: "standing-hash", Roles: []string{"admin"}},
+		User: &dbpb.IDPUser{Username: username, Email: email, PasswordHash: "standing-hash", Roles: []string{"admin"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -188,7 +192,10 @@ func TestIDPUserLifecycleGraph(t *testing.T) {
 		t.Errorf("edge 3: row active = true, want false")
 	}
 	// Identity/history RETAINED: the row still exists with the same ID,
-	// email, and roles.
+	// username, email, and roles.
+	if r3.Username != username {
+		t.Errorf("edge 3: row username = %q, want %q", r3.Username, username)
+	}
 	if r3.Email != email {
 		t.Errorf("edge 3: row email = %q, want %q", r3.Email, email)
 	}
@@ -252,7 +259,10 @@ func TestIDPUserLifecycleGraph(t *testing.T) {
 	if r4.PasswordHash != "" {
 		t.Errorf("edge 4: row password hash = %q, want zeroed", r4.PasswordHash)
 	}
-	// History INTACT: email and roles survived the cycle.
+	// History INTACT: username, email, and roles survived the cycle.
+	if r4.Username != username {
+		t.Errorf("edge 4: row username = %q, want %q", r4.Username, username)
+	}
 	if r4.Email != email {
 		t.Errorf("edge 4: row email = %q, want %q", r4.Email, email)
 	}
@@ -274,13 +284,13 @@ func TestIDPUserListingVisibility(t *testing.T) {
 	ctx := context.Background()
 
 	a, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: "visible@example.com", PasswordHash: "h", Roles: []string{"user"}},
+		User: &dbpb.IDPUser{Username: "visible", Email: "visible@example.com", PasswordHash: "h", Roles: []string{"user"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateUser a: %v", err)
 	}
 	b, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: "ghost@example.com", PasswordHash: "h", Roles: []string{"user"}},
+		User: &dbpb.IDPUser{Username: "ghost", Email: "ghost@example.com", PasswordHash: "h", Roles: []string{"user"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateUser b: %v", err)
@@ -335,6 +345,7 @@ func TestIDPUserFieldPersistenceRoundTrip(t *testing.T) {
 	windowEnd := mustTimestamp(t, "2026-11-03T12:00:00Z")
 	prov, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
 		User: &dbpb.IDPUser{
+			Username:                    "corp",
 			Email:                       "corp@example.com",
 			Roles:                       []string{"user"},
 			ExternalId:                  "azure-object-xyz",
@@ -424,7 +435,7 @@ func TestIDPUserLifecycleErrors(t *testing.T) {
 func describeUsers(users []*dbpb.IDPUser) []string {
 	out := make([]string, 0, len(users))
 	for _, u := range users {
-		out = append(out, u.GetId()+"("+u.GetEmail()+")")
+		out = append(out, u.GetId()+"("+u.GetUsername()+")")
 	}
 	return out
 }

@@ -3138,7 +3138,9 @@ message IDPUser {
   string id = 1;
   string first_name = 2;
   string last_name = 3;
-  // email is the user's unique login identifier.
+  // email is the user's OPTIONAL electronic-mail address (F-28.4): purely
+  // informational, non-unique, never a lookup key. Empty when the user has
+  // no known email (e.g. a machine principal with a UUID subject).
   string email = 4;
   // password_hash is the salted hash of the user's password (Argon2ID,
   // PHC encoding; the salt is embedded in the encoding). It is never
@@ -3179,23 +3181,36 @@ message IDPUser {
   // temporary_password_valid_until bounds the temporal password's usability
   // (F-28.3 break-glass); unset means there is no temporal credential.
   google.protobuf.Timestamp temporary_password_valid_until = 15;
+  // username is the user's UNIQUE login identifier (F-28.4): the OIDC
+  // subject claim and the SCIM userName both land here. It is the anchor all
+  // lookups run through (never email).
+  string username = 16;
 }
 
-// CreateIDPUserRequest registers (or updates) a user. Email is the unique
-// key; when a user with the email already exists the profile and roles are
-// updated (and the password hash replaced when a new one is supplied).
+// CreateIDPUserRequest registers (or updates) a user. Username is the unique
+// key; when a user with the username already exists the profile and roles
+// are updated (and the password hash replaced when a new one is supplied).
 message CreateIDPUserRequest {
   IDPUser user = 1;
 }
 
+// GetIDPUserRequest locates a user by AT MOST ONE of the mutually-exclusive
+// identifiers id, username, or external_id (setting more than one is
+// InvalidArgument). When include_deleted is true, a tombstoned (deprovisioned)
+// user is returned (flagged via deleted_at); by default such users are
+// reported NotFound (F-28.3).
 message GetIDPUserRequest {
-  // id is the user's identifier; when empty, email is used.
+  // id is the user's stable identifier (numeric, decimal string).
   string id = 1;
-  string email = 2;
+  // username is the user's unique login identifier.
+  string username = 2;
   // include_deleted, when true, returns a tombstoned (deprovisioned) user
   // (flagged via deleted_at); by default such users are reported NotFound
   // (F-28.3).
   bool include_deleted = 3;
+  // external_id is the corporate directory's stable identifier (the
+  // re-provisioning match key, F-28.3/F-28.4).
+  string external_id = 4;
 }
 
 // ListIDPUsersRequest lists registered users. When include_deleted is true,
@@ -3211,7 +3226,7 @@ message ListIDPUsersResponse {
 
 // UpdateIDPUserRequest updates a user's profile and/or roles. Only the
 // fields set on user are changed; an empty password_hash leaves the existing
-// password untouched.
+// password untouched. The user is addressed by id.
 message UpdateIDPUserRequest {
   IDPUser user = 1;
 }

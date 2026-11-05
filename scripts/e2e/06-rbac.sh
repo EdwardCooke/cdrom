@@ -46,15 +46,15 @@ RBAC=http://127.0.0.1:8081
 # Sign in as the admin (ada, registered first) and as the default user (bob)
 # against the RBAC-enabled API. The IdP mints each token stamped with the
 # user's roles, which the API reads to authorize the request.
-ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_EMAIL" "$E2E_USER_ADA_PASSWORD")
-USER_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_BOB_EMAIL" "$E2E_USER_BOB_PASSWORD")
+ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
+USER_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_BOB_USERNAME" "$E2E_USER_BOB_PASSWORD")
 
 # Create a user with the operator role (via the admin's user-management
 # endpoint, which honours the supplied roles) and sign in as them.
 e2e_authed_request POST "$RBAC/api/users" "$ADMIN_TOKEN" \
-  '{"first_name":"Op","last_name":"Erator","email":"op@example.com","password":"pw","roles":["operator"]}'
+  '{"first_name":"Op","last_name":"Erator","username":"op","password":"pw","roles":["operator"]}'
 [ "$HTTP_CODE" = "201" ] || { echo ">> create operator user returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
-OPERATOR_TOKEN=$(e2e_login "$RBAC" "op@example.com" "pw")
+OPERATOR_TOKEN=$(e2e_login "$RBAC" "op" "pw")
 
 # Create a pipeline (as the admin) to use as a resource-scoped target.
 e2e_authed_request POST "$RBAC/api/pipelines" "$ADMIN_TOKEN" '{"name":"rbac-pipeline"}'
@@ -109,9 +109,9 @@ e2e_authed_request POST "$RBAC/api/pipelines" "$USER_TOKEN" '{"name":"rbac-user-
 # in as them. With no roles and no mapped claims, deny-by-default means every
 # action is refused — not even listing pipelines.
 e2e_authed_request POST "$RBAC/api/users" "$ADMIN_TOKEN" \
-  '{"first_name":"No","last_name":"Role","email":"nole@example.com","password":"pw","roles":[]}'
+  '{"first_name":"No","last_name":"Role","username":"nole","password":"pw","roles":[]}'
 [ "$HTTP_CODE" = "201" ] || { echo ">> create no-role user returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
-NOROLE_TOKEN=$(e2e_login "$RBAC" "nole@example.com" "pw")
+NOROLE_TOKEN=$(e2e_login "$RBAC" "nole" "pw")
 e2e_authed_request GET "$RBAC/api/pipelines" "$NOROLE_TOKEN"
 [ "$HTTP_CODE" = "403" ] || { echo ">> no-role list pipelines returned $HTTP_CODE, want 403 (DISALLOW, deny-by-default)" >&2; exit 1; }
 e2e_authed_request GET "$RBAC/api/me/permissions" "$NOROLE_TOKEN"

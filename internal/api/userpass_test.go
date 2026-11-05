@@ -31,16 +31,16 @@ type fakeUserPass struct {
 	updateErr      error
 	deleteErr      error
 
-	loginEmail, loginPassword string
-	registered                RegisterRequest
-	created                   RegisterRequest
-	updatedID                 string
-	updated                   UpdateUserRequest
-	deletedID                 string
+	loginUsername, loginPassword string
+	registered                   RegisterRequest
+	created                      RegisterRequest
+	updatedID                    string
+	updated                      UpdateUserRequest
+	deletedID                    string
 }
 
-func (f *fakeUserPass) Login(_ context.Context, email, password string) (*LoginResult, error) {
-	f.loginEmail, f.loginPassword = email, password
+func (f *fakeUserPass) Login(_ context.Context, username, password string) (*LoginResult, error) {
+	f.loginUsername, f.loginPassword = username, password
 	if f.loginErr != nil {
 		return nil, f.loginErr
 	}
@@ -128,16 +128,16 @@ func postJSONBody(t *testing.T, url, body string) (int, []byte) {
 func TestAPILogin(t *testing.T) {
 	fake := &fakeUserPass{loginResult: &LoginResult{
 		AccessToken: "tok", TokenType: "Bearer", ExpiresIn: 3600,
-		Email: "ada@example.com", Roles: []string{"admin"},
+		Username: "ada", Email: "ada@example.com", Roles: []string{"admin"},
 	}}
 	ts := userPassServer(t, fake, auth.User{})
 
-	code, body := postJSONBody(t, ts.URL+"/api/login", `{"email":"ada@example.com","password":"s3cret"}`)
+	code, body := postJSONBody(t, ts.URL+"/api/login", `{"username":"ada","password":"s3cret"}`)
 	if code != http.StatusOK {
 		t.Fatalf("login status = %d, want 200 (body %s)", code, body)
 	}
-	if fake.loginEmail != "ada@example.com" || fake.loginPassword != "s3cret" {
-		t.Errorf("forwarded creds = %q/%q, want ada@example.com/s3cret", fake.loginEmail, fake.loginPassword)
+	if fake.loginUsername != "ada" || fake.loginPassword != "s3cret" {
+		t.Errorf("forwarded creds = %q/%q, want ada/s3cret", fake.loginUsername, fake.loginPassword)
 	}
 	var out LoginResult
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -146,11 +146,14 @@ func TestAPILogin(t *testing.T) {
 	if out.AccessToken != "tok" {
 		t.Errorf("access_token = %q, want tok", out.AccessToken)
 	}
+	if out.Username != "ada" {
+		t.Errorf("username = %q, want ada", out.Username)
+	}
 
 	// A failed login (the IdP returns 401) is surfaced as a 401.
 	fake2 := &fakeUserPass{loginErr: &userPassError{code: codes.Unauthenticated, msg: "invalid credentials"}}
 	ts2 := userPassServer(t, fake2, auth.User{})
-	if code, _ := postJSONBody(t, ts2.URL+"/api/login", `{"email":"a","password":"b"}`); code != http.StatusUnauthorized {
+	if code, _ := postJSONBody(t, ts2.URL+"/api/login", `{"username":"a","password":"b"}`); code != http.StatusUnauthorized {
 		t.Errorf("failed login status = %d, want 401", code)
 	}
 }
@@ -158,16 +161,16 @@ func TestAPILogin(t *testing.T) {
 // TestAPIRegister checks that /api/register proxies to the IdP and returns the
 // created user, and that a duplicate (409 from the IdP) is surfaced as a 409.
 func TestAPIRegister(t *testing.T) {
-	fake := &fakeUserPass{registerResult: &UserResult{ID: "u1", Email: "ada@example.com", Roles: []string{"admin"}}}
+	fake := &fakeUserPass{registerResult: &UserResult{ID: "u1", Username: "ada", Email: "ada@example.com", Roles: []string{"admin"}}}
 	ts := userPassServer(t, fake, auth.User{})
 
 	code, body := postJSONBody(t, ts.URL+"/api/register",
-		`{"first_name":"Ada","last_name":"L","email":"ada@example.com","password":"s3cret"}`)
+		`{"username":"ada","first_name":"Ada","last_name":"L","email":"ada@example.com","password":"s3cret"}`)
 	if code != http.StatusCreated {
 		t.Fatalf("register status = %d, want 201 (body %s)", code, body)
 	}
-	if fake.registered.Email != "ada@example.com" || fake.registered.Password != "s3cret" {
-		t.Errorf("forwarded register = %+v, want ada@example.com/s3cret", fake.registered)
+	if fake.registered.Username != "ada" || fake.registered.Password != "s3cret" {
+		t.Errorf("forwarded register = %+v, want ada/s3cret", fake.registered)
 	}
 	var out UserResult
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -180,7 +183,7 @@ func TestAPIRegister(t *testing.T) {
 	// A duplicate (the IdP returns 409) is surfaced as a 409.
 	fake2 := &fakeUserPass{registerErr: &userPassError{code: codes.AlreadyExists, msg: "exists"}}
 	ts2 := userPassServer(t, fake2, auth.User{})
-	if code, _ := postJSONBody(t, ts2.URL+"/api/register", `{"email":"a","password":"b"}`); code != http.StatusConflict {
+	if code, _ := postJSONBody(t, ts2.URL+"/api/register", `{"username":"a","password":"b"}`); code != http.StatusConflict {
 		t.Errorf("duplicate register status = %d, want 409", code)
 	}
 }
@@ -246,10 +249,10 @@ func TestAPIUserManagement(t *testing.T) {
 // username/password auth is not enabled (no userpass client attached).
 func TestAPIUserPassDisabled(t *testing.T) {
 	ts := userPassServer(t, nil, auth.User{})
-	if code, _ := postJSONBody(t, ts.URL+"/api/login", `{"email":"a","password":"b"}`); code != http.StatusNotImplemented {
+	if code, _ := postJSONBody(t, ts.URL+"/api/login", `{"username":"a","password":"b"}`); code != http.StatusNotImplemented {
 		t.Errorf("login status = %d, want 501", code)
 	}
-	if code, _ := postJSONBody(t, ts.URL+"/api/register", `{"email":"a","password":"b"}`); code != http.StatusNotImplemented {
+	if code, _ := postJSONBody(t, ts.URL+"/api/register", `{"username":"a","password":"b"}`); code != http.StatusNotImplemented {
 		t.Errorf("register status = %d, want 501", code)
 	}
 	if code, _ := doRequest(t, http.MethodGet, ts.URL+"/api/users", ""); code != http.StatusNotImplemented {
@@ -305,7 +308,7 @@ func TestAPISignInDefinitesRelay(t *testing.T) {
 	for name, defErr := range definite {
 		fake := &fakeUserPass{loginErr: defErr}
 		ts := userPassServer(t, fake, auth.User{})
-		code, body := postJSONBody(t, ts.URL+"/api/login", `{"email":"a@example.com","password":"x"}`)
+		code, body := postJSONBody(t, ts.URL+"/api/login", `{"username":"a","password":"x"}`)
 		if code != http.StatusForbidden {
 			t.Errorf("[%s] status = %d, want 403", name, code)
 		}
@@ -317,7 +320,7 @@ func TestAPISignInDefinitesRelay(t *testing.T) {
 	// Unknown user: generic 401, no enumeration.
 	fakeUnknown := &fakeUserPass{loginErr: &userPassError{code: codes.Unauthenticated, msg: "invalid credentials"}}
 	tsUnknown := userPassServer(t, fakeUnknown, auth.User{})
-	code, body := postJSONBody(t, tsUnknown.URL+"/api/login", `{"email":"ghost@example.com","password":"x"}`)
+	code, body := postJSONBody(t, tsUnknown.URL+"/api/login", `{"username":"ghost","password":"x"}`)
 	if code != http.StatusUnauthorized {
 		t.Errorf("[unknown] status = %d, want 401", code)
 	}
@@ -338,8 +341,8 @@ func statusMsg(e error) string {
 func TestAPIListIncludeDeleted(t *testing.T) {
 	now := time.Now()
 	fake := &fakeUserPass{users: []UserResult{
-		{ID: "u-live", Email: "live@example.com", Active: true},
-		{ID: "u-dead", Email: "dead@example.com", Active: false, DeletedAt: &now},
+		{ID: "u-live", Username: "live", Email: "live@example.com", Active: true},
+		{ID: "u-dead", Username: "dead", Email: "dead@example.com", Active: false, DeletedAt: &now},
 	}}
 	admin := auth.User{Subject: "admin-1", Roles: []string{"admin"}}
 	ts := userPassServer(t, fake, admin)

@@ -408,9 +408,9 @@ e2e_submit_job() {
 # the default user role); the F-14 test signs in as them against the
 # RBAC-enabled API. When the F-14 test runs standalone (without the F-24
 # test), it registers them itself if they are not present yet.
-E2E_USER_ADA_EMAIL="ada@example.com"
+E2E_USER_ADA_USERNAME="ada"
 E2E_USER_ADA_PASSWORD="s3cret"
-E2E_USER_BOB_EMAIL="bob@example.com"
+E2E_USER_BOB_USERNAME="bob"
 E2E_USER_BOB_PASSWORD="pw"
 
 # e2e_ensure_users <api-base>
@@ -419,16 +419,16 @@ E2E_USER_BOB_PASSWORD="pw"
 e2e_ensure_users() {
   local base="$1"
   e2e_http_request POST "$base/api/register" \
-    "{\"first_name\":\"Ada\",\"last_name\":\"Lovelace\",\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
+    "{\"first_name\":\"Ada\",\"last_name\":\"Lovelace\",\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
   case "$HTTP_CODE" in
     201|409) ;;
-    *) echo ">> register ${E2E_USER_ADA_EMAIL} returned $HTTP_CODE, want 201 or 409 ($HTTP_BODY)" >&2; exit 1 ;;
+    *) echo ">> register ${E2E_USER_ADA_USERNAME} returned $HTTP_CODE, want 201 or 409 ($HTTP_BODY)" >&2; exit 1 ;;
   esac
   e2e_http_request POST "$base/api/register" \
-    "{\"first_name\":\"Bob\",\"last_name\":\"Jones\",\"email\":\"${E2E_USER_BOB_EMAIL}\",\"password\":\"${E2E_USER_BOB_PASSWORD}\"}"
+    "{\"first_name\":\"Bob\",\"last_name\":\"Jones\",\"username\":\"${E2E_USER_BOB_USERNAME}\",\"password\":\"${E2E_USER_BOB_PASSWORD}\"}"
   case "$HTTP_CODE" in
     201|409) ;;
-    *) echo ">> register ${E2E_USER_BOB_EMAIL} returned $HTTP_CODE, want 201 or 409 ($HTTP_BODY)" >&2; exit 1 ;;
+    *) echo ">> register ${E2E_USER_BOB_USERNAME} returned $HTTP_CODE, want 201 or 409 ($HTTP_BODY)" >&2; exit 1 ;;
   esac
 }
 
@@ -446,15 +446,15 @@ e2e_start_rbac_api() {
     CDROM_LOG_FORMAT=text -- "$BIN/api"
 }
 
-# e2e_login <api-base> <email> <password>
+# e2e_login <api-base> <username> <password>
 # Signs in against <api-base> and prints the access token.
 e2e_login() {
-  local base="$1" email="$2" password="$3"
-  e2e_http_request POST "$base/api/login" "{\"email\":\"$email\",\"password\":\"$password\"}"
-  [ "$HTTP_CODE" = "200" ] || { echo ">> login ($email, ${base}) returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
+  local base="$1" username="$2" password="$3"
+  e2e_http_request POST "$base/api/login" "{\"username\":\"$username\",\"password\":\"$password\"}"
+  [ "$HTTP_CODE" = "200" ] || { echo ">> login ($username, ${base}) returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
   local token
   token=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
   [ -n "$token" ] && [ "$token" != "null" ] \
-    || { echo ">> login ($email, ${base}) returned no token: $HTTP_BODY" >&2; exit 1; }
+    || { echo ">> login ($username, ${base}) returned no token: $HTTP_BODY" >&2; exit 1; }
   printf '%s' "$token"
 }

@@ -76,8 +76,10 @@ func TestE2E_IssuesVerifiableIDTokens(t *testing.T) {
 	if err := idt.Claims(&claims); err != nil {
 		t.Fatalf("claims: %v", err)
 	}
-	if claims.Email != "alice@example.com" {
-		t.Errorf("email = %q, want alice@example.com", claims.Email)
+	// The dev shim no longer FABRICATES an email domain (F-28.4): the
+	// subject IS the username, and the email claim is empty.
+	if claims.Email != "" {
+		t.Errorf("email = %q, want empty (no fabricated domain)", claims.Email)
 	}
 }
 

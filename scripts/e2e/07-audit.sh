@@ -31,13 +31,13 @@ e2e_boot_stack with-worker
 # --- generate the audited actions this script asserts on --------------------
 # Register + log in a user (auth.register, auth.login).
 e2e_http_request POST http://127.0.0.1:8080/api/register \
-  "{\"first_name\":\"Ada\",\"last_name\":\"Lovelace\",\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
+  "{\"first_name\":\"Ada\",\"last_name\":\"Lovelace\",\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
 case "$HTTP_CODE" in
   201|409) ;;
   *) echo ">> register returned $HTTP_CODE, want 201 or 409 ($HTTP_BODY)" >&2; exit 1 ;;
 esac
 e2e_http_request POST http://127.0.0.1:8080/api/login \
-  "{\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
+  "{\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
 [ "$HTTP_CODE" = "200" ] || { echo ">> login returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
 
 # Submit a job with a token_exchange step (run.trigger, job.status,
@@ -124,8 +124,8 @@ printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="job.approve") | select(
 printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="job.reject")' >/dev/null \
   || { echo ">> no job.reject audit event recorded" >&2; exit 1; }
 # A login is recorded with the user's email as the actor.
-printf '%s' "$AUDIT_ALL" | jq -e ".[] | select(.action==\"auth.login\") | select(.actor==\"${E2E_USER_ADA_EMAIL}\")" >/dev/null \
-  || { echo ">> no auth.login audit event for ${E2E_USER_ADA_EMAIL}" >&2; exit 1; }
+printf '%s' "$AUDIT_ALL" | jq -e ".[] | select(.action==\"auth.login\") | select(.actor==\"${E2E_USER_ADA_USERNAME}\")" >/dev/null \
+  || { echo ">> no auth.login audit event for ${E2E_USER_ADA_USERNAME}" >&2; exit 1; }
 # A run trigger (a standalone job submit) is recorded.
 printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="run.trigger")' >/dev/null \
   || { echo ">> no run.trigger audit event recorded" >&2; exit 1; }

@@ -53,7 +53,7 @@ const breakGlassDrawLength = 16
 const breakGlassPasswordLength = 24
 
 // breakGlassRetryBudget bounds the redraw attempts on the (practically
-// impossible) unique-email collision: failing CLOSED, never touching
+// impossible) unique-USERNAME collision: failing CLOSED, never touching
 // somebody else's row.
 const breakGlassRetryBudget = 5
 
@@ -70,9 +70,11 @@ const breakGlassPasswordCharset = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUV
 // breakGlassCoinResponse is the 200 body of a successful coinage. The
 // PLAINTEXT password appears exactly once (Cache-Control: no-store); it is
 // never logged and never audited (house rule shared with F-25/F-26/F-28.2:
-// record the event, not the secret).
+// record the event, not the secret). The coined identity is a USERNAME
+// (F-28.4): the randomized `breakglass-…@invalid` login name, with no email
+// attached (@invalid signals the unroutable domain).
 type breakGlassCoinResponse struct {
-	Email     string `json:"email"`
+	Username  string `json:"username"`
 	Password  string `json:"password"`
 	ExpiresAt string `json:"expires_at"`
 }
@@ -137,7 +139,7 @@ func (c *coinBreakGlass) coin(ctx context.Context, ttl time.Duration) (*breakGla
 	}
 	validUntil := now.Add(ttl)
 	coined := &User{
-		Email:                  "", // filled per attempt
+		Username:               "", // filled per attempt
 		Roles:                  []string{"admin"},
 		Active:                 true,
 		Provisioned:            false, // a LOCAL user: outside SCIM governance
@@ -150,12 +152,12 @@ func (c *coinBreakGlass) coin(ctx context.Context, ttl time.Duration) (*breakGla
 		if derr != nil {
 			return nil, fmt.Errorf("break glass: draw identity: %w", derr)
 		}
-		coined.Email = "breakglass-" + draw + "@invalid"
+		coined.Username = "breakglass-" + draw + "@invalid"
 		created, cerr := c.users.Create(ctx, coined)
 		if cerr == nil {
-			c.logger.Info("break glass: coined ephemeral admin", "email", created.Email, "ttl", ttl.Round(time.Second))
+			c.logger.Info("break glass: coined ephemeral admin", "username", created.Username, "ttl", ttl.Round(time.Second))
 			return &breakGlassCoinResponse{
-				Email:     created.Email,
+				Username:  created.Username,
 				Password:  password,
 				ExpiresAt: validUntil.UTC().Format(time.RFC3339),
 			}, nil
@@ -163,7 +165,7 @@ func (c *coinBreakGlass) coin(ctx context.Context, ttl time.Duration) (*breakGla
 		lastErr = cerr
 		// A collision on our own @invalid namespace is retriable (redraw);
 		// anything else fails closed.
-		if !strings.HasSuffix(coined.Email, "@invalid") {
+		if !strings.HasSuffix(coined.Username, "@invalid") {
 			break
 		}
 	}
@@ -171,10 +173,10 @@ func (c *coinBreakGlass) coin(ctx context.Context, ttl time.Duration) (*breakGla
 }
 
 // isBreakGlass identifies a break-glass-coined user: the randomized
-// @invalid login name (structural — SCIM cannot mint it, and no local
+// @invalid USERNAME (structural — SCIM cannot mint it, and no local
 // registrant picks it).
 func (u *User) isBreakGlass() bool {
-	return strings.HasPrefix(u.Email, "breakglass-") && strings.HasSuffix(u.Email, "@invalid")
+	return strings.HasPrefix(u.Username, "breakglass-") && strings.HasSuffix(u.Username, "@invalid")
 }
 
 // unexpired reports whether the user's TEMPORAL credential is still inside
@@ -235,7 +237,7 @@ func (s *Server) SweepExpiredBreakGlass(ctx context.Context) int {
 			}
 		}
 		swept++
-		s.logger.Info("break glass: swept expired credential", "email", u.Email)
+		s.logger.Info("break glass: swept expired credential", "username", u.Username)
 	}
 	return swept
 }
@@ -283,8 +285,8 @@ func (s *Server) SetBreakGlassAuditor(rec *audit.Recorder) {
 //     (verifyPeerChain). Plaintext listeners negotiate no peer cert → 403.
 //  4. The live-pool cap must permit coinage (429 when saturated).
 //
-// Success: 200 with {email, password, expires_at}; the password plaintext is
-// shown exactly once (Cache-Control: no-store) and is NEVER logged or
+// Success: 200 with {username, password, expires_at}; the password plaintext
+// is shown exactly once (Cache-Control: no-store) and is NEVER logged or
 // audited. Every invocation (success or saturation) writes an F-15 audit
 // event attributing the caller's certificate leaf, plus a conspicuous WARN
 // log.
@@ -350,8 +352,8 @@ func (s *Server) handleEmergencyBreakGlass(w http.ResponseWriter, r *http.Reques
 		deny()
 		return
 	}
-	s.warnBreakGlass(actor, "coin", "email="+maskEmail(resp.Email)+" ttl="+strconv.Itoa(int(ttl/time.Second)))
-	s.recordBreakGlass(actor, "success", maskEmail(resp.Email), resp.ExpiresAt)
+	s.warnBreakGlass(actor, "coin", "username="+maskIdentity(resp.Username)+" ttl="+strconv.Itoa(int(ttl/time.Second)))
+	s.recordBreakGlass(actor, "success", maskIdentity(resp.Username), resp.ExpiresAt)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -367,9 +369,9 @@ func (s *Server) warnBreakGlass(actor, phase, detail string) {
 }
 
 // recordBreakGlass writes the F-15 audit event: actor = the caller's
-// certificate leaf, target = the coined user (masked email), outcome. The
+// certificate leaf, target = the coined user (masked identity), outcome. The
 // password appears nowhere.
-func (s *Server) recordBreakGlass(actor, outcome, maskedEmail, expiresAt string) {
+func (s *Server) recordBreakGlass(actor, outcome, maskedIdentity, expiresAt string) {
 	if s.bgAuditor == nil {
 		return
 	}
@@ -378,7 +380,7 @@ func (s *Server) recordBreakGlass(actor, outcome, maskedEmail, expiresAt string)
 		ActorKind:  audit.ActorKindSystem,
 		Action:     audit.ActionBreakGlassCoin,
 		TargetKind: audit.TargetUser,
-		TargetID:   maskedEmail,
+		TargetID:   maskedIdentity,
 		Outcome:    audit.OutcomeSuccess,
 	}
 	if outcome == "saturation" {
@@ -441,19 +443,23 @@ func breakGlassActorLeaf(leaf *x509.Certificate) string {
 	return "break-glass(" + strings.Join(parts, "|") + ")"
 }
 
-// maskEmail obscures the local-part of an email for LOG/AUDIT contexts
-// (keeps the domain so incidents correlate; the coined @invalid domain is
-// uninformative anyway).
-func maskEmail(email string) string {
-	at := strings.LastIndexByte(email, '@')
+// maskIdentity obscures the local-part of a login identity for LOG/AUDIT
+// contexts (keeps the domain so incidents correlate; the coined @invalid
+// domain is uninformative anyway). Identities without a domain (rare) are
+// masked wholesale.
+func maskIdentity(identity string) string {
+	at := strings.LastIndexByte(identity, '@')
 	if at <= 0 {
-		return "***"
+		if len(identity) <= 4 {
+			return "****"
+		}
+		return identity[:2] + "…" + identity[len(identity)-2:]
 	}
-	local := email[:at]
+	local := identity[:at]
 	if len(local) <= 4 {
-		return "****" + email[at:]
+		return "****" + identity[at:]
 	}
-	return local[:2] + "…" + local[len(local)-2:] + email[at:]
+	return local[:2] + "…" + local[len(local)-2:] + identity[at:]
 }
 
 // drawRandom draws n characters from charset using crypto/rand.

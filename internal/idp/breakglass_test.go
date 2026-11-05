@@ -199,7 +199,7 @@ func TestBreakGlassAdmissionLadder(t *testing.T) {
 	srv, sink := breakGlassFixture(t, true, pki.trust, users)
 	ctx := context.Background()
 
-	seed, err := users.Create(ctx, &User{Email: "benign@example.com", Roles: []string{"user"}, Active: true})
+	seed, err := users.Create(ctx, &User{Username: "benign", Email: "benign@example.com", Roles: []string{"user"}, Active: true})
 	if err != nil {
 		t.Fatalf("seed benign user: %v", err)
 	}
@@ -283,8 +283,8 @@ func TestBreakGlassCoinsStrictlyAdditiveAdmin(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !strings.HasPrefix(resp.Email, "breakglass-") || !strings.HasSuffix(resp.Email, "@invalid") {
-		t.Errorf("email = %q, want the breakglass-…@invalid shape", resp.Email)
+	if !strings.HasPrefix(resp.Username, "breakglass-") || !strings.HasSuffix(resp.Username, "@invalid") {
+		t.Errorf("username = %q, want the breakglass-…@invalid shape", resp.Username)
 	}
 	if resp.Password == "" {
 		t.Error("password empty, want the once-shown plaintext")
@@ -317,8 +317,8 @@ func TestBreakGlassCoinsStrictlyAdditiveAdmin(t *testing.T) {
 		}
 		if !found {
 			newRows++
-			if u.Email != resp.Email {
-				t.Errorf("new row email = %q, want the coined %q", u.Email, resp.Email)
+			if u.Username != resp.Username {
+				t.Errorf("new row username = %q, want the coined %q", u.Username, resp.Username)
 			}
 			if !u.Active || u.Provisioned || u.DeletedAt != nil {
 				t.Errorf("new row state = active:%v provisioned:%v tombstone:%v, want active local non-tombstoned", u.Active, u.Provisioned, u.DeletedAt)
@@ -386,7 +386,7 @@ func TestBreakGlassTTLRidesRequestClamped(t *testing.T) {
 	if d := shortExp.Sub(time.Now()); d < 14*time.Minute || d > 16*time.Minute {
 		t.Errorf("short ttl ≈ %v, want ≈15m", d)
 	}
-	shortUser, _ := users.GetByEmail(ctx, shortResp.Email, true)
+	shortUser, _ := users.GetByUsername(ctx, shortResp.Username, true)
 
 	// Oversized request ttl: clamped to MAX (7d).
 	rec = httptest.NewRecorder()
@@ -400,7 +400,7 @@ func TestBreakGlassTTLRidesRequestClamped(t *testing.T) {
 	if d := longExp.Sub(time.Now()); d < 6*24*time.Hour || d > 8*24*time.Hour {
 		t.Errorf("clamped ttl ≈ %v, want ≤7d", d)
 	}
-	longUser, _ := users.GetByEmail(ctx, longResp.Email, true)
+	longUser, _ := users.GetByUsername(ctx, longResp.Username, true)
 
 	// The WINDOWS persisted on the rows agree with the responses.
 	if shortUser.TempPasswordValidUntil == nil || shortUser.TempPasswordValidUntil.Sub(shortExp) > time.Minute {
@@ -425,7 +425,7 @@ func TestBreakGlassLivePoolCap(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		h, _ := HashPassword("", "seeded-temp")
 		if _, err := users.Create(ctx, &User{
-			Email:                  "breakglass-seeded" + string(rune('a'+i)) + "@invalid",
+			Username:               "breakglass-seeded" + string(rune('a'+i)) + "@invalid",
 			Roles:                  []string{"admin"},
 			Active:                 true,
 			TempPasswordHash:       h,
@@ -489,20 +489,20 @@ func TestBreakGlassSweepRetiresExpired(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	h, _ := HashPassword("", "swp")
 	expired, err := users.Create(ctx, &User{
-		Email: "breakglass-swpx@invalid", Roles: []string{"admin"}, Active: true,
+		Username: "breakglass-swpx@invalid", Roles: []string{"admin"}, Active: true,
 		TempPasswordHash: h, TempPasswordValidUntil: &past,
 	})
 	if err != nil {
 		t.Fatalf("create expired: %v", err)
 	}
 	live, err := users.Create(ctx, &User{
-		Email: "breakglass-swpy@invalid", Roles: []string{"admin"}, Active: true,
+		Username: "breakglass-swpy@invalid", Roles: []string{"admin"}, Active: true,
 		TempPasswordHash: h, TempPasswordValidUntil: &future,
 	})
 	if err != nil {
 		t.Fatalf("create live: %v", err)
 	}
-	stranger, err := users.Create(ctx, &User{Email: "innocent@example.com", Roles: []string{"user"}, Active: true})
+	stranger, err := users.Create(ctx, &User{Username: "innocent", Email: "innocent@example.com", Roles: []string{"user"}, Active: true})
 	if err != nil {
 		t.Fatalf("create stranger: %v", err)
 	}
@@ -550,26 +550,26 @@ func TestLoginHonorsTemporalWindow(t *testing.T) {
 
 	// Within the window: the temporal password ADMITS.
 	winUser, err := users.Create(ctx, &User{
-		Email: "win@glass.invalid", Roles: []string{"admin"}, Active: true,
+		Username: "win@glass.invalid", Roles: []string{"admin"}, Active: true,
 		TempPasswordHash: h, TempPasswordValidUntil: &inFuture,
 	})
 	if err != nil {
 		t.Fatalf("create win: %v", err)
 	}
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: winUser.Email, Password: pw}); err != nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: winUser.Username, Password: pw}); err != nil {
 		t.Fatalf("login within window: %v", err)
 	}
 
 	// Outside the window: REFUSED (generic invalid credentials — no state
 	// leakage), and the credential is LAZILY VOIDED (hash zeroed).
 	loseUser, err := users.Create(ctx, &User{
-		Email: "lose@glass.invalid", Roles: []string{"admin"}, Active: true,
+		Username: "lose@glass.invalid", Roles: []string{"admin"}, Active: true,
 		TempPasswordHash: h, TempPasswordValidUntil: &inPast,
 	})
 	if err != nil {
 		t.Fatalf("create lose: %v", err)
 	}
-	_, err = idp.client.Login(ctx, &idppb.LoginRequest{Email: loseUser.Email, Password: pw})
+	_, err = idp.client.Login(ctx, &idppb.LoginRequest{Username: loseUser.Username, Password: pw})
 	if err == nil {
 		t.Fatal("login outside window succeeded, want refused")
 	}

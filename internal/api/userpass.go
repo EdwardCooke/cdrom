@@ -21,9 +21,10 @@ import (
 // requests go to the IdP over gRPC (mTLS when TLS is configured), so only the
 // API can reach them.
 type UserPassClient interface {
-	// Login verifies the user's credentials and returns the OIDC token the
-	// IdP minted for the user (plus the user's profile and roles).
-	Login(ctx context.Context, email, password string) (*LoginResult, error)
+	// Login verifies the user's credentials (username + password) and
+	// returns the OIDC token the IdP minted for the user (plus the user's
+	// profile and roles).
+	Login(ctx context.Context, username, password string) (*LoginResult, error)
 	// Register creates a new user from the request's profile and password.
 	Register(ctx context.Context, req RegisterRequest) (*UserResult, error)
 	// ListUsers returns registered users (profile + roles, no password).
@@ -45,24 +46,30 @@ type UserPassClient interface {
 // minted for the user (present it as `Authorization: Bearer <access_token>`),
 // plus the user's profile and roles.
 type LoginResult struct {
-	AccessToken string   `json:"access_token"`
-	TokenType   string   `json:"token_type"`
-	ExpiresIn   int      `json:"expires_in"`
-	IDToken     string   `json:"id_token"`
-	ID          string   `json:"id"`
-	FirstName   string   `json:"first_name"`
-	LastName    string   `json:"last_name"`
-	Email       string   `json:"email"`
-	Roles       []string `json:"roles"`
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+	IDToken     string `json:"id_token"`
+	ID          string `json:"id"`
+	// Username is the user's unique login identifier (F-28.4).
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	// Email is the user's optional electronic-mail address (may be "").
+	Email string   `json:"email"`
+	Roles []string `json:"roles"`
 }
 
 // UserResult is the profile of a registered user (never the password hash).
 type UserResult struct {
-	ID        string   `json:"id"`
-	FirstName string   `json:"first_name"`
-	LastName  string   `json:"last_name"`
-	Email     string   `json:"email"`
-	Roles     []string `json:"roles"`
+	ID string `json:"id"`
+	// Username is the user's unique login identifier (F-28.4).
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	// Email is the user's optional electronic-mail address (may be "").
+	Email string   `json:"email"`
+	Roles []string `json:"roles"`
 	// Active is the user's activated state (F-28.3); false means deactivated
 	// ("on leave").
 	Active bool `json:"active"`
@@ -75,11 +82,13 @@ type UserResult struct {
 }
 
 // RegisterRequest is the request to create a user: the required profile
-// fields (first/last/email) and password, plus an optional initial role set.
+// fields (username, first/last) and password, plus an optional email and
+// initial role set.
 type RegisterRequest struct {
+	Username  string   `json:"username"`
 	FirstName string   `json:"first_name"`
 	LastName  string   `json:"last_name"`
-	Email     string   `json:"email"`
+	Email     string   `json:"email,omitempty"`
 	Password  string   `json:"password"`
 	Roles     []string `json:"roles,omitempty"`
 }
@@ -88,6 +97,7 @@ type RegisterRequest struct {
 // Empty fields are left unchanged; an empty password leaves the existing
 // password untouched.
 type UpdateUserRequest struct {
+	Username  string   `json:"username,omitempty"`
 	FirstName string   `json:"first_name,omitempty"`
 	LastName  string   `json:"last_name,omitempty"`
 	Email     string   `json:"email,omitempty"`
@@ -120,9 +130,9 @@ func NewUserPassClient(idp idppb.IdPClient, audience, issuer string) UserPassCli
 	return &grpcUserPassClient{idp: idp, audience: audience, issuer: issuer}
 }
 
-func (c *grpcUserPassClient) Login(ctx context.Context, email, password string) (*LoginResult, error) {
+func (c *grpcUserPassClient) Login(ctx context.Context, username, password string) (*LoginResult, error) {
 	resp, err := c.idp.Login(ctx, &idppb.LoginRequest{
-		Email:    email,
+		Username: username,
 		Password: password,
 		Audience: c.audience,
 		Issuer:   c.issuer,
@@ -137,6 +147,7 @@ func (c *grpcUserPassClient) Login(ctx context.Context, email, password string) 
 		ExpiresIn:   int(resp.GetExpiresIn()),
 		IDToken:     resp.GetIdToken(),
 		ID:          u.GetId(),
+		Username:    u.GetUsername(),
 		FirstName:   u.GetFirstName(),
 		LastName:    u.GetLastName(),
 		Email:       u.GetEmail(),
@@ -146,6 +157,7 @@ func (c *grpcUserPassClient) Login(ctx context.Context, email, password string) 
 
 func (c *grpcUserPassClient) Register(ctx context.Context, req RegisterRequest) (*UserResult, error) {
 	u, err := c.idp.Register(ctx, &idppb.RegisterRequest{
+		Username:  req.Username,
 		FirstName: req.FirstName,
 		LastName:  req.LastName,
 		Email:     req.Email,
@@ -172,6 +184,7 @@ func (c *grpcUserPassClient) ListUsers(ctx context.Context, includeDeleted bool)
 
 func (c *grpcUserPassClient) CreateUser(ctx context.Context, req RegisterRequest) (*UserResult, error) {
 	u, err := c.idp.CreateUser(ctx, &idppb.CreateUserRequest{
+		Username:  req.Username,
 		FirstName: req.FirstName,
 		LastName:  req.LastName,
 		Email:     req.Email,
@@ -187,6 +200,7 @@ func (c *grpcUserPassClient) CreateUser(ctx context.Context, req RegisterRequest
 func (c *grpcUserPassClient) UpdateUser(ctx context.Context, id string, req UpdateUserRequest) (*UserResult, error) {
 	u, err := c.idp.UpdateUser(ctx, &idppb.UpdateUserRequest{
 		Id:        id,
+		Username:  req.Username,
 		FirstName: req.FirstName,
 		LastName:  req.LastName,
 		Email:     req.Email,
@@ -211,6 +225,7 @@ func (c *grpcUserPassClient) DeleteUser(ctx context.Context, id string) error {
 func userResult(u *dbpb.IDPUser) *UserResult {
 	result := &UserResult{
 		ID:          u.GetId(),
+		Username:    u.GetUsername(),
 		FirstName:   u.GetFirstName(),
 		LastName:    u.GetLastName(),
 		Email:       u.GetEmail(),

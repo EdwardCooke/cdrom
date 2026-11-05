@@ -143,9 +143,18 @@ type User struct {
 	// empty) or "service-account" (F-26). It is how the API distinguishes a
 	// service-account principal from a human user for authorization (the
 	// principal's role bindings are looked up by kind + id).
-	Kind  string `json:"kind,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Email string `json:"email,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	// Username is the principal's unique login identifier (F-28.4). For
+	// human user principals it equals the token's subject claim (the IdP
+	// stamps `sub` with the username); empty for service accounts.
+	Username string `json:"username,omitempty"`
+	// UserID is the user's stable NUMERIC identifier (the IdP's `user_id`
+	// claim, F-28.4). It is the key for owner-scoped lookups (API keys,
+	// role bindings) — distinct from the Subject, which is the username.
+	// Empty for service accounts and the synthetic admin.
+	UserID string `json:"user_id,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Email  string `json:"email,omitempty"`
 	// Roles are the user's role names, stamped onto the token by the IdP
 	// (from the user's registered roles). They are empty when the token was
 	// not minted for a registered user (e.g. the local OIDC dev flow).
@@ -350,12 +359,18 @@ func parseServiceAccountBearer(r *http.Request) (loginName, apiKey string, ok bo
 func userFromIDToken(idToken *oidc.IDToken, roles config.RolesConfig) User {
 	var claims struct {
 		Subject string   `json:"sub"`
+		UserID  string   `json:"user_id"`
 		Name    string   `json:"name"`
 		Email   string   `json:"email"`
 		Roles   []string `json:"roles"`
 	}
 	_ = idToken.Claims(&claims)
-	user := User{Subject: claims.Subject, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
+	// The principal's Username is the token's subject (F-28.4): the built-in
+	// IdP stamps `sub` with the user's username, so the admission gate and
+	// the approver-set matching correlate on it. Foreign issuers stamp their
+	// own subject — equally usable as the correlation key. The numeric ID
+	// (the `user_id` claim) keys owner-scoped lookups.
+	user := User{Subject: claims.Subject, Username: claims.Subject, UserID: claims.UserID, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
 	// Capture the token's VERBATIM claims (F-27): a claim name → its value(s).
 	// The API honors approval groups whose membership is derived from a claim
 	// (a group's claim derivation matches a decider whose token carries the

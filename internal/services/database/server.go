@@ -3193,11 +3193,12 @@ func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCo
 // can never resurrect a deprovisioned identity.
 func (s *Server) createUser(ctx context.Context, u *dbpb.IDPUser) (*dbpb.IDPUser, error) {
 	var existing models.IDPUser
-	err := s.db.WithContext(ctx).Where("email = ?", u.GetEmail()).First(&existing).Error
+	err := s.db.WithContext(ctx).Where("lower(username) = ?", strings.ToLower(u.GetUsername())).First(&existing).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		// New user: the database assigns the ID (auto-increment primary key).
 		user := &models.IDPUser{
+			Username:                    u.GetUsername(),
 			FirstName:                   u.GetFirstName(),
 			LastName:                    u.GetLastName(),
 			Email:                       u.GetEmail(),
@@ -3219,9 +3220,11 @@ func (s *Server) createUser(ctx context.Context, u *dbpb.IDPUser) (*dbpb.IDPUser
 		return nil, grpcErr(err)
 	default:
 		// Existing user: update the profile and roles; replace the password
-		// hash only when a new one is supplied.
+		// hash only when a new one is supplied. CreatedAt is PRESERVED (the
+		// row's original birth moment; F-28.4's SCIM meta echoes it).
 		existing.FirstName = u.GetFirstName()
 		existing.LastName = u.GetLastName()
+		existing.Email = u.GetEmail()
 		existing.Roles = nonNilRoles(u.GetRoles())
 		if u.GetPasswordHash() != "" {
 			existing.PasswordHash = u.GetPasswordHash()
@@ -3237,27 +3240,40 @@ func (s *Server) createUser(ctx context.Context, u *dbpb.IDPUser) (*dbpb.IDPUser
 // CreateUser registers (or updates) a user (see createUser).
 func (s *Server) CreateUser(ctx context.Context, req *dbpb.CreateIDPUserRequest) (*dbpb.IDPUser, error) {
 	u := req.GetUser()
-	if u == nil || u.GetEmail() == "" {
-		return nil, status.Error(codes.InvalidArgument, "email is required")
+	if u == nil || u.GetUsername() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username is required")
 	}
 	return s.createUser(ctx, u)
 }
 
-// getUser loads a user by ID, or by email when the ID is empty. When
-// includeDeleted is false a tombstoned (deprovisioned) user is treated as
-// NotFound (F-28.3). A missing user returns NotFound.
-func (s *Server) getUser(ctx context.Context, idStr, email string, includeDeleted bool) (*models.IDPUser, error) {
+// getUser loads a user by AT MOST ONE of the mutually-exclusive locators id,
+// username, or externalID (more than one set is InvalidArgument; none is
+// InvalidArgument). When includeDeleted is false a tombstoned (deprovisioned)
+// user is treated as NotFound (F-28.3). A missing user returns NotFound.
+func (s *Server) getUser(ctx context.Context, idStr, username, externalID string, includeDeleted bool) (*models.IDPUser, error) {
+	set := 0
+	for _, v := range []string{idStr, username, externalID} {
+		if v != "" {
+			set++
+		}
+	}
+	if set > 1 {
+		return nil, status.Error(codes.InvalidArgument, "provide at most one of id, username, or external_id")
+	}
 	query := s.db.WithContext(ctx).Model(&models.IDPUser{})
-	if idStr != "" {
+	switch {
+	case idStr != "":
 		id, err := parseUserID(idStr)
 		if err != nil {
 			return nil, err
 		}
 		query = query.Where("id = ?", id)
-	} else if email != "" {
-		query = query.Where("email = ?", email)
-	} else {
-		return nil, status.Error(codes.InvalidArgument, "id or email is required")
+	case username != "":
+		query = query.Where("lower(username) = ?", strings.ToLower(username))
+	case externalID != "":
+		query = query.Where("external_id = ?", externalID)
+	default:
+		return nil, status.Error(codes.InvalidArgument, "one of id, username, or external_id is required")
 	}
 	var user models.IDPUser
 	if err := query.First(&user).Error; err != nil {
@@ -3272,11 +3288,11 @@ func (s *Server) getUser(ctx context.Context, idStr, email string, includeDelete
 	return &user, nil
 }
 
-// GetIDPUser returns a user by ID, or by email when the ID is empty. A
-// missing user returns NotFound. Tombstoned (deprovisioned) users are
+// GetIDPUser returns a user located by id, username, or external_id (at most
+// one). A missing user returns NotFound. Tombstoned (deprovisioned) users are
 // reported as NotFound unless include_deleted is set (F-28.3).
 func (s *Server) GetIDPUser(ctx context.Context, req *dbpb.GetIDPUserRequest) (*dbpb.IDPUser, error) {
-	user, err := s.getUser(ctx, req.GetId(), req.GetEmail(), req.GetIncludeDeleted())
+	user, err := s.getUser(ctx, req.GetId(), req.GetUsername(), req.GetExternalId(), req.GetIncludeDeleted())
 	if err != nil {
 		return nil, err
 	}
@@ -3339,6 +3355,23 @@ func (s *Server) UpdateIDPUser(ctx context.Context, req *dbpb.UpdateIDPUserReque
 	}
 	if u.GetEmail() != "" {
 		user.Email = u.GetEmail()
+	}
+	// Username is MUTABLE (F-28.4: it is metadata, not deep identity) but
+	// UNIQUE: a rename onto someone else's username is AlreadyExists.
+	// Case-folded comparisons mirror the lookup semantics.
+	if nu := u.GetUsername(); nu != "" && !strings.EqualFold(nu, user.Username) {
+		var clash models.IDPUser
+		err := s.db.WithContext(ctx).
+			Where("lower(username) = ? AND id <> ?", strings.ToLower(nu), id).
+			First(&clash).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			user.Username = nu
+		case err != nil:
+			return nil, grpcErr(err)
+		default:
+			return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
+		}
 	}
 	if len(u.GetRoles()) > 0 {
 		user.Roles = nonNilRoles(u.GetRoles())
@@ -6591,6 +6624,7 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 func toProtoIDPUser(user *models.IDPUser) *dbpb.IDPUser {
 	out := &dbpb.IDPUser{
 		Id:                    strconv.FormatUint(uint64(user.ID), 10),
+		Username:              user.Username,
 		FirstName:             user.FirstName,
 		LastName:              user.LastName,
 		Email:                 user.Email,

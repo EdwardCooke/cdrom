@@ -72,19 +72,19 @@ type IdPClient interface {
 	// the IdP use its default job-token audiences. The token's lifetime is
 	// expires_in when set, else the IdP's configured token lifetime.
 	MintJobToken(ctx context.Context, in *MintJobTokenRequest, opts ...grpc.CallOption) (*MintJobTokenResponse, error)
-	// Login verifies a user's credentials (email + password) and returns the
-	// OIDC token the IdP minted for the user (stamped with the user's roles)
-	// plus the user's profile. A bad password or unknown user is
+	// Login verifies a user's credentials (username + password) and returns
+	// the OIDC token the IdP minted for the user (stamped with the user's
+	// roles) plus the user's profile. A bad password or unknown user is
 	// Unauthenticated.
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
 	// Register creates a new user from the request's profile and password. The
-	// password is hashed before it is stored. A duplicate email is
+	// password is hashed before it is stored. A duplicate username is
 	// AlreadyExists.
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*v1.IDPUser, error)
 	// ListUsers returns all registered users (profile + roles, no password).
 	ListUsers(ctx context.Context, in *ListUsersRequest, opts ...grpc.CallOption) (*ListUsersResponse, error)
 	// CreateUser creates a user (profile, password, and roles). A duplicate
-	// email is AlreadyExists.
+	// username is AlreadyExists.
 	CreateUser(ctx context.Context, in *CreateUserRequest, opts ...grpc.CallOption) (*v1.IDPUser, error)
 	// UpdateUser updates a user's profile and/or roles (and password when
 	// supplied), keyed by user ID. A missing user is NotFound.
@@ -491,19 +491,19 @@ type IdPServer interface {
 	// the IdP use its default job-token audiences. The token's lifetime is
 	// expires_in when set, else the IdP's configured token lifetime.
 	MintJobToken(context.Context, *MintJobTokenRequest) (*MintJobTokenResponse, error)
-	// Login verifies a user's credentials (email + password) and returns the
-	// OIDC token the IdP minted for the user (stamped with the user's roles)
-	// plus the user's profile. A bad password or unknown user is
+	// Login verifies a user's credentials (username + password) and returns
+	// the OIDC token the IdP minted for the user (stamped with the user's
+	// roles) plus the user's profile. A bad password or unknown user is
 	// Unauthenticated.
 	Login(context.Context, *LoginRequest) (*LoginResponse, error)
 	// Register creates a new user from the request's profile and password. The
-	// password is hashed before it is stored. A duplicate email is
+	// password is hashed before it is stored. A duplicate username is
 	// AlreadyExists.
 	Register(context.Context, *RegisterRequest) (*v1.IDPUser, error)
 	// ListUsers returns all registered users (profile + roles, no password).
 	ListUsers(context.Context, *ListUsersRequest) (*ListUsersResponse, error)
 	// CreateUser creates a user (profile, password, and roles). A duplicate
-	// email is AlreadyExists.
+	// username is AlreadyExists.
 	CreateUser(context.Context, *CreateUserRequest) (*v1.IDPUser, error)
 	// UpdateUser updates a user's profile and/or roles (and password when
 	// supplied), keyed by user ID. A missing user is NotFound.

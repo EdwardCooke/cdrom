@@ -2593,9 +2593,10 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// loginRequest is the body of POST /api/login: the user's email and password.
+// loginRequest is the body of POST /api/login: the user's username and
+// password (F-28.4: the username is the unique login identifier).
 type loginRequest struct {
-	Email    string `json:"email"`
+	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
@@ -2613,20 +2614,20 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
-	if req.Email == "" || req.Password == "" {
-		httpError(w, http.StatusUnauthorized, "email and password are required")
+	if req.Username == "" || req.Password == "" {
+		httpError(w, http.StatusUnauthorized, "username and password are required")
 		return
 	}
-	result, err := s.userpass.Login(r.Context(), req.Email, req.Password)
+	result, err := s.userpass.Login(r.Context(), req.Username, req.Password)
 	if err != nil {
-		// A failed login is audited too (F-15): the actor is the email the
-		// caller presented, and the outcome is failure.
+		// A failed login is audited too (F-15): the actor is the username
+		// the caller presented, and the outcome is failure.
 		s.recordAudit(r, audit.Event{
 			Action:     audit.ActionLogin,
 			TargetKind: audit.TargetLogin,
-			TargetID:   req.Email,
+			TargetID:   req.Username,
 			Outcome:    audit.OutcomeFailure,
-			Actor:      req.Email,
+			Actor:      req.Username,
 			ActorKind:  audit.ActorKindUser,
 		})
 		if userPassStatus(err) == http.StatusUnauthorized {
@@ -2645,10 +2646,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.recordAudit(r, audit.Event{
 		Action:     audit.ActionLogin,
 		TargetKind: audit.TargetLogin,
-		TargetID:   result.Email,
-		TargetName: result.Email,
+		TargetID:   result.Username,
+		TargetName: result.Username,
 		Outcome:    audit.OutcomeSuccess,
-		Actor:      result.Email,
+		Actor:      result.Username,
 		ActorKind:  audit.ActorKindUser,
 		Details:    auditJSON(map[string]any{"roles": result.Roles}),
 	})
@@ -2656,11 +2657,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 // registerRequest is the body of POST /api/register: the required fields to
-// create a user (first/last/email and a password).
+// create a user (username, first/last, and a password) plus an optional
+// email (F-28.4).
 type registerRequest struct {
+	Username  string `json:"username"`
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
-	Email     string `json:"email"`
+	Email     string `json:"email,omitempty"`
 	Password  string `json:"password"`
 }
 
@@ -2677,11 +2680,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
-	if req.Email == "" || req.Password == "" {
-		httpError(w, http.StatusBadRequest, "email and password are required")
+	if req.Username == "" || req.Password == "" {
+		httpError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
 	result, err := s.userpass.Register(r.Context(), RegisterRequest{
+		Username:  req.Username,
 		FirstName: req.FirstName,
 		LastName:  req.LastName,
 		Email:     req.Email,
@@ -2689,7 +2693,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if userPassStatus(err) == http.StatusConflict {
-			httpError(w, http.StatusConflict, "a user with that email already exists")
+			httpError(w, http.StatusConflict, "a user with that username already exists")
 			return
 		}
 		httpError(w, userPassStatus(err), "register: %v", err)
@@ -2701,9 +2705,9 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		Action:     audit.ActionRegister,
 		TargetKind: audit.TargetUser,
 		TargetID:   result.ID,
-		TargetName: result.Email,
+		TargetName: result.Username,
 		Outcome:    audit.OutcomeSuccess,
-		Actor:      result.Email,
+		Actor:      result.Username,
 		ActorKind:  audit.ActorKindUser,
 		Details:    auditJSON(map[string]any{"roles": result.Roles}),
 	})
@@ -2734,9 +2738,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 // authenticated admin caller, and — unlike the unauthenticated register — it
 // honours the supplied roles.
 type createUserRequest struct {
+	Username  string   `json:"username"`
 	FirstName string   `json:"first_name"`
 	LastName  string   `json:"last_name"`
-	Email     string   `json:"email"`
+	Email     string   `json:"email,omitempty"`
 	Password  string   `json:"password"`
 	Roles     []string `json:"roles,omitempty"`
 }
@@ -2753,11 +2758,12 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
-	if req.Email == "" || req.Password == "" {
-		httpError(w, http.StatusBadRequest, "email and password are required")
+	if req.Username == "" || req.Password == "" {
+		httpError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
 	result, err := s.userpass.CreateUser(r.Context(), RegisterRequest{
+		Username:  req.Username,
 		FirstName: req.FirstName,
 		LastName:  req.LastName,
 		Email:     req.Email,
@@ -2766,7 +2772,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if userPassStatus(err) == http.StatusConflict {
-			httpError(w, http.StatusConflict, "a user with that email already exists")
+			httpError(w, http.StatusConflict, "a user with that username already exists")
 			return
 		}
 		httpError(w, userPassStatus(err), "create user: %v", err)
@@ -2776,9 +2782,9 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		Action:     audit.ActionUserCreate,
 		TargetKind: audit.TargetUser,
 		TargetID:   result.ID,
-		TargetName: result.Email,
+		TargetName: result.Username,
 		Outcome:    audit.OutcomeSuccess,
-		NewValue:   auditJSON(map[string]any{"email": result.Email, "roles": result.Roles}),
+		NewValue:   auditJSON(map[string]any{"username": result.Username, "roles": result.Roles}),
 	})
 	writeJSON(w, http.StatusCreated, result)
 }
@@ -2811,7 +2817,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	if users, err := s.userpass.ListUsers(r.Context(), true); err == nil {
 		for i := range users {
 			if users[i].ID == id {
-				oldValue = auditJSON(map[string]any{"email": users[i].Email, "roles": users[i].Roles})
+				oldValue = auditJSON(map[string]any{"username": users[i].Username, "roles": users[i].Roles})
 				break
 			}
 		}
@@ -2835,10 +2841,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		Action:     audit.ActionUserUpdate,
 		TargetKind: audit.TargetUser,
 		TargetID:   result.ID,
-		TargetName: result.Email,
+		TargetName: result.Username,
 		Outcome:    audit.OutcomeSuccess,
 		OldValue:   oldValue,
-		NewValue:   auditJSON(map[string]any{"email": result.Email, "roles": result.Roles}),
+		NewValue:   auditJSON(map[string]any{"username": result.Username, "roles": result.Roles}),
 	})
 	writeJSON(w, http.StatusOK, result)
 }
@@ -2863,7 +2869,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	if users, err := s.userpass.ListUsers(r.Context(), true); err == nil {
 		for i := range users {
 			if users[i].ID == id {
-				oldValue = auditJSON(map[string]any{"email": users[i].Email, "roles": users[i].Roles})
+				oldValue = auditJSON(map[string]any{"username": users[i].Username, "roles": users[i].Roles})
 				break
 			}
 		}
@@ -2921,11 +2927,11 @@ func apiKeyStatus(err error) int {
 	return http.StatusBadGateway
 }
 
-// apiKeyOwnerEmail resolves a key's owner id to the owner's email (so the UI
-// can show who a key belongs to). It returns "" when the owner cannot be
-// resolved (e.g. the user was deleted); a failure to resolve does not block
-// the response.
-func (s *Server) apiKeyOwnerEmail(ctx context.Context, ownerID string) string {
+// apiKeyOwnerUsername resolves a key's owner id to the owner's username (so
+// the UI can show who a key belongs to). It returns "" when the owner cannot
+// be resolved (e.g. the user was deleted); a failure to resolve does not
+// block the response.
+func (s *Server) apiKeyOwnerUsername(ctx context.Context, ownerID string) string {
 	if s.userpass == nil || ownerID == "" {
 		return ""
 	}
@@ -2935,15 +2941,15 @@ func (s *Server) apiKeyOwnerEmail(ctx context.Context, ownerID string) string {
 	}
 	for i := range users {
 		if users[i].ID == ownerID {
-			return users[i].Email
+			return users[i].Username
 		}
 	}
 	return ""
 }
 
-// fillAPIKeyOwnerEmails resolves each key's owner email (best-effort) so the
-// UI can show who a key belongs to.
-func (s *Server) fillAPIKeyOwnerEmails(ctx context.Context, keys []APIKeyResult) {
+// fillAPIKeyOwnerUsernames resolves each key's owner username (best-effort)
+// so the UI can show who a key belongs to.
+func (s *Server) fillAPIKeyOwnerUsernames(ctx context.Context, keys []APIKeyResult) {
 	if s.userpass == nil {
 		return
 	}
@@ -2953,19 +2959,19 @@ func (s *Server) fillAPIKeyOwnerEmails(ctx context.Context, keys []APIKeyResult)
 	}
 	byID := make(map[string]string, len(users))
 	for i := range users {
-		byID[users[i].ID] = users[i].Email
+		byID[users[i].ID] = users[i].Username
 	}
 	for i := range keys {
-		keys[i].OwnerEmail = byID[keys[i].OwnerID]
+		keys[i].OwnerUsername = byID[keys[i].OwnerID]
 	}
 }
 
 // createAPIKeyRequest is the body of POST /api/api-keys: the key's metadata.
-// owner_email is the user the key belongs to; when empty the caller's own
+// owner_username is the user the key belongs to; when empty the caller's own
 // account is used. An authenticated caller with the api-keys.can-manage
 // permission (e.g. an admin) may create a key for another user.
 type createAPIKeyRequest struct {
-	OwnerEmail    string `json:"owner_email"`
+	OwnerUsername string `json:"owner_username"`
 	Description   string `json:"description"`
 	ExpiresIn     string `json:"expires_in,omitempty"`
 	PipelineScope []uint `json:"pipeline_scope,omitempty"`
@@ -2984,12 +2990,12 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.UserFromContext(r.Context())
-	ownerEmail := req.OwnerEmail
-	if ownerEmail == "" {
-		ownerEmail = user.Email
+	ownerUsername := req.OwnerUsername
+	if ownerUsername == "" {
+		ownerUsername = user.Username
 	}
-	if ownerEmail == "" {
-		httpError(w, http.StatusBadRequest, "owner_email is required")
+	if ownerUsername == "" {
+		httpError(w, http.StatusBadRequest, "owner_username is required")
 		return
 	}
 	// Creating a key requires the api-keys.can-manage permission (self-service,
@@ -3000,12 +3006,12 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermAPIKeysManage, authz.Resource{}) {
 		return
 	}
-	if ownerEmail != user.Email {
+	if ownerUsername != user.Username {
 		if !s.requirePermission(w, r, authz.PermAPIKeysManageAll, authz.Resource{}) {
 			return
 		}
 	}
-	result, plaintext, err := s.apikey.CreateAPIKey(r.Context(), ownerEmail, req.Description, req.ExpiresIn, req.PipelineScope)
+	result, plaintext, err := s.apikey.CreateAPIKey(r.Context(), ownerUsername, req.Description, req.ExpiresIn, req.PipelineScope)
 	if err != nil {
 		httpError(w, apiKeyStatus(err), "create api key: %v", err)
 		return
@@ -3018,7 +3024,7 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		Outcome:    audit.OutcomeSuccess,
 		Actor:      user.Subject,
 		ActorKind:  audit.ActorKindUser,
-		NewValue:   auditJSON(map[string]any{"owner": ownerEmail, "description": req.Description, "prefix": result.KeyPrefix, "pipeline_scope": result.PipelineScope}),
+		NewValue:   auditJSON(map[string]any{"owner": ownerUsername, "description": req.Description, "prefix": result.KeyPrefix, "pipeline_scope": result.PipelineScope}),
 	})
 	// The plaintext key is returned exactly once (at creation and at each
 	// rotation); it is never returned by list/get.
@@ -3037,12 +3043,14 @@ func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := auth.UserFromContext(r.Context())
-	keys, err := s.apikey.ListAPIKeys(r.Context(), user.Subject)
+	// Keys are OWNERSHIP-scoped by the user's NUMERIC ID (the key's
+	// owner_id), hence UserID — not the username Subject (F-28.4).
+	keys, err := s.apikey.ListAPIKeys(r.Context(), user.UserID)
 	if err != nil {
 		httpError(w, apiKeyStatus(err), "list api keys: %v", err)
 		return
 	}
-	s.fillAPIKeyOwnerEmails(r.Context(), keys)
+	s.fillAPIKeyOwnerUsernames(r.Context(), keys)
 	writeJSON(w, http.StatusOK, nonNil(keys))
 }
 
@@ -3062,7 +3070,7 @@ func (s *Server) listAllAPIKeys(w http.ResponseWriter, r *http.Request) {
 		httpError(w, apiKeyStatus(err), "list all api keys: %v", err)
 		return
 	}
-	s.fillAPIKeyOwnerEmails(r.Context(), keys)
+	s.fillAPIKeyOwnerUsernames(r.Context(), keys)
 	writeJSON(w, http.StatusOK, nonNil(keys))
 }
 
@@ -3106,12 +3114,12 @@ func (s *Server) getAPIKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, apiKeyStatus(err), "get api key: %v", err)
 		return
 	}
-	if !s.callerCanManageAllAPIKeys(r) && result.OwnerID != auth.UserFromContext(r.Context()).Subject {
+	if !s.callerCanManageAllAPIKeys(r) && result.OwnerID != auth.UserFromContext(r.Context()).UserID {
 		httpError(w, http.StatusForbidden, "permission denied: not your api key")
 		return
 	}
 	keys := []APIKeyResult{*result}
-	s.fillAPIKeyOwnerEmails(r.Context(), keys)
+	s.fillAPIKeyOwnerUsernames(r.Context(), keys)
 	writeJSON(w, http.StatusOK, keys[0])
 }
 

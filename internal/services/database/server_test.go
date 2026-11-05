@@ -1016,15 +1016,16 @@ func TestIDPAuthCodes(t *testing.T) {
 }
 
 // TestIDPUsers verifies the IdP user CRUD RPCs: create (new and upsert on
-// email), get by email and by ID, list, update, and delete, plus the
+// username), get by username and by ID, list, update, and delete, plus the
 // not-found cases.
 func TestIDPUsers(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// Create a new user.
+	// Create a new user (username anchored; email optional metadata).
 	created, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
 		User: &dbpb.IDPUser{
+			Username:     "ada",
 			FirstName:    "Ada",
 			LastName:     "Lovelace",
 			Email:        "ada@example.com",
@@ -1038,6 +1039,9 @@ func TestIDPUsers(t *testing.T) {
 	if created.GetId() == "" {
 		t.Fatal("created user has no ID")
 	}
+	if created.GetUsername() != "ada" {
+		t.Errorf("username = %q, want ada", created.GetUsername())
+	}
 	if created.GetEmail() != "ada@example.com" {
 		t.Errorf("email = %q, want ada@example.com", created.GetEmail())
 	}
@@ -1046,13 +1050,13 @@ func TestIDPUsers(t *testing.T) {
 	}
 	id := created.GetId()
 
-	// Get by email.
-	byEmail, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Email: "ada@example.com"})
+	// Get by username.
+	byUsername, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Username: "ada"})
 	if err != nil {
-		t.Fatalf("GetIDPUser by email: %v", err)
+		t.Fatalf("GetIDPUser by username: %v", err)
 	}
-	if byEmail.GetId() != id {
-		t.Errorf("by email id = %q, want %q", byEmail.GetId(), id)
+	if byUsername.GetId() != id {
+		t.Errorf("by username id = %q, want %q", byUsername.GetId(), id)
 	}
 
 	// Get by ID.
@@ -1066,7 +1070,7 @@ func TestIDPUsers(t *testing.T) {
 
 	// Create a second user.
 	if _, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: "bob@example.com", PasswordHash: "h2", Roles: []string{"user"}},
+		User: &dbpb.IDPUser{Username: "bob", Email: "bob@example.com", PasswordHash: "h2", Roles: []string{"user"}},
 	}); err != nil {
 		t.Fatalf("CreateUser bob: %v", err)
 	}
@@ -1091,10 +1095,30 @@ func TestIDPUsers(t *testing.T) {
 		t.Errorf("updated roles = %v, want 2 roles", updated.GetRoles())
 	}
 
-	// Upsert on email: creating with the same email updates the existing user
-	// (does not create a duplicate).
+	// Locator mutual exclusion (F-28.4): two identifiers set at once is
+	// InvalidArgument.
+	if _, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Id: id, Username: "ada"}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("double locator = %v, want InvalidArgument", err)
+	}
+	// Locate by external_id (round trip through the new locator).
+	extUpdated, err := client.UpdateIDPUser(ctx, &dbpb.UpdateIDPUserRequest{
+		User: &dbpb.IDPUser{Id: id, ExternalId: "az-ext-1"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateIDPUser external_id: %v", err)
+	}
+	byExt, err := client.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{ExternalId: "az-ext-1"})
+	if err != nil {
+		t.Fatalf("GetIDPUser by external_id: %v", err)
+	}
+	if byExt.GetId() != extUpdated.GetId() {
+		t.Errorf("by external_id id = %q, want %q", byExt.GetId(), extUpdated.GetId())
+	}
+
+	// Upsert on username: creating with the same username updates the
+	// existing user (does not create a duplicate).
 	if _, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: "ada@example.com", FirstName: "Ada", Roles: []string{"admin"}},
+		User: &dbpb.IDPUser{Username: "ada", FirstName: "Ada", Roles: []string{"admin"}},
 	}); err != nil {
 		t.Fatalf("CreateUser upsert: %v", err)
 	}
@@ -1131,7 +1155,7 @@ func TestAPIKeys(t *testing.T) {
 
 	// A key's owner must exist.
 	owner, err := client.CreateUser(ctx, &dbpb.CreateIDPUserRequest{
-		User: &dbpb.IDPUser{Email: "ada@example.com", PasswordHash: "h", Roles: []string{"admin"}},
+		User: &dbpb.IDPUser{Username: "ada", Email: "ada@example.com", PasswordHash: "h", Roles: []string{"admin"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)

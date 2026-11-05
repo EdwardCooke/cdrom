@@ -58,10 +58,11 @@ type APIKey struct {
 // use an in-memory implementation.
 type APIKeyStore interface {
 	// Create generates a new `cdrom-…` key for the owner (looked up by
-	// email), hashes it (mixing in pepper), stores it, and returns the stored
-	// key plus the plaintext (shown to the caller exactly once). A key's
-	// expiration is validated to be at most one year in the future.
-	Create(ctx context.Context, ownerEmail, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error)
+	// USERNAME, the unique login identifier, F-28.4), hashes it (mixing in
+	// pepper), stores it, and returns the stored key plus the plaintext
+	// (shown to the caller exactly once). A key's expiration is validated to
+	// be at most one year in the future.
+	Create(ctx context.Context, ownerUsername, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error)
 	// Get returns a key by id. A missing key returns an error with
 	// status.Code == codes.NotFound.
 	Get(ctx context.Context, id string) (*APIKey, error)
@@ -200,11 +201,11 @@ func NewDBAPIKeyStore(db dbpb.DatabaseClient) APIKeyStore {
 	return &dbAPIKeyStore{db: db}
 }
 
-func (s *dbAPIKeyStore) Create(ctx context.Context, ownerEmail, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error) {
+func (s *dbAPIKeyStore) Create(ctx context.Context, ownerUsername, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error) {
 	if !expiresAt.IsZero() && expiresAt.After(time.Now().Add(maxAPIKeyLifetime)) {
 		return nil, "", status.Error(codes.InvalidArgument, "expiration is more than one year in the future")
 	}
-	owner, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Email: ownerEmail})
+	owner, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Username: ownerUsername})
 	if err != nil {
 		return nil, "", err
 	}
@@ -316,7 +317,7 @@ func (s *dbAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper str
 	if username == "" || apiKey == "" {
 		return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
-	owner, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Email: username})
+	owner, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Username: username})
 	if err != nil {
 		// Unknown user: fail with the same response as a bad key so the
 		// endpoint does not reveal which usernames exist.

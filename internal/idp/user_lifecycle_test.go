@@ -24,7 +24,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 	ctx := context.Background()
 
 	ada, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		FirstName: "Ada", LastName: "L", Email: "ada@example.com", Password: "s3cret",
+		FirstName: "Ada", LastName: "L", Username: "ada", Email: "ada@example.com", Password: "s3cret",
 	})
 	if err != nil {
 		t.Fatalf("register ada: %v", err)
@@ -32,7 +32,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 	id := ada.GetId()
 
 	// Baseline: she CAN log in.
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ada@example.com", Password: "s3cret"}); err != nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ada", Password: "s3cret"}); err != nil {
 		t.Fatalf("baseline login: %v", err)
 	}
 
@@ -40,7 +40,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 	if err := users.Deactivate(ctx, id); err != nil {
 		t.Fatalf("deactivate: %v", err)
 	}
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ada@example.com", Password: "s3cret"}); err == nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ada", Password: "s3cret"}); err == nil {
 		t.Fatal("login while deactivated succeeded, want denied")
 	} else if status.Code(err) != codes.PermissionDenied {
 		t.Errorf("denied code = %v, want PermissionDenied", status.Code(err))
@@ -52,7 +52,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 	if err := users.Activate(ctx, id); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ada@example.com", Password: "s3cret"}); err != nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ada", Password: "s3cret"}); err != nil {
 		t.Fatalf("login after activation: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 	if err := users.SoftDelete(ctx, id); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ada@example.com", Password: "s3cret"}); err == nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ada", Password: "s3cret"}); err == nil {
 		t.Fatal("login while deprovisioned succeeded, want denied")
 	} else if status.Code(err) != codes.PermissionDenied {
 		t.Errorf("denied code = %v, want PermissionDenied", status.Code(err))
@@ -73,7 +73,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 	if err := users.Reactivate(ctx, id); err != nil {
 		t.Fatalf("reactivate: %v", err)
 	}
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ada@example.com", Password: "s3cret"}); err == nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ada", Password: "s3cret"}); err == nil {
 		t.Fatal("login with the ZEROED hash succeeded, want invalid credentials")
 	} else if status.Code(err) != codes.Unauthenticated {
 		t.Errorf("reactivated-login code = %v, want Unauthenticated (hash zeroed)", status.Code(err))
@@ -81,7 +81,7 @@ func TestUserLifecycleSignInEnforcement(t *testing.T) {
 
 	// UNKNOWN users still collapse to the generic message (enumeration
 	// protection is unchanged by the state denials).
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ghost@example.com", Password: "whatever"}); err == nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ghost", Password: "whatever"}); err == nil {
 		t.Fatal("login for unknown user succeeded")
 	} else if msg := status.Convert(err).Message(); msg != "invalid credentials" {
 		t.Errorf("unknown-user message = %q, want the generic 'invalid credentials'", msg)
@@ -100,17 +100,18 @@ func TestUserProvisionedChannelLockdown(t *testing.T) {
 
 	// A locally registered user logs in fine (control).
 	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		Email: "local@example.com", Password: "pw1",
+		Username: "local", Email: "local@example.com", Password: "pw1",
 	}); err != nil {
 		t.Fatalf("register local: %v", err)
 	}
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "local@example.com", Password: "pw1"}); err != nil {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "local", Password: "pw1"}); err != nil {
 		t.Fatalf("local login: %v", err)
 	}
 
 	// A provisioned user with a SMUGGLED hash (simulate legacy state /
 	// defect): the password channel must stay shut.
 	smuggled, err := users.Create(ctx, &User{
+		Username:     "corp",
 		Email:        "corp@example.com",
 		PasswordHash: "should-be-unused-smuggled-hash",
 		Roles:        []string{"user"},
@@ -120,8 +121,8 @@ func TestUserProvisionedChannelLockdown(t *testing.T) {
 		t.Fatalf("create provisioned: %v", err)
 	}
 
-	wrongDenial, errWrong := idp.client.Login(ctx, &idppb.LoginRequest{Email: "corp@example.com", Password: "totally-wrong"})
-	rightDenial, errRight := idp.client.Login(ctx, &idppb.LoginRequest{Email: "corp@example.com", Password: "correct-smuggled"})
+	wrongDenial, errWrong := idp.client.Login(ctx, &idppb.LoginRequest{Username: "corp", Password: "totally-wrong"})
+	rightDenial, errRight := idp.client.Login(ctx, &idppb.LoginRequest{Username: "corp", Password: "correct-smuggled"})
 	_ = wrongDenial
 	_ = rightDenial
 	if errWrong == nil || errRight == nil {
@@ -149,6 +150,7 @@ func TestUserUpdateProvisionedPasswordRefusal(t *testing.T) {
 	ctx := context.Background()
 
 	prov, err := users.Create(ctx, &User{
+		Username:    "scimmed",
 		Email:       "scimmed@example.com",
 		Roles:       []string{"user"},
 		Provisioned: true,
@@ -186,7 +188,7 @@ func TestUserUpdateProvisionedPasswordRefusal(t *testing.T) {
 	}
 
 	// Control: a NON-provisioned user MAY be given a password.
-	local, err := users.Create(ctx, &User{Email: "local-upd@example.com", Roles: []string{"user"}})
+	local, err := users.Create(ctx, &User{Username: "localupd", Email: "local-upd@example.com", Roles: []string{"user"}})
 	if err != nil {
 		t.Fatalf("create local: %v", err)
 	}
@@ -211,10 +213,10 @@ func TestUserListIncludeDeleted(t *testing.T) {
 	idp := startTestIDP(t, testConfig(time.Hour, 30*time.Minute), users)
 	ctx := context.Background()
 
-	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{Email: "stay@example.com", Password: "p"}); err != nil {
+	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{Username: "stay", Email: "stay@example.com", Password: "p"}); err != nil {
 		t.Fatalf("register stay: %v", err)
 	}
-	gone, err := idp.client.Register(ctx, &idppb.RegisterRequest{Email: "gone@example.com", Password: "p"})
+	gone, err := idp.client.Register(ctx, &idppb.RegisterRequest{Username: "gone", Email: "gone@example.com", Password: "p"})
 	if err != nil {
 		t.Fatalf("register gone: %v", err)
 	}
@@ -239,7 +241,7 @@ func TestUserListIncludeDeleted(t *testing.T) {
 	}
 	var ghost *dbpb.IDPUser
 	for _, u := range fullList.GetUsers() {
-		if u.GetEmail() == "gone@example.com" {
+		if u.GetUsername() == "gone" {
 			ghost = u
 		}
 	}
@@ -255,15 +257,15 @@ func TestUserListIncludeDeleted(t *testing.T) {
 }
 
 // TestUserRegisterReservation checks the F-28.3 registration reservation: a
-// TOMBSTONED email is refused (already-exists), not duplicated — the identity
-// is reserved for restoration via reactivation.
+// TOMBSTONED username is refused (already-exists), not duplicated — the
+// identity is reserved for restoration via reactivation.
 func TestUserRegisterReservation(t *testing.T) {
 	users := NewMemoryUserStore()
 	idp := startTestIDP(t, testConfig(time.Hour, 30*time.Minute), users)
 	ctx := context.Background()
 
 	res, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		Email: "departed@example.com", Password: "pw",
+		Username: "departed", Email: "departed@example.com", Password: "pw",
 	})
 	if err != nil {
 		t.Fatalf("initial register: %v", err)
@@ -273,14 +275,14 @@ func TestUserRegisterReservation(t *testing.T) {
 		t.Fatalf("soft delete: %v", err)
 	}
 
-	// Re-registering the RESERVED email is refused…
+	// Re-registering the RESERVED username is refused…
 	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		Email: "departed@example.com", Password: "other",
+		Username: "departed", Email: "departed@example.com", Password: "other",
 	}); status.Code(err) != codes.AlreadyExists {
-		t.Fatalf("register reserved email = %v, want AlreadyExists", err)
+		t.Fatalf("register reserved username = %v, want AlreadyExists", err)
 	}
 	// …and no DUPLICATE row was created.
-	if _, err := users.GetByEmail(ctx, "departed@example.com", true); err != nil {
+	if _, err := users.GetByUsername(ctx, "departed", true); err != nil {
 		t.Fatalf("look up survivor: %v", err)
 	}
 	list, err := users.List(ctx, true)
@@ -289,11 +291,11 @@ func TestUserRegisterReservation(t *testing.T) {
 	}
 	count := 0
 	for _, u := range list {
-		if u.Email == "departed@example.com" {
+		if u.Username == "departed" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Errorf("rows for reserved email = %d, want exactly 1 (no duplicate)", count)
+		t.Errorf("rows for reserved username = %d, want exactly 1 (no duplicate)", count)
 	}
 }

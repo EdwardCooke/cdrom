@@ -145,24 +145,25 @@ func (s *GRPCServer) jobTokenAudiences() []string {
 	return []string{"cdrom-api"}
 }
 
-// Login verifies a user's credentials (email + password) against the stored
-// password hash and, on success, mints an OIDC token for the user (stamped
-// with the user's roles) and returns it with the user's profile. A bad
-// password or unknown user is Unauthenticated. The token is issued for the
-// request's audience (the caller's verifier audience) and issuer (the
+// Login verifies a user's credentials (username + password) against the
+// stored password hash and, on success, mints an OIDC token for the user
+// (stamped with the user's roles) and returns it with the user's profile. A
+// bad password or unknown user is Unauthenticated. The token is issued for
+// the request's audience (the caller's verifier audience) and issuer (the
 // caller's configured issuer), so the token the caller receives is one it will
 // accept.
 func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb.LoginResponse, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
 	}
-	if req.GetEmail() == "" || req.GetPassword() == "" {
-		return nil, status.Error(codes.Unauthenticated, "email and password are required")
+	username := req.GetUsername()
+	if username == "" || req.GetPassword() == "" {
+		return nil, status.Error(codes.Unauthenticated, "username and password are required")
 	}
-	user, err := s.users.GetByEmail(ctx, req.GetEmail(), true)
+	user, err := s.users.GetByUsername(ctx, username, true)
 	if err != nil {
 		// Unknown user: fail with the same response as a bad password so the
-		// endpoint does not reveal which emails are registered.
+		// endpoint does not reveal which usernames are registered.
 		if s.metrics != nil {
 			s.metrics.RecordLogin("invalid_username")
 		}
@@ -243,13 +244,17 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 	}
 	now := time.Now()
 	claims := map[string]any{
-		"iss":   issuer,
-		"sub":   user.ID,
-		"aud":   audience,
-		"exp":   now.Add(s.cfg.TokenLifetime).Unix(),
-		"iat":   now.Unix(),
-		"name":  userName(user),
-		"email": user.Email,
+		"iss": issuer,
+		// The token's SUBJECT is the user's USERNAME (F-28.4): the admission
+		// gate and the approver-set matching correlate on it. The numeric ID
+		// travels as a convenience claim.
+		"sub":     user.Username,
+		"user_id": user.ID,
+		"aud":     audience,
+		"exp":     now.Add(s.cfg.TokenLifetime).Unix(),
+		"iat":     now.Unix(),
+		"name":    userName(user),
+		"email":   user.Email,
 	}
 	if len(user.Roles) > 0 {
 		claims["roles"] = user.Roles
@@ -258,7 +263,7 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "idp: sign user token: %v", err)
 	}
-	s.logger.Info("idp: user login", "email", user.Email, "roles", user.Roles)
+	s.logger.Info("idp: user login", "username", user.Username, "email", user.Email, "roles", user.Roles)
 	if s.metrics != nil {
 		s.metrics.RecordLogin("success")
 		s.metrics.RecordTokenMinted("ui")
@@ -273,34 +278,39 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 }
 
 // userName returns the display name for a user's token: the first and last
-// name, or the email when the name is blank.
+// name, or the USERNAME when the name is blank (falling back to the email
+// only when the username is also empty — unusual, but harmless).
 func userName(u *User) string {
 	name := u.FirstName + " " + u.LastName
 	if name == "  " {
+		if u.Username != "" {
+			return u.Username
+		}
 		return u.Email
 	}
 	return name
 }
 
-// Register creates a new user from the request's first/last/email and
-// password. The password is encoded with Argon2ID (pepper prepended) before
-// it is stored; the plaintext
-// is never persisted. A duplicate email is AlreadyExists. The unauthenticated
-// register path does not honour client-supplied roles (that would let anyone
-// self-assign a role); instead it assigns a default: the first user ever
-// registered becomes an admin (so a local run has a way in), and every later
-// user gets the default "user" role.
+// Register creates a new user from the request's username, first/last, and
+// password (email is optional). The password is encoded with Argon2ID (pepper
+// prepended) before it is stored; the plaintext is never persisted. A
+// duplicate username is AlreadyExists. The unauthenticated register path does
+// not honour client-supplied roles (that would let anyone self-assign a
+// role); instead it assigns a default: the first user ever registered becomes
+// an admin (so a local run has a way in), and every later user gets the
+// default "user" role.
 func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (*dbpb.IDPUser, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
 	}
-	if req.GetEmail() == "" || req.GetPassword() == "" {
-		return nil, status.Error(codes.InvalidArgument, "email and password are required")
+	username := req.GetUsername()
+	if username == "" || req.GetPassword() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username and password are required")
 	}
-	// Reservation (F-28.3): a tombstoned email is refused, not recreated —
+	// Reservation (F-28.3): a tombstoned username is refused, not recreated —
 	// the identity is reserved for restoration via reactivation.
-	if _, err := s.users.GetByEmail(ctx, req.GetEmail(), true); err == nil {
-		return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
+	if _, err := s.users.GetByUsername(ctx, username, true); err == nil {
+		return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
 	} else if status.Code(err) != codes.NotFound {
 		return nil, status.Errorf(codes.Internal, "idp: look up user: %v", err)
 	}
@@ -310,6 +320,7 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 	}
 	roles := s.defaultRoles(ctx)
 	user, err := s.users.Create(ctx, &User{
+		Username:     username,
 		FirstName:    req.GetFirstName(),
 		LastName:     req.GetLastName(),
 		Email:        req.GetEmail(),
@@ -318,11 +329,11 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 	})
 	if err != nil {
 		if status.Code(err) == codes.AlreadyExists {
-			return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
+			return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
 		}
 		return nil, status.Errorf(codes.Internal, "idp: create user: %v", err)
 	}
-	s.logger.Info("idp: registered user", "email", user.Email, "roles", user.Roles)
+	s.logger.Info("idp: registered user", "username", user.Username, "email", user.Email, "roles", user.Roles)
 	s.refreshUserMetrics(ctx)
 	return userToProto(user), nil
 }
@@ -372,17 +383,18 @@ func (s *GRPCServer) ListUsers(ctx context.Context, req *idppb.ListUsersRequest)
 }
 
 // CreateUser creates a user from the request's profile, password, and roles
-// (unlike Register, it honours the supplied role set). A duplicate email is
-// AlreadyExists.
+// (unlike Register, it honours the supplied role set). A duplicate username
+// is AlreadyExists.
 func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserRequest) (*dbpb.IDPUser, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
 	}
-	if req.GetEmail() == "" || req.GetPassword() == "" {
-		return nil, status.Error(codes.InvalidArgument, "email and password are required")
+	username := req.GetUsername()
+	if username == "" || req.GetPassword() == "" {
+		return nil, status.Error(codes.InvalidArgument, "username and password are required")
 	}
-	if _, err := s.users.GetByEmail(ctx, req.GetEmail(), true); err == nil {
-		return nil, status.Error(codes.AlreadyExists, "a user with that email already exists")
+	if _, err := s.users.GetByUsername(ctx, username, true); err == nil {
+		return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
 	} else if status.Code(err) != codes.NotFound {
 		return nil, status.Errorf(codes.Internal, "idp: look up user: %v", err)
 	}
@@ -391,6 +403,7 @@ func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserReques
 		return nil, status.Errorf(codes.Internal, "idp: hash password: %v", err)
 	}
 	user, err := s.users.Create(ctx, &User{
+		Username:     username,
 		FirstName:    req.GetFirstName(),
 		LastName:     req.GetLastName(),
 		Email:        req.GetEmail(),
@@ -406,7 +419,8 @@ func (s *GRPCServer) CreateUser(ctx context.Context, req *idppb.CreateUserReques
 }
 
 // UpdateUser updates a user's profile and/or roles (and password when
-// supplied), keyed by user ID. A missing user is NotFound.
+// supplied), keyed by user ID. A missing user is NotFound. A renamed
+// username that clashes with another user's is AlreadyExists (F-28.4).
 func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserRequest) (*dbpb.IDPUser, error) {
 	if s.users == nil {
 		return nil, status.Error(codes.Unimplemented, "user store is not configured")
@@ -430,7 +444,7 @@ func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserReques
 		// channel lockdown): the password channel is closed at both doors.
 		return nil, status.Error(codes.FailedPrecondition, "cannot set a password on a provisioned user; it is managed by the identity provider")
 	}
-	update := &User{ID: id, FirstName: req.GetFirstName(), LastName: req.GetLastName(), Email: req.GetEmail(), Roles: req.GetRoles()}
+	update := &User{ID: id, Username: req.GetUsername(), FirstName: req.GetFirstName(), LastName: req.GetLastName(), Email: req.GetEmail(), Roles: req.GetRoles()}
 	if pw := req.GetPassword(); pw != "" {
 		hash, err := HashPassword(s.cfg.PasswordPepper, pw)
 		if err != nil {
@@ -442,6 +456,9 @@ func (s *GRPCServer) UpdateUser(ctx context.Context, req *idppb.UpdateUserReques
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return nil, status.Error(codes.NotFound, "user not found")
+		}
+		if status.Code(err) == codes.AlreadyExists {
+			return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
 		}
 		return nil, status.Errorf(codes.Internal, "idp: update user: %v", err)
 	}
@@ -483,8 +500,8 @@ func (s *GRPCServer) CreateAPIKey(ctx context.Context, req *idppb.CreateAPIKeyRe
 	if s.keys == nil {
 		return nil, status.Error(codes.Unimplemented, "api key store is not configured")
 	}
-	if req.GetOwnerEmail() == "" {
-		return nil, status.Error(codes.InvalidArgument, "owner_email is required")
+	if req.GetOwnerUsername() == "" {
+		return nil, status.Error(codes.InvalidArgument, "owner_username is required")
 	}
 	var expiresAt time.Time
 	if v := req.GetExpiresIn(); v != "" {
@@ -497,11 +514,11 @@ func (s *GRPCServer) CreateAPIKey(ctx context.Context, req *idppb.CreateAPIKeyRe
 		}
 		expiresAt = time.Now().Add(d)
 	}
-	key, plaintext, err := s.keys.Create(ctx, req.GetOwnerEmail(), req.GetDescription(), expiresAt, uintsFromInt64(req.GetPipelineScope()), req.GetPepper())
+	key, plaintext, err := s.keys.Create(ctx, req.GetOwnerUsername(), req.GetDescription(), expiresAt, uintsFromInt64(req.GetPipelineScope()), req.GetPepper())
 	if err != nil {
 		return nil, err
 	}
-	s.logger.Info("idp: created api key", "key", key.ID, "owner", req.GetOwnerEmail(), "description", req.GetDescription())
+	s.logger.Info("idp: created api key", "key", key.ID, "owner", req.GetOwnerUsername(), "description", req.GetDescription())
 	return &idppb.CreateAPIKeyResponse{Key: apiKeyToProto(key), Plaintext: plaintext}, nil
 }
 
@@ -659,6 +676,7 @@ func (s *GRPCServer) ResetAPIKeyLockout(ctx context.Context, req *idppb.ResetAPI
 func userToProto(u *User) *dbpb.IDPUser {
 	out := &dbpb.IDPUser{
 		Id:           u.ID,
+		Username:     u.Username,
 		FirstName:    u.FirstName,
 		LastName:     u.LastName,
 		Email:        u.Email,

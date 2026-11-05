@@ -71,7 +71,7 @@ e2e_start api-p "$WORK/api-p.log" 'serving' \
   CDROM_IDP_GRPC_ADDR=127.0.0.1:7116 \
   CDROM_AUDIT_FILE="$WORK/api-p-audit.log" CDROM_AUDIT_FORMAT=json \
   CDROM_METRICS_ENABLED=false CDROM_LOG_FORMAT=text -- "$BIN/api"
-TOKEN3=$(e2e_login "$API3" "$E2E_USER_ADA_EMAIL" "$E2E_USER_ADA_PASSWORD")
+TOKEN3=$(e2e_login "$API3" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
 log ">> replicas + third API up"
 
 # scim_req <origin-url-base> <url-rel> <key-or-empty>: prints "<code>\n<body>".

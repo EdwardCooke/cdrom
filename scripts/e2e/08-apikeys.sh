@@ -65,8 +65,8 @@ RBAC=http://127.0.0.1:8081
 # Sign in as the admin (ada, registered first) and as the default user (bob)
 # against the RBAC-enabled API. The IdP mints each token stamped with the
 # user's roles, which the API reads to authorize the request.
-ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_EMAIL" "$E2E_USER_ADA_PASSWORD")
-USER_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_BOB_EMAIL" "$E2E_USER_BOB_PASSWORD")
+ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
+USER_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_BOB_USERNAME" "$E2E_USER_BOB_PASSWORD")
 
 # Create two pipelines to use as pipeline-scope targets.
 e2e_authed_request POST "$RBAC/api/pipelines" "$ADMIN_TOKEN" '{"name":"apikey-pipeline-a"}'
@@ -80,7 +80,7 @@ PIPELINE_B=$(printf '%s' "$HTTP_BODY" | jq -r '.id')
 # The plaintext `cdrom-…` key is returned exactly once (at creation and at
 # each rotation); the stored record holds only its hash.
 e2e_authed_request POST "$RBAC/api/api-keys" "$ADMIN_TOKEN" \
-  "{\"owner_email\":\"${E2E_USER_BOB_EMAIL}\",\"description\":\"bob's key\",\"pipeline_scope\":[${PIPELINE_A}]}"
+  "{\"owner_username\":\"${E2E_USER_BOB_USERNAME}\",\"description\":\"bob's key\",\"pipeline_scope\":[${PIPELINE_A}]}"
 [ "$HTTP_CODE" = "201" ] || { echo ">> create bob key returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 BOB_KEY_ID=$(printf '%s' "$HTTP_BODY" | jq -r '.key.id')
 BOB_KEY=$(printf '%s' "$HTTP_BODY" | jq -r '.plaintext')
@@ -96,7 +96,7 @@ printf '%s' "$HTTP_BODY" | jq -e '.key | has("plaintext") | not' >/dev/null \
 # A second key, owned by the admin, so the "list all" vs "list own"
 # distinction is observable (two different owners).
 e2e_authed_request POST "$RBAC/api/api-keys" "$ADMIN_TOKEN" \
-  "{\"owner_email\":\"${E2E_USER_ADA_EMAIL}\",\"description\":\"ada's key\"}"
+  "{\"owner_username\":\"${E2E_USER_ADA_USERNAME}\",\"description\":\"ada's key\"}"
 [ "$HTTP_CODE" = "201" ] || { echo ">> create ada key returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 ADA_KEY_ID=$(printf '%s' "$HTTP_BODY" | jq -r '.key.id')
 
@@ -110,7 +110,7 @@ e2e_authed_request POST "$RBAC/api/api-keys" "$USER_TOKEN" \
 [ "$HTTP_CODE" = "201" ] || { echo ">> user create own key returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 # A user cannot create a key for another user (403).
 e2e_authed_request POST "$RBAC/api/api-keys" "$USER_TOKEN" \
-  "{\"owner_email\":\"${E2E_USER_ADA_EMAIL}\",\"description\":\"x\"}"
+  "{\"owner_username\":\"${E2E_USER_ADA_USERNAME}\",\"description\":\"x\"}"
 [ "$HTTP_CODE" = "403" ] || { echo ">> user create-for-other returned $HTTP_CODE, want 403" >&2; exit 1; }
 # A user cannot manage another user's key (403).
 e2e_authed_request PUT "$RBAC/api/api-keys/${ADA_KEY_ID}" "$USER_TOKEN" '{"description":"x"}'
@@ -143,36 +143,36 @@ e2e_authed_request GET "$RBAC/api/api-keys/all" "$USER_TOKEN"
 # --- a user authenticates with their API key (the middleware's API-key branch)
 # The credential is `Bearer <username>:<apikey>`; the owner is placed in the
 # context and the request is authorized as that user.
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY}"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY}"
 [ "$HTTP_CODE" = "200" ] || { echo ">> api-key auth returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
 
 # --- a key's pipeline scope limits the caller's resource-scoped permissions -
 # bob's key is scoped to pipeline A: an in-scope resource is allowed, an
 # out-of-scope one is denied (403) even though bob's role would otherwise
 # grant pipelines.can-view.
-e2e_authed_request GET "$RBAC/api/pipelines/${PIPELINE_A}/versions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY}"
+e2e_authed_request GET "$RBAC/api/pipelines/${PIPELINE_A}/versions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY}"
 [ "$HTTP_CODE" = "200" ] || { echo ">> in-scope pipeline returned $HTTP_CODE, want 200 (ALLOW)" >&2; exit 1; }
-e2e_authed_request GET "$RBAC/api/pipelines/${PIPELINE_B}/versions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY}"
+e2e_authed_request GET "$RBAC/api/pipelines/${PIPELINE_B}/versions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY}"
 [ "$HTTP_CODE" = "403" ] || { echo ">> out-of-scope pipeline returned $HTTP_CODE, want 403 (DISALLOW)" >&2; exit 1; }
 
 # --- a wrong key is rejected, and repeated failures lock the user out -------
 # max_failures=3: three consecutive misses lock bob out for the configured
 # duration, after which even the correct key is rejected until an admin
 # resets the lockout.
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:cdrom-wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:cdrom-wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong"
 [ "$HTTP_CODE" = "401" ] || { echo ">> wrong key (1) returned $HTTP_CODE, want 401" >&2; exit 1; }
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:cdrom-wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:cdrom-wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong"
 [ "$HTTP_CODE" = "401" ] || { echo ">> wrong key (2) returned $HTTP_CODE, want 401" >&2; exit 1; }
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:cdrom-wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:cdrom-wrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrongwrong"
 [ "$HTTP_CODE" = "401" ] || { echo ">> wrong key (3) returned $HTTP_CODE, want 401" >&2; exit 1; }
 # bob is now locked out: even the correct key is rejected.
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY}"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY}"
 [ "$HTTP_CODE" = "401" ] || { echo ">> locked-out correct key returned $HTTP_CODE, want 401" >&2; exit 1; }
 
 # An admin resets bob's lockout; the correct key works again.
 e2e_authed_request POST "$RBAC/api/api-keys/lockout/reset" "$ADMIN_TOKEN" "{\"user_id\":\"${BOB_OWNER_ID}\"}"
 [ "$HTTP_CODE" = "200" ] || { echo ">> reset lockout returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY}"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY}"
 [ "$HTTP_CODE" = "200" ] || { echo ">> post-reset api-key auth returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
 
 # --- rotating a key issues a new plaintext; the old one stops working -------
@@ -182,16 +182,16 @@ BOB_KEY_NEW=$(printf '%s' "$HTTP_BODY" | jq -r '.plaintext')
 [ "$(printf '%s' "$BOB_KEY_NEW" | cut -c1-6)" = "cdrom-" ] \
   || { echo ">> rotated key plaintext does not start with cdrom-: $BOB_KEY_NEW" >&2; exit 1; }
 # The old plaintext no longer authenticates.
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY}"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY}"
 [ "$HTTP_CODE" = "401" ] || { echo ">> old key after rotate returned $HTTP_CODE, want 401" >&2; exit 1; }
 # The new plaintext does.
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY_NEW}"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY_NEW}"
 [ "$HTTP_CODE" = "200" ] || { echo ">> new key after rotate returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
 
 # --- deleting a key revokes it ----------------------------------------------
 e2e_authed_request DELETE "$RBAC/api/api-keys/${BOB_KEY_ID}" "$ADMIN_TOKEN"
 [ "$HTTP_CODE" = "200" ] || { echo ">> delete returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
-e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_EMAIL}:${BOB_KEY_NEW}"
+e2e_authed_request GET "$RBAC/api/me/permissions" "${E2E_USER_BOB_USERNAME}:${BOB_KEY_NEW}"
 [ "$HTTP_CODE" = "401" ] || { echo ">> deleted key returned $HTTP_CODE, want 401" >&2; exit 1; }
 
 log ">> 08-apikeys PASSED"

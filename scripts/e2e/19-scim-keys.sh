@@ -90,8 +90,8 @@ e2e_start api-rbac "$WORK/api-rbac.log" 'serving' \
 RBAC=http://127.0.0.1:8081
 
 # Sign in as the admin (ada) and as the default user (bob).
-ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_EMAIL" "$E2E_USER_ADA_PASSWORD")
-USER_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_BOB_EMAIL" "$E2E_USER_BOB_PASSWORD")
+ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
+USER_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_BOB_USERNAME" "$E2E_USER_BOB_PASSWORD")
 
 # --- deny-by-default: bob (the built-in user role) holds no scim-keys.* ----
 e2e_authed_request GET "$RBAC/api/scim/keys" "$USER_TOKEN"
@@ -238,7 +238,7 @@ e2e_start api-s3 "$WORK/api-s3.log" 'serving' \
   CDROM_IDP_GRPC_ADDR=127.0.0.1:7116 \
   CDROM_AUDIT_FILE="$WORK/api-s3-audit.log" CDROM_AUDIT_FORMAT=json \
   CDROM_METRICS_ENABLED=false CDROM_LOG_FORMAT=text -- "$BIN/api"
-TOKEN3=$(e2e_login "$API3" "$E2E_USER_ADA_EMAIL" "$E2E_USER_ADA_PASSWORD")
+TOKEN3=$(e2e_login "$API3" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
 log ">> s3: replicas + third API up; exercising the guard"
 
 # scim_req <url-without-origin> <key-or-empty>: GET replica A; prints
@@ -308,11 +308,11 @@ case "$SA_KEY" in cdrom-sa-*) ;; *) echo ">> sa key unexpected: $SA_KEY" >&2; ex
 OUT=$(scim_req /scim/v2/Schemas "svc-s3sep:$SA_KEY")
 [ "${OUT%%$'\n'*}" = "401" ] || { echo ">> service-account cred got ${OUT%%$'\n'*}, want 401 (separation)" >&2; exit 1; }
 [ "${OUT#*$'\n'}" = "$REF401" ] || { echo ">> sa 401 body diverges from the canonical one" >&2; exit 1; }
-e2e_authed_request POST "$API3/api/api-keys" "$TOKEN3" "{\"owner_email\":\"${E2E_USER_BOB_EMAIL}\",\"description\":\"s3 sep\"}"
+e2e_authed_request POST "$API3/api/api-keys" "$TOKEN3" "{\"owner_username\":\"${E2E_USER_BOB_USERNAME}\",\"description\":\"s3 sep\"}"
 [ "$HTTP_CODE" = "201" ] || { echo ">> user api-key create returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 UBODY=$(printf '%s' "$HTTP_BODY" | jq -r '.plaintext'); UPREFIX=$(printf '%s' "$UBODY" | cut -c1-6)
 [ "$UPREFIX" = "cdrom-" ] || { echo ">> user key plaintext unexpected: $UBODY" >&2; exit 1; }
-OUT=$(scim_req /scim/v2/Schemas "${E2E_USER_BOB_EMAIL}:${UBODY}")
+OUT=$(scim_req /scim/v2/Schemas "${E2E_USER_BOB_USERNAME}:${UBODY}")
 [ "${OUT%%$'\n'*}" = "401" ] || { echo ">> user api-key cred got ${OUT%%$'\n'*}, want 401 (separation)" >&2; exit 1; }
 [ "${OUT#*$'\n'}" = "$REF401" ] || { echo ">> user-key 401 body diverges from the canonical one" >&2; exit 1; }
 log ">> s3: separation OK (F-25/F-26 credentials 401 on the SCIM surface)"

@@ -15,8 +15,8 @@ import (
 
 // TestUserRegisterAndLogin drives the full username/password flow over gRPC:
 // register a user, log in, and verify the returned token with go-oidc (the
-// same library the API uses). It checks the token's subject, email, and roles
-// claims.
+// same library the API uses). It checks the token's subject (the USERNAME,
+// F-28.4), user_id, email, and roles claims.
 func TestUserRegisterAndLogin(t *testing.T) {
 	users := NewMemoryUserStore()
 	idp := startTestIDP(t, testConfig(time.Hour, 30*time.Minute), users)
@@ -29,12 +29,16 @@ func TestUserRegisterAndLogin(t *testing.T) {
 	}
 	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true})
 
-	// Register the first user (it should be given the admin role).
+	// Register the first user (it should be given the admin role). The
+	// username is the anchor; the email is optional metadata.
 	reg, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		FirstName: "Ada", LastName: "Lovelace", Email: "ada@example.com", Password: "s3cret",
+		FirstName: "Ada", LastName: "Lovelace", Username: "ada", Email: "ada@example.com", Password: "s3cret",
 	})
 	if err != nil {
 		t.Fatalf("register: %v", err)
+	}
+	if reg.GetUsername() != "ada" {
+		t.Errorf("register username = %q, want ada", reg.GetUsername())
 	}
 	if reg.GetEmail() != "ada@example.com" {
 		t.Errorf("register email = %q, want ada@example.com", reg.GetEmail())
@@ -43,8 +47,8 @@ func TestUserRegisterAndLogin(t *testing.T) {
 		t.Errorf("first user roles = %v, want to include admin", reg.GetRoles())
 	}
 
-	// Log in with the correct password.
-	login, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "ada@example.com", Password: "s3cret"})
+	// Log in with the correct password (BY USERNAME).
+	login, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "ada", Password: "s3cret"})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -60,16 +64,22 @@ func TestUserRegisterAndLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify token: %v", err)
 	}
-	if idt.Subject != reg.GetId() {
-		t.Errorf("token subject = %q, want %q", idt.Subject, reg.GetId())
+	// The token's SUBJECT is the username (F-28.4); the numeric ID travels
+	// as the user_id claim.
+	if idt.Subject != "ada" {
+		t.Errorf("token subject = %q, want ada", idt.Subject)
 	}
 	var claims struct {
-		Email string   `json:"email"`
-		Name  string   `json:"name"`
-		Roles []string `json:"roles"`
+		UserID string   `json:"user_id"`
+		Email  string   `json:"email"`
+		Name   string   `json:"name"`
+		Roles  []string `json:"roles"`
 	}
 	if err := idt.Claims(&claims); err != nil {
 		t.Fatalf("claims: %v", err)
+	}
+	if claims.UserID != reg.GetId() {
+		t.Errorf("token user_id = %q, want %q", claims.UserID, reg.GetId())
 	}
 	if claims.Email != "ada@example.com" {
 		t.Errorf("token email = %q, want ada@example.com", claims.Email)
@@ -79,7 +89,7 @@ func TestUserRegisterAndLogin(t *testing.T) {
 	}
 
 	// The user is stored with a password hash, not the plaintext.
-	stored, err := users.GetByEmail(ctx, "ada@example.com", true)
+	stored, err := users.GetByUsername(ctx, "ada", true)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}
@@ -99,29 +109,29 @@ func TestUserLoginWrongPassword(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		FirstName: "Bob", LastName: "Jones", Email: "bob@example.com", Password: "right",
+		FirstName: "Bob", LastName: "Jones", Username: "bob", Email: "bob@example.com", Password: "right",
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
 	// Wrong password.
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "bob@example.com", Password: "wrong"}); status.Code(err) != codes.Unauthenticated {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "bob", Password: "wrong"}); status.Code(err) != codes.Unauthenticated {
 		t.Errorf("wrong password code = %v, want Unauthenticated", status.Code(err))
 	}
 
 	// Unknown user.
-	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Email: "nobody@example.com", Password: "x"}); status.Code(err) != codes.Unauthenticated {
+	if _, err := idp.client.Login(ctx, &idppb.LoginRequest{Username: "nobody", Password: "x"}); status.Code(err) != codes.Unauthenticated {
 		t.Errorf("unknown user code = %v, want Unauthenticated", status.Code(err))
 	}
 }
 
 // TestUserRegisterDuplicate checks that registering a user with an existing
-// email is rejected (AlreadyExists).
+// username is rejected (AlreadyExists).
 func TestUserRegisterDuplicate(t *testing.T) {
 	idp := startTestIDP(t, testConfig(time.Hour, 30*time.Minute), NewMemoryUserStore())
 	ctx := context.Background()
 
-	req := &idppb.RegisterRequest{FirstName: "Ada", LastName: "L", Email: "ada@example.com", Password: "s3cret"}
+	req := &idppb.RegisterRequest{FirstName: "Ada", LastName: "L", Username: "ada", Email: "ada@example.com", Password: "s3cret"}
 	if _, err := idp.client.Register(ctx, req); err != nil {
 		t.Fatalf("first register: %v", err)
 	}
@@ -138,12 +148,12 @@ func TestUserRolesManagement(t *testing.T) {
 
 	// Create two users (first is admin, second is user).
 	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		FirstName: "Ada", LastName: "L", Email: "ada@example.com", Password: "s3cret",
+		FirstName: "Ada", LastName: "L", Username: "ada", Email: "ada@example.com", Password: "s3cret",
 	}); err != nil {
 		t.Fatalf("register ada: %v", err)
 	}
 	bob, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		FirstName: "Bob", LastName: "J", Email: "bob@example.com", Password: "pw",
+		FirstName: "Bob", LastName: "J", Username: "bob", Email: "bob@example.com", Password: "pw",
 	})
 	if err != nil {
 		t.Fatalf("register bob: %v", err)
@@ -225,14 +235,14 @@ func TestUserLoginAudienceOverride(t *testing.T) {
 	verifier := provider.Verifier(&oidc.Config{ClientID: "cdrom-ui"})
 
 	if _, err := idp.client.Register(ctx, &idppb.RegisterRequest{
-		FirstName: "Ada", LastName: "L", Email: "ada@example.com", Password: "s3cret",
+		FirstName: "Ada", LastName: "L", Username: "ada", Email: "ada@example.com", Password: "s3cret",
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
 	// Login requesting the audience the API's verifier checks.
 	login, err := idp.client.Login(ctx, &idppb.LoginRequest{
-		Email: "ada@example.com", Password: "s3cret", Audience: "cdrom-ui",
+		Username: "ada", Password: "s3cret", Audience: "cdrom-ui",
 	})
 	if err != nil {
 		t.Fatalf("login: %v", err)

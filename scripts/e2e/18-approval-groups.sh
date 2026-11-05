@@ -46,26 +46,26 @@ want() {
 # (VIEWER-grade; does NOT hold jobs.can-approve) — the "member without
 # permission" case.
 log ">> creating test users (3 operators + 1 permission-less member)"
-ADA_TOKEN=$(e2e_login "$AUTH" "$E2E_USER_ADA_EMAIL" "$E2E_USER_ADA_PASSWORD")
+ADA_TOKEN=$(e2e_login "$AUTH" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
 create_user() { # <prefix> <role>
   e2e_authed_request POST "$AUTH/api/users" "$ADA_TOKEN" \
-    "{\"first_name\":\"$(echo "$1" | tr a-z A-Z)\",\"last_name\":\"T\",\"email\":\"$1@example.com\",\"password\":\"pw\",\"roles\":[\"$2\"]}"
+    "{\"first_name\":\"$(echo "$1" | tr a-z A-Z)\",\"last_name\":\"T\",\"username\":\"$1\",\"password\":\"pw\",\"roles\":[\"$2\"]}"
   want 201 "create user $1 ($2)"
 }
-create_user cara operator;   CARA_TOK=$(e2e_login "$AUTH" "cara@example.com" pw)
-create_user mallory operator; MALLORY_TOK=$(e2e_login "$AUTH" "mallory@example.com" pw)
-create_user solo operator;    SOLO_TOK=$(e2e_login "$AUTH" "solo@example.com" pw)
-create_user erin user;        ERIN_TOK=$(e2e_login "$AUTH" "erin@example.com" pw)
+create_user cara operator;   CARA_TOK=$(e2e_login "$AUTH" "cara" pw)
+create_user mallory operator; MALLORY_TOK=$(e2e_login "$AUTH" "mallory" pw)
+create_user solo operator;    SOLO_TOK=$(e2e_login "$AUTH" "solo" pw)
+create_user erin user;        ERIN_TOK=$(e2e_login "$AUTH" "erin" pw)
 
 # --- fixture: the approval group "eng" (initially just erin) ------------------
 log ">> creating approval group 'eng' (member: erin)"
 e2e_authed_request POST "$AUTH/api/approval-groups" "$ADA_TOKEN" \
-  '{"name":"eng","description":"engineering approvers","members":["erin@example.com"]}'
+  '{"name":"eng","description":"engineering approvers","members":["erin"]}'
 want 201 "create group eng"
 
 # --- AC6: group management is gated by approvals.can-manage + audited ---------
 log ">> a plain user cannot manage approval groups (403); the admin can (audited)"
-BOB_TOKEN=$(e2e_login "$AUTH" "$E2E_USER_BOB_EMAIL" "$E2E_USER_BOB_PASSWORD")
+BOB_TOKEN=$(e2e_login "$AUTH" "$E2E_USER_BOB_USERNAME" "$E2E_USER_BOB_PASSWORD")
 e2e_authed_request POST "$AUTH/api/approval-groups" "$BOB_TOKEN" '{"name":"nope"}'
 want 403 "bob create group (denied)"
 e2e_authed_request POST "$AUTH/api/approval-groups" "$ADA_TOKEN" '{"name":"scratch"}'
@@ -135,7 +135,7 @@ log ">> A (group:eng): non-member 403, member-without-permission 403, add a memb
 JA=$(submit_gate_job A '["group:eng"]' 0)
 e2e_authed_request POST "$AUTH/api/jobs/$JA/approve" "$MALLORY_TOK" '{}'; want 403 "A: mallory (operator, non-member)"
 e2e_authed_request POST "$AUTH/api/jobs/$JA/approve" "$ERIN_TOK" '{}';    want 403 "A: erin (member, no permission)"
-e2e_authed_request POST "$AUTH/api/approval-groups/eng/members" "$ADA_TOKEN" '{"member":"cara@example.com"}'; want 200 "A: add cara to eng"
+e2e_authed_request POST "$AUTH/api/approval-groups/eng/members" "$ADA_TOKEN" '{"member":"cara"}'; want 200 "A: add cara to eng"
 e2e_authed_request POST "$AUTH/api/jobs/$JA/approve" "$CARA_TOK" '{"reason":"signed off"}'; want 200 "A: cara (member+permission)"
 FA=$(e2e_wait_for_status "$JA" 3 "A succeeded after approval")
 printf '%s' "$FA" | jq -e '.approval_decision=="approved"' >/dev/null || { echo ">> A decision not approved" >&2; exit 1; }
@@ -144,15 +144,15 @@ e2e_wait_for_job "$JA" 'ag-A-done' 'A post-gate step ran'
 # --- AC5(remove): job R (group:eng) — remove a member; bite on the same gate ---
 log ">> R (group:eng): remove a member; their in-flight approval is refused"
 JR=$(submit_gate_job R '["group:eng"]' 0)
-e2e_authed_request DELETE "$AUTH/api/approval-groups/eng/members/cara@example.com" "$ADA_TOKEN"; want 200 "R: remove cara from eng"
+e2e_authed_request DELETE "$AUTH/api/approval-groups/eng/members/cara" "$ADA_TOKEN"; want 200 "R: remove cara from eng"
 e2e_authed_request POST "$AUTH/api/jobs/$JR/approve" "$CARA_TOK" '{}'; want 403 "R: cara (former member) after removal"
-e2e_authed_request POST "$AUTH/api/approval-groups/eng/members" "$ADA_TOKEN" '{"member":"mallory@example.com"}'; want 200 "R: add mallory to eng"
+e2e_authed_request POST "$AUTH/api/approval-groups/eng/members" "$ADA_TOKEN" '{"member":"mallory"}'; want 200 "R: add mallory to eng"
 e2e_authed_request POST "$AUTH/api/jobs/$JR/approve" "$MALLORY_TOK" '{}'; want 200 "R: mallory approve"
 e2e_wait_for_status "$JR" 3 "R succeeded after approval" >/dev/null
 
 # --- AC2: job B (group:eng + a named individual) — union of the set -----------
-log ">> B (group:eng + solo@example.com): a named individual (not in the group) may approve"
-JB=$(submit_gate_job B '["group:eng","solo@example.com"]' 0)
+log ">> B (group:eng + solo): a named individual (not in the group) may approve"
+JB=$(submit_gate_job B '["group:eng","solo"]' 0)
 e2e_authed_request POST "$AUTH/api/jobs/$JB/approve" "$SOLO_TOK" '{}'; want 200 "B: solo (named individual)"
 e2e_wait_for_status "$JB" 3 "B succeeded after approval" >/dev/null
 

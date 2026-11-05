@@ -1688,14 +1688,26 @@ type IDPAuthCode struct {
 // The model uses a numeric, database-assigned primary key (auto-increment),
 // like the other entities. It does not embed gorm.Model (so there is no
 // soft-delete column); the tombstone is declared explicitly instead.
+//
+// Identity anchors (F-28.4): Username is the unique login identifier (the
+// OIDC subject claim and the SCIM userName land here); Email is OPTIONAL and
+// non-unique (a subject need not be an email — e.g. an App-registration's
+// UUID subject). All lookups run through ID, Username, or ExternalID —
+// never email.
 type IDPUser struct {
 	// ID is the user's stable identifier (the token's subject); it is the
 	// table's primary key, assigned by the database (auto-increment).
-	ID        uint   `gorm:"primaryKey" json:"id"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// Username is the user's UNIQUE login identifier (F-28.4): the OIDC
+	// subject claim (claim name configurable, default "sub") and the SCIM
+	// userName both land here. Case-insensitively compared everywhere.
+	Username  string `gorm:"column:username;uniqueIndex;not null" json:"username"`
 	FirstName string `gorm:"column:first_name" json:"first_name"`
 	LastName  string `gorm:"column:last_name" json:"last_name"`
-	// Email is the user's unique login identifier.
-	Email string `gorm:"uniqueIndex;not null" json:"email"`
+	// Email is the user's OPTIONAL electronic-mail address (F-28.4): purely
+	// informational, non-unique, never a lookup key. Empty when the user has
+	// no known email (e.g. a machine principal with a UUID subject).
+	Email string `gorm:"column:email;index" json:"email"`
 	// PasswordHash is the Argon2ID encoding of the user's password (pepper
 	// prepended to the KDF input; the salt is embedded in the encoding). It is
 	// never returned to the UI; the IdP uses it only to verify logins. It is

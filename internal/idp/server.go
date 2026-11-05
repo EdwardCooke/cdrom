@@ -284,7 +284,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	// Prune expired codes opportunistically, then store the new one.
+	// Prune expired codes opportunistically, then store the new one. The
+	// synthesized identity treats the subject AS the username (F-28.4): no
+	// fabricated email domain (previously "<subject>@example.com").
 	_ = s.codes.Prune(r.Context(), time.Now().Add(-codeTTL))
 	if err := s.codes.Store(r.Context(), &authCode{
 		code:          code,
@@ -293,7 +295,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		codeChallenge: challenge,
 		subject:       subject,
 		name:          subject,
-		email:         subject + "@example.com",
+		email:         "",
 		createdAt:     time.Now(),
 	}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

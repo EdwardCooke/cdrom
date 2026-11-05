@@ -16,6 +16,11 @@ import (
 // (stamping the user's roles onto the token). The password is stored only as
 // a salted hash (PasswordHash); the plaintext is never persisted.
 //
+// Identity anchors (F-28.4): Username is the UNIQUE login identifier (the
+// OIDC subject claim and the SCIM userName land here); Email is OPTIONAL and
+// non-unique (a subject need not be an email). All lookups run through ID,
+// Username, or ExternalID — never email.
+//
 // Lifecycle (F-28.3): a user is active (full access), deactivated
 // (Active=false — "on leave", credentials retained), or deprovisioned
 // (DeletedAt tombstone — gone; credentials destroyed, identity and history
@@ -25,9 +30,14 @@ import (
 // ExternalID is the corporate directory's stable identifier (the
 // re-provisioning match key).
 type User struct {
-	ID           string
-	FirstName    string
-	LastName     string
+	ID string
+	// Username is the user's unique login identifier (F-28.4).
+	Username  string
+	FirstName string
+	LastName  string
+	// Email is the user's optional electronic-mail address (F-28.4); empty
+	// when the user has no known email. Informational only — never a lookup
+	// key.
 	Email        string
 	PasswordHash string
 	Roles        []string
@@ -57,19 +67,25 @@ type User struct {
 // users. The production implementation stores users in the Database service;
 // tests use an in-memory implementation.
 //
-// Lookup semantics (F-28.3): a tombstoned (deprovisioned) user is reported
-// as NotFound unless includeDeleted is set. Reviving a tombstoned user is
-// exclusively Reactivate's job.
+// Lookup semantics (F-28.3/F-28.4): a tombstoned (deprovisioned) user is
+// reported as NotFound unless includeDeleted is set. Reviving a tombstoned
+// user is exclusively Reactivate's job. Identifiers (username, external ID)
+// are the lookup keys — email is never consulted.
 type UserStore interface {
-	// Create registers (or updates) a user, keyed by email. A new user is
-	// given a stable ID (the token's subject) and is born ACTIVE and
-	// non-tombstoned; an existing user's profile and roles are updated. It
-	// returns the stored user.
+	// Create registers (or updates) a user, keyed by USERNAME (the unique
+	// login identifier, F-28.4). A new user is given a stable ID (the
+	// token's subject) and is born ACTIVE and non-tombstoned; an existing
+	// user's profile and roles are updated. It returns the stored user.
 	Create(ctx context.Context, user *User) (*User, error)
-	// GetByEmail returns the user with the given email (case-insensitive). A
-	// missing user — or a tombstoned one when includeDeleted is false —
-	// returns an error with status.Code == codes.NotFound.
-	GetByEmail(ctx context.Context, email string, includeDeleted bool) (*User, error)
+	// GetByUsername returns the user with the given username (case-
+	// insensitive). A missing user — or a tombstoned one when includeDeleted
+	// is false — returns an error with status.Code == codes.NotFound.
+	GetByUsername(ctx context.Context, username string, includeDeleted bool) (*User, error)
+	// FindByExternalID returns the user with the given corporate external ID
+	// (exact match; the re-provisioning match key, F-28.3/F-28.4). A missing
+	// user — or a tombstoned one when includeDeleted is false — returns an
+	// error with status.Code == codes.NotFound.
+	FindByExternalID(ctx context.Context, externalID string, includeDeleted bool) (*User, error)
 	// GetByID returns the user with the given ID. A missing user — or a
 	// tombstoned one when includeDeleted is false — returns an error with
 	// status.Code == codes.NotFound.
@@ -126,8 +142,16 @@ func (s *dbUserStore) Create(ctx context.Context, user *User) (*User, error) {
 	return userFromProto(resp), nil
 }
 
-func (s *dbUserStore) GetByEmail(ctx context.Context, email string, includeDeleted bool) (*User, error) {
-	resp, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Email: email, IncludeDeleted: includeDeleted})
+func (s *dbUserStore) GetByUsername(ctx context.Context, username string, includeDeleted bool) (*User, error) {
+	resp, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{Username: username, IncludeDeleted: includeDeleted})
+	if err != nil {
+		return nil, err
+	}
+	return userFromProto(resp), nil
+}
+
+func (s *dbUserStore) FindByExternalID(ctx context.Context, externalID string, includeDeleted bool) (*User, error) {
+	resp, err := s.db.GetIDPUser(ctx, &dbpb.GetIDPUserRequest{ExternalId: externalID, IncludeDeleted: includeDeleted})
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +230,7 @@ func (s *dbUserStore) ExpireTemporaryPassword(ctx context.Context, id string) er
 func (u *User) toProto() *dbpb.IDPUser {
 	out := &dbpb.IDPUser{
 		Id:                    u.ID,
+		Username:              u.Username,
 		FirstName:             u.FirstName,
 		LastName:              u.LastName,
 		Email:                 u.Email,
@@ -229,12 +254,13 @@ func (u *User) toProto() *dbpb.IDPUser {
 // userFromProto reconstructs an in-memory user from its Database-service form.
 func userFromProto(u *dbpb.IDPUser) *User {
 	user := &User{
-		ID:           u.GetId(),
-		FirstName:    u.GetFirstName(),
-		LastName:     u.GetLastName(),
-		Email:        u.GetEmail(),
-		PasswordHash: u.GetPasswordHash(),
-		Roles:        u.GetRoles(),
+		ID:               u.GetId(),
+		Username:         u.GetUsername(),
+		FirstName:        u.GetFirstName(),
+		LastName:         u.GetLastName(),
+		Email:            u.GetEmail(),
+		PasswordHash:     u.GetPasswordHash(),
+		Roles:            u.GetRoles(),
 		Active:           u.GetActive(),
 		ExternalID:       u.GetExternalId(),
 		Provisioned:      u.GetProvisioned(),

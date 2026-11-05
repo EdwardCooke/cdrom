@@ -95,25 +95,35 @@ func (s *MemoryAuthCodeStore) Prune(_ context.Context, before time.Time) error {
 // suitable for running a single IdP without a Database service; it does not
 // share state across processes, so it does not support multiple IdP replicas.
 type MemoryUserStore struct {
-	mu     sync.Mutex
-	byID   map[string]*User
-	byMail map[string]*User // keyed by lower-cased email
+	mu      sync.Mutex
+	byID    map[string]*User
+	byUser  map[string]*User // keyed by lower-cased username
+	byExtID map[string]*User // keyed by external ID (exact)
 }
 
 // NewMemoryUserStore returns an empty in-memory UserStore.
 func NewMemoryUserStore() *MemoryUserStore {
-	return &MemoryUserStore{byID: make(map[string]*User), byMail: make(map[string]*User)}
+	return &MemoryUserStore{
+		byID:    make(map[string]*User),
+		byUser:  make(map[string]*User),
+		byExtID: make(map[string]*User),
+	}
 }
 
-// Create registers (or updates) a user, keyed by email. A new user is given a
-// stable random ID; an existing user's profile and roles are updated.
+// Create registers (or updates) a user, keyed by USERNAME (the unique login
+// identifier, F-28.4). A new user is given a stable random ID; an existing
+// user's profile and roles are updated.
 func (s *MemoryUserStore) Create(_ context.Context, user *User) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := strings.ToLower(user.Email)
-	if existing, ok := s.byMail[key]; ok {
+	if user.Username == "" {
+		return nil, status.Error(codes.InvalidArgument, "username is required")
+	}
+	key := strings.ToLower(user.Username)
+	if existing, ok := s.byUser[key]; ok {
 		existing.FirstName = user.FirstName
 		existing.LastName = user.LastName
+		existing.Email = user.Email
 		existing.Roles = user.Roles
 		if user.PasswordHash != "" {
 			existing.PasswordHash = user.PasswordHash
@@ -135,18 +145,39 @@ func (s *MemoryUserStore) Create(_ context.Context, user *User) (*User, error) {
 	user.Active = true
 	user.DeletedAt = nil
 	stored := copyUser(user)
-	s.byID[stored.ID] = stored
-	s.byMail[key] = stored
+	s.index(stored)
 	return stored, nil
 }
 
-// GetByEmail returns the user with the given email (case-insensitive). A
-// missing user — or a tombstoned one when includeDeleted is false — returns
-// a NotFound error.
-func (s *MemoryUserStore) GetByEmail(_ context.Context, email string, includeDeleted bool) (*User, error) {
+// index adds/removes a user in the auxiliary indices. Caller holds s.mu.
+func (s *MemoryUserStore) index(u *User) {
+	s.byID[u.ID] = u
+	s.byUser[strings.ToLower(u.Username)] = u
+	if u.ExternalID != "" {
+		s.byExtID[u.ExternalID] = u
+	}
+}
+
+// GetByUsername returns the user with the given username (case-insensitive).
+// A missing user — or a tombstoned one when includeDeleted is false —
+// returns a NotFound error.
+func (s *MemoryUserStore) GetByUsername(_ context.Context, username string, includeDeleted bool) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	u, ok := s.byMail[strings.ToLower(email)]
+	u, ok := s.byUser[strings.ToLower(username)]
+	if !ok || (!includeDeleted && u.DeletedAt != nil) {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+	return copyUser(u), nil
+}
+
+// FindByExternalID returns the user with the given corporate external ID
+// (exact match). A missing user — or a tombstoned one when includeDeleted is
+// false — returns a NotFound error.
+func (s *MemoryUserStore) FindByExternalID(_ context.Context, externalID string, includeDeleted bool) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byExtID[externalID]
 	if !ok || (!includeDeleted && u.DeletedAt != nil) {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
@@ -198,9 +229,16 @@ func (s *MemoryUserStore) Update(_ context.Context, user *User) (*User, error) {
 		existing.LastName = user.LastName
 	}
 	if user.Email != "" {
-		delete(s.byMail, strings.ToLower(existing.Email))
 		existing.Email = user.Email
-		s.byMail[strings.ToLower(existing.Email)] = existing
+	}
+	// Username is mutable-but-UNIQUE (F-28.4): a rename onto another user's
+	// username is AlreadyExists.
+	if nu := user.Username; nu != "" && !strings.EqualFold(nu, existing.Username) {
+		if other, taken := s.byUser[strings.ToLower(nu)]; taken && other.ID != existing.ID {
+			return nil, status.Error(codes.AlreadyExists, "a user with that username already exists")
+		}
+		existing.Username = nu
+		s.index(existing)
 	}
 	if len(user.Roles) > 0 {
 		existing.Roles = user.Roles
@@ -312,7 +350,7 @@ func copyUser(u *User) *User {
 // MemoryAPIKeyStore is an in-memory APIKeyStore. It is used by tests and is
 // suitable for running a single IdP without a Database service; it does not
 // share state across processes, so it does not support multiple IdP replicas.
-// It holds a UserStore (users) so it can resolve a key's owner by email.
+// It holds a UserStore (users) so it can resolve a key's owner by username.
 type MemoryAPIKeyStore struct {
 	mu   sync.Mutex
 	keys map[string]*APIKey
@@ -358,11 +396,11 @@ func (s *MemoryAPIKeyStore) removeKey(k *APIKey) {
 	delete(s.keys, k.ID)
 }
 
-func (s *MemoryAPIKeyStore) Create(ctx context.Context, ownerEmail, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error) {
+func (s *MemoryAPIKeyStore) Create(ctx context.Context, ownerUsername, description string, expiresAt time.Time, pipelineScope []uint, pepper string) (*APIKey, string, error) {
 	if !expiresAt.IsZero() && expiresAt.After(time.Now().Add(maxAPIKeyLifetime)) {
 		return nil, "", status.Error(codes.InvalidArgument, "expiration is more than one year in the future")
 	}
-	owner, err := s.users.GetByEmail(ctx, ownerEmail, true)
+	owner, err := s.users.GetByUsername(ctx, ownerUsername, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -465,7 +503,7 @@ func (s *MemoryAPIKeyStore) Delete(_ context.Context, id string) error {
 }
 
 func (s *MemoryAPIKeyStore) Verify(ctx context.Context, username, apiKey, pepper string, maxFailures int, lockoutDuration time.Duration) (*APIKey, *User, error) {
-	owner, err := s.users.GetByEmail(ctx, username, true)
+	owner, err := s.users.GetByUsername(ctx, username, true)
 	if err != nil {
 		return nil, nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}

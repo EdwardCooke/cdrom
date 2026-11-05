@@ -23,10 +23,11 @@ import (
 // and lockout duration are supplied by the API (from its auth.api_key config)
 // on each operation.
 type APIKeyClient interface {
-	// CreateAPIKey generates a new `cdrom-…` API key for the owner (by email),
-	// and returns the key's metadata (never the hash) plus the plaintext key
-	// (shown to the caller exactly once).
-	CreateAPIKey(ctx context.Context, ownerEmail, description, expiresIn string, pipelineScope []uint) (*APIKeyResult, string, error)
+	// CreateAPIKey generates a new `cdrom-…` API key for the owner (by
+	// username, the unique login identifier, F-28.4), and returns the key's
+	// metadata (never the hash) plus the plaintext key (shown to the caller
+	// exactly once).
+	CreateAPIKey(ctx context.Context, ownerUsername, description, expiresIn string, pipelineScope []uint) (*APIKeyResult, string, error)
 	// GetAPIKey returns a key's metadata and prefix (never the plaintext or
 	// hash) by key id.
 	GetAPIKey(ctx context.Context, id string) (*APIKeyResult, error)
@@ -56,7 +57,7 @@ type APIKeyClient interface {
 type APIKeyResult struct {
 	ID            string  `json:"id"`
 	OwnerID       string  `json:"owner_id"`
-	OwnerEmail    string  `json:"owner_email,omitempty"`
+	OwnerUsername string  `json:"owner_username,omitempty"`
 	Description   string  `json:"description"`
 	KeyPrefix     string  `json:"key_prefix"`
 	ExpiresAt     *string `json:"expires_at,omitempty"`
@@ -97,9 +98,9 @@ func NewAPIKeyClient(idp idppb.IdPClient, pepper string, maxFailures int, lockou
 	return &grpcAPIKeyClient{idp: idp, pepper: pepper, maxFailures: maxFailures, lockoutDuration: lockoutDuration}
 }
 
-func (c *grpcAPIKeyClient) CreateAPIKey(ctx context.Context, ownerEmail, description, expiresIn string, pipelineScope []uint) (*APIKeyResult, string, error) {
+func (c *grpcAPIKeyClient) CreateAPIKey(ctx context.Context, ownerUsername, description, expiresIn string, pipelineScope []uint) (*APIKeyResult, string, error) {
 	resp, err := c.idp.CreateAPIKey(ctx, &idppb.CreateAPIKeyRequest{
-		OwnerEmail:    ownerEmail,
+		OwnerUsername: ownerUsername,
 		Description:   description,
 		ExpiresIn:     expiresIn,
 		PipelineScope: uintsTo64(pipelineScope),
@@ -177,13 +178,20 @@ func (c *grpcAPIKeyClient) VerifyAPIKey(ctx context.Context, username, apiKey st
 	owner := resp.GetOwner()
 	name := owner.GetFirstName() + " " + owner.GetLastName()
 	if name == "  " {
-		name = owner.GetEmail()
+		name = owner.GetUsername()
 	}
+	// The principal's Subject is the OWNER'S USERNAME (F-28.4): it aligns
+	// with the JWT principals (whose subject claim is the username) so the
+	// admission gate and the approver-set matching correlate identically
+	// regardless of which channel authenticated the caller. The numeric ID
+	// (UserID) keys owner-scoped lookups.
 	user := auth.User{
-		Subject: owner.GetId(),
-		Name:    name,
-		Email:   owner.GetEmail(),
-		Roles:   nonNil(owner.GetRoles()),
+		Subject:  owner.GetUsername(),
+		Username: owner.GetUsername(),
+		UserID:   owner.GetId(),
+		Name:     name,
+		Email:    owner.GetEmail(),
+		Roles:    nonNil(owner.GetRoles()),
 	}
 	if key := resp.GetKey(); key != nil {
 		user.PipelineScope = uintsFrom64(key.GetPipelineScope())

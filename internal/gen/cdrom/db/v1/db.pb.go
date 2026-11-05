@@ -10067,7 +10067,9 @@ type IDPUser struct {
 	Id        string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	FirstName string `protobuf:"bytes,2,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
 	LastName  string `protobuf:"bytes,3,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
-	// email is the user's unique login identifier.
+	// email is the user's OPTIONAL electronic-mail address (F-28.4): purely
+	// informational, non-unique, never a lookup key. Empty when the user has
+	// no known email (e.g. a machine principal with a UUID subject).
 	Email string `protobuf:"bytes,4,opt,name=email,proto3" json:"email,omitempty"`
 	// password_hash is the salted hash of the user's password (Argon2ID,
 	// PHC encoding; the salt is embedded in the encoding). It is never
@@ -10108,8 +10110,12 @@ type IDPUser struct {
 	// temporary_password_valid_until bounds the temporal password's usability
 	// (F-28.3 break-glass); unset means there is no temporal credential.
 	TemporaryPasswordValidUntil *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=temporary_password_valid_until,json=temporaryPasswordValidUntil,proto3" json:"temporary_password_valid_until,omitempty"`
-	unknownFields               protoimpl.UnknownFields
-	sizeCache                   protoimpl.SizeCache
+	// username is the user's UNIQUE login identifier (F-28.4): the OIDC
+	// subject claim and the SCIM userName both land here. It is the anchor all
+	// lookups run through (never email).
+	Username      string `protobuf:"bytes,16,opt,name=username,proto3" json:"username,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *IDPUser) Reset() {
@@ -10247,9 +10253,16 @@ func (x *IDPUser) GetTemporaryPasswordValidUntil() *timestamppb.Timestamp {
 	return nil
 }
 
-// CreateIDPUserRequest registers (or updates) a user. Email is the unique
-// key; when a user with the email already exists the profile and roles are
-// updated (and the password hash replaced when a new one is supplied).
+func (x *IDPUser) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+// CreateIDPUserRequest registers (or updates) a user. Username is the unique
+// key; when a user with the username already exists the profile and roles
+// are updated (and the password hash replaced when a new one is supplied).
 type CreateIDPUserRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	User          *IDPUser               `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
@@ -10294,17 +10307,26 @@ func (x *CreateIDPUserRequest) GetUser() *IDPUser {
 	return nil
 }
 
+// GetIDPUserRequest locates a user by AT MOST ONE of the mutually-exclusive
+// identifiers id, username, or external_id (setting more than one is
+// InvalidArgument). When include_deleted is true, a tombstoned (deprovisioned)
+// user is returned (flagged via deleted_at); by default such users are
+// reported NotFound (F-28.3).
 type GetIDPUserRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// id is the user's identifier; when empty, email is used.
-	Id    string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Email string `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
+	// id is the user's stable identifier (numeric, decimal string).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// username is the user's unique login identifier.
+	Username string `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
 	// include_deleted, when true, returns a tombstoned (deprovisioned) user
 	// (flagged via deleted_at); by default such users are reported NotFound
 	// (F-28.3).
 	IncludeDeleted bool `protobuf:"varint,3,opt,name=include_deleted,json=includeDeleted,proto3" json:"include_deleted,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// external_id is the corporate directory's stable identifier (the
+	// re-provisioning match key, F-28.3/F-28.4).
+	ExternalId    string `protobuf:"bytes,4,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetIDPUserRequest) Reset() {
@@ -10344,9 +10366,9 @@ func (x *GetIDPUserRequest) GetId() string {
 	return ""
 }
 
-func (x *GetIDPUserRequest) GetEmail() string {
+func (x *GetIDPUserRequest) GetUsername() string {
 	if x != nil {
-		return x.Email
+		return x.Username
 	}
 	return ""
 }
@@ -10356,6 +10378,13 @@ func (x *GetIDPUserRequest) GetIncludeDeleted() bool {
 		return x.IncludeDeleted
 	}
 	return false
+}
+
+func (x *GetIDPUserRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
 }
 
 // ListIDPUsersRequest lists registered users. When include_deleted is true,
@@ -10451,7 +10480,7 @@ func (x *ListIDPUsersResponse) GetUsers() []*IDPUser {
 
 // UpdateIDPUserRequest updates a user's profile and/or roles. Only the
 // fields set on user are changed; an empty password_hash leaves the existing
-// password untouched.
+// password untouched. The user is addressed by id.
 type UpdateIDPUserRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	User          *IDPUser               `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"`
@@ -19980,7 +20009,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x19ConsumeIDPAuthCodeRequest\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\"]\n" +
 	"\x18PruneIDPAuthCodesRequest\x12A\n" +
-	"\x0ecreated_before\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\rcreatedBefore\"\x8e\x05\n" +
+	"\x0ecreated_before\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\rcreatedBefore\"\xaa\x05\n" +
 	"\aIDPUser\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -20001,13 +20030,16 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"externalId\x12 \n" +
 	"\vprovisioned\x18\r \x01(\bR\vprovisioned\x126\n" +
 	"\x17temporary_password_hash\x18\x0e \x01(\tR\x15temporaryPasswordHash\x12_\n" +
-	"\x1etemporary_password_valid_until\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\x1btemporaryPasswordValidUntil\"@\n" +
+	"\x1etemporary_password_valid_until\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\x1btemporaryPasswordValidUntil\x12\x1a\n" +
+	"\busername\x18\x10 \x01(\tR\busername\"@\n" +
 	"\x14CreateIDPUserRequest\x12(\n" +
-	"\x04user\x18\x01 \x01(\v2\x14.cdrom.db.v1.IDPUserR\x04user\"b\n" +
+	"\x04user\x18\x01 \x01(\v2\x14.cdrom.db.v1.IDPUserR\x04user\"\x89\x01\n" +
 	"\x11GetIDPUserRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
-	"\x05email\x18\x02 \x01(\tR\x05email\x12'\n" +
-	"\x0finclude_deleted\x18\x03 \x01(\bR\x0eincludeDeleted\">\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\x12'\n" +
+	"\x0finclude_deleted\x18\x03 \x01(\bR\x0eincludeDeleted\x12\x1f\n" +
+	"\vexternal_id\x18\x04 \x01(\tR\n" +
+	"externalId\">\n" +
 	"\x13ListIDPUsersRequest\x12'\n" +
 	"\x0finclude_deleted\x18\x01 \x01(\bR\x0eincludeDeleted\"B\n" +
 	"\x14ListIDPUsersResponse\x12*\n" +

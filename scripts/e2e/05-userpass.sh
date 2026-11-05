@@ -32,7 +32,7 @@ log ">> verifying username/password authentication (F-24)"
 # Register the first user: created (201) and, as the first user, given the
 # admin role.
 e2e_http_request POST http://127.0.0.1:8080/api/register \
-  "{\"first_name\":\"Ada\",\"last_name\":\"Lovelace\",\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
+  "{\"first_name\":\"Ada\",\"last_name\":\"Lovelace\",\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
 [ "$HTTP_CODE" = "201" ] \
   || { echo ">> first register returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 printf '%s' "$HTTP_BODY" | jq -e '.roles | index("admin")' >/dev/null \
@@ -40,7 +40,7 @@ printf '%s' "$HTTP_BODY" | jq -e '.roles | index("admin")' >/dev/null \
 
 # Register a second user: created (201) with the default user role.
 e2e_http_request POST http://127.0.0.1:8080/api/register \
-  "{\"first_name\":\"Bob\",\"last_name\":\"Jones\",\"email\":\"${E2E_USER_BOB_EMAIL}\",\"password\":\"${E2E_USER_BOB_PASSWORD}\"}"
+  "{\"first_name\":\"Bob\",\"last_name\":\"Jones\",\"username\":\"${E2E_USER_BOB_USERNAME}\",\"password\":\"${E2E_USER_BOB_PASSWORD}\"}"
 [ "$HTTP_CODE" = "201" ] \
   || { echo ">> second register returned $HTTP_CODE, want 201 ($HTTP_BODY)" >&2; exit 1; }
 printf '%s' "$HTTP_BODY" | jq -e '.roles | index("user")' >/dev/null \
@@ -48,7 +48,7 @@ printf '%s' "$HTTP_BODY" | jq -e '.roles | index("user")' >/dev/null \
 
 # Registering a duplicate email is rejected (409).
 e2e_http_request POST http://127.0.0.1:8080/api/register \
-  "{\"first_name\":\"Ada\",\"last_name\":\"L\",\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"x\"}"
+  "{\"first_name\":\"Ada\",\"last_name\":\"L\",\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"x\"}"
 [ "$HTTP_CODE" = "409" ] \
   || { echo ">> duplicate register returned $HTTP_CODE, want 409" >&2; exit 1; }
 
@@ -56,7 +56,7 @@ e2e_http_request POST http://127.0.0.1:8080/api/register \
 # is a signed JWT (three dot-separated segments) minted by the IdP, stamped
 # with the user's roles.
 e2e_http_request POST http://127.0.0.1:8080/api/login \
-  "{\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
+  "{\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"${E2E_USER_ADA_PASSWORD}\"}"
 [ "$HTTP_CODE" = "200" ] \
   || { echo ">> login returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
 LOGIN_TOKEN=$(printf '%s' "$HTTP_BODY" | jq -r '.access_token')
@@ -69,13 +69,13 @@ printf '%s' "$HTTP_BODY" | jq -e '.roles | index("admin")' >/dev/null \
 
 # Login with a wrong password is rejected (401).
 e2e_http_request POST http://127.0.0.1:8080/api/login \
-  "{\"email\":\"${E2E_USER_ADA_EMAIL}\",\"password\":\"wrong\"}"
+  "{\"username\":\"${E2E_USER_ADA_USERNAME}\",\"password\":\"wrong\"}"
 [ "$HTTP_CODE" = "401" ] \
   || { echo ">> wrong-password login returned $HTTP_CODE, want 401" >&2; exit 1; }
 
 # Login for an unknown user is rejected (401).
 e2e_http_request POST http://127.0.0.1:8080/api/login \
-  '{"email":"nobody@example.com","password":"x"}'
+  '{"username":"nobody","password":"x"}'
 [ "$HTTP_CODE" = "401" ] \
   || { echo ">> unknown-user login returned $HTTP_CODE, want 401" >&2; exit 1; }
 
