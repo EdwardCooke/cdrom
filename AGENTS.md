@@ -387,9 +387,12 @@ make build
 For auth also run `./bin/idp` and point the API's `auth.issuer` at
 `http://127.0.0.1:7104`. Username/password sign-in is on by default: register
 the first user (`POST /api/register` → `admin`) and sign in with
-`POST /api/login`. For the full OIDC authorization-code flow set
-`auth.enabled: true` + `client_id`/`redirect_url`. For mTLS run `make certs`
-and configure the `tls` section.
+`POST /api/login`. Identification is by **username** (the unique login
+identifier; email is optional metadata — F-28.4 S1), and the IdP's minted
+tokens stamp `sub` with the username (numeric ID in `user_id`). For the full
+OIDC authorization-code flow set `auth.enabled: true` +
+`client_id`/`redirect_url`. For mTLS run `make certs` and configure the `tls`
+section.
 
 ## Authentication Overview
 
