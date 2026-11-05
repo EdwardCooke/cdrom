@@ -159,7 +159,8 @@ func (h *captureHandler) blob() string {
 	for _, r := range h.records {
 		sb.WriteString(r.Message)
 		r.Attrs(func(a slog.Attr) bool {
-			sb.WriteString(" " + a.Value.String())
+			sb.WriteString(" ")
+			sb.WriteString(a.Value.String())
 			return true
 		})
 		sb.WriteByte('\n')

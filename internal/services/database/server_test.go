@@ -1897,23 +1897,39 @@ func TestUpdateRun(t *testing.T) {
 // Job executions (fan-out)
 // ---------------------------------------------------------------------------
 
-// newGroupJob creates a pipeline and a pending job that targets a worker
-// group, returning the job.
+// newGroupJob creates a pipeline with a single job targeting a worker group,
+// materializes a manual run, and returns the run's job INSTANCE — a startable
+// work item. It deliberately does NOT return the pipeline DEFINITION row:
+// StartJobExecution refuses definition rows (a job with a pipeline but no run
+// is a definition, never executed — F-08), and handing tests a definition
+// silently broke every start/update/abandon assertion (caught 2026-11-05).
 func newGroupJob(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, group string) *dbpb.Job {
 	t.Helper()
-	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name + "-pipeline"})
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: name + "-pipeline",
+		Jobs: []*dbpb.JobDefinition{{Key: name, Name: name, TargetGroup: group}},
+	})
 	if err != nil {
 		t.Fatalf("CreatePipeline: %v", err)
 	}
-	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
-		PipelineId:  pipeline.GetId(),
-		Name:        name,
-		TargetGroup: group,
-	})
-	if err != nil {
-		t.Fatalf("CreateJob: %v", err)
+	if _, err := client.CreateRun(ctx, &dbpb.CreateRunRequest{PipelineId: pipeline.GetId(), Trigger: "manual"}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
 	}
-	return job
+	jobs, err := client.ListJobs(ctx, &dbpb.ListJobsRequest{PipelineId: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	var instance *dbpb.Job
+	for _, j := range jobs.GetJobs() {
+		if j.GetRunId() != 0 {
+			instance = j
+			break
+		}
+	}
+	if instance == nil {
+		t.Fatalf("no run instance found for pipeline %d", pipeline.GetId())
+	}
+	return instance
 }
 
 // TestStartJobExecution verifies that a worker starting a pending group job

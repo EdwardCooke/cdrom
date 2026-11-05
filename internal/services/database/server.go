@@ -1581,7 +1581,10 @@ func (s *Server) ListRuns(ctx context.Context, req *dbpb.ListRunsRequest) (*dbpb
 	}
 	if finishedAfter := req.GetFinishedAfter(); finishedAfter != nil {
 		// A run that has not finished (finished_at is null) is excluded.
-		query = query.Where("finished_at IS NOT NULL AND finished_at >= ?", finishedAfter.AsTime())
+		// .Local(): timezone normalization for the mixed-zone lexical datetime
+		// comparison (see ListAuditEvents) — a UTC bound wrongly excluded
+		// recently-finished runs in non-UTC process zones.
+		query = query.Where("finished_at IS NOT NULL AND finished_at >= ?", finishedAfter.AsTime().Local())
 	}
 	// Preload each run's pipeline so the response carries the pipeline's name
 	// (F-09): the scheduler's event loop matches a finished run against the
@@ -3167,7 +3170,11 @@ func (s *Server) ConsumeIDPAuthCode(ctx context.Context, req *dbpb.ConsumeIDPAut
 func (s *Server) PruneIDPAuthCodes(ctx context.Context, req *dbpb.PruneIDPAuthCodesRequest) (*emptypb.Empty, error) {
 	query := s.db.WithContext(ctx).Model(&models.IDPAuthCode{})
 	if ts := req.GetCreatedBefore(); ts != nil {
-		query = query.Where("created_at < ?", ts.AsTime())
+		// .Local(): timezone normalization for the mixed-zone lexical datetime
+		// comparison (see ListAuditEvents). Over-pruning is tolerable, but
+		// UNDER-pruning retains expired auth codes past their expiry — a
+		// security smell, hence the same care.
+		query = query.Where("created_at < ?", ts.AsTime().Local())
 	} else {
 		query = query.Where("1 = 1")
 	}
@@ -7742,11 +7749,22 @@ func (s *Server) ListAuditEvents(ctx context.Context, req *dbpb.ListAuditEventsR
 	if req.GetPipelineId() > 0 {
 		query = query.Where("pipeline_id = ?", req.GetPipelineId())
 	}
+	// TIMEZONE NORMALIZATION (driver quirk, 2026-11-05): created_at columns are
+	// WRITTEN in the process-local zone (GORM autotimestamps bind time.Now(),
+	// Location=Local) and rendered lexically with that offset ("-07:00"), but
+	// prost's AsTime() ALWAYS returns Location=UTC ("Z"). The pure-Go sqlite
+	// driver (modernc.org/sqlite via glebarez) compares DATETIME operands
+	// lexically and mixes the two zones incorrectly — a UTC-bound ">" against
+	// local-offset stored values can yield inverted results (verified:
+	// ">= now-1h" matched 0-of-3 fresh rows when the bound was UTC, 3-of-3
+	// when local). Binding the bound in the WRITER's zone (Local) makes the
+	// textual ordering agree with chronological ordering. Harmless in a UTC
+	// deployment (zones coincide); mandatory wherever the process TZ differs.
 	if ts := req.GetFrom(); ts != nil {
-		query = query.Where("created_at >= ?", ts.AsTime())
+		query = query.Where("created_at >= ?", ts.AsTime().Local())
 	}
 	if ts := req.GetTo(); ts != nil {
-		query = query.Where("created_at < ?", ts.AsTime())
+		query = query.Where("created_at < ?", ts.AsTime().Local())
 	}
 	var events []models.AuditEvent
 	if err := query.Order("id DESC").Limit(limit).Find(&events).Error; err != nil {
@@ -7767,7 +7785,10 @@ func (s *Server) ListAuditEvents(ctx context.Context, req *dbpb.ListAuditEventsR
 func (s *Server) PruneAuditEvents(ctx context.Context, req *dbpb.PruneAuditEventsRequest) (*dbpb.PruneAuditEventsResponse, error) {
 	query := s.db.WithContext(ctx).Model(&models.AuditEvent{})
 	if ts := req.GetCreatedBefore(); ts != nil {
-		query = query.Where("created_at < ?", ts.AsTime())
+		// .Local(): same timezone-normalization requirement as ListAuditEvents
+		// (see there) — a UTC bound compared against local-rendered created_at
+		// values can prune rows NEWER than the cutoff.
+		query = query.Where("created_at < ?", ts.AsTime().Local())
 	}
 	result := query.Delete(&models.AuditEvent{})
 	if result.Error != nil {
