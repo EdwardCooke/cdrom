@@ -74,8 +74,11 @@ heap, GC, CPU, file descriptors) comes for free.
   `cdrom_api_log_stream_bytes_total`, `cdrom_api_tokens_minted_total`,
   `cdrom_api_secrets_decrypted_total`, `cdrom_api_notifications_total`,
   `cdrom_api_restorations_total{door,result}` (F-22: resumption initiations
-  by door — `armed` (job-mediated) / `manual` (operator) — and outcome). Probe
-  steps surface through the worker's generic step counters
+  by door — `armed` (job-mediated) / `manual` (operator) — and outcome),
+  `cdrom_admissions_total{verdict}` (PLANNED, F-28.4 S3: the admission gate's
+  verdicts — `admitted` / `deactivated` / `deprovisioned` / `unknown_rejected`
+  / `no_roles_rejected` — judged PER REQUEST, no cache). Probe steps surface
+  through the worker's generic step counters
   (`cdrom_worker_steps_total{step_type="probe"}`).
 - **Scheduler** — `cdrom_scheduler_dispatches_total{outcome}`,
   `cdrom_scheduler_admission_checks_total` / `cdrom_scheduler_admission_duration_seconds`,
