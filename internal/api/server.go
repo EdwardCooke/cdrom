@@ -125,6 +125,10 @@ type Server struct {
 	// (F-20). It is kept in sync by handleWebSocket (incremented on connect,
 	// decremented on close) and mirrored to the cdrom_api_ws_clients gauge.
 	wsClients atomic.Int64
+	// idpSysDesc is the IdP client used to populate the `idp` segment of
+	// GET /api/system/info (F-28.4 Slice 4). Nil in tests that do not wire it
+	// (the segment then reports null). Attached via SetIdPSystemDescriber.
+	idpSysDesc idpSystemDescriber
 	// cfg is the API's configuration the server needs beyond its clients
 	// (F-21.5.1): the system-default refresh interval and the global
 	// periodic-refresh override gate. Populated via SetConfig; nil in tests
@@ -438,6 +442,9 @@ func (s *Server) Handler() http.Handler {
 	// disabled (501) when username/password auth is not enabled.
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/register", s.register)
+	// System info (F-28.4 Slice 4): unauthenticated, strictly non-secret
+	// whitelist the UI reads on load to drive show/hide decisions.
+	mux.HandleFunc("GET /api/system/info", s.systemInfo)
 	mux.HandleFunc("GET /api/users", s.listUsers)
 	mux.HandleFunc("POST /api/users", s.createUser)
 	mux.HandleFunc("PUT /api/users/{id}", s.updateUser)
@@ -2875,18 +2882,42 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid body: %v", err)
 		return
 	}
-	// Fetch the user's current profile so the audit event can record what
-	// changed (old value vs new value, F-15). A failure to fetch it does not
-	// block the update. Tombstoned users are readable here (include_deleted)
-	// so the audit OldValue stays informative; the update itself still
-	// refuses them (below).
+	// Fetch the user's current profile BY ID (one row — never the whole
+	// directory; the table is big and this is a hot admin path) so the audit
+	// event can record what changed (old value vs new value, F-15) and the
+	// restricted-write lock (below) can learn the user's provenance.
+	// Tombstoned users are readable here (include_deleted) so the audit
+	// OldValue stays informative; the update itself still refuses them. A
+	// NotFound (the row vanished racing us) does not block the update — the
+	// IdP 404s it; any OTHER fetch error aborts (the lock cannot be judged
+	// without the row).
+	var currentUser *dbpb.IDPUser
 	oldValue := ""
-	if users, err := s.userpass.ListUsers(r.Context(), true); err == nil {
-		for i := range users {
-			if users[i].ID == id {
-				oldValue = auditJSON(map[string]any{"username": users[i].Username, "roles": users[i].Roles})
-				break
-			}
+	if s.clients.Database != nil {
+		cur, err := s.clients.Database.GetIDPUser(r.Context(), &dbpb.GetIDPUserRequest{Id: id, IncludeDeleted: true})
+		switch {
+		case err == nil:
+			currentUser = cur
+			oldValue = auditJSON(map[string]any{"username": cur.GetUsername(), "roles": cur.GetRoles()})
+		case status.Code(err) == codes.NotFound:
+			// Vanished racing us: proceed; the IdP's update 404s it.
+		default:
+			grpcError(w, err)
+			return
+		}
+	}
+	// Restricted-write lock (F-28.4 Slice 4): a SCIM-managed user's identity
+	// fields (username, names, email, password) are controlled by the
+	// corporate directory — any touch is refused (409), DETECTED BY PRESENCE
+	// (a non-empty field in the payload) rather than by value comparison, so
+	// a VALUE-PRESERVING no-op still trips it. Roles-only payloads pass, and
+	// DELETE is unaffected. JIT (provisioned, no externalId) and local users
+	// remain fully editable.
+	if currentUser != nil && currentUser.GetProvisioned() && currentUser.GetExternalId() != "" {
+		if req.Username != "" || req.FirstName != "" || req.LastName != "" || req.Email != "" || req.Password != "" {
+			httpError(w, http.StatusConflict,
+				"identity fields of a SCIM-managed user are controlled by the identity provider; only roles may be edited here")
+			return
 		}
 	}
 	result, err := s.userpass.UpdateUser(r.Context(), id, req)
@@ -2929,16 +2960,21 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "user id is required")
 		return
 	}
-	// Fetch the user's profile before deprovisioning it so the audit event
-	// can record the user that was removed (F-15). A failure to fetch it does
-	// not block the delete.
+	// Fetch the user's profile BY ID before deprovisioning it so the audit
+	// event can record the user that was removed (F-15) — one row, not the
+	// whole directory. A NotFound (vanished racing us) does not block the
+	// delete; any other fetch error aborts.
 	oldValue := ""
-	if users, err := s.userpass.ListUsers(r.Context(), true); err == nil {
-		for i := range users {
-			if users[i].ID == id {
-				oldValue = auditJSON(map[string]any{"username": users[i].Username, "roles": users[i].Roles})
-				break
-			}
+	if s.clients.Database != nil {
+		cur, err := s.clients.Database.GetIDPUser(r.Context(), &dbpb.GetIDPUserRequest{Id: id, IncludeDeleted: true})
+		switch {
+		case err == nil:
+			oldValue = auditJSON(map[string]any{"username": cur.GetUsername(), "roles": cur.GetRoles()})
+		case status.Code(err) == codes.NotFound:
+			// Gone already: proceed; the IdP's delete 404s it.
+		default:
+			grpcError(w, err)
+			return
 		}
 	}
 	if err := s.userpass.DeleteUser(r.Context(), id); err != nil {

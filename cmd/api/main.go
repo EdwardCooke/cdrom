@@ -295,6 +295,11 @@ func main() {
 	// UI credential holding the scim-keys.* permissions).
 	apiServer.SetScimKeyClient(api.NewScimKeyClient(clients.Database, idpClient))
 
+	// System info (F-28.4 Slice 4): the API's GET /api/system/info reads the
+	// IdP's enablement flags through DescribeSystem (lazy dial — a down IdP
+	// yields a null segment, never a failed endpoint).
+	apiServer.SetIdPSystemDescriber(idpClient)
+
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
 	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
 	// endpoint is registered on a parent mux so it is reachable without a
@@ -303,9 +308,11 @@ func main() {
 	// handler. When username/password auth is enabled the sign-in entry points
 	// (/api/login, /api/register) are exempted from the token check so they
 	// stay reachable without a token.
-	var exempt []string
+	// GET /api/system/info is ALWAYS exempt (unauthenticated by design — the
+	// UI reads it before it holds a token; it is a non-secret whitelist).
+	exempt := []string{"/api/system/info"}
 	if cfg.Auth.UserPassEnabled {
-		exempt = []string{"/api/login", "/api/register"}
+		exempt = append(exempt, "/api/login", "/api/register")
 	}
 	// The UI HTTP surface's metrics (F-20): the request/duration middleware
 	// wraps the inner mux (inside auth, so it observes authenticated requests

@@ -58,6 +58,12 @@ service Artifacts {
 
   // DeleteBlob removes a blob (nothing else). A missing id is a no-op.
   rpc DeleteBlob(BlobRef) returns (google.protobuf.Empty);
+
+  // Describe (F-28.4 Slice 4) reports the store KIND this service is backed
+  // by (today always "filesystem"; the knob anticipates S3/Azure Blob). Feeds
+  // the API's GET /api/system/info aggregator. Strictly non-secret: a single
+  // capability string, no roots, credentials, or addresses.
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
 }
 
 // BlobRef identifies a blob by its id (plus an optional read offset).
@@ -97,4 +103,14 @@ message CopyBlobRequest {
   string src = 1;
   // dst is the id to replicate it TO (must not exist yet).
   string dst = 2;
+}
+
+// DescribeRequest is empty: the service describes itself.
+message DescribeRequest {}
+
+// DescribeResponse reports the backing store kind (F-28.4 Slice 4).
+message DescribeResponse {
+  // store_kind is the configured blob-store kind ("filesystem" today; the
+  // value of artifacts_store / CDROM_ARTIFACTS_STORE, lowercased).
+  string store_kind = 1;
 }

@@ -26,6 +26,7 @@ const (
 	Artifacts_AppendBlob_FullMethodName = "/cdrom.artifacts.v1.Artifacts/AppendBlob"
 	Artifacts_CopyBlob_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/CopyBlob"
 	Artifacts_DeleteBlob_FullMethodName = "/cdrom.artifacts.v1.Artifacts/DeleteBlob"
+	Artifacts_Describe_FullMethodName   = "/cdrom.artifacts.v1.Artifacts/Describe"
 )
 
 // ArtifactsClient is the client API for Artifacts service.
@@ -79,6 +80,11 @@ type ArtifactsClient interface {
 	CopyBlob(ctx context.Context, in *CopyBlobRequest, opts ...grpc.CallOption) (*BlobStat, error)
 	// DeleteBlob removes a blob (nothing else). A missing id is a no-op.
 	DeleteBlob(ctx context.Context, in *BlobRef, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Describe (F-28.4 Slice 4) reports the store KIND this service is backed
+	// by (today always "filesystem"; the knob anticipates S3/Azure Blob). Feeds
+	// the API's GET /api/system/info aggregator. Strictly non-secret: a single
+	// capability string, no roots, credentials, or addresses.
+	Describe(ctx context.Context, in *DescribeRequest, opts ...grpc.CallOption) (*DescribeResponse, error)
 }
 
 type artifactsClient struct {
@@ -164,6 +170,16 @@ func (c *artifactsClient) DeleteBlob(ctx context.Context, in *BlobRef, opts ...g
 	return out, nil
 }
 
+func (c *artifactsClient) Describe(ctx context.Context, in *DescribeRequest, opts ...grpc.CallOption) (*DescribeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DescribeResponse)
+	err := c.cc.Invoke(ctx, Artifacts_Describe_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ArtifactsServer is the server API for Artifacts service.
 // All implementations must embed UnimplementedArtifactsServer
 // for forward compatibility.
@@ -215,6 +231,11 @@ type ArtifactsServer interface {
 	CopyBlob(context.Context, *CopyBlobRequest) (*BlobStat, error)
 	// DeleteBlob removes a blob (nothing else). A missing id is a no-op.
 	DeleteBlob(context.Context, *BlobRef) (*emptypb.Empty, error)
+	// Describe (F-28.4 Slice 4) reports the store KIND this service is backed
+	// by (today always "filesystem"; the knob anticipates S3/Azure Blob). Feeds
+	// the API's GET /api/system/info aggregator. Strictly non-secret: a single
+	// capability string, no roots, credentials, or addresses.
+	Describe(context.Context, *DescribeRequest) (*DescribeResponse, error)
 	mustEmbedUnimplementedArtifactsServer()
 }
 
@@ -242,6 +263,9 @@ func (UnimplementedArtifactsServer) CopyBlob(context.Context, *CopyBlobRequest) 
 }
 func (UnimplementedArtifactsServer) DeleteBlob(context.Context, *BlobRef) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteBlob not implemented")
+}
+func (UnimplementedArtifactsServer) Describe(context.Context, *DescribeRequest) (*DescribeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Describe not implemented")
 }
 func (UnimplementedArtifactsServer) mustEmbedUnimplementedArtifactsServer() {}
 func (UnimplementedArtifactsServer) testEmbeddedByValue()                   {}
@@ -343,6 +367,24 @@ func _Artifacts_DeleteBlob_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Artifacts_Describe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DescribeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArtifactsServer).Describe(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Artifacts_Describe_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArtifactsServer).Describe(ctx, req.(*DescribeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Artifacts_ServiceDesc is the grpc.ServiceDesc for Artifacts service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -361,6 +403,10 @@ var Artifacts_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteBlob",
 			Handler:    _Artifacts_DeleteBlob_Handler,
+		},
+		{
+			MethodName: "Describe",
+			Handler:    _Artifacts_Describe_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

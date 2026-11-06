@@ -58,6 +58,10 @@ type LoginResult struct {
 	// Email is the user's optional electronic-mail address (may be "").
 	Email string   `json:"email"`
 	Roles []string `json:"roles"`
+	// Channel is WHICH credential satisfied the login (F-28.4 Slice 4):
+	// "standing" (permanent password) or "temporal" (break-glass, inside its
+	// window). Surfaced so the UI can explain a break-glass sign-in.
+	Channel string `json:"channel,omitempty"`
 }
 
 // UserResult is the profile of a registered user (never the password hash).
@@ -79,6 +83,11 @@ type UserResult struct {
 	// Provisioned marks an externally-sourced record (SCIM/JIT) (F-28.3);
 	// such users sign in via SSO only.
 	Provisioned bool `json:"provisioned"`
+	// ExternalID is the SCIM-origin identity anchor (F-28.4). Present for
+	// SCIM-managed rows; EMPTY for JIT rows (provisioned, no externalId) and
+	// locally-registered rows. Together with Provisioned it tells the admin
+	// API which identity fields are LOCKED (SCIM-managed) vs freely editable.
+	ExternalID string `json:"external_id,omitempty"`
 }
 
 // RegisterRequest is the request to create a user: the required profile
@@ -152,6 +161,7 @@ func (c *grpcUserPassClient) Login(ctx context.Context, username, password strin
 		LastName:    u.GetLastName(),
 		Email:       u.GetEmail(),
 		Roles:       nonNil(u.GetRoles()),
+		Channel:     resp.GetChannel(),
 	}, nil
 }
 
@@ -232,6 +242,7 @@ func userResult(u *dbpb.IDPUser) *UserResult {
 		Roles:       nonNil(u.GetRoles()),
 		Active:      u.GetActive(),
 		Provisioned: u.GetProvisioned(),
+		ExternalID:  u.GetExternalId(),
 	}
 	if ts := u.GetDeletedAt(); ts != nil {
 		t := ts.AsTime()

@@ -49,6 +49,7 @@ const (
 	IdP_ResetServiceAccountLockout_FullMethodName = "/cdrom.idp.v1.IdP/ResetServiceAccountLockout"
 	IdP_DeriveScimKey_FullMethodName              = "/cdrom.idp.v1.IdP/DeriveScimKey"
 	IdP_AdmitPrincipal_FullMethodName             = "/cdrom.idp.v1.IdP/AdmitPrincipal"
+	IdP_DescribeSystem_FullMethodName             = "/cdrom.idp.v1.IdP/DescribeSystem"
 )
 
 // IdPClient is the client API for IdP service.
@@ -199,9 +200,17 @@ type IdPClient interface {
 	//     NO row created, fail-closed) and the verdict is ADMITTED. Returning
 	//     JIT users REFRESH name/email from the args and GROW roles
 	//     MONOTONICALLY (stored ∪ incoming).
-	// The username undergoes LIGHT SANITY BOUNDS (length/charset); violations
-	// are DENIED (UNKNOWN_REJECTED) with no row created.
+	// The subject is TRUSTED AS-IS (trusted-issuer ruling, 2026-11-05): no
+	// charset/shape bounds — subjects arrive from the configured issuers the
+	// operator elected to honor (Azure UPNs carry "@", emails-as-usernames are
+	// common; the directory treats usernames as opaque unique keys). Only an
+	// empty-after-trim subject is refused (InvalidArgument, not a verdict).
 	AdmitPrincipal(ctx context.Context, in *AdmitPrincipalRequest, opts ...grpc.CallOption) (*AdmitPrincipalResponse, error)
+	// DescribeSystem (F-28.4 Slice 4) reports the IdP's OWN enablement flags —
+	// a strictly non-secret whitelist feeding the API's GET /api/system/info
+	// aggregator (which drives the UI's show/hide decisions). It reveals
+	// capability, never material: no addresses, keys, peppers, or DSNs.
+	DescribeSystem(ctx context.Context, in *DescribeSystemRequest, opts ...grpc.CallOption) (*DescribeSystemResponse, error)
 }
 
 type idPClient struct {
@@ -502,6 +511,16 @@ func (c *idPClient) AdmitPrincipal(ctx context.Context, in *AdmitPrincipalReques
 	return out, nil
 }
 
+func (c *idPClient) DescribeSystem(ctx context.Context, in *DescribeSystemRequest, opts ...grpc.CallOption) (*DescribeSystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DescribeSystemResponse)
+	err := c.cc.Invoke(ctx, IdP_DescribeSystem_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdPServer is the server API for IdP service.
 // All implementations must embed UnimplementedIdPServer
 // for forward compatibility.
@@ -650,9 +669,17 @@ type IdPServer interface {
 	//     NO row created, fail-closed) and the verdict is ADMITTED. Returning
 	//     JIT users REFRESH name/email from the args and GROW roles
 	//     MONOTONICALLY (stored ∪ incoming).
-	// The username undergoes LIGHT SANITY BOUNDS (length/charset); violations
-	// are DENIED (UNKNOWN_REJECTED) with no row created.
+	// The subject is TRUSTED AS-IS (trusted-issuer ruling, 2026-11-05): no
+	// charset/shape bounds — subjects arrive from the configured issuers the
+	// operator elected to honor (Azure UPNs carry "@", emails-as-usernames are
+	// common; the directory treats usernames as opaque unique keys). Only an
+	// empty-after-trim subject is refused (InvalidArgument, not a verdict).
 	AdmitPrincipal(context.Context, *AdmitPrincipalRequest) (*AdmitPrincipalResponse, error)
+	// DescribeSystem (F-28.4 Slice 4) reports the IdP's OWN enablement flags —
+	// a strictly non-secret whitelist feeding the API's GET /api/system/info
+	// aggregator (which drives the UI's show/hide decisions). It reveals
+	// capability, never material: no addresses, keys, peppers, or DSNs.
+	DescribeSystem(context.Context, *DescribeSystemRequest) (*DescribeSystemResponse, error)
 	mustEmbedUnimplementedIdPServer()
 }
 
@@ -749,6 +776,9 @@ func (UnimplementedIdPServer) DeriveScimKey(context.Context, *DeriveScimKeyReque
 }
 func (UnimplementedIdPServer) AdmitPrincipal(context.Context, *AdmitPrincipalRequest) (*AdmitPrincipalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdmitPrincipal not implemented")
+}
+func (UnimplementedIdPServer) DescribeSystem(context.Context, *DescribeSystemRequest) (*DescribeSystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DescribeSystem not implemented")
 }
 func (UnimplementedIdPServer) mustEmbedUnimplementedIdPServer() {}
 func (UnimplementedIdPServer) testEmbeddedByValue()             {}
@@ -1293,6 +1323,24 @@ func _IdP_AdmitPrincipal_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IdP_DescribeSystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DescribeSystemRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).DescribeSystem(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_DescribeSystem_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).DescribeSystem(ctx, req.(*DescribeSystemRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IdP_ServiceDesc is the grpc.ServiceDesc for IdP service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1415,6 +1463,10 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AdmitPrincipal",
 			Handler:    _IdP_AdmitPrincipal_Handler,
+		},
+		{
+			MethodName: "DescribeSystem",
+			Handler:    _IdP_DescribeSystem_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

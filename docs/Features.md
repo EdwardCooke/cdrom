@@ -271,6 +271,18 @@ Tick each feature off as it lands.
       exempt; `cdrom_admissions_total{verdict}`; trust-the-issuer subject
       handling (no charset bounds — Azure UPNs/'emails-as-usernames');
       dev-shim `?roles=` corporate-issuer simulation powering the e2e gate
-      legs)_
+      legs; S4 operator switches + restricted writes + system info landed:
+      `idp.local_login_enabled` (default on; false = SSO-ONLY — the IdP
+      refuses standing logins and registration, admitting only temporal
+      break-glass logins; a calm mode switch, no boot alarm), `LoginResponse.
+      channel` (`standing`|`temporal`), the `PUT /api/users/{id}` restricted-
+      write lock (any identity-field touch on a SCIM-managed user ⇒ 409,
+      detected by PRESENCE so value-preserving no-ops trip it; roles-only and
+      DELETE pass; JIT/local users fully editable; the row's provenance is
+      fetched BY ID from the Database service — one row, never a whole-table
+      list), and the unauthenticated
+      `GET /api/system/info` aggregator (API-local flags + IdP `DescribeSystem`
+      + Artifacts `Describe`; a degraded/unwired component ⇒ `null` segment,
+      endpoint still 200; strictly non-secret)_
 - [ ] F-28.5 SCIM group management
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

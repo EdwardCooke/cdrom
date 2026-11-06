@@ -70,6 +70,9 @@ func main() {
 		os.Exit(1)
 	}
 	srvImpl := artifacts.NewServer(store)
+	// Report the store kind (F-28.4 Slice 4): NewStore failed fast on an
+	// unimplementable kind, so the resolved config value IS the live kind.
+	srvImpl.SetStoreKind(artifacts.StoreKind(cfg.ArtifactsStore))
 	// Attach the Artifacts service's Prometheus metric set (F-20) so the
 	// operations record their counters, bytes, and durations.
 	srvImpl.SetMetrics(artMetrics)

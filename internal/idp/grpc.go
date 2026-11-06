@@ -199,23 +199,32 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 	// Evaluation is CONSTANT-WORK: whichever hash(es) exist are ALWAYS
 	// verified (the wall clock only gates ACCEPTANCE, never WHETHER we
 	// verify), so a lapse contributes no observable timing difference.
+	// CHANNEL MARKING (F-28.4 Slice 4): which credential satisfied the login
+	// (standing vs temporal) is reported on the response so the API's
+	// local-login switch can admit only temporal sign-ins.
 	temporalWindow := user.TempPasswordValidUntil != nil && time.Now().Before(*user.TempPasswordValidUntil)
 	var matched bool
+	var channel string
 	switch {
 	case user.PasswordHash != "" && user.TempPasswordHash != "":
 		// Standing + temporal: accept EITHER (temporal only inside its
 		// window). Both are verified.
-		matched = VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword())
-		if !matched {
-			matched = temporalWindow && VerifyPassword(s.cfg.PasswordPepper, user.TempPasswordHash, req.GetPassword())
+		standingMatches := VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword())
+		temporalMatches := VerifyPassword(s.cfg.PasswordPepper, user.TempPasswordHash, req.GetPassword())
+		matched = standingMatches || (temporalWindow && temporalMatches)
+		channel = "standing"
+		if !standingMatches && temporalMatches {
+			channel = "temporal"
 		}
 	case user.PasswordHash != "":
 		matched = VerifyPassword(s.cfg.PasswordPepper, user.PasswordHash, req.GetPassword())
+		channel = "standing"
 	default:
 		// Temporal-only (the break-glass shape): accept iff the presented
 		// password matches AND the window holds.
 		temporalMatches := VerifyPassword(s.cfg.PasswordPepper, user.TempPasswordHash, req.GetPassword())
 		matched = temporalWindow && temporalMatches
+		channel = "temporal"
 		if temporalMatches && !temporalWindow {
 			// Lazy hygiene: the window LAPSED — void the credential now so
 			// the periodic sweep (the backstop) catches up promptly.
@@ -230,6 +239,16 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 			s.metrics.RecordLogin("invalid_password")
 		}
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+	// Local-login switch (F-28.4 Slice 4): when OFF the IdP is SSO-ONLY —
+	// standing-channel sign-ins are refused (a distinct denial), while
+	// TEMPORAL (break-glass) holders still get through. Registration is
+	// likewise refused (see Register).
+	if !s.cfg.LocalLoginEnabled && channel == "standing" {
+		if s.metrics != nil {
+			s.metrics.RecordLogin("local_login_disabled")
+		}
+		return nil, status.Error(codes.PermissionDenied, "local login is disabled; sign in via SSO")
 	}
 	audience := req.GetAudience()
 	if audience == "" {
@@ -275,6 +294,7 @@ func (s *GRPCServer) Login(ctx context.Context, req *idppb.LoginRequest) (*idppb
 		ExpiresIn:   int64(s.cfg.TokenLifetime.Seconds()),
 		IdToken:     token,
 		User:        userToProto(user),
+		Channel:     channel,
 	}, nil
 }
 
@@ -307,6 +327,12 @@ func (s *GRPCServer) Register(ctx context.Context, req *idppb.RegisterRequest) (
 	username := req.GetUsername()
 	if username == "" || req.GetPassword() == "" {
 		return nil, status.Error(codes.InvalidArgument, "username and password are required")
+	}
+	// Local-login switch (F-28.4 Slice 4): when OFF the IdP is SSO-ONLY — no
+	// NEW local accounts may be created (standing sign-in is equally
+	// refused); break-glass coinage bypasses Register entirely.
+	if !s.cfg.LocalLoginEnabled {
+		return nil, status.Error(codes.PermissionDenied, "local login is disabled; sign in via SSO")
 	}
 	// Reservation (F-28.3): a tombstoned username is refused, not recreated —
 	// the identity is reserved for restoration via reactivation.
@@ -1241,6 +1267,19 @@ func (s *GRPCServer) ResetServiceAccountLockout(ctx context.Context, req *idppb.
 // through the Database service), so the RPC is available even before any pool
 // rows exist (the bootstrap ritual). The IdP is the ONLY pepper-touching site
 // — the pepper never leaves this process.
+// DescribeSystem (F-28.4 Slice 4) reports the IdP's OWN enablement flags —
+// a strictly non-secret whitelist feeding the API's GET /api/system/info
+// aggregator (which drives the UI's show/hide decisions). It reveals
+// CAPABILITY, never material: no addresses, keys, peppers, or DSNs travel
+// here.
+func (s *GRPCServer) DescribeSystem(ctx context.Context, req *idppb.DescribeSystemRequest) (*idppb.DescribeSystemResponse, error) {
+	return &idppb.DescribeSystemResponse{
+		ScimEnabled:       s.cfg.Scim.Enabled,
+		LocalLoginEnabled: s.cfg.LocalLoginEnabled,
+		BreakGlassEnabled: s.cfg.BreakGlassEnabled,
+	}, nil
+}
+
 func (s *GRPCServer) DeriveScimKey(ctx context.Context, req *idppb.DeriveScimKeyRequest) (*idppb.DeriveScimKeyResponse, error) {
 	plaintext, err := NewScimKey()
 	if err != nil {

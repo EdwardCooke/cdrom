@@ -16,7 +16,10 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// testConfig returns a valid IdP config.
+// testConfig returns a valid IdP config. It mirrors the PRODUCTION defaults
+// for the behavioral switches (local login ON, break-glass ON) so that tests
+// constructing a config via this helper behave like a deployed IdP; a test
+// that wants SSO-only mode sets LocalLoginEnabled: false explicitly.
 func testConfig(keyLifetime, rotateBefore time.Duration) config.IdPConfig {
 	return config.IdPConfig{
 		Issuer:        "http://127.0.0.1:7104",
@@ -24,6 +27,10 @@ func testConfig(keyLifetime, rotateBefore time.Duration) config.IdPConfig {
 		RotateBefore:  rotateBefore,
 		TokenLifetime: time.Hour,
 		CheckInterval: time.Hour,
+		// Mirror production defaults (config.LoadDefaults): the local-login
+		// switch is ON unless a test opts into SSO-only mode. Without this the
+		// zero value (false) would refuse every standing login in tests.
+		LocalLoginEnabled: true,
 	}
 }
 

@@ -233,6 +233,13 @@ db:
 #  #  default_ttl: 24h
 #  #  max_ttl: 168h
 #  #  live_cap: 3
+#
+#  # Local-login switch (F-28.4 Slice 4). True (default): username/password
+#  # sign-in (/api/login, /api/register) is permitted ALONGSIDE SSO. False:
+#  # SSO-ONLY — the IdP refuses standing logins and registration, admitting
+#  # only TEMPORAL (break-glass) logins. A calm mode switch, not an alarm.
+#  # Env: CDROM_IDP_LOCAL_LOGIN_ENABLED.
+#  #local_login_enabled: true
 
 # gRPC address of the IdP's API-only surface (job-token minting and user
 # management). The API dials it (over mTLS when the tls section is set) to

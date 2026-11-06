@@ -778,6 +778,13 @@ type IdPConfig struct {
 	// is refused with 429 until some expire. Zero (unset) resolves to the
 	// default of 3 via EffectiveBreakGlassLiveCap.
 	BreakGlassLiveCap int
+	// LocalLoginEnabled governs username/password sign-in (F-28.4 Slice 4).
+	// True (the default): standing users and break-glass holders sign in via
+	// /api/login and /api/register is open. False: SSO-ONLY — the IdP refuses
+	// STANDING logins and registration, admitting only TEMPORAL (break-glass)
+	// logins. A calm mode switch, not an alarm: disabling it declares "SSO is
+	// the only door" (break-glass remains the guaranteed back-door).
+	LocalLoginEnabled bool
 }
 
 // DefaultBreakGlassEnabled is the break-glass hatch's default ON state
@@ -794,6 +801,12 @@ const MaxBreakGlassTTL = 7 * 24 * time.Hour
 // DefaultBreakGlassLiveCap is the default bound on live break-glass admins
 // (F-28.3).
 const DefaultBreakGlassLiveCap = 3
+
+// DefaultLocalLoginEnabled is the local-login switch's default ON state
+// (F-28.4 Slice 4): username/password sign-in is permitted unless explicitly
+// disabled (disabled = SSO-only mode; break-glass temporal logins are always
+// admitted).
+const DefaultLocalLoginEnabled = true
 
 // EffectiveBreakGlassDefaultTTL resolves the default temporal-password
 // lifetime (zero/negative -> the 24-hour default).
@@ -1098,6 +1111,7 @@ func LoadWithFile(file string) (*Config, error) {
 			BreakGlassDefaultTTL: DefaultBreakGlassTTL,
 			BreakGlassMaxTTL:     MaxBreakGlassTTL,
 			BreakGlassLiveCap:    DefaultBreakGlassLiveCap,
+			LocalLoginEnabled:    DefaultLocalLoginEnabled,
 		},
 		IdPGRPCAddress: DefaultIdPGRPCAddress,
 		GRPCAuth:       GRPCAuthConfig{},
@@ -1244,6 +1258,8 @@ type fileConfig struct {
 			MaxTTL     *string `yaml:"max_ttl"`
 			LiveCap    *int    `yaml:"live_cap"`
 		} `yaml:"break_glass"`
+		// LocalLoginEnabled toggles username/password sign-in (F-28.4 Slice 4).
+		LocalLoginEnabled *bool `yaml:"local_login_enabled"`
 	} `yaml:"idp"`
 	IdPGRPCAddress *string `yaml:"idp_grpc_address"`
 	GRPCAuth       *struct {
@@ -1531,6 +1547,9 @@ func applyFile(cfg *Config, path string) error {
 				cfg.IdP.BreakGlassLiveCap = *bg.LiveCap
 			}
 		}
+		if f.IdP.LocalLoginEnabled != nil {
+			cfg.IdP.LocalLoginEnabled = *f.IdP.LocalLoginEnabled
+		}
 	}
 	if f.IdPGRPCAddress != nil {
 		cfg.IdPGRPCAddress = *f.IdPGRPCAddress
@@ -1790,6 +1809,11 @@ func applyEnv(cfg *Config) {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.IdP.BreakGlassLiveCap = n
 		}
+	}
+	// Local-login switch (F-28.4 Slice 4): false = SSO-only (standing logins
+	// and registration refused; break-glass temporal logins still admitted).
+	if v := os.Getenv("CDROM_IDP_LOCAL_LOGIN_ENABLED"); v != "" {
+		cfg.IdP.LocalLoginEnabled = v == "true" || v == "1"
 	}
 	// SCIM provisioning surface (F-28.1). CDROM_SCIM_GROUP_ROLE_MAPPINGS is a
 	// comma-separated list of "groupName=roleName" pairs.

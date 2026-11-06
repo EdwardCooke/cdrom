@@ -156,9 +156,18 @@ service IdP {
   //     NO row created, fail-closed) and the verdict is ADMITTED. Returning
   //     JIT users REFRESH name/email from the args and GROW roles
   //     MONOTONICALLY (stored ∪ incoming).
-  // The username undergoes LIGHT SANITY BOUNDS (length/charset); violations
-  // are DENIED (UNKNOWN_REJECTED) with no row created.
+  // The subject is TRUSTED AS-IS (trusted-issuer ruling, 2026-11-05): no
+  // charset/shape bounds — subjects arrive from the configured issuers the
+  // operator elected to honor (Azure UPNs carry "@", emails-as-usernames are
+  // common; the directory treats usernames as opaque unique keys). Only an
+  // empty-after-trim subject is refused (InvalidArgument, not a verdict).
   rpc AdmitPrincipal(AdmitPrincipalRequest) returns (AdmitPrincipalResponse);
+
+  // DescribeSystem (F-28.4 Slice 4) reports the IdP's OWN enablement flags —
+  // a strictly non-secret whitelist feeding the API's GET /api/system/info
+  // aggregator (which drives the UI's show/hide decisions). It reveals
+  // capability, never material: no addresses, keys, peppers, or DSNs.
+  rpc DescribeSystem(DescribeSystemRequest) returns (DescribeSystemResponse);
 }
 
 // MintJobTokenRequest is the request to mint a job token.
@@ -223,6 +232,11 @@ message LoginResponse {
   string id_token = 4;
   // user is the signed-in user's profile (never the password hash).
   cdrom.db.v1.IDPUser user = 5;
+  // channel is WHICH credential satisfied the login (F-28.4 Slice 4):
+  // "standing" (the user's permanent password) or "temporal" (a break-glass
+  // password inside its validity window). Lets the API's local-login switch
+  // admit only temporal sign-ins while refusing standing ones.
+  string channel = 6;
 }
 
 // RegisterRequest is the request to create a user: the required profile
@@ -685,9 +699,9 @@ enum AdmissionVerdict {
   DEACTIVATED = 2;
   // DEPROVISIONED: the row is tombstoned (denied; departed).
   DEPROVISIONED = 3;
-  // UNKNOWN_REJECTED: no row exists and JIT is unavailable — either SCIM is
-  // enabled (the corporate directory is the sole source of truth) or the
-  // username failed the sanity bounds (denied; no row created).
+  // UNKNOWN_REJECTED: no row exists and JIT is unavailable — SCIM is
+  // enabled (the corporate directory is the sole source of truth; denied,
+  // no row created).
   UNKNOWN_REJECTED = 4;
   // NO_ROLES_REJECTED: JIT would apply but the claim-derived role set is
   // EMPTY (denied; no row created — fail-closed).
@@ -700,7 +714,10 @@ enum AdmissionVerdict {
 // display name, the email, and the CLAIM-DERIVED role set.
 message AdmitPrincipalRequest {
   // username is the principal's login identifier (the token's subject claim,
-  // or the API-key owner). REQUIRED. Undergoes the sanity bounds.
+  // or the API-key owner). REQUIRED. Trusted as presented (trusted-issuer
+  // ruling): no charset/shape bounds — the directory treats usernames as
+  // opaque unique keys. Only an empty-after-trim value is refused
+  // (InvalidArgument, not a verdict).
   string username = 1;
   // name is the display name (OPTIONAL; refreshed onto JIT rows).
   string name = 2;
@@ -722,4 +739,28 @@ message AdmitPrincipalResponse {
   // nil otherwise. Its roles reflect the EFFECTIVE set (monotonic growth for
   // JIT, stored set for known users).
   cdrom.db.v1.IDPUser user = 2;
+}
+
+// ---------------------------------------------------------------------------
+// System description (F-28.4 Slice 4)
+// ---------------------------------------------------------------------------
+
+// DescribeSystemRequest is empty: the IdP describes ITSELF.
+message DescribeSystemRequest {}
+
+// DescribeSystemResponse is the IdP's OWN enablement flags — a strictly
+// non-secret whitelist consumed by the API's GET /api/system/info aggregator
+// (which drives the UI's show/hide decisions). Capability only: no
+// addresses, keys, peppers, or DSNs ever travel here.
+message DescribeSystemResponse {
+  // scim_enabled reports whether the SCIM 2.0 user-provisioning surface
+  // (F-28.1) is mounted.
+  bool scim_enabled = 1;
+  // local_login_enabled reports whether username/password sign-in is
+  // permitted (F-28.4 Slice 4). When false the IdP admits only TEMPORAL
+  // (break-glass) logins and refuses registration.
+  bool local_login_enabled = 2;
+  // break_glass_enabled reports whether the break-glass escape hatch
+  // (F-28.3) is armed.
+  bool break_glass_enabled = 3;
 }

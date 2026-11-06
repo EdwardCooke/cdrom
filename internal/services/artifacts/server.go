@@ -37,6 +37,10 @@ const maxChunkSize = 4 << 20 // 4 MiB
 type Server struct {
 	artifactspb.UnimplementedArtifactsServer
 	store Store
+	// storeKind names the backing store implementation (reported by Describe,
+	// F-28.4 Slice 4). Set via SetStoreKind; NewFilesystemServer defaults it
+	// to "filesystem". Empty when unset (Describe then reports "").
+	storeKind StoreKind
 	// metrics records the Artifacts service's Prometheus metrics (F-20): the
 	// operation counters (by op and gRPC status code), the bytes moved, and
 	// the operation durations. It is nil when metrics are disabled, in which
@@ -47,6 +51,19 @@ type Server struct {
 // NewServer creates an Artifacts gRPC service over the given store.
 func NewServer(store Store) *Server {
 	return &Server{store: store}
+}
+
+// SetStoreKind records the backing store's kind (F-28.4 Slice 4) so Describe
+// can report it. Called by the binary from its resolved config.
+func (s *Server) SetStoreKind(kind StoreKind) {
+	s.storeKind = kind
+}
+
+// Describe (F-28.4 Slice 4) reports the store KIND this service is backed by
+// (feeds the API's GET /api/system/info aggregator). Strictly non-secret: a
+// single capability string — no roots, credentials, or addresses.
+func (s *Server) Describe(ctx context.Context, req *artifactspb.DescribeRequest) (*artifactspb.DescribeResponse, error) {
+	return &artifactspb.DescribeResponse{StoreKind: string(s.storeKind)}, nil
 }
 
 // SetMetrics attaches the Artifacts service's Prometheus metric set (F-20).
