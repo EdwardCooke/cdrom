@@ -83,7 +83,7 @@ e2e_ensure_users http://127.0.0.1:8080
 # addresses.
 e2e_start api-rbac "$WORK/api-rbac.log" 'serving' \
   CDROM_API_HTTP_ADDR=127.0.0.1:8081 CDROM_LISTEN_ADDR=127.0.0.1:7107 \
-  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
+  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=https://127.0.0.1:7104 \
   CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8081/api/auth/callback \
   CDROM_AUDIT_FILE="$WORK/audit-rbac.log" CDROM_AUDIT_FORMAT=json \
   CDROM_LOG_FORMAT=text -- "$BIN/api"
@@ -206,8 +206,8 @@ e2e_authed_request GET "$RBAC/api/scim/keys/999999" "$ADMIN_TOKEN"
 # strikes long-lived auxiliary processes, and a short scenario dodges it).
 # ==========================================================================
 PEPPER="s3-e2e-pepper"
-SCIMA=http://127.0.0.1:7114
-SCIMB=http://127.0.0.1:7115
+SCIMA=https://127.0.0.1:7114
+SCIMB=https://127.0.0.1:7115
 API3=http://127.0.0.1:8082
 
 # tick <seconds>: sleep with a progress DOT every 0.5 s. Long silent stretches
@@ -221,19 +221,19 @@ tick() {
 
 e2e_start idp-s3-a "$WORK/idp-s3-a.log" 'idp starting' \
   CDROM_LISTEN_ADDR=127.0.0.1:7114 CDROM_IDP_GRPC_ADDR=127.0.0.1:7116 \
-  CDROM_IDP_ISSUER=http://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
+  CDROM_IDP_ISSUER=https://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
   CDROM_IDP_SCIM_KEYS_PEPPER="$PEPPER" CDROM_SCIM_ENABLED=true \
   CDROM_AUDIT_FILE="$WORK/idp-s3-a-audit.log" CDROM_AUDIT_FORMAT=json \
   CDROM_METRICS_ENABLED=false CDROM_LOG_FORMAT=text -- "$BIN/idp"
 e2e_start idp-s3-b "$WORK/idp-s3-b.log" 'idp starting' \
   CDROM_LISTEN_ADDR=127.0.0.1:7115 CDROM_IDP_GRPC_ADDR=127.0.0.1:7117 \
-  CDROM_IDP_ISSUER=http://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
+  CDROM_IDP_ISSUER=https://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
   CDROM_IDP_SCIM_KEYS_PEPPER="$PEPPER" CDROM_SCIM_ENABLED=true \
   CDROM_AUDIT_FILE="$WORK/idp-s3-b-audit.log" CDROM_AUDIT_FORMAT=json \
   CDROM_METRICS_ENABLED=false CDROM_LOG_FORMAT=text -- "$BIN/idp"
 e2e_start api-s3 "$WORK/api-s3.log" 'serving' \
   CDROM_API_HTTP_ADDR=127.0.0.1:8082 CDROM_LISTEN_ADDR=127.0.0.1:7108 \
-  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
+  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=https://127.0.0.1:7104 \
   CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8082/api/auth/callback \
   CDROM_IDP_GRPC_ADDR=127.0.0.1:7116 \
   CDROM_AUDIT_FILE="$WORK/api-s3-audit.log" CDROM_AUDIT_FORMAT=json \

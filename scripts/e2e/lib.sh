@@ -68,6 +68,36 @@ WORKDIR="${WORKDIR:-}"
 PIDS=()
 E2E_OWN_STACK=0
 
+# --- mTLS foundation (the whole gRPC mesh + the IdP's HTTPS surface) --------
+# Generates a THROWAWAY CA + leaf certificate set into $WORK/certs (hermetic —
+# never depends on committed/stale certs; ruled 2026-11-06) and EXPORTS the
+# CDROM_TLS_* triple that every service launched afterwards inherits: e2e_start
+# execs `env … cmd` in the CURRENT environment, so one export turns the ENTIRE
+# gRPC mesh (db, scheduler, artifacts, idp, api, pipelinesource, worker, agent,
+# and every per-scenario replica) into mutual TLS with zero per-launch edits.
+# CURL_CA_BUNDLE makes every curl in the suite trust OUR CA, so https:// probes
+# to the IdP's OIDC/SCIM surfaces verify instead of failing.
+#
+# WHY THE IdP'S HTTP SURFACE NECESSARILY BECOMES HTTPS: the IdP multiplexes its
+# single cfg.TLS onto BOTH its gRPC server and its OIDC/SCIM/break-glass HTTP
+# listener, and break-glass's mTLS client-cert check lives on THAT listener —
+# so a TLS IdP serves HTTPS unavoidably. The e2e embraces it (ruled 2026-11-06):
+# the main IdP is launched with CDROM_IDP_ISSUER=https://127.0.0.1:7104
+# (otherwise it would advertise the http:// default), and the API's
+# CDROM_AUTH_ISSUER follows suit (the discovery URL it fetches AND the iss it
+# verifies — both must match the IdP's announced issuer).
+e2e_setup_tls() {
+  [ -n "$WORK" ] || { echo ">> e2e_setup_tls: WORK is not set" >&2; exit 1; }
+  local certs="$WORK/certs"
+  "${E2E_REPO}/scripts/gencerts.sh" "$certs" >/dev/null \
+    || { echo ">> gencerts failed (openssl required)" >&2; exit 1; }
+  export CDROM_TLS_CA_FILE="$certs/ca.crt"
+  export CDROM_TLS_CERT_FILE="$certs/cert.crt"
+  export CDROM_TLS_KEY_FILE="$certs/cert.key"
+  export CURL_CA_BUNDLE="$certs/ca.crt"
+  log ">> mTLS: certs in $certs (CDROM_TLS_* + CURL_CA_BUNDLE exported — the gRPC mesh negotiates mutual TLS)"
+}
+
 # F-18 notification sinks: the fake SMTP server and fake webhook HTTP server
 # the API's email/webhook sends reach. They run on fixed localhost ports and
 # record what they receive under WORK (the test scripts read those files).
@@ -155,6 +185,10 @@ e2e_boot_stack() {
   WORKDIR="$WORK/workdir"
   mkdir -p "$WORK/artifacts" "$WORKDIR"
   trap e2e_cleanup EXIT
+  # Mutual TLS for the WHOLE gRPC mesh (ruled 2026-11-06): generate a
+  # throwaway CA + leaf set and export the CDROM_TLS_* triple every service
+  # inherits (see e2e_setup_tls for the full rationale).
+  e2e_setup_tls
 
   # The SQLite DSN carries two pragmas (the pure-Go driver, modernc.org/sqlite
   # via glebarez/sqlite, applies them on EVERY connection it opens):
@@ -182,15 +216,18 @@ e2e_boot_stack() {
   # exchanged tokens a token_exchange step requests). It is started before the
   # API so the API's job-token auth (OIDC discovery against the IdP) can
   # initialize.
-  e2e_start idp       "$WORK/idp.log"       'idp starting' CDROM_LOG_FORMAT=text -- "$BIN/idp"
+  # CDROM_IDP_ISSUER=https://… is REQUIRED under mTLS: the IdP's OIDC surface
+  # necessarily serves HTTPS (it shares cfg.TLS), so its discovery document
+  # announces an https issuer — and the API's CDROM_AUTH_ISSUER must match it.
+  e2e_start idp       "$WORK/idp.log"       'idp starting' CDROM_IDP_ISSUER=https://127.0.0.1:7104 CDROM_LOG_FORMAT=text -- "$BIN/idp"
   # The IdP logs "starting" before its HTTP server is listening, so poll its
   # discovery endpoint until it responds; the API's job-token auth performs
   # OIDC discovery against the IdP at startup and would fail if the IdP is not
-  # up.
+  # up. (https — the IdP serves TLS; CURL_CA_BUNDLE trusts our CA.)
   log ">> waiting for the IdP to serve"
   local i
   for i in $(seq 1 100); do
-    if curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1; then
+    if curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1; then
       break
     fi
     # HEARTBEAT (anti-starvation): a silent readiness wait is a reap risk.
@@ -199,7 +236,7 @@ e2e_boot_stack() {
     fi
     sleep 0.2
   done
-  curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
+  curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
     || { echo ">> IdP did not start serving"; exit 1; }
   # The F-18 notification sinks (a fake SMTP server and a fake webhook HTTP
   # server) are started before the API so the API's email/webhook sends have a
@@ -211,7 +248,12 @@ e2e_boot_stack() {
   # the worker's job-scoped calls, including the token_exchange step's
   # ExchangeJobToken RPC. The email config points the API's SMTP sender at the
   # fake SMTP sink (F-18).
-  e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
+  # CDROM_GRPC_AUTH_IDP_ADDR is a full https:// URL (not a bare host:port):
+  # the job-token auth performs OIDC discovery + mint against the IdP's
+  # HTTPS surface (a bare address would be coerced to http:// by
+  # normalizeIDPURL and fail handshake). The gRPC DIAL address is separate
+  # (CDROM_IDP_GRPC_ADDR, inherited default 127.0.0.1:7106).
+  e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
   if [ "$with_worker" = "with-worker" ]; then
     e2e_start worker  "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
     # Gate on the API having the worker's WatchJobs stream open before
@@ -512,7 +554,7 @@ e2e_ensure_users() {
 e2e_start_rbac_api() {
   e2e_start api-rbac "$WORK/api-rbac.log" 'serving' \
     CDROM_API_HTTP_ADDR=127.0.0.1:8081 CDROM_LISTEN_ADDR=127.0.0.1:7107 \
-    CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
+    CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=https://127.0.0.1:7104 \
     CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8081/api/auth/callback \
     CDROM_AUDIT_FILE="$WORK/audit-rbac.log" CDROM_AUDIT_FORMAT=json \
     CDROM_LOG_FORMAT=text -- "$BIN/api"

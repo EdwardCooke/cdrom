@@ -283,6 +283,14 @@ Tick each feature off as it lands.
       list), and the unauthenticated
       `GET /api/system/info` aggregator (API-local flags + IdP `DescribeSystem`
       + Artifacts `Describe`; a degraded/unwired component ⇒ `null` segment,
-      endpoint still 200; strictly non-secret)_
+      endpoint still 200; strictly non-secret; S5 e2e + docs fold-back landed:
+      `22-scim-users.sh` now covers the full lifecycle + gate modes + the
+      local-login switch (SSO-only IdP refuses standing login/register, admits
+      break-glass temporal, system-info contrast), and the WHOLE e2e suite
+      runs under MUTUAL TLS (throwaway CA per run, `CDROM_TLS_*` +
+      `CURL_CA_BUNDLE` exported — the IdP's OIDC surface serves HTTPS and the
+      break-glass drill demonstrates affirmative coinage); UI consumption of
+      `/api/system/info` DEFERRED (frontend not yet scaffolded — ruled
+      2026-11-06; the contract it would consume is landed and e2e-proofed)_
 - [ ] F-28.5 SCIM group management
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)

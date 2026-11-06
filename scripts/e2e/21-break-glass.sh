@@ -38,7 +38,9 @@ e2e_boot_stack
 # The break-glass route is a FLAT LITERAL on the IdP (not configurable), so
 # the drill URL is derivable from the IdP's base address alone.
 readonly BREAKGLASS_ROUTE=/emergency/break-glass
-BG_URL="http://127.0.0.1:7104${BREAKGLASS_ROUTE}"
+# https: under the e2e's mTLS regime the IdP's HTTP surface serves TLS
+# (CURL_CA_BUNDLE trusts the run-generated CA).
+BG_URL="https://127.0.0.1:7104${BREAKGLASS_ROUTE}"
 DENIAL='{"error":"forbidden"}'
 
 # Probe: expect a UNIFORM 403 with the fixed denial body (no state advertised).
@@ -95,5 +97,35 @@ if [ "${FAULT_CODE:0:1}" = "5" ]; then
   exit 1
 fi
 log "✓ denials are calm 4xx (no 5xx infrastructure fault)"
+
+# Leg 4: the AFFIRMATIVE DRILL (possible only under the e2e's mTLS regime —
+# the IdP's HTTP listener serves TLS and the harness exports the CA-signed
+# client cert): present the CA-signed certificate, coin a break-glass admin,
+# and SIGN IN with its temporal password through the API — which must report
+# channel=temporal (F-28.4 Slice 4). The coined identity is a randomized
+# username (breakglass-…@invalid); the password appears exactly once.
+# ONE coinage (the live pool is capped — never burn a second credential):
+# body + status in a single transfer.
+COIN_OUT=$(curl -s -w $'\n%{http_code}' --cert "$CDROM_TLS_CERT_FILE" --key "$CDROM_TLS_KEY_FILE" \
+  -X POST -d '{"ttl_seconds":3600}' "$BG_URL")
+COIN_CODE=$(printf '%s' "$COIN_OUT" | tail -n1)
+COIN_RAW=$(printf '%s' "$COIN_OUT" | sed '$d')
+BG_USER=$(printf '%s' "$COIN_RAW" | jq -r '.username // empty')
+BG_PASS=$(printf '%s' "$COIN_RAW" | jq -r '.password // empty')
+[ "$COIN_CODE" = "200" ] && [ -n "$BG_USER" ] && [ -n "$BG_PASS" ] \
+  || { echo ">> coinage with client cert = $COIN_CODE, want 200 + username/password ($COIN_RAW)" >&2; exit 1; }
+log "✓ break-glass coinage with the CA-signed client cert (temporal admin $BG_USER)"
+LOGIN_RESP=$(curl -s -X POST http://127.0.0.1:8080/api/login \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"$BG_USER\",\"password\":\"$BG_PASS\"}")
+CHANNEL=$(printf '%s' "$LOGIN_RESP" | jq -r '.channel // empty')
+ACCESS=$(printf '%s' "$LOGIN_RESP" | jq -r '.access_token // empty')
+[ "$CHANNEL" = "temporal" ] && [ -n "$ACCESS" ] \
+  || { echo ">> break-glass login channel = $CHANNEL, want temporal ($LOGIN_RESP)" >&2; exit 1; }
+log "✓ temporal sign-in through the API reports channel=temporal"
+# The minted token ACTS: it authenticates a real request.
+GW=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/pipelines -H "Authorization: Bearer $ACCESS")
+[ "$GW" = "200" ] || { echo ">> token from the temporal login got $GW on /api/pipelines, want 200" >&2; exit 1; }
+log "✓ the temporal login's token authenticates a real request"
 
 echo ">> 21-break-glass PASSED"

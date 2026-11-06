@@ -45,7 +45,7 @@ tick() {
 # so it is UNAVAILABLE in shared-stack mode). Standalone mode also needs the shared-stack
 # ports free (orphans from an abandoned run squat them).
 if [ -n "${E2E_STACK_READY:-}" ]; then
-  PREFLIGHT_PATTERN='7114|7116|7118|8083'
+  PREFLIGHT_PATTERN='7108|7114|7115|7116|7117|7118|8082|8083'
 else
   PREFLIGHT_PATTERN='710[1-9]|711[0-9]|808[0-9]|910[0-9]|1025|1008[01]'
 fi
@@ -73,7 +73,7 @@ ADMIN_TOKEN=$(e2e_login "$RBAC" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD
 PEPPER="s2-e2e-pepper"
 e2e_start idp-u "$WORK/idp-u.log" 'idp starting' \
   CDROM_LISTEN_ADDR=127.0.0.1:7114 CDROM_IDP_GRPC_ADDR=127.0.0.1:7116 \
-  CDROM_IDP_ISSUER=http://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
+  CDROM_IDP_ISSUER=https://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
   CDROM_IDP_SCIM_KEYS_PEPPER="$PEPPER" CDROM_SCIM_ENABLED=true \
   CDROM_AUDIT_FILE="$WORK/idp-u-audit.log" CDROM_AUDIT_FORMAT=json \
   CDROM_LOG_FORMAT=text -- "$BIN/idp"
@@ -82,13 +82,13 @@ e2e_start idp-u "$WORK/idp-u.log" 'idp starting' \
 idpu_pid="${PIDS[${#PIDS[@]}-1]}"
 e2e_start api-u "$WORK/api-u.log" 'serving' \
   CDROM_API_HTTP_ADDR=127.0.0.1:8083 CDROM_LISTEN_ADDR=127.0.0.1:7118 \
-  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
+  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=https://127.0.0.1:7104 \
   CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8083/api/auth/callback \
   CDROM_IDP_GRPC_ADDR=127.0.0.1:7116 \
   CDROM_AUDIT_FILE="$WORK/audit-u.log" CDROM_AUDIT_FORMAT=json \
   CDROM_LOG_FORMAT=text -- "$BIN/api"
 API_U=http://127.0.0.1:8083
-SCIM=http://127.0.0.1:7114/scim/v2
+SCIM=https://127.0.0.1:7114/scim/v2
 
 # Admin token for the fourth API (same IdP-issued realm).
 ADMIN_U_TOKEN=$(e2e_login "$API_U" "$E2E_USER_ADA_USERNAME" "$E2E_USER_ADA_PASSWORD")
@@ -242,10 +242,10 @@ shim_token() {
   local user="$1" roles="${2:-}" qs location code_val tok_raw tok
   qs="user=$user&redirect_uri=http://127.0.0.1:8081/api/auth/callback&client_id=cdrom-ui"
   [ -n "$roles" ] && qs="$qs&roles=$roles"
-  location=$(curl -s --max-time 10 -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:7104/auth?$qs")
+  location=$(curl -s --max-time 10 -o /dev/null -w '%{redirect_url}' "https://127.0.0.1:7104/auth?$qs")
   code_val=$(printf '%s' "$location" | sed -n 's/.*code=\([^&]*\).*/\1/p')
   [ -n "$code_val" ] || { echo ">> shim redirect lacked a code: $location"; exit 1; }
-  tok_raw=$(curl -s --max-time 10 -X POST "http://127.0.0.1:7104/token" \
+  tok_raw=$(curl -s --max-time 10 -X POST "https://127.0.0.1:7104/token" \
     -d "grant_type=authorization_code&code=$code_val&client_id=cdrom-ui&redirect_uri=http://127.0.0.1:8081/api/auth/callback")
   tok=$(printf '%s' "$tok_raw" | jq -r '.access_token // empty')
   [ -n "$tok" ] || { echo ">> shim token exchange failed: $tok_raw"; exit 1; }
@@ -333,5 +333,69 @@ while kill -0 "$idpu_pid" 2>/dev/null && [ "$wait_dead" -lt 25 ]; do
 done
 gate_probe "$API_U" "$HIRER_TOK"
 [ "$GP_CODE" = "503" ] || { echo ">> IdP-down admit = $GP_CODE, want 503 (fail closed) [$GP_BODY]"; exit 1; }
+
+# ===========================================================================
+# Local-login SWITCH (F-28.4 slice 4): a FIFTH IdP with local login DISABLED
+# (SSO-only mode) + a SIXTH API steering at it. The same user signs in on the
+# main API (switch on) but is refused on the switch-off API — while a
+# break-glass (TEMPORAL) holder still gets through, and /api/system/info
+# contrasts the two.
+# ===========================================================================
+log ">> local-login switch: SSO-only IdP refuses standing logins, admits break-glass"
+e2e_start idp-sw "$WORK/idp-sw.log" 'idp starting' \
+  CDROM_LISTEN_ADDR=127.0.0.1:7115 CDROM_IDP_GRPC_ADDR=127.0.0.1:7117 \
+  CDROM_IDP_ISSUER=https://127.0.0.1:7104 CDROM_DB_ADDR=127.0.0.1:7101 \
+  CDROM_IDP_LOCAL_LOGIN_ENABLED=false CDROM_LOG_FORMAT=text -- "$BIN/idp"
+e2e_start api-sw "$WORK/api-sw.log" 'serving' \
+  CDROM_API_HTTP_ADDR=127.0.0.1:8082 CDROM_LISTEN_ADDR=127.0.0.1:7108 \
+  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=https://127.0.0.1:7104 \
+  CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8082/api/auth/callback \
+  CDROM_IDP_GRPC_ADDR=127.0.0.1:7117 \
+  CDROM_LOG_FORMAT=text -- "$BIN/api"
+API_SW=http://127.0.0.1:8082
+
+# CONTROL: the same user's STANDING login succeeds on the main API (switch on).
+CTRL=$(curl -s -X POST http://127.0.0.1:8080/api/login -H "Content-Type: application/json" \
+  -d "{\"username\":\"$E2E_USER_ADA_USERNAME\",\"password\":\"$E2E_USER_ADA_PASSWORD\"}")
+CTRL_CH=$(printf '%s' "$CTRL" | jq -r '.channel // empty')
+[ -n "$(printf '%s' "$CTRL" | jq -r '.access_token // empty')" ] && [ "$CTRL_CH" = "standing" ] \
+  || { echo ">> control standing login on main API failed (channel=$CTRL_CH): $CTRL"; exit 1; }
+# SWITCH OFF: the SAME standing login is refused with the distinct text.
+SW_STAND=$(curl -s -w $'\n%{http_code}' -X POST "$API_SW/api/login" -H "Content-Type: application/json" \
+  -d "{\"username\":\"$E2E_USER_ADA_USERNAME\",\"password\":\"$E2E_USER_ADA_PASSWORD\"}")
+SW_CODE=$(printf '%s' "$SW_STAND" | tail -n1); SW_BODY=$(printf '%s' "$SW_STAND" | sed '$d')
+[ "$SW_CODE" = "403" ] || { echo ">> switch-off standing login = $SW_CODE, want 403 [$SW_BODY]"; exit 1; }
+printf '%s' "$SW_BODY" | grep -q "local login is disabled; sign in via SSO" \
+  || { echo ">> switch-off standing login lacks the distinct text: $SW_BODY"; exit 1; }
+# SWITCH OFF: registration is refused too.
+SW_REG=$(curl -s -w $'\n%{http_code}' -X POST "$API_SW/api/register" -H "Content-Type: application/json" \
+  -d "{\"username\":\"sw.late\",\"password\":\"pw\"}")
+[ "$(printf '%s' "$SW_REG" | tail -n1)" = "403" ] \
+  || { echo ">> switch-off register = $(printf '%s' "$SW_REG" | tail -n1), want 403"; exit 1; }
+# CARVE-OUT: a break-glass (TEMPORAL) holder still signs in — coin one against
+# the switch-off IdP (mTLS client cert) and log in through api-sw.
+COIN_OUT=$(curl -s -w $'\n%{http_code}' --cert "$CDROM_TLS_CERT_FILE" --key "$CDROM_TLS_KEY_FILE" \
+  -X POST -d '{"ttl_seconds":3600}' "https://127.0.0.1:7115/emergency/break-glass")
+COIN_CODE=$(printf '%s' "$COIN_OUT" | tail -n1); COIN_BODY=$(printf '%s' "$COIN_OUT" | sed '$d')
+BG_USER=$(printf '%s' "$COIN_BODY" | jq -r '.username // empty')
+BG_PASS=$(printf '%s' "$COIN_BODY" | jq -r '.password // empty')
+[ "$COIN_CODE" = "200" ] && [ -n "$BG_USER" ] && [ -n "$BG_PASS" ] \
+  || { echo ">> switch-off IdP coinage = $COIN_CODE, want 200 ($COIN_BODY)"; exit 1; }
+SW_BG=$(curl -s -X POST "$API_SW/api/login" -H "Content-Type: application/json" \
+  -d "{\"username\":\"$BG_USER\",\"password\":\"$BG_PASS\"}")
+SW_BG_CH=$(printf '%s' "$SW_BG" | jq -r '.channel // empty')
+[ "$SW_BG_CH" = "temporal" ] && [ -n "$(printf '%s' "$SW_BG" | jq -r '.access_token // empty')" ] \
+  || { echo ">> switch-off break-glass login refused (channel=$SW_BG_CH): $SW_BG"; exit 1; }
+# SYSTEM INFO CONTRAST: unauthenticated, the two APIs report opposite values.
+# NB: jq's `//` treats `false` as FALSY — extract the raw booleans (jq -r
+# prints "true"/"false"/"null") and compare literally.
+SI_MAIN=$(curl -s http://127.0.0.1:8080/api/system/info)
+SI_SW=$(curl -s "$API_SW/api/system/info")
+MM=$(printf '%s' "$SI_MAIN" | jq -r '.idp.local_login')
+MS=$(printf '%s' "$SI_SW" | jq -r '.idp.local_login')
+MA=$(printf '%s' "$SI_MAIN" | jq -r '.artifacts.store_kind')
+[ "$MM" = "true" ] && [ "$MS" = "false" ] \
+  || { echo ">> system info local_login contrast = main:$MM sw:$MS, want true/false ($SI_MAIN / $SI_SW)"; exit 1; }
+[ "$MA" = "filesystem" ] || { echo ">> system info store_kind = $MA, want filesystem"; exit 1; }
 
 log ">> 22-scim-users PASSED"

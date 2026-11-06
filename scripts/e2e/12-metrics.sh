@@ -350,7 +350,7 @@ log ">> verifying the service ports do not serve /metrics"
 API_SVC_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8080/metrics || true)
 [ "$API_SVC_CODE" != "200" ] \
   || { echo ">> API UI HTTP port 8080 serves /metrics (want only the dedicated metrics port)" >&2; exit 1; }
-IDP_SVC_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:7104/metrics || true)
+IDP_SVC_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:7104/metrics || true)
 [ "$IDP_SVC_CODE" != "200" ] \
   || { echo ">> IdP OIDC port 7104 serves /metrics (want only the dedicated metrics port)" >&2; exit 1; }
 log "   API :8080/metrics -> $API_SVC_CODE, IdP :7104/metrics -> $IDP_SVC_CODE (both non-200, as expected)"

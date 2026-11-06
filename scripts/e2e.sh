@@ -96,6 +96,9 @@ cleanup() {
 trap cleanup EXIT
 
 log ">> booting shared stack in $WORK"
+# Mutual TLS for the WHOLE gRPC mesh (ruled 2026-11-06): generate a throwaway
+# CA + leaf set and export the CDROM_TLS_* triple every service inherits.
+e2e_setup_tls
 # The SQLite DSN carries the same pragmas as lib.sh's e2e_boot_stack
 # (journal_mode=wal + busy_timeout=5000, applied per connection by the
 # pure-Go driver) — see the annotated db start in scripts/e2e/lib.sh for why
@@ -106,7 +109,10 @@ e2e_start artifacts "$WORK/artifacts.log" 'serving'    CDROM_ARTIFACTS_ROOT="$WO
 # The IdP mints the job tokens the API hands to the worker (and the exchanged
 # tokens a token_exchange step requests). It is started before the API so the
 # API's job-token auth (OIDC discovery against the IdP) can initialize.
-e2e_start idp       "$WORK/idp.log"       'idp starting' CDROM_LOG_FORMAT=text -- "$BIN/idp"
+# CDROM_IDP_ISSUER=https://… is REQUIRED under mTLS: the IdP's OIDC surface
+# necessarily serves HTTPS (it shares cfg.TLS), so its discovery document
+# announces an https issuer — and the API's CDROM_AUTH_ISSUER must match it.
+e2e_start idp       "$WORK/idp.log"       'idp starting' CDROM_IDP_ISSUER=https://127.0.0.1:7104 CDROM_LOG_FORMAT=text -- "$BIN/idp"
 # The F-18 notification sinks (a fake SMTP server and a fake webhook HTTP
 # server) are started before the API so the API's email/webhook sends have a
 # target. The API is configured to send email to the SMTP sink (plaintext,
@@ -132,12 +138,12 @@ e2e_start pipelinesource "$WORK/pipelinesource.log" 'service starting' \
 # discovery against the IdP at startup and would fail if the IdP is not up.
 log ">> waiting for the IdP to serve"
 for i in $(seq 1 100); do
-  if curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1; then
+  if curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1; then
     break
   fi
   sleep 0.2
 done
-curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
+curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
   || { echo ">> IdP did not start serving" >&2; exit 1; }
 # Enable job-token auth on the API's gRPC surface: the API mints a job token
 # for the worker (audience cdrom-api, the IdP's default) and verifies it on
@@ -148,7 +154,10 @@ curl -sf http://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 
 # action is also appended to the shared audit log in the database (queryable
 # via GET /api/audit), which both API instances share. The email config points
 # the API's SMTP sender at the fake SMTP sink (F-18).
-e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_PIPELINE_SOURCE_ADDR=127.0.0.1:7109 CDROM_LOG_FORMAT=text -- "$BIN/api"
+# CDROM_GRPC_AUTH_IDP_ADDR is a full https:// URL (not a bare host:port): the
+# job-token auth performs OIDC discovery + mint against the IdP's HTTPS
+# surface (a bare address would be coerced to http:// by normalizeIDPURL).
+e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_PIPELINE_SOURCE_ADDR=127.0.0.1:7109 CDROM_LOG_FORMAT=text -- "$BIN/api"
 e2e_start worker    "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
 
 # Gate on the API having the worker's WatchJobs stream open before dispatching.

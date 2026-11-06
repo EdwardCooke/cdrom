@@ -55,7 +55,7 @@ e2e_ensure_users http://127.0.0.1:8080
 # -> a 1h lockout) so the lockout + reset behavior can be exercised.
 e2e_start api-rbac "$WORK/api-rbac.log" 'serving' \
   CDROM_API_HTTP_ADDR=127.0.0.1:8081 CDROM_LISTEN_ADDR=127.0.0.1:7107 \
-  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
+  CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=https://127.0.0.1:7104 \
   CDROM_AUTH_CLIENT_ID=cdrom-ui CDROM_AUTH_REDIRECT_URL=http://127.0.0.1:8081/api/auth/callback \
   CDROM_AUTH_APIKEY_MAX_FAILURES=3 CDROM_AUTH_APIKEY_LOCKOUT_DURATION=1h \
   CDROM_AUDIT_FILE="$WORK/audit-rbac.log" CDROM_AUDIT_FORMAT=json \

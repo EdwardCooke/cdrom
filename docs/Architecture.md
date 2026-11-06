@@ -1182,6 +1182,7 @@ plaintext. `make certs` generates a local set.
 | `CDROM_AUTH_APIKEY_ENABLED`, `CDROM_AUTH_APIKEY_MAX_FAILURES`, `CDROM_AUTH_APIKEY_LOCKOUT_DURATION`, `CDROM_AUTH_APIKEY_PEPPER` | per-user API keys (F-25) |
 | `CDROM_AUTH_SERVICEACCOUNT_ENABLED`, `CDROM_AUTH_SERVICEACCOUNT_MAX_FAILURES`, `CDROM_AUTH_SERVICEACCOUNT_LOCKOUT_DURATION`, `CDROM_AUTH_SERVICEACCOUNT_PEPPER` | service accounts (F-26) |
 | `CDROM_AUTH_ROLE_CLAIM`, `CDROM_AUTH_ROLE_MAPPINGS`, `CDROM_AUTH_ROLE_CLAIM_AS_NAMES` | map an external IdP's group claim onto Cdrom roles (F-14) |
+| `CDROM_AUTH_SUBJECT_CLAIM` | the token claim the admission gate correlates on (F-28.4 S3; default `sub`) |
 
 ### Job-token auth (target gRPC surface, `CDROM_GRPC_AUTH_*`)
 
@@ -1199,6 +1200,12 @@ gates username/password sign-in: when `false` the IdP is SSO-ONLY — it
 refuses standing logins and registration, admitting only temporal
 (break-glass) logins. Reported to the UI via `GET /api/system/info`
 (segment `idp.local_login`).
+
+NOTE: when `CDROM_TLS_*` is set the IdP's HTTP surface SERVES HTTPS (it
+multiplexes its single TLS config onto both listeners) — the OIDC
+discovery/issuer URLs must therefore be `https://` (the e2e harness runs
+the whole gRPC mesh under mutual TLS and flips its IdP URLs accordingly;
+`CDROM_GRPC_AUTH_IDP_ADDR` is a full URL base, not a bare host:port).
 
 #### SCIM provisioning surface (F-28.1, `CDROM_SCIM_*`)
 

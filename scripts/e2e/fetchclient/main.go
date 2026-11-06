@@ -23,9 +23,10 @@ import (
 	"strings"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
+	"cdrom/internal/config"
 	pipelinesourcepb "cdrom/internal/gen/cdrom/pipelinesource/v1"
+	"cdrom/internal/grpcutil"
 )
 
 // headerFlag is a repeatable -cred-header flag ("Name=Value").
@@ -55,7 +56,21 @@ func main() {
 		os.Exit(2)
 	}
 
-	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Transport credentials: MUTUAL TLS when the harness exports the
+	// CDROM_TLS_* triple (the e2e suite runs the whole gRPC mesh under mTLS —
+	// the fetcher's server presents the same CA-signed leaf), plaintext
+	// otherwise.
+	tlsCfg := config.TLSConfig{
+		CAFile:   os.Getenv("CDROM_TLS_CA_FILE"),
+		CertFile: os.Getenv("CDROM_TLS_CERT_FILE"),
+		KeyFile:  os.Getenv("CDROM_TLS_KEY_FILE"),
+	}
+	creds, err := grpcutil.ClientCreds(tlsCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fetchclient: tls creds: %v\n", err)
+		os.Exit(1)
+	}
+	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fetchclient: dial %q: %v\n", *addr, err)
 		os.Exit(1)

@@ -334,8 +334,12 @@ Rules:
 
 - `Makefile`: `make build` (host binaries → `./bin`, incl. the e2e
   `fetchclient` helper), `make proto` (regen gRPC code), `make test`,
-  `make vet`, `make fmt`, `make e2e` (boot stack + run `scripts/e2e/*.sh`),
-  `make certs` (local mTLS set → `./certs`), `make clean`.
+  `make vet`, `make fmt`, `make e2e` (boot stack + run `scripts/e2e/*.sh` —
+  the WHOLE gRPC mesh runs under MUTUAL TLS: the harness generates a
+  throwaway CA + leaf set per run and exports `CDROM_TLS_*` +
+  `CURL_CA_BUNDLE`; the IdP's OIDC surface consequently serves HTTPS and the
+  break-glass drill presents the client cert), `make certs` (local mTLS set →
+  `./certs`), `make clean`.
 - Verify with `go vet ./...`; build with `go build ./...`.
 - **Cross-compile check:** `GOOS=windows GOARCH=amd64 go build ./cmd/...` must
   stay green — worker and agent ship for Windows.
@@ -366,8 +370,12 @@ Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 `CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_WORKER_ROOT` (worker/agent staged-working-area
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
 resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
-(OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping),
-`CDROM_IDP_*`, `CDROM_SCIM_*` (F-28.1 SCIM provisioning surface),
+(OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping,
+`CDROM_AUTH_SUBJECT_CLAIM` — the token claim the admission gate correlates
+on, default `sub`), `CDROM_IDP_*` (incl. `CDROM_IDP_LOCAL_LOGIN_ENABLED` —
+F-28.4 S4: `false` = SSO-only, standing logins + registration refused,
+break-glass temporal logins still admitted), `CDROM_SCIM_*` (F-28.1 SCIM
+provisioning surface),
 `CDROM_GRPC_AUTH_*` (job-token auth), `CDROM_SECRETS_{KIND,KEY}`,
 `CDROM_PIPELINE_SOURCE_*` (F-21.2/F-21.5), `CDROM_AUDIT_*` (F-15),
 `CDROM_EMAIL_*` + `CDROM_WEBHOOK_TIMEOUT{,_MAX}` (F-18), `CDROM_METRICS_*`
@@ -411,6 +419,19 @@ F-25/F-26 specs):
   the API (`internal/authz`) with a cache invalidated by `role_change` events
   on the shared event log. Delegation: granting a role requires
   `roles.can-assign` + direct possession of the role at ≥ the granted scope.
+- **Admission gate (F-28.4 S3):** a CONSOLIDATED gate in the IdP
+  (`AdmitPrincipal`) that the API's auth middleware invokes PER REQUEST (no
+  cache) for every HUMAN user principal (OIDC + user API keys; service
+  accounts and job tokens exempt). Judgment is origin-independent (weighs the
+  claims, not the signer). SCIM-enabled ⇒ unknown denied; SCIM-disabled ⇒ JIT
+  auto-provision (claim roles required at birth, monotonic growth). Distinct
+  403 texts per verdict; IdP-down ⇒ 503 fail-closed. Metered by
+  `cdrom_admissions_total{verdict}`.
+- **System info (F-28.4 S4):** `GET /api/system/info` (unauthenticated,
+  strictly non-secret) reports which mechanics are on (OIDC, userpass, API
+  keys, service accounts, RBAC; IdP SCIM / local-login / break-glass; artifact
+  store kind) so the UI can make show/hide decisions. Degraded/unwired
+  components yield a `null` segment; the endpoint still returns 200.
 - **Targets (gRPC):** job tokens (RS256, minted by the API via the IdP over
   mTLS; one per job, `sub: "job:<id>"`). Validity is gated on the job's live
   status, not `exp`; `ExchangeJobToken` mints short-lived tokens for other
