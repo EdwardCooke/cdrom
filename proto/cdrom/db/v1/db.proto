@@ -3991,6 +3991,12 @@ message IDPGroup {
   repeated string member_values = 4;
   google.protobuf.Timestamp created_at = 5;
   google.protobuf.Timestamp updated_at = 6;
+  // external_id is the corporate directory's stable identifier for the
+  // group (e.g. the Azure group objectId) carried by SCIM provisioning
+  // (F-28.5): the re-correlation key when a connector loses its id mapping.
+  // CREATE-ONLY and IMMUTABLE after (supplied on ReplaceGroup ⇒
+  // InvalidArgument). Empty when the provider sent none.
+  string external_id = 7;
 }
 
 // CreateGroupRequest creates a group with an initial (possibly empty)
@@ -3999,6 +4005,9 @@ message CreateGroupRequest {
   string display_name = 1;
   string description = 2;
   repeated string member_values = 3;
+  // external_id is the corporate directory's group identifier (accepted
+  // ONLY at creation; see IDPGroup.external_id).
+  string external_id = 4;
 }
 
 // GetGroupRequest fetches a group by id.
@@ -4013,7 +4022,7 @@ message GetGroupRequest {
 // InvalidArgument.
 message ListGroupsRequest {
   message Predicate {
-    // attribute is one of: display_name, members_value.
+    // attribute is one of: display_name, members_value, external_id.
     string attribute = 1;
     // case_sensitive governs the string comparisons (loose/casefolded by
     // default — directory convention).
@@ -4031,13 +4040,18 @@ message ListGroupsResponse {
 // ReplaceGroupRequest DEFINITELY replaces a group's attributes and its ENTIRE
 // membership (PUT semantics): display_name/description are set to the
 // supplied values (omitted means ""); the membership is swapped for
-// member_values wholesale (omitted/empty means EMPTY).
+// member_values wholesale (omitted/empty means EMPTY). external_id is
+// IMMUTABLE (supplying a value differing from the row's current one is
+// InvalidArgument; equal-or-absent is a no-op — the provider's group
+// identity is stable for the group's life).
 message ReplaceGroupRequest {
   // id is the group's stable identifier (decimal string).
   string id = 1;
   string display_name = 2;
   string description = 3;
   repeated string member_values = 4;
+  // external_id is IMMUTABLE (see the message comment).
+  string external_id = 5;
 }
 
 // PatchGroupMembersRequest atomically adds and/or removes membership values

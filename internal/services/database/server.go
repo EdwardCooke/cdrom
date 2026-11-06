@@ -7889,6 +7889,9 @@ type idpGroupColumnRule struct {
 // so typos fail loudly instead of silently widening the scan.
 var idpGroupPushdownAttributes = map[string]idpGroupColumnRule{
 	"display_name": {column: "display_name"},
+	// external_id: the corporate directory's group identifier (CREATE-ONLY,
+	// immutable after — the re-correlation key, cf. the user's external_id).
+	"external_id": {column: "external_id"},
 	// members_value: "the group HAS a member with this verbatim value" — a
 	// relational predicate spliced as an indexed sub-query on the junction
 	// table (whose name is PINNED by IDPGroupMember.TableName, avoiding any
@@ -7957,6 +7960,7 @@ func toProtoIDPGroup(group *models.IDPGroup) *dbpb.IDPGroup {
 		Id:          strconv.FormatUint(uint64(group.ID), 10),
 		DisplayName: group.DisplayName,
 		Description: group.Description,
+		ExternalId:  group.ExternalID,
 		CreatedAt:   timestamppb.New(group.CreatedAt),
 		UpdatedAt:   timestamppb.New(group.UpdatedAt),
 	}
@@ -7973,6 +7977,7 @@ func (s *Server) CreateGroup(ctx context.Context, req *dbpb.CreateGroupRequest) 
 	group := &models.IDPGroup{
 		DisplayName: strings.TrimSpace(req.GetDisplayName()),
 		Description: req.GetDescription(),
+		ExternalID:  strings.TrimSpace(req.GetExternalId()),
 	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(group).Error; err != nil {
@@ -8075,6 +8080,7 @@ func (s *Server) ReplaceGroup(ctx context.Context, req *dbpb.ReplaceGroupRequest
 	}
 	displayName := strings.TrimSpace(req.GetDisplayName())
 	description := req.GetDescription()
+	postedExternalID := strings.TrimSpace(req.GetExternalId())
 	values := req.GetMemberValues()
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing models.IDPGroup
@@ -8083,6 +8089,12 @@ func (s *Server) ReplaceGroup(ctx context.Context, req *dbpb.ReplaceGroupRequest
 				return status.Errorf(codes.NotFound, "group %d not found", id)
 			}
 			return err
+		}
+		// external_id is IMMUTABLE (the provider's group identity is stable
+		// for the group's life): altering it is InvalidArgument; equal-or-
+		// absent is a no-op (cf. the user's sticky externalId, F-28.4).
+		if postedExternalID != "" && postedExternalID != existing.ExternalID {
+			return status.Error(codes.InvalidArgument, "external_id is immutable")
 		}
 		// Definite attribute replace: Select forces the columns even when
 		// their values are the zero value (PUT semantics — omitted means "").

@@ -132,6 +132,9 @@ func (s *Server) scimGroupDoc(r *http.Request, g *SCIMGroup) map[string]any {
 	if g.Description != "" {
 		doc["description"] = g.Description
 	}
+	if g.ExternalID != "" {
+		doc["externalId"] = g.ExternalID
+	}
 	meta := map[string]any{
 		"resourceType": scimRTGroup,
 		"location":     s.scimLocation(r, "/Groups/"+g.ID),
@@ -152,8 +155,11 @@ func (s *Server) scimGroupDoc(r *http.Request, g *SCIMGroup) map[string]any {
 
 // scimGroupPayload is the decoded inbound Group document (tracked fields).
 type scimGroupPayload struct {
-	DisplayName  string
-	Description  string
+	DisplayName string
+	Description string
+	// ExternalID is the corporate directory's group identifier (azure
+	// objectId et al.) — accepted at CREATION, immutable afterwards.
+	ExternalID   string
 	MemberValues []string
 }
 
@@ -175,6 +181,9 @@ func decodeSCIMGroup(raw map[string]any) (*scimGroupPayload, error) {
 	doc.DisplayName = dname
 	if desc, ok := raw["description"].(string); ok {
 		doc.Description = desc
+	}
+	if ext, ok := raw["externalId"].(string); ok {
+		doc.ExternalID = ext
 	}
 	if ms, ok := raw["members"].([]any); ok {
 		for _, m := range ms {
@@ -214,6 +223,7 @@ var scimGroupFilterTranslator = map[string]struct {
 	caseSensitive bool
 }{
 	"displayName":    {canonical: "display_name", caseSensitive: false},
+	"externalId":     {canonical: "external_id", caseSensitive: true},
 	"members[value]": {canonical: "members_value", caseSensitive: true},
 }
 
@@ -340,6 +350,7 @@ func scimGroupAuditDoc(g *SCIMGroup) any {
 	return map[string]any{
 		"display_name":  g.DisplayName,
 		"description":   g.Description,
+		"external_id":   g.ExternalID,
 		"member_values": append([]string(nil), g.MemberValues...),
 	}
 }
@@ -447,7 +458,7 @@ func (s *Server) handleSCIMGroupsCreate(w http.ResponseWriter, r *http.Request) 
 		s.scimErrTyped(w, r, http.StatusBadRequest, scimTypeInvalidValue, err.Error())
 		return
 	}
-	g, err := store.Create(r.Context(), payload.DisplayName, payload.Description, payload.MemberValues)
+	g, err := store.Create(r.Context(), payload.DisplayName, payload.Description, payload.ExternalID, payload.MemberValues)
 	if err != nil {
 		s.finishSCIMOp(r, "group_create", "failure")
 		s.scimErrTyped(w, r, http.StatusInternalServerError, "", "creating the group failed")
@@ -495,7 +506,14 @@ func (s *Server) handleSCIMGroupPut(w http.ResponseWriter, r *http.Request) {
 		s.groupPutPatchMalformed(w, r, err.Error())
 		return
 	}
-	refreshed, err := s.scimGroups.Replace(r.Context(), current.ID, payload.DisplayName, payload.Description, payload.MemberValues)
+	// externalId is IMMUTABLE (the provider's group identity is stable for
+	// the group's life): a differing posted value is 400 (absent or equal is
+	// a no-op — the current value is carried through the replace).
+	if ext, ok := doc["externalId"].(string); ok && ext != "" && ext != current.ExternalID {
+		s.groupPutPatchMalformed(w, r, "externalId is immutable")
+		return
+	}
+	refreshed, err := s.scimGroups.Replace(r.Context(), current.ID, payload.DisplayName, payload.Description, current.ExternalID, payload.MemberValues)
 	if err != nil {
 		s.finishSCIMOp(r, "group_update", "failure")
 		s.renderSCIMGroupMutationError(w, r, err)
@@ -588,7 +606,9 @@ func (s *Server) handleSCIMGroupPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	var refreshed *SCIMGroup
 	if attrChanged {
-		attrs, err := s.scimGroups.Replace(r.Context(), current.ID, newName, newDesc, current.MemberValues)
+		// The attribute leg carries the group's EXTERNAL ID unchanged
+		// (immutable — PATCH has no externalId path).
+		attrs, err := s.scimGroups.Replace(r.Context(), current.ID, newName, newDesc, current.ExternalID, current.MemberValues)
 		if err != nil {
 			s.finishSCIMOp(r, "group_update", "failure")
 			s.renderSCIMGroupMutationError(w, r, err)
@@ -675,11 +695,12 @@ func (s *Server) handleSCIMGroupDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // groupPutPatchMalformed renders a PUT/PATCH malformation as 400 (invalidValue
-// for shape faults, unsupportedAttribute for unknown paths) and meters the
+// for shape faults, unsupportedAttribute for unknown paths and immutability
+// breaches — MIRRORING the /Users classifier's treatment) and meters the
 // failure.
 func (s *Server) groupPutPatchMalformed(w http.ResponseWriter, r *http.Request, msg string) {
 	scimType := scimTypeInvalidValue
-	if strings.Contains(msg, "unsupported") {
+	if strings.Contains(msg, "unsupported") || strings.Contains(msg, "immu") {
 		scimType = scimTypeUnsupportedAttribute
 	}
 	s.finishSCIMOp(r, "group_update", "failure")

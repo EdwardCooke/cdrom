@@ -2084,6 +2084,14 @@ type IDPGroup struct {
 	DisplayName string `gorm:"column:display_name;index" json:"display_name"`
 	// Description is a human-readable description.
 	Description string `json:"description"`
+	// ExternalID is the corporate directory's stable identifier for the
+	// group (e.g. the Azure group objectId) carried by SCIM provisioning
+	// (F-28.5): the re-correlation key when a connector loses its id
+	// mapping (groups have no unique local key to re-find by — displayName
+	// is non-unique). CREATE-ONLY and IMMUTABLE after (the provider's group
+	// identity is stable for the group's life; a changed identity is a new
+	// group). Empty when the provider sent none.
+	ExternalID string `gorm:"column:external_id;index" json:"external_id,omitempty"`
 	// Members is the virtual association to the junction table (ordered by
 	// insertion, i.e. junction id).
 	Members []*IDPGroupMember `gorm:"foreignKey:GroupID;constraint:OnDelete:CASCADE" json:"members,omitempty"`

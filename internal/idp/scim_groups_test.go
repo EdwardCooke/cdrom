@@ -163,6 +163,79 @@ func TestSCIMGroups_Create(t *testing.T) {
 	}
 }
 
+// TestSCIMGroups_ExternalID locks the azure-objectId analogue: accepted at
+// creation, EMITTED on reads, IMMUTABLE after (a differing PUT ⇒ 400; an
+// equal/absent one is a no-op), and FILTERABLE (exact match).
+func TestSCIMGroups_ExternalID(t *testing.T) {
+	ts, _, _, _, _ := scimGroupsFixture(t, config.ScimConfig{Enabled: true})
+	base := groupsBase(ts.URL)
+
+	code, doc := scimCall(t, http.MethodPost, base, map[string]any{
+		"displayName": "Corp Synced", "externalId": "az-group-uuid-1",
+		"members": memberObjs("e1"),
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("POST = %d, want 201", code)
+	}
+	id := doc["id"].(string)
+	if doc["externalId"] != "az-group-uuid-1" {
+		t.Errorf("POST echo externalId = %v, want az-group-uuid-1", doc["externalId"])
+	}
+
+	// GET emits it.
+	code, doc = scimCall(t, http.MethodGet, base+"/"+id, nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200", code)
+	}
+	if doc["externalId"] != "az-group-uuid-1" {
+		t.Errorf("GET externalId = %v, want az-group-uuid-1", doc["externalId"])
+	}
+
+	// PUT with the SAME externalId is a no-op on it (allowed).
+	code, doc = scimCall(t, http.MethodPut, base+"/"+id, map[string]any{
+		"displayName": "Corp Synced", "externalId": "az-group-uuid-1",
+		"members": memberObjs("e1"),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("PUT(same externalId) = %d, want 200", code)
+	}
+	if doc["externalId"] != "az-group-uuid-1" {
+		t.Errorf("PUT(same) externalId = %v, want unchanged", doc["externalId"])
+	}
+
+	// PUT with a DIFFERING externalId ⇒ 400 (immutable).
+	code, doc = scimCall(t, http.MethodPut, base+"/"+id, map[string]any{
+		"displayName": "Corp Synced", "externalId": "az-group-uuid-2",
+		"members": memberObjs("e1"),
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("PUT(diff externalId) = %d, want 400", code)
+	}
+	// Immutability breach ⇒ unsupportedAttribute — MIRRORS the /Users
+	// classifier (putPatchMalformed), whose "immu" catch covers the same
+	// territory; keeping both surfaces lexically aligned beats pedantic
+	// RFC-split hairs the connectors wouldn't notice anyway.
+	if st, _ := doc["scimType"].(string); st != scimTypeUnsupportedAttribute {
+		t.Errorf("scimType = %v, want %s", doc["scimType"], scimTypeUnsupportedAttribute)
+	}
+
+	// Filter: externalId eq (EXACT — uuid casing matters).
+	code, doc = scimCall(t, http.MethodGet, scimURL(t, base, "filter=externalId eq \"az-group-uuid-1\""), nil)
+	if code != http.StatusOK {
+		t.Fatalf("externalId filter GET = %d, want 200", code)
+	}
+	if tot, _ := doc["totalResults"].(float64); int(tot) != 1 {
+		t.Errorf("externalId filter totalResults = %v, want 1 (body %v)", doc["totalResults"], doc)
+	}
+	code, doc = scimCall(t, http.MethodGet, scimURL(t, base, "filter=externalId eq AZ-GROUP-UUID-1"), nil)
+	if code != http.StatusOK {
+		t.Fatalf("externalId exact GET = %d, want 200", code)
+	}
+	if tot, _ := doc["totalResults"].(float64); int(tot) != 0 {
+		t.Errorf("externalId exact (uppercased) totalResults = %v, want 0 (case matters)", tot)
+	}
+}
+
 // =====================================================================
 // GET /Groups (list + filter + pagination)
 // =====================================================================

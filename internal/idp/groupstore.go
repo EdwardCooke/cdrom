@@ -36,8 +36,13 @@ type SCIMGroup struct {
 	// DisplayName is the group's display name (NOT unique — departments
 	// routinely share names).
 	DisplayName string
-	Description string
-	// MemberValues are the group's VERBATIM membership strings (opaque;
+	Description string // ExternalID is the corporate directory's stable identifier for the
+	// group (e.g. the Azure group objectId) — the re-correlation key when a
+	// connector loses its id mapping (groups have no unique LOCAL key to
+	// re-find by: displayName is non-unique). CREATE-ONLY and IMMUTABLE
+	// after (the provider's group identity is stable for the group's life;
+	// a changed identity is a new group). Empty when the provider sent none.
+	ExternalID string // MemberValues are the group's VERBATIM membership strings (opaque;
 	// usually the user's external_id, occasionally the username).
 	MemberValues []string
 	CreatedAt    time.Time
@@ -62,22 +67,27 @@ func cloneSCIMGroup(g *SCIMGroup) *SCIMGroup {
 // caller translates its own dialect's unsupported expressions upstream).
 type GroupStore interface {
 	// Create registers a group with an initial (possibly empty) membership.
-	// Values are normalized (trimmed, deduplicated). Returns the stored
-	// group (with its assigned id).
-	Create(ctx context.Context, displayName, description string, memberValues []string) (*SCIMGroup, error)
+	// Values are normalized (trimmed, deduplicated). externalID is the
+	// corporate directory's group identifier (ACCEPTED ONLY HERE — it is
+	// immutable afterwards; empty means the provider sent none). Returns the
+	// stored group (with its assigned id).
+	Create(ctx context.Context, displayName, description, externalID string, memberValues []string) (*SCIMGroup, error)
 	// Get returns the group with the given id. A missing group returns an
 	// error with status.Code == codes.NotFound; a malformed id returns
 	// codes.InvalidArgument.
 	Get(ctx context.Context, id string) (*SCIMGroup, error)
 	// List returns groups narrowed by the generic equality constraints
-	// (nil/empty ⇒ unconstrained), ordered by id.
+	// (nil/empty ⇒ unconstrained), ordered by id. Canonical attributes:
+	// display_name, external_id, members_value.
 	List(ctx context.Context, equalities *EqualityConstraints) ([]*SCIMGroup, error)
 	// Replace DEFINITELY replaces a group's attributes and its ENTIRE
 	// membership (SCIM PUT semantics): displayName/description are SET to
 	// the supplied values ("" clears them) and the membership is swapped
-	// for memberValues wholesale (empty ⇒ emptied). A missing group returns
-	// codes.NotFound.
-	Replace(ctx context.Context, id, displayName, description string, memberValues []string) (*SCIMGroup, error)
+	// for memberValues wholesale (empty ⇒ emptied). externalID is
+	// IMMUTABLE: a non-empty value differing from the group's current one
+	// is codes.InvalidArgument (equal-or-absent is a no-op). A missing
+	// group returns codes.NotFound.
+	Replace(ctx context.Context, id, displayName, description, externalID string, memberValues []string) (*SCIMGroup, error)
 	// PatchMembers atomically adds and/or removes membership values
 	// (idempotent both ways; values normalized). At least one side must be
 	// non-empty (otherwise InvalidArgument). A missing group returns
@@ -127,16 +137,18 @@ func groupFromProto(g *dbpb.IDPGroup) *SCIMGroup {
 		ID:           g.GetId(),
 		DisplayName:  g.GetDisplayName(),
 		Description:  g.GetDescription(),
+		ExternalID:   g.GetExternalId(),
 		MemberValues: append([]string(nil), g.GetMemberValues()...),
 		CreatedAt:    g.GetCreatedAt().AsTime(),
 		UpdatedAt:    g.GetUpdatedAt().AsTime(),
 	}
 }
 
-func (s *dbGroupStore) Create(ctx context.Context, displayName, description string, memberValues []string) (*SCIMGroup, error) {
+func (s *dbGroupStore) Create(ctx context.Context, displayName, description, externalID string, memberValues []string) (*SCIMGroup, error) {
 	resp, err := s.db.CreateGroup(ctx, &dbpb.CreateGroupRequest{
 		DisplayName:  displayName,
 		Description:  description,
+		ExternalId:   externalID,
 		MemberValues: memberValues,
 	})
 	if err != nil {
@@ -182,11 +194,12 @@ func (s *dbGroupStore) List(ctx context.Context, equalities *EqualityConstraints
 	return groups, nil
 }
 
-func (s *dbGroupStore) Replace(ctx context.Context, id, displayName, description string, memberValues []string) (*SCIMGroup, error) {
+func (s *dbGroupStore) Replace(ctx context.Context, id, displayName, description, externalID string, memberValues []string) (*SCIMGroup, error) {
 	resp, err := s.db.ReplaceGroup(ctx, &dbpb.ReplaceGroupRequest{
 		Id:           id,
 		DisplayName:  displayName,
 		Description:  description,
+		ExternalId:   externalID,
 		MemberValues: memberValues,
 	})
 	if err != nil {
@@ -244,7 +257,7 @@ func validateGroupEqualities(eq *EqualityConstraints) error {
 	}
 	for _, c := range *eq {
 		switch c.Attribute {
-		case "display_name", "members_value":
+		case "display_name", "external_id", "members_value":
 		default:
 			return status.Errorf(codes.InvalidArgument, "unknown group filter attribute: %q", c.Attribute)
 		}
@@ -252,7 +265,7 @@ func validateGroupEqualities(eq *EqualityConstraints) error {
 	return nil
 }
 
-func (s *MemoryGroupStore) Create(_ context.Context, displayName, description string, memberValues []string) (*SCIMGroup, error) {
+func (s *MemoryGroupStore) Create(_ context.Context, displayName, description, externalID string, memberValues []string) (*SCIMGroup, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
@@ -262,6 +275,7 @@ func (s *MemoryGroupStore) Create(_ context.Context, displayName, description st
 		ID:           id,
 		DisplayName:  displayName,
 		Description:  description,
+		ExternalID:   externalID,
 		MemberValues: normalizeMemberValues(memberValues),
 		CreatedAt:    now,
 		UpdatedAt:    now,
@@ -312,6 +326,12 @@ func groupMatches(g *SCIMGroup, eq *EqualityConstraints) bool {
 			} else if !strings.EqualFold(g.DisplayName, c.Value) {
 				return false
 			}
+		case "external_id":
+			// Provider identifiers are EXACT (case matters) — the
+			// translator pins caseSensitive=true for this attribute.
+			if g.ExternalID != c.Value {
+				return false
+			}
 		case "members_value":
 			found := false
 			for _, v := range g.MemberValues {
@@ -333,12 +353,16 @@ func groupMatches(g *SCIMGroup, eq *EqualityConstraints) bool {
 	return true
 }
 
-func (s *MemoryGroupStore) Replace(_ context.Context, id, displayName, description string, memberValues []string) (*SCIMGroup, error) {
+func (s *MemoryGroupStore) Replace(_ context.Context, id, displayName, description, externalID string, memberValues []string) (*SCIMGroup, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.byID[id]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "group %q not found", id)
+	}
+	// external_id is IMMUTABLE (parity with the DB store's guard).
+	if externalID != "" && externalID != g.ExternalID {
+		return nil, status.Error(codes.InvalidArgument, "external_id is immutable")
 	}
 	g.DisplayName = displayName
 	g.Description = description

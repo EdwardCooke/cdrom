@@ -45,10 +45,11 @@ func TestIDPGroupCRUD(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// Create trims blanks and dedupes values.
+	// Create trims blanks and dedupes values; external_id is accepted.
 	g, err := client.CreateGroup(ctx, &dbpb.CreateGroupRequest{
 		DisplayName:  "  Platform Eng ",
 		Description:  "owns the platform",
+		ExternalId:   "az-group-uuid-1",
 		MemberValues: []string{"ext-alice", "ext-bob", " ext-alice", "", "   "},
 	})
 	if err != nil {
@@ -56,6 +57,9 @@ func TestIDPGroupCRUD(t *testing.T) {
 	}
 	if g.GetDisplayName() != "Platform Eng" {
 		t.Errorf("display_name trimmed = %q, want \"Platform Eng\"", g.GetDisplayName())
+	}
+	if g.GetExternalId() != "az-group-uuid-1" {
+		t.Errorf("external_id = %q, want az-group-uuid-1", g.GetExternalId())
 	}
 	if got := strSet(g.GetMemberValues()); !reflect.DeepEqual(got, []string{"ext-alice", "ext-bob"}) {
 		t.Errorf("members = %v, want [ext-alice ext-bob]", got)
@@ -122,6 +126,21 @@ func TestIDPGroupCRUD(t *testing.T) {
 	}
 	if len(cleared.GetMemberValues()) != 0 {
 		t.Errorf("cleared members = %v, want none", cleared.GetMemberValues())
+	}
+	if cleared.GetExternalId() != "az-group-uuid-1" {
+		t.Errorf("external_id after replace = %q, want unchanged (immutable)", cleared.GetExternalId())
+	}
+	// external_id is IMMUTABLE: a differing value ⇒ InvalidArgument; an
+	// equal value is a no-op.
+	if _, err := client.ReplaceGroup(ctx, &dbpb.ReplaceGroupRequest{
+		Id: id, DisplayName: "Empty Team", ExternalId: "DIFFERENT-IDENTITY",
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("ReplaceGroup(diff external_id) code = %v, want InvalidArgument", status.Code(err))
+	}
+	if _, err := client.ReplaceGroup(ctx, &dbpb.ReplaceGroupRequest{
+		Id: id, DisplayName: "Empty Team", ExternalId: "az-group-uuid-1",
+	}); err != nil {
+		t.Errorf("ReplaceGroup(same external_id) = %v, want a no-op", err)
 	}
 	if _, err := client.ReplaceGroup(ctx, &dbpb.ReplaceGroupRequest{Id: "999999"}); status.Code(err) != codes.NotFound {
 		t.Errorf("ReplaceGroup(unknown) code = %v, want NotFound", status.Code(err))
@@ -222,9 +241,15 @@ func TestIDPGroupListPredicates(t *testing.T) {
 		"GAMMA squad": {"gg-1", "aa-1"},
 		"No Members":  {},
 	}
+	externals := map[string]string{
+		"Alpha Squad": "EXT-alpha",
+		"Beta Squad":  "EXT-beta",
+	}
 	ids := map[string]string{}
 	for name, members := range names {
-		g, err := client.CreateGroup(ctx, &dbpb.CreateGroupRequest{DisplayName: name, MemberValues: members})
+		g, err := client.CreateGroup(ctx, &dbpb.CreateGroupRequest{
+			DisplayName: name, MemberValues: members, ExternalId: externals[name],
+		})
 		if err != nil {
 			t.Fatalf("seed %q: %v", name, err)
 		}
@@ -272,6 +297,38 @@ func TestIDPGroupListPredicates(t *testing.T) {
 	}
 	if len(respLoose.GetGroups()) != 1 || respLoose.GetGroups()[0].GetId() != ids["GAMMA squad"] {
 		t.Errorf("display_name loose = %v, want only GAMMA squad", respLoose.GetGroups())
+	}
+
+	// external_id EXACT (provider identifiers are case-meaning): the
+	// case-sensitive arm matches; the looser arm does NOT (EXTERNALS are
+	// exact — the IdP's translator pins caseSensitive=true for them).
+	respExtCS, err := client.ListGroups(ctx, &dbpb.ListGroupsRequest{GenericPredicate: []*dbpb.ListGroupsRequest_Predicate{
+		{Attribute: "external_id", CaseSensitive: true, Value: "EXT-alpha"},
+	}})
+	if err != nil {
+		t.Fatalf("external_id CS: %v", err)
+	}
+	if len(respExtCS.GetGroups()) != 1 || respExtCS.GetGroups()[0].GetId() != ids["Alpha Squad"] {
+		t.Errorf("external_id CS = %v, want only Alpha Squad", respExtCS.GetGroups())
+	}
+	respExtLoose, err := client.ListGroups(ctx, &dbpb.ListGroupsRequest{GenericPredicate: []*dbpb.ListGroupsRequest_Predicate{
+		{Attribute: "external_id", CaseSensitive: false, Value: "ext-BETA"},
+	}})
+	if err != nil {
+		t.Fatalf("external_id loose: %v", err)
+	}
+	if len(respExtLoose.GetGroups()) != 1 || respExtLoose.GetGroups()[0].GetId() != ids["Beta Squad"] {
+		t.Errorf("external_id loose = %v, want only Beta squad", respExtLoose.GetGroups())
+	}
+	// Unknown external_id ⇒ empty (no leak of other groups).
+	respExtMiss, err := client.ListGroups(ctx, &dbpb.ListGroupsRequest{GenericPredicate: []*dbpb.ListGroupsRequest_Predicate{
+		{Attribute: "external_id", CaseSensitive: true, Value: "EXT-none"},
+	}})
+	if err != nil {
+		t.Fatalf("external_id miss: %v", err)
+	}
+	if len(respExtMiss.GetGroups()) != 0 {
+		t.Errorf("external_id miss = %v, want NONE", respExtMiss.GetGroups())
 	}
 
 	// members_value EXACT (relational): aa-1 ∈ Alpha Squad and GAMMA squad.

@@ -13995,9 +13995,15 @@ type IDPGroup struct {
 	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
 	// member_values are the group's verbatim membership strings, in insertion
 	// order.
-	MemberValues  []string               `protobuf:"bytes,4,rep,name=member_values,json=memberValues,proto3" json:"member_values,omitempty"`
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	MemberValues []string               `protobuf:"bytes,4,rep,name=member_values,json=memberValues,proto3" json:"member_values,omitempty"`
+	CreatedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt    *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// external_id is the corporate directory's stable identifier for the
+	// group (e.g. the Azure group objectId) carried by SCIM provisioning
+	// (F-28.5): the re-correlation key when a connector loses its id mapping.
+	// CREATE-ONLY and IMMUTABLE after (supplied on ReplaceGroup ⇒
+	// InvalidArgument). Empty when the provider sent none.
+	ExternalId    string `protobuf:"bytes,7,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14074,13 +14080,23 @@ func (x *IDPGroup) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *IDPGroup) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
+}
+
 // CreateGroupRequest creates a group with an initial (possibly empty)
 // membership. Values are applied verbatim and deduplicated.
 type CreateGroupRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DisplayName   string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	MemberValues  []string               `protobuf:"bytes,3,rep,name=member_values,json=memberValues,proto3" json:"member_values,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	DisplayName  string                 `protobuf:"bytes,1,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Description  string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	MemberValues []string               `protobuf:"bytes,3,rep,name=member_values,json=memberValues,proto3" json:"member_values,omitempty"`
+	// external_id is the corporate directory's group identifier (accepted
+	// ONLY at creation; see IDPGroup.external_id).
+	ExternalId    string `protobuf:"bytes,4,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14134,6 +14150,13 @@ func (x *CreateGroupRequest) GetMemberValues() []string {
 		return x.MemberValues
 	}
 	return nil
+}
+
+func (x *CreateGroupRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
 }
 
 // GetGroupRequest fetches a group by id.
@@ -14277,14 +14300,19 @@ func (x *ListGroupsResponse) GetGroups() []*IDPGroup {
 // ReplaceGroupRequest DEFINITELY replaces a group's attributes and its ENTIRE
 // membership (PUT semantics): display_name/description are set to the
 // supplied values (omitted means ""); the membership is swapped for
-// member_values wholesale (omitted/empty means EMPTY).
+// member_values wholesale (omitted/empty means EMPTY). external_id is
+// IMMUTABLE (supplying a value differing from the row's current one is
+// InvalidArgument; equal-or-absent is a no-op — the provider's group
+// identity is stable for the group's life).
 type ReplaceGroupRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// id is the group's stable identifier (decimal string).
-	Id            string   `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	DisplayName   string   `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Description   string   `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
-	MemberValues  []string `protobuf:"bytes,4,rep,name=member_values,json=memberValues,proto3" json:"member_values,omitempty"`
+	Id           string   `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	DisplayName  string   `protobuf:"bytes,2,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Description  string   `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	MemberValues []string `protobuf:"bytes,4,rep,name=member_values,json=memberValues,proto3" json:"member_values,omitempty"`
+	// external_id is IMMUTABLE (see the message comment).
+	ExternalId    string `protobuf:"bytes,5,opt,name=external_id,json=externalId,proto3" json:"external_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14345,6 +14373,13 @@ func (x *ReplaceGroupRequest) GetMemberValues() []string {
 		return x.MemberValues
 	}
 	return nil
+}
+
+func (x *ReplaceGroupRequest) GetExternalId() string {
+	if x != nil {
+		return x.ExternalId
+	}
+	return ""
 }
 
 // PatchGroupMembersRequest atomically adds and/or removes membership values
@@ -19933,7 +19968,7 @@ func (x *ListIDPUsersRequest_Predicate) GetValue() string {
 
 type ListGroupsRequest_Predicate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// attribute is one of: display_name, members_value.
+	// attribute is one of: display_name, members_value, external_id.
 	Attribute string `protobuf:"bytes,1,opt,name=attribute,proto3" json:"attribute,omitempty"`
 	// case_sensitive governs the string comparisons (loose/casefolded by
 	// default — directory convention).
@@ -21093,7 +21128,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\trole_name\x18\x03 \x01(\tR\broleName\x12\x1f\n" +
 	"\vpipeline_id\x18\x04 \x01(\x03R\n" +
 	"pipelineId\x12\x16\n" +
-	"\x06origin\x18\x05 \x01(\tR\x06origin\"\xfa\x01\n" +
+	"\x06origin\x18\x05 \x01(\tR\x06origin\"\x9b\x02\n" +
 	"\bIDPGroup\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +
@@ -21102,11 +21137,15 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"~\n" +
+	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x1f\n" +
+	"\vexternal_id\x18\a \x01(\tR\n" +
+	"externalId\"\x9f\x01\n" +
 	"\x12CreateGroupRequest\x12!\n" +
 	"\fdisplay_name\x18\x01 \x01(\tR\vdisplayName\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12#\n" +
-	"\rmember_values\x18\x03 \x03(\tR\fmemberValues\"!\n" +
+	"\rmember_values\x18\x03 \x03(\tR\fmemberValues\x12\x1f\n" +
+	"\vexternal_id\x18\x04 \x01(\tR\n" +
+	"externalId\"!\n" +
 	"\x0fGetGroupRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\xd2\x01\n" +
 	"\x11ListGroupsRequest\x12U\n" +
@@ -21116,12 +21155,14 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x0ecase_sensitive\x18\x02 \x01(\bR\rcaseSensitive\x12\x14\n" +
 	"\x05value\x18\x03 \x01(\tR\x05value\"C\n" +
 	"\x12ListGroupsResponse\x12-\n" +
-	"\x06groups\x18\x01 \x03(\v2\x15.cdrom.db.v1.IDPGroupR\x06groups\"\x8f\x01\n" +
+	"\x06groups\x18\x01 \x03(\v2\x15.cdrom.db.v1.IDPGroupR\x06groups\"\xb0\x01\n" +
 	"\x13ReplaceGroupRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fdisplay_name\x18\x02 \x01(\tR\vdisplayName\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12#\n" +
-	"\rmember_values\x18\x04 \x03(\tR\fmemberValues\"T\n" +
+	"\rmember_values\x18\x04 \x03(\tR\fmemberValues\x12\x1f\n" +
+	"\vexternal_id\x18\x05 \x01(\tR\n" +
+	"externalId\"T\n" +
 	"\x18PatchGroupMembersRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
 	"\x03add\x18\x02 \x03(\tR\x03add\x12\x16\n" +

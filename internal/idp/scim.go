@@ -289,6 +289,7 @@ var scimCoreSchemas = []map[string]any{
 	scimSchemaDescriptor("Group", scimSchemaGroup, true, []string{"displayName"},
 		scimAttr("displayName", "string", false, true, "Localized name of the Group."),
 		scimAttr("description", "string", false, false, "Human-readable description for the Group."),
+		scimAttr("externalId", "string", false, false, "Corporation-wide unique identifier (immutable after creation)."),
 		scimAttr("members", "complex", true, false, "Members of the Group ($ref to User)."),
 	),
 	scimSchemaDescriptor("Error", scimSchemaError, false, nil,
