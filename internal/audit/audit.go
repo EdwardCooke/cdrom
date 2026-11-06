@@ -288,7 +288,10 @@ const (
 	TargetPackage = "package"
 	// TargetApprovalGroup is the target kind of an approval group (F-27): a
 	// named set of users an approval step can reference.
-	TargetApprovalGroup = "approval-group"
+	TargetApprovalGroup = "approval-group" // TargetSCIMGroup is the target kind of a SCIM group (F-28.5): a group
+	// synced from the corporate directory whose membership drives role
+	// derivation.
+	TargetSCIMGroup = "scim-group"
 )
 
 // Outcomes (F-15).

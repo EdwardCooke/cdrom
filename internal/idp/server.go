@@ -142,9 +142,15 @@ type Server struct {
 	// answer 503 (the surface is mounted but its backing is unwired — a
 	// misconfiguration, degraded rather than guessed at).
 	scimUsers UserStore
+	// scimGroups is the group directory the SCIM /Groups resource (F-28.5,
+	// Slice 2) manages. Attached by cmd/idp; when nil the /Groups routes
+	// answer 503 (same degradation posture as scimUsers).
+	scimGroups GroupStore
 	// scimUsersAuditor records SCIM /Users mutations (F-15, F-28.4 Slice 2),
 	// attributed to the presenting connector. May be nil (mutations then
-	// skip the durable audit copy — unit tests without an audit sink).
+	// skip the durable audit copy — unit tests without an audit sink). The
+	// /Groups resource (F-28.5) SHARES this auditor (one recorder for the
+	// whole SCIM surface, distinguished by Action/target kind).
 	scimUsersAuditor scimAuditor
 	// bgc coins break-glass admins (F-28.3, Slice 3). Attached by cmd/idp;
 	// when nil the /emergency/break-glass route denies every request.
@@ -196,6 +202,15 @@ func (s *Server) SetScimAuthorizer(a scimAuthorizer) {
 func (s *Server) SetScimUserBacking(store UserStore, auditor scimAuditor) {
 	s.scimUsers = store
 	s.scimUsersAuditor = auditor
+}
+
+// SetScimGroupBacking attaches the group directory the SCIM /Groups resource
+// (F-28.5, Slice 2) manages. Until the directory is attached, the /Groups
+// routes degrade to 503. The AUDITOR is shared with the /Users resource (the
+// SetScimUserBacking attachment) — this setter deliberately does not touch
+// it, so the group surface can be wired independently of the user surface.
+func (s *Server) SetScimGroupBacking(store GroupStore) {
+	s.scimGroups = store
 }
 
 // Handler builds the IdP's HTTP handler (the OIDC surface, plus the SCIM

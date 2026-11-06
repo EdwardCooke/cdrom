@@ -59,13 +59,20 @@ func (s *Server) mountSCIM(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+base+"/ResourceTypes/{rtype}", s.scimGuard(s.handleSCIMResourceType))
 	// The /Users resource (F-28.4, Slice 2): the concrete User endpoints
 	// under the same guard (Accept + key pool + connector attribution).
-	// /Groups lands with F-28.5.
 	mux.HandleFunc("GET "+base+"/Users", s.scimGuard(s.handleSCIMUsersList))
 	mux.HandleFunc("POST "+base+"/Users", s.scimGuard(s.handleSCIMUsersCreate))
 	mux.HandleFunc("GET "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserGet))
 	mux.HandleFunc("PUT "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserPut))
 	mux.HandleFunc("PATCH "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserPatch))
 	mux.HandleFunc("DELETE "+base+"/Users/{id}", s.scimGuard(s.handleSCIMUserDelete))
+	// The /Groups resource (F-28.5, Slice 2): the concrete Group endpoints
+	// under the same guard.
+	mux.HandleFunc("GET "+base+"/Groups", s.scimGuard(s.handleSCIMGroupsList))
+	mux.HandleFunc("POST "+base+"/Groups", s.scimGuard(s.handleSCIMGroupsCreate))
+	mux.HandleFunc("GET "+base+"/Groups/{id}", s.scimGuard(s.handleSCIMGroupGet))
+	mux.HandleFunc("PUT "+base+"/Groups/{id}", s.scimGuard(s.handleSCIMGroupPut))
+	mux.HandleFunc("PATCH "+base+"/Groups/{id}", s.scimGuard(s.handleSCIMGroupPatch))
+	mux.HandleFunc("DELETE "+base+"/Groups/{id}", s.scimGuard(s.handleSCIMGroupDelete))
 	mux.Handle(base+"/", s.scimGuard(http.HandlerFunc(s.handleSCIMSubtree)))
 }
 

@@ -184,6 +184,10 @@ func main() {
 		// directory (the same store the gRPC surface and break-glass use),
 		// and audits its mutations to the same recorder the guard uses.
 		srv.SetScimUserBacking(userStore, idpAudit)
+		// The /Groups resource (F-28.5, Slice 2) manages the SHARED group
+		// directory (through the Database service, like the user directory)
+		// and shares the same auditor (actions distinguish the surface).
+		srv.SetScimGroupBacking(idp.NewDBGroupStore(dbClient))
 	}
 	// Break-glass escape hatch (F-28.3, Slice 3): coins ephemeral
 	// random-identity admins for holders of a CA-signed client certificate
