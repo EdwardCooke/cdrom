@@ -359,6 +359,30 @@ service Database {
   // counter and the lockout instant); an admin uses it to un-lock a user.
   rpc ResetAPIKeyLockout(ResetIDPAPIKeyLockoutRequest) returns (google.protobuf.Empty);
 
+  // IdP groups (F-28.5). SCIM groups synced from the corporate directory.
+  // Membership values are OPAQUE: whatever the provider sends in
+  // members[].value is stored verbatim (assumed to be the user's external_id,
+  // but not guaranteed) and is never validated against the user directory at
+  // write time — unknown or departed members degrade gracefully. Groups are
+  // HARD-DELETED (cascade their membership rows); recreation is legal.
+  // ListGroups narrowing is SERVER-SIDE (generic equality predicates, cf.
+  // ListIDPUsers): callers receive only matching rows.
+  rpc CreateGroup(CreateGroupRequest) returns (IDPGroup);
+  rpc GetGroup(GetGroupRequest) returns (IDPGroup);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  // ReplaceGroup DEFINITELY replaces a group's attributes and its ENTIRE
+  // membership (PUT semantics): display_name/description are set to the
+  // supplied values (omitted means "") and the membership is swapped for
+  // member_values wholesale (omitted/empty means EMPTY). Atomic in a
+  // transaction.
+  rpc ReplaceGroup(ReplaceGroupRequest) returns (IDPGroup);
+  // PatchGroupMembers atomically ADDS and/or REMOVES membership values
+  // (transactional junction-row mutation, not an IdP-side read-modify-write).
+  // Adds are idempotent (present value: no-op); removes are idempotent
+  // (absent value: no-op). Values are applied verbatim.
+  rpc PatchGroupMembers(PatchGroupMembersRequest) returns (IDPGroup);
+  rpc DeleteGroup(DeleteGroupRequest) returns (google.protobuf.Empty);
+
   // Service accounts (F-26). A service account is a non-human identity with
   // two API-key slots. The IdP generates and hashes the keys (mixing in a
   // per-key salt and an optional pepper) and persists them here; the Database
@@ -3923,6 +3947,13 @@ message RoleBinding {
   // is unscoped (platform-wide).
   int64 pipeline_id = 5;
   google.protobuf.Timestamp created_at = 6;
+  // origin is the PROVENANCE of the write (F-28.5): "manual" (operators,
+  // local/JIT paths — the default for everything predating this field) or
+  // "scim_group" (written solely by the SCIM group->role mapping applicator).
+  // The applicator's recomputation diffs ONLY scim_group-origin bindings, so
+  // operator grants survive every group sync untouched. Absent decodes to
+  // "manual" (backward-compatible with older peers).
+  string origin = 7;
 }
 
 // AddRoleBindingRequest attaches a role to a principal.
@@ -3936,6 +3967,93 @@ message AddRoleBindingRequest {
   // pipeline_id is the pipeline the binding is scoped to; 0 means unscoped
   // (platform-wide).
   int64 pipeline_id = 4;
+  // origin stamps the binding's provenance (F-28.5); empty means "manual".
+  string origin = 5;
+}
+
+// ---------------------------------------------------------------------------
+// IdP groups (F-28.5)
+// ---------------------------------------------------------------------------
+
+// IDPGroup is a SCIM group synced from the corporate directory. display_name
+// is DELIBERATELY NOT UNIQUE (departments routinely share names). Membership
+// is carried by member_values: OPAQUE verbatim strings (whatever the provider
+// puts in members[].value — assumed to be the user's external_id, but not
+// guaranteed), never validated against the user directory at write time.
+message IDPGroup {
+  // id is the group's stable identifier (numeric, decimal string — the SCIM
+  // resource id).
+  string id = 1;
+  string display_name = 2;
+  string description = 3;
+  // member_values are the group's verbatim membership strings, in insertion
+  // order.
+  repeated string member_values = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// CreateGroupRequest creates a group with an initial (possibly empty)
+// membership. Values are applied verbatim and deduplicated.
+message CreateGroupRequest {
+  string display_name = 1;
+  string description = 2;
+  repeated string member_values = 3;
+}
+
+// GetGroupRequest fetches a group by id.
+message GetGroupRequest {
+  // id is the group's stable identifier (decimal string).
+  string id = 1;
+}
+
+// ListGroupsRequest lists groups, narrowed by generic EQUALITY predicates
+// (SERVER-SIDE pushdown, cf. ListIDPUsers): callers receive only matching
+// rows. Multiple predicates are AND-ed; an unknown attribute is
+// InvalidArgument.
+message ListGroupsRequest {
+  message Predicate {
+    // attribute is one of: display_name, members_value.
+    string attribute = 1;
+    // case_sensitive governs the string comparisons (loose/casefolded by
+    // default — directory convention).
+    bool case_sensitive = 2;
+    // value is the compared constant.
+    string value = 3;
+  }
+  repeated Predicate generic_predicate = 1;
+}
+
+message ListGroupsResponse {
+  repeated IDPGroup groups = 1;
+}
+
+// ReplaceGroupRequest DEFINITELY replaces a group's attributes and its ENTIRE
+// membership (PUT semantics): display_name/description are set to the
+// supplied values (omitted means ""); the membership is swapped for
+// member_values wholesale (omitted/empty means EMPTY).
+message ReplaceGroupRequest {
+  // id is the group's stable identifier (decimal string).
+  string id = 1;
+  string display_name = 2;
+  string description = 3;
+  repeated string member_values = 4;
+}
+
+// PatchGroupMembersRequest atomically adds and/or removes membership values
+// (idempotent both ways; values applied verbatim). At least one side must be
+// non-empty (otherwise InvalidArgument).
+message PatchGroupMembersRequest {
+  // id is the group's stable identifier (decimal string).
+  string id = 1;
+  repeated string add = 2;
+  repeated string remove = 3;
+}
+
+// DeleteGroupRequest hard-deletes a group (cascading its membership rows).
+message DeleteGroupRequest {
+  // id is the group's stable identifier (decimal string).
+  string id = 1;
 }
 
 // ListRoleBindingsRequest lists role bindings, optionally filtered by

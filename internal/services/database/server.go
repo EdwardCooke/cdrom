@@ -7334,6 +7334,10 @@ func (s *Server) AddRoleBinding(ctx context.Context, req *dbpb.AddRoleBindingReq
 	if req.GetRoleName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "role_name is required")
 	}
+	origin, err := normalizeRoleBindingOrigin(req.GetOrigin())
+	if err != nil {
+		return nil, err
+	}
 	var existing models.RoleBinding
 	query := s.db.WithContext(ctx).
 		Where("principal_kind = ? AND principal_id = ? AND role_name = ?",
@@ -7352,6 +7356,7 @@ func (s *Server) AddRoleBinding(ctx context.Context, req *dbpb.AddRoleBindingReq
 		PrincipalKind: req.GetPrincipalKind(),
 		PrincipalID:   req.GetPrincipalId(),
 		RoleName:      req.GetRoleName(),
+		Origin:        origin,
 	}
 	if req.GetPipelineId() != 0 {
 		pid := uint(req.GetPipelineId())
@@ -7361,6 +7366,21 @@ func (s *Server) AddRoleBinding(ctx context.Context, req *dbpb.AddRoleBindingReq
 		return nil, grpcErr(err)
 	}
 	return toProtoRoleBinding(binding), nil
+}
+
+// normalizeRoleBindingOrigin settles a requested binding origin to its
+// canonical spelling (F-28.5): empty/"manual" ⇒ "manual"; "scim_group" ⇒
+// "scim_group"; anything else is InvalidArgument (typos must not mint a new
+// provenance bucket the applicator won't recognise).
+func normalizeRoleBindingOrigin(origin string) (string, error) {
+	switch origin {
+	case "", "manual":
+		return "manual", nil
+	case "scim_group":
+		return "scim_group", nil
+	default:
+		return "", status.Errorf(codes.InvalidArgument, "unknown role binding origin: %q", origin)
+	}
 }
 
 // ListRoleBindings returns role bindings, optionally filtered by principal
@@ -7840,6 +7860,345 @@ func saveApprovalGroupColumnsTx(tx *gorm.DB, group *models.ApprovalGroup) error 
 }
 
 // ---------------------------------------------------------------------------
+// IdP groups (F-28.5)
+// ---------------------------------------------------------------------------
+//
+// SCIM groups synced from the corporate directory. Membership values are
+// OPAQUE: whatever the provider sends is stored verbatim (assumed to be the
+// user's external_id, but not guaranteed) and is never validated against the
+// user directory at write time — unknown or departed members degrade
+// gracefully (the ApprovalGroup.Members spirit, F-27). Groups are
+// hard-deletable (CASCADE their junction rows); recreation is legal. Listing
+// narrowing is SERVER-SIDE (generic equality predicates, cf.
+// idpUserListingQuery): callers receive only matching rows.
+
+// idpGroupColumnRule describes one pushdown-capable predicate of a group
+// listing: its NAME and HOW it constrains the query.
+type idpGroupColumnRule struct {
+	// column is the groups-table column constrained by an equality predicate
+	// (empty for relational predicates).
+	column string
+	// relationSQL is the EXISTS-subquery fragment for RELATIONAL predicates
+	// (evaluated against the junction table; empty for column predicates).
+	relationSQL string
+}
+
+// idpGroupPushdownAttributes closes the generic equality algebra for group
+// listings (F-28.5): the finite set of attributes a ListGroups predicate may
+// constrain. Deliberately FINITE — an unknown attribute is InvalidArgument,
+// so typos fail loudly instead of silently widening the scan.
+var idpGroupPushdownAttributes = map[string]idpGroupColumnRule{
+	"display_name": {column: "display_name"},
+	// members_value: "the group HAS a member with this verbatim value" — a
+	// relational predicate spliced as an indexed sub-query on the junction
+	// table (whose name is PINNED by IDPGroupMember.TableName, avoiding any
+	// reliance on GORM's inference for the outer table). Reverse membership
+	// is equally an index lookup on value.
+	"members_value": {relationSQL: "id IN (SELECT group_id FROM idp_group_member WHERE value = ?)"},
+}
+
+// idpGroupParseID coerces a request's decimal-string group id to its numeric
+// form (the SCIM id convention, cf. F-28.4's user ids).
+func idpGroupParseID(field, id string) (uint, error) {
+	n, err := strconv.ParseUint(strings.TrimSpace(id), 10, 64)
+	if err != nil || n == 0 {
+		return 0, status.Errorf(codes.InvalidArgument, "%s must be a positive decimal id, got %q", field, id)
+	}
+	return uint(n), nil
+}
+
+// idpGroupLoadByID fetches a group by id (NotFound when absent).
+func (s *Server) idpGroupLoadByID(ctx context.Context, id uint) (*models.IDPGroup, error) {
+	var group models.IDPGroup
+	if err := s.db.WithContext(ctx).First(&group, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Errorf(codes.NotFound, "group %d not found", id)
+		}
+		return nil, grpcErr(err)
+	}
+	return &group, nil
+}
+
+// idpGroupUpsertMembership swaps a group's junction rows for the given
+// DISTINCT verbatim values inside tx (order-preserving by value). Returns the
+// new membership. Deduplication is APPLICATION-side (the composite unique
+// index is the durability floor).
+func idpGroupUpsertMembership(tx *gorm.DB, ctx context.Context, groupID uint, values []string) ([]*models.IDPGroupMember, error) {
+	distinct := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		distinct = append(distinct, v)
+	}
+	if len(distinct) > 0 {
+		rows := make([]*models.IDPGroupMember, 0, len(distinct))
+		for _, v := range distinct {
+			rows = append(rows, &models.IDPGroupMember{GroupID: groupID, Value: v})
+		}
+		if err := tx.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
+			return nil, err
+		}
+	}
+	var members []*models.IDPGroupMember
+	if err := tx.WithContext(ctx).Where("group_id = ?", groupID).Order("id").Find(&members).Error; err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+// toProtoIDPGroup renders a group (WITH its membership, loaded eagerly) as
+// its Database-service form.
+func toProtoIDPGroup(group *models.IDPGroup) *dbpb.IDPGroup {
+	out := &dbpb.IDPGroup{
+		Id:          strconv.FormatUint(uint64(group.ID), 10),
+		DisplayName: group.DisplayName,
+		Description: group.Description,
+		CreatedAt:   timestamppb.New(group.CreatedAt),
+		UpdatedAt:   timestamppb.New(group.UpdatedAt),
+	}
+	for _, m := range group.Members {
+		out.MemberValues = append(out.MemberValues, m.Value)
+	}
+	return out
+}
+
+// CreateGroup creates a group with an initial (possibly empty) membership.
+// Duplicate display names are LEGAL (ruling 4 — departments share names);
+// membership values are applied verbatim and deduplicated.
+func (s *Server) CreateGroup(ctx context.Context, req *dbpb.CreateGroupRequest) (*dbpb.IDPGroup, error) {
+	group := &models.IDPGroup{
+		DisplayName: strings.TrimSpace(req.GetDisplayName()),
+		Description: req.GetDescription(),
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(group).Error; err != nil {
+			return err
+		}
+		members, err := idpGroupUpsertMembership(tx, ctx, group.ID, req.GetMemberValues())
+		if err != nil {
+			return err
+		}
+		group.Members = members
+		return nil
+	})
+	if err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPGroup(group), nil
+}
+
+// GetGroup fetches a group (with its membership) by id.
+func (s *Server) GetGroup(ctx context.Context, req *dbpb.GetGroupRequest) (*dbpb.IDPGroup, error) {
+	id, err := idpGroupParseID("id", req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	group, err := s.idpGroupLoadByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.db.WithContext(ctx).Where("group_id = ?", id).Order("id").Find(&group.Members).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPGroup(group), nil
+}
+
+// idpGroupListingQuery builds the CONDITIONAL query for group listings: the
+// generic equality predicates EVALUATED HERE (server-side pushdown — callers
+// deal only with matching rows, so the transfer scales with the answer, not
+// the population; F-28.5 ruling 5). String predicates honour the predicate's
+// case sensitivity (loose/casefolded by default — directory convention);
+// relational predicates splice their sub-query fragment with the compared
+// value.
+func (s *Server) idpGroupListingQuery(ctx context.Context, req *dbpb.ListGroupsRequest) (*gorm.DB, error) {
+	query := s.db.WithContext(ctx).Model(&models.IDPGroup{})
+	for _, pred := range req.GetGenericPredicate() {
+		rule, ok := idpGroupPushdownAttributes[pred.GetAttribute()]
+		if !ok {
+			return nil, status.Errorf(codes.InvalidArgument, "unknown group filter attribute: %q", pred.GetAttribute())
+		}
+		switch {
+		case rule.relationSQL != "":
+			// Relational predicate: splice the sub-query fragment with the
+			// compared value. Loose (casefolded) matching lowers the VALUE
+			// side — portable across SQLite and PostgreSQL (COLLATE NOCASE
+			// is SQLite-only and would not travel). Exactly one "?" in the
+			// fragment.
+			sqlFragment := rule.relationSQL
+			if !pred.GetCaseSensitive() {
+				sqlFragment = strings.Replace(sqlFragment, "value = ?", "LOWER(value) = LOWER(?)", 1)
+			}
+			query = query.Where(clause.Expr{SQL: sqlFragment, Vars: []any{pred.GetValue()}})
+		default:
+			if pred.GetCaseSensitive() {
+				query = query.Where(rule.column+" = ?", pred.GetValue())
+			} else {
+				query = query.Where("LOWER("+rule.column+") = LOWER(?)", pred.GetValue())
+			}
+		}
+	}
+	return query, nil
+}
+
+// ListGroups returns groups ORDERED BY ID, narrowed by the request's
+// predicates (see idpGroupListingQuery).
+func (s *Server) ListGroups(ctx context.Context, req *dbpb.ListGroupsRequest) (*dbpb.ListGroupsResponse, error) {
+	query, err := s.idpGroupListingQuery(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	var groups []models.IDPGroup
+	if err := query.Preload("Members", func(db *gorm.DB) *gorm.DB { return db.Order("id") }).
+		Order("id").Find(&groups).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	response := &dbpb.ListGroupsResponse{}
+	for i := range groups {
+		response.Groups = append(response.Groups, toProtoIDPGroup(&groups[i]))
+	}
+	return response, nil
+}
+
+// ReplaceGroup DEFINITELY replaces a group's attributes and its ENTIRE
+// membership (PUT semantics): display_name/description are set to the
+// supplied values (omitted means ""); the membership is swapped for
+// member_values wholesale (omitted/empty means EMPTY). Atomic in a
+// transaction.
+func (s *Server) ReplaceGroup(ctx context.Context, req *dbpb.ReplaceGroupRequest) (*dbpb.IDPGroup, error) {
+	id, err := idpGroupParseID("id", req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	displayName := strings.TrimSpace(req.GetDisplayName())
+	description := req.GetDescription()
+	values := req.GetMemberValues()
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing models.IDPGroup
+		if err := tx.First(&existing, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return status.Errorf(codes.NotFound, "group %d not found", id)
+			}
+			return err
+		}
+		// Definite attribute replace: Select forces the columns even when
+		// their values are the zero value (PUT semantics — omitted means "").
+		if err := tx.Model(&models.IDPGroup{}).
+			Where("id = ?", id).
+			Select("DisplayName", "Description").
+			Updates(models.IDPGroup{DisplayName: displayName, Description: description}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("group_id = ?", id).Delete(&models.IDPGroupMember{}).Error; err != nil {
+			return err
+		}
+		_, err := idpGroupUpsertMembership(tx, ctx, id, values)
+		return err
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	// Reload the definitive row (post-transaction timestamps + membership)
+	// for the response.
+	final, err := s.idpGroupLoadByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.db.WithContext(ctx).Where("group_id = ?", id).Order("id").Find(&final.Members).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return toProtoIDPGroup(final), nil
+}
+
+// PatchGroupMembers atomically adds and/or removes membership values
+// (transactional junction-row mutation, not an IdP-side read-modify-write).
+// Adds are idempotent (present value: no-op); removes are idempotent (absent
+// value: no-op). Values are applied verbatim.
+func (s *Server) PatchGroupMembers(ctx context.Context, req *dbpb.PatchGroupMembersRequest) (*dbpb.IDPGroup, error) {
+	id, err := idpGroupParseID("id", req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	add := make([]string, 0, len(req.GetAdd()))
+	remove := make([]string, 0, len(req.GetRemove()))
+	seenAdd := make(map[string]bool)
+	for _, v := range req.GetAdd() {
+		v = strings.TrimSpace(v)
+		if v != "" && !seenAdd[v] {
+			seenAdd[v] = true
+			add = append(add, v)
+		}
+	}
+	seenRem := make(map[string]bool)
+	for _, v := range req.GetRemove() {
+		v = strings.TrimSpace(v)
+		if v != "" && !seenRem[v] {
+			seenRem[v] = true
+			remove = append(remove, v)
+		}
+	}
+	if len(add)+len(remove) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "nothing to patch: supply at least one add or remove value")
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing models.IDPGroup
+		if err := tx.First(&existing, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return status.Errorf(codes.NotFound, "group %d not found", id)
+			}
+			return err
+		}
+		if len(remove) > 0 {
+			if err := tx.Where("group_id = ? AND value IN (?)", id, remove).Delete(&models.IDPGroupMember{}).Error; err != nil {
+				return err
+			}
+		}
+		if len(add) > 0 {
+			rows := make([]*models.IDPGroupMember, 0, len(add))
+			for _, v := range add {
+				rows = append(rows, &models.IDPGroupMember{GroupID: id, Value: v})
+			}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	return s.GetGroup(ctx, &dbpb.GetGroupRequest{Id: req.GetId()})
+}
+
+// DeleteGroup hard-deletes a group together with its membership rows. Groups
+// are recreatable — no tombstone machinery (contrast with users, F-28.3).
+// The junction cleanup is EXPLICIT (inside the transaction) rather than
+// delegated to the ON DELETE CASCADE DDL: SQLite enforces foreign keys only
+// when the per-connection pragma is on, so the explicit delete is the
+// portable guarantee (the DDL constraint remains as defence in depth).
+func (s *Server) DeleteGroup(ctx context.Context, req *dbpb.DeleteGroupRequest) (*emptypb.Empty, error) {
+	id, err := idpGroupParseID("id", req.GetId())
+	if err != nil {
+		return nil, err
+	}
+	var res *gorm.DB
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("group_id = ?", id).Delete(&models.IDPGroupMember{}).Error; err != nil {
+			return err
+		}
+		res = tx.Delete(&models.IDPGroup{}, id)
+		return res.Error
+	}); err != nil {
+		return nil, grpcErr(err)
+	}
+	if res.RowsAffected == 0 {
+		return nil, status.Errorf(codes.NotFound, "group %d not found", id)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+// ---------------------------------------------------------------------------
 // Audit log (F-15)
 // ---------------------------------------------------------------------------
 
@@ -8003,6 +8362,7 @@ func toProtoRoleBinding(b *models.RoleBinding) *dbpb.RoleBinding {
 		PrincipalKind: b.PrincipalKind,
 		PrincipalId:   b.PrincipalID,
 		RoleName:      b.RoleName,
+		Origin:        b.Origin,
 		CreatedAt:     timestamppb.New(b.CreatedAt),
 	}
 	if b.PipelineID != nil {

@@ -2057,6 +2057,60 @@ type RoleBinding struct {
 	// PipelineID is the pipeline the binding is scoped to; nil means the
 	// binding is unscoped (platform-wide).
 	PipelineID *uint `gorm:"index" json:"pipeline_id,omitempty"`
+	// Origin is the PROVENANCE of the write (F-28.5): "manual" (operators,
+	// local/JIT paths — everything predating this column) or "scim_group"
+	// (written solely by the SCIM group->role mapping applicator). The
+	// applicator's recomputation diffs ONLY scim_group-origin bindings, so
+	// operator grants (made for temporary adjustments) survive every group
+	// sync untouched.
+	Origin string `gorm:"column:origin;index;not null;default:'manual'" json:"origin"`
+}
+
+// IDPGroup is a SCIM group synced from the corporate directory (F-28.5):
+// DisplayName (deliberately NOT unique — departments routinely share names),
+// Description, and membership via the IDPGroupMember junction. Membership
+// values are OPACITY-FIRST: whatever the corporate provider puts in
+// members[].value is stored verbatim (assumed to be the user's external_id,
+// but not guaranteed) and is deliberately UNVALIDATED against the user
+// directory at write time, so unknown or departed members degrade gracefully
+// instead of poisoning the write (the ApprovalGroup.Members spirit, F-27).
+// Groups are HARD-DELETABLE (contrast with users): audit trails attach to
+// users (actors), not groups, and a deleted group can be recreated — no
+// tombstone machinery.
+type IDPGroup struct {
+	gorm.Model
+	// DisplayName is the group's display name (NOT unique; indexed for the
+	// display_name filter pushdown).
+	DisplayName string `gorm:"column:display_name;index" json:"display_name"`
+	// Description is a human-readable description.
+	Description string `json:"description"`
+	// Members is the virtual association to the junction table (ordered by
+	// insertion, i.e. junction id).
+	Members []*IDPGroupMember `gorm:"foreignKey:GroupID;constraint:OnDelete:CASCADE" json:"members,omitempty"`
+}
+
+// TableName pins the groups table name (deterministic across dialects; the
+// Database service's filter sub-queries reference the pinned junction name).
+func (IDPGroup) TableName() string { return "idp_groups" }
+
+// TableName pins the junction table name (deterministic across dialects).
+func (IDPGroupMember) TableName() string { return "idp_group_member" }
+
+// IDPGroupMember links an IDPGroup to one VERBATIM member value (F-28.5).
+// Value is opaque (usually the user's external_id, occasionally the
+// username); resolution against the user directory is BEST-EFFORT at read /
+// mapping-application time, never at write time. Composite unique on
+// (group_id, value): a value appears at most once per group.
+type IDPGroupMember struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// GroupID is the owning group. Together with Value it forms the
+	// COMPOSITE UNIQUE index uk_idp_group_member: a value appears at most
+	// once per group (writes dedupe application-side; this is the
+	// durability floor).
+	GroupID uint `gorm:"column:group_id;not null;uniqueIndex:uk_idp_group_member,priority:1" json:"group_id"`
+	// Value is the member's verbatim identifier string. Standalone index:
+	// reverse membership (which groups carry value V) is an index lookup.
+	Value string `gorm:"column:value;index;not null;uniqueIndex:uk_idp_group_member,priority:2" json:"value"`
 }
 
 // ApprovalGroup is a named set of users that a pipeline's approval step
@@ -2397,6 +2451,8 @@ func All() []any {
 		&IDPSigningKey{},
 		&IDPAuthCode{},
 		&IDPUser{},
+		&IDPGroup{},
+		&IDPGroupMember{},
 		&IDPAPIKey{},
 		&ServiceAccount{},
 		&ServiceAccountKey{},

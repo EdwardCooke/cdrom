@@ -94,6 +94,12 @@ const (
 	Database_DeleteAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/DeleteAPIKey"
 	Database_AdjustAPIKeyLockout_FullMethodName            = "/cdrom.db.v1.Database/AdjustAPIKeyLockout"
 	Database_ResetAPIKeyLockout_FullMethodName             = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
+	Database_CreateGroup_FullMethodName                    = "/cdrom.db.v1.Database/CreateGroup"
+	Database_GetGroup_FullMethodName                       = "/cdrom.db.v1.Database/GetGroup"
+	Database_ListGroups_FullMethodName                     = "/cdrom.db.v1.Database/ListGroups"
+	Database_ReplaceGroup_FullMethodName                   = "/cdrom.db.v1.Database/ReplaceGroup"
+	Database_PatchGroupMembers_FullMethodName              = "/cdrom.db.v1.Database/PatchGroupMembers"
+	Database_DeleteGroup_FullMethodName                    = "/cdrom.db.v1.Database/DeleteGroup"
 	Database_CreateServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/CreateServiceAccount"
 	Database_GetServiceAccount_FullMethodName              = "/cdrom.db.v1.Database/GetServiceAccount"
 	Database_ListServiceAccounts_FullMethodName            = "/cdrom.db.v1.Database/ListServiceAccounts"
@@ -527,6 +533,29 @@ type DatabaseClient interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant); an admin uses it to un-lock a user.
 	ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPIKeyLockoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// IdP groups (F-28.5). SCIM groups synced from the corporate directory.
+	// Membership values are OPAQUE: whatever the provider sends in
+	// members[].value is stored verbatim (assumed to be the user's external_id,
+	// but not guaranteed) and is never validated against the user directory at
+	// write time — unknown or departed members degrade gracefully. Groups are
+	// HARD-DELETED (cascade their membership rows); recreation is legal.
+	// ListGroups narrowing is SERVER-SIDE (generic equality predicates, cf.
+	// ListIDPUsers): callers receive only matching rows.
+	CreateGroup(ctx context.Context, in *CreateGroupRequest, opts ...grpc.CallOption) (*IDPGroup, error)
+	GetGroup(ctx context.Context, in *GetGroupRequest, opts ...grpc.CallOption) (*IDPGroup, error)
+	ListGroups(ctx context.Context, in *ListGroupsRequest, opts ...grpc.CallOption) (*ListGroupsResponse, error)
+	// ReplaceGroup DEFINITELY replaces a group's attributes and its ENTIRE
+	// membership (PUT semantics): display_name/description are set to the
+	// supplied values (omitted means "") and the membership is swapped for
+	// member_values wholesale (omitted/empty means EMPTY). Atomic in a
+	// transaction.
+	ReplaceGroup(ctx context.Context, in *ReplaceGroupRequest, opts ...grpc.CallOption) (*IDPGroup, error)
+	// PatchGroupMembers atomically ADDS and/or REMOVES membership values
+	// (transactional junction-row mutation, not an IdP-side read-modify-write).
+	// Adds are idempotent (present value: no-op); removes are idempotent
+	// (absent value: no-op). Values are applied verbatim.
+	PatchGroupMembers(ctx context.Context, in *PatchGroupMembersRequest, opts ...grpc.CallOption) (*IDPGroup, error)
+	DeleteGroup(ctx context.Context, in *DeleteGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Service accounts (F-26). A service account is a non-human identity with
 	// two API-key slots. The IdP generates and hashes the keys (mixing in a
 	// per-key salt and an optional pepper) and persists them here; the Database
@@ -1732,6 +1761,66 @@ func (c *databaseClient) ResetAPIKeyLockout(ctx context.Context, in *ResetIDPAPI
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_ResetAPIKeyLockout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CreateGroup(ctx context.Context, in *CreateGroupRequest, opts ...grpc.CallOption) (*IDPGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPGroup)
+	err := c.cc.Invoke(ctx, Database_CreateGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetGroup(ctx context.Context, in *GetGroupRequest, opts ...grpc.CallOption) (*IDPGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPGroup)
+	err := c.cc.Invoke(ctx, Database_GetGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListGroups(ctx context.Context, in *ListGroupsRequest, opts ...grpc.CallOption) (*ListGroupsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListGroupsResponse)
+	err := c.cc.Invoke(ctx, Database_ListGroups_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ReplaceGroup(ctx context.Context, in *ReplaceGroupRequest, opts ...grpc.CallOption) (*IDPGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPGroup)
+	err := c.cc.Invoke(ctx, Database_ReplaceGroup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) PatchGroupMembers(ctx context.Context, in *PatchGroupMembersRequest, opts ...grpc.CallOption) (*IDPGroup, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IDPGroup)
+	err := c.cc.Invoke(ctx, Database_PatchGroupMembers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DeleteGroup(ctx context.Context, in *DeleteGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_DeleteGroup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2961,6 +3050,29 @@ type DatabaseServer interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant); an admin uses it to un-lock a user.
 	ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error)
+	// IdP groups (F-28.5). SCIM groups synced from the corporate directory.
+	// Membership values are OPAQUE: whatever the provider sends in
+	// members[].value is stored verbatim (assumed to be the user's external_id,
+	// but not guaranteed) and is never validated against the user directory at
+	// write time — unknown or departed members degrade gracefully. Groups are
+	// HARD-DELETED (cascade their membership rows); recreation is legal.
+	// ListGroups narrowing is SERVER-SIDE (generic equality predicates, cf.
+	// ListIDPUsers): callers receive only matching rows.
+	CreateGroup(context.Context, *CreateGroupRequest) (*IDPGroup, error)
+	GetGroup(context.Context, *GetGroupRequest) (*IDPGroup, error)
+	ListGroups(context.Context, *ListGroupsRequest) (*ListGroupsResponse, error)
+	// ReplaceGroup DEFINITELY replaces a group's attributes and its ENTIRE
+	// membership (PUT semantics): display_name/description are set to the
+	// supplied values (omitted means "") and the membership is swapped for
+	// member_values wholesale (omitted/empty means EMPTY). Atomic in a
+	// transaction.
+	ReplaceGroup(context.Context, *ReplaceGroupRequest) (*IDPGroup, error)
+	// PatchGroupMembers atomically ADDS and/or REMOVES membership values
+	// (transactional junction-row mutation, not an IdP-side read-modify-write).
+	// Adds are idempotent (present value: no-op); removes are idempotent
+	// (absent value: no-op). Values are applied verbatim.
+	PatchGroupMembers(context.Context, *PatchGroupMembersRequest) (*IDPGroup, error)
+	DeleteGroup(context.Context, *DeleteGroupRequest) (*emptypb.Empty, error)
 	// Service accounts (F-26). A service account is a non-human identity with
 	// two API-key slots. The IdP generates and hashes the keys (mixing in a
 	// per-key salt and an optional pepper) and persists them here; the Database
@@ -3653,6 +3765,24 @@ func (UnimplementedDatabaseServer) AdjustAPIKeyLockout(context.Context, *AdjustA
 }
 func (UnimplementedDatabaseServer) ResetAPIKeyLockout(context.Context, *ResetIDPAPIKeyLockoutRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
+}
+func (UnimplementedDatabaseServer) CreateGroup(context.Context, *CreateGroupRequest) (*IDPGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateGroup not implemented")
+}
+func (UnimplementedDatabaseServer) GetGroup(context.Context, *GetGroupRequest) (*IDPGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetGroup not implemented")
+}
+func (UnimplementedDatabaseServer) ListGroups(context.Context, *ListGroupsRequest) (*ListGroupsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListGroups not implemented")
+}
+func (UnimplementedDatabaseServer) ReplaceGroup(context.Context, *ReplaceGroupRequest) (*IDPGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReplaceGroup not implemented")
+}
+func (UnimplementedDatabaseServer) PatchGroupMembers(context.Context, *PatchGroupMembersRequest) (*IDPGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method PatchGroupMembers not implemented")
+}
+func (UnimplementedDatabaseServer) DeleteGroup(context.Context, *DeleteGroupRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteGroup not implemented")
 }
 func (UnimplementedDatabaseServer) CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*ServiceAccount, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateServiceAccount not implemented")
@@ -5267,6 +5397,114 @@ func _Database_ResetAPIKeyLockout_Handler(srv interface{}, ctx context.Context, 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).ResetAPIKeyLockout(ctx, req.(*ResetIDPAPIKeyLockoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CreateGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateGroup(ctx, req.(*CreateGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetGroup(ctx, req.(*GetGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListGroupsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListGroups(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListGroups_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListGroups(ctx, req.(*ListGroupsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ReplaceGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplaceGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ReplaceGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ReplaceGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ReplaceGroup(ctx, req.(*ReplaceGroupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_PatchGroupMembers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PatchGroupMembersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).PatchGroupMembers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_PatchGroupMembers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).PatchGroupMembers(ctx, req.(*PatchGroupMembersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DeleteGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteGroupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DeleteGroup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DeleteGroup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DeleteGroup(ctx, req.(*DeleteGroupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -7157,6 +7395,30 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetAPIKeyLockout",
 			Handler:    _Database_ResetAPIKeyLockout_Handler,
+		},
+		{
+			MethodName: "CreateGroup",
+			Handler:    _Database_CreateGroup_Handler,
+		},
+		{
+			MethodName: "GetGroup",
+			Handler:    _Database_GetGroup_Handler,
+		},
+		{
+			MethodName: "ListGroups",
+			Handler:    _Database_ListGroups_Handler,
+		},
+		{
+			MethodName: "ReplaceGroup",
+			Handler:    _Database_ReplaceGroup_Handler,
+		},
+		{
+			MethodName: "PatchGroupMembers",
+			Handler:    _Database_PatchGroupMembers_Handler,
+		},
+		{
+			MethodName: "DeleteGroup",
+			Handler:    _Database_DeleteGroup_Handler,
 		},
 		{
 			MethodName: "CreateServiceAccount",
