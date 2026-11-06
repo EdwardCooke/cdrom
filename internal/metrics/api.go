@@ -90,6 +90,11 @@ type APIMetrics struct {
 	// restart endpoint) and result (initiated, cooldown, no_anchor, rearmed,
 	// invalid_cut_point, error).
 	Restorations *prometheus.CounterVec
+	// Admissions counts the admission gate's verdicts (F-28.4 Slice 3) by
+	// verdict (admitted / deactivated / deprovisioned / unknown_rejected /
+	// no_roles_rejected / infra_failure) — judged PER REQUEST (no cache), so
+	// the rate tracks the request rate.
+	Admissions *prometheus.CounterVec
 }
 
 // NewAPIMetrics builds the API metric set, registering its collectors with
@@ -171,13 +176,19 @@ func NewAPIMetrics(reg prometheus.Registerer) *APIMetrics {
 			Name: Prefix + "_api_restorations_total",
 			Help: "Resumption (rollback) initiations (F-22), by door and result.",
 		}, []string{"door", "result"}),
+		Admissions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			// SPEC-MANDATED NAME (F-28.4 S3): cdrom_admissions_total (no
+			// _api_ infix — the spec fixes the series name).
+			Name: Prefix + "_admissions_total",
+			Help: "Admission-gate verdicts (F-28.4 S3), by verdict — judged per request.",
+		}, []string{"verdict"}),
 	}
 	reg.MustRegister(
 		m.HTTPRequests, m.HTTPDuration, m.AuthFailures, m.WSClients, m.Workers,
 		m.EventLogLag, m.JobStatus, m.JobDuration, m.ArtifactBytes,
 		m.LogStreamBytes, m.TokensMinted, m.SecretsDecrypted, m.Notifications,
 		m.SourceSyncs, m.SourceSyncDuration, m.SourceSyncInFlight, m.LeaderState,
-		m.Restorations,
+		m.Restorations, m.Admissions,
 	)
 	return m
 }

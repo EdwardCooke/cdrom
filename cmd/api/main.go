@@ -179,6 +179,14 @@ func main() {
 		logger.Error("auth: init", "err", err)
 		os.Exit(1)
 	}
+	// The admission gate (F-28.4 Slice 3): every authenticated HUMAN user
+	// principal (OIDC token or user API key) is adjudicated by the IdP PER
+	// REQUEST (no caching — a SCIM-driven deactivation bites the next hop).
+	// Attached unconditionally: the middleware only engages it for verified
+	// human principals, so the auth-disabled passthrough (synthetic admin)
+	// and machine principals (service accounts; job tokens never traverse
+	// this surface) remain ungated. IdP unreachable ⇒ fail closed (503).
+	authBundle.SetAdmissionPolicy(api.NewAdmissionPolicy(idpClient, apiMetrics))
 
 	// The API's HTTP server. When username/password authentication is enabled
 	// (the default for local development) the API attaches a proxy client to

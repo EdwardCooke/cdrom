@@ -499,6 +499,13 @@ type AuthConfig struct {
 	// empty the API accepts the token's audience as-is (the verifier checks
 	// it against ClientID). Optional.
 	TokenAudience string
+	// SubjectClaim is the TOKEN CLAIM NAME the API reads for the principal's
+	// subject (F-28.4 Slice 3 — the admission gate's correlation key). Most
+	// issuers stamp `sub`; a corporate IdP may use a different claim (e.g.
+	// `preferred_username`). When empty the default `sub` is used. A missing
+	// subject claim on a presented token is a DENIAL (the gate cannot
+	// correlate the principal).
+	SubjectClaim string
 	// Roles configures JWT claim mapping for role-based access control (F-14):
 	// a configurable claim (e.g. groups, roles, scope) is read from a token
 	// from any IdP and its values mapped to role names, so group membership in
@@ -1201,6 +1208,7 @@ type fileConfig struct {
 		RedirectURL     *string  `yaml:"redirect_url"`
 		Scopes          []string `yaml:"scopes"`
 		TokenAudience   *string  `yaml:"token_audience"`
+		SubjectClaim    *string  `yaml:"subject_claim"`
 		Roles           *struct {
 			RoleClaim        *string           `yaml:"role_claim"`
 			RoleMappings     map[string]string `yaml:"role_mappings"`
@@ -1399,6 +1407,9 @@ func applyFile(cfg *Config, path string) error {
 		}
 		if f.Auth.Scopes != nil {
 			cfg.Auth.Scopes = f.Auth.Scopes
+		}
+		if f.Auth.SubjectClaim != nil {
+			cfg.Auth.SubjectClaim = *f.Auth.SubjectClaim
 		}
 		if f.Auth.TokenAudience != nil {
 			cfg.Auth.TokenAudience = *f.Auth.TokenAudience
@@ -1724,6 +1735,7 @@ func applyEnv(cfg *Config) {
 	cfg.Auth.ClientID = envOr("CDROM_AUTH_CLIENT_ID", cfg.Auth.ClientID)
 	cfg.Auth.RedirectURL = envOr("CDROM_AUTH_REDIRECT_URL", cfg.Auth.RedirectURL)
 	cfg.Auth.TokenAudience = envOr("CDROM_AUTH_TOKEN_AUDIENCE", cfg.Auth.TokenAudience)
+	cfg.Auth.SubjectClaim = envOr("CDROM_AUTH_SUBJECT_CLAIM", cfg.Auth.SubjectClaim)
 	// JWT claim mapping for RBAC (F-14): a configurable claim is read from a
 	// token and its values mapped to role names. CDROM_AUTH_ROLE_MAPPINGS is a
 	// comma-separated list of "claimValue=roleName" pairs.

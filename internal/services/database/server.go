@@ -3133,6 +3133,7 @@ func (s *Server) StoreIDPAuthCode(ctx context.Context, req *dbpb.StoreIDPAuthCod
 		Subject:       code.GetSubject(),
 		Name:          code.GetName(),
 		Email:         code.GetEmail(),
+		Roles:         code.GetRoles(),
 	}
 	if ts := code.GetCreatedAt(); ts != nil {
 		ac.CreatedAt = ts.AsTime()
@@ -6782,6 +6783,7 @@ func toProtoIDPAuthCode(code *models.IDPAuthCode) *dbpb.IDPAuthCode {
 		Subject:       code.Subject,
 		Name:          code.Name,
 		Email:         code.Email,
+		Roles:         code.Roles,
 		CreatedAt:     timestamppb.New(code.CreatedAt),
 	}
 }

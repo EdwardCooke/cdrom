@@ -3122,6 +3122,11 @@ message IDPAuthCode {
   string name = 6;
   string email = 7;
   google.protobuf.Timestamp created_at = 8;
+  // roles are SIMULATED claim-derived roles stamped by the dev shim's
+  // ?roles= affordance (corporate-issuer simulation; empty for real
+  // sign-ins). Carried across the code round-trip so the issued token bears
+  // them (F-28.4 Slice 3 gate demos).
+  repeated string roles = 9;
 }
 
 message StoreIDPAuthCodeRequest {

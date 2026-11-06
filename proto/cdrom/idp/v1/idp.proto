@@ -136,6 +136,29 @@ service IdP {
   // the 201. Nothing is stored here: this is a pure derivation, so the RPC is
   // available even before any pool rows exist (the bootstrap ritual).
   rpc DeriveScimKey(DeriveScimKeyRequest) returns (DeriveScimKeyResponse);
+
+  // AdmitPrincipal (F-28.4 Slice 3) ADJUDICATES a presented principal against
+  // the user directory — the consolidated admission gate the API's auth
+  // middleware invokes PER REQUEST (no caching) for every human user
+  // principal (OIDC tokens and user API keys; service accounts and job tokens
+  // are exempt). Judgment is ORIGIN-INDEPENDENT: the gate weighs the claims
+  // presented, not who signed them (the built-in IdP issues user tokens only
+  // for valid credentials, so the gate chiefly adjudicates foreign-issued
+  // tokens). Modes (mutually exclusive, chosen by idp.scim.enabled):
+  //   - KNOWN + ACTIVE ⇒ ADMITTED (locally-registered and SCIM-managed rows
+  //     alike — admitted untouched; no overwrite).
+  //   - DEACTIVATED / TOMBSTONED ⇒ DENIED with the distinct verdicts.
+  //   - UNKNOWN + SCIM ENABLED ⇒ DENIED (no JIT; the corporate directory is
+  //     the sole source of truth).
+  //   - UNKNOWN + SCIM DISABLED ⇒ JUST-IN-TIME CREATION: a row is created
+  //     (provisioned=true, external_id="", name/email from the args, roles =
+  //     the CLAIM-DERIVED set — REQUIRED NON-EMPTY; empty roles ⇒ DENIED with
+  //     NO row created, fail-closed) and the verdict is ADMITTED. Returning
+  //     JIT users REFRESH name/email from the args and GROW roles
+  //     MONOTONICALLY (stored ∪ incoming).
+  // The username undergoes LIGHT SANITY BOUNDS (length/charset); violations
+  // are DENIED (UNKNOWN_REJECTED) with no row created.
+  rpc AdmitPrincipal(AdmitPrincipalRequest) returns (AdmitPrincipalResponse);
 }
 
 // MintJobTokenRequest is the request to mint a job token.
@@ -646,4 +669,57 @@ message DeriveScimKeyResponse {
   string encoding = 2;
   // prefix is the first eight characters of the plaintext (display aid).
   string prefix = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate (F-28.4 Slice 3)
+// ---------------------------------------------------------------------------
+
+// AdmissionVerdict is the gate's determination for a presented principal.
+enum AdmissionVerdict {
+  // ADMITTED_UNSPECIFIED is the zero value (no verdict).
+  ADMITTED_UNSPECIFIED = 0;
+  // ADMITTED: the principal is known + active (or was just-created via JIT).
+  ADMITTED = 1;
+  // DEACTIVATED: the row exists but active=false (denied; "on leave").
+  DEACTIVATED = 2;
+  // DEPROVISIONED: the row is tombstoned (denied; departed).
+  DEPROVISIONED = 3;
+  // UNKNOWN_REJECTED: no row exists and JIT is unavailable — either SCIM is
+  // enabled (the corporate directory is the sole source of truth) or the
+  // username failed the sanity bounds (denied; no row created).
+  UNKNOWN_REJECTED = 4;
+  // NO_ROLES_REJECTED: JIT would apply but the claim-derived role set is
+  // EMPTY (denied; no row created — fail-closed).
+  NO_ROLES_REJECTED = 5;
+}
+
+// AdmitPrincipalRequest presents a principal's identity for adjudication.
+// The fields mirror what the API's auth middleware extracts from a verified
+// token (or an API-key credential): the username (the subject claim), the
+// display name, the email, and the CLAIM-DERIVED role set.
+message AdmitPrincipalRequest {
+  // username is the principal's login identifier (the token's subject claim,
+  // or the API-key owner). REQUIRED. Undergoes the sanity bounds.
+  string username = 1;
+  // name is the display name (OPTIONAL; refreshed onto JIT rows).
+  string name = 2;
+  // email is the principal's email (OPTIONAL; refreshed onto JIT rows).
+  string email = 3;
+  // roles is the CLAIM-DERIVED role set (REQUIRED NON-EMPTY for JIT creation;
+  // ignored for known users — their roles are operator-/SCIM-controlled).
+  repeated string roles = 4;
+}
+
+// AdmitPrincipalResponse carries the verdict and (when admitted) the
+// AUTHORITATIVE user profile — the caller adopts the row's roles/state, not
+// the presented ones, so a JIT user's monotonic role growth and a known
+// user's operator grants are reflected faithfully.
+message AdmitPrincipalResponse {
+  // verdict is the gate's determination.
+  AdmissionVerdict verdict = 1;
+  // user is the admitted row's profile (set only when verdict=ADMITTED);
+  // nil otherwise. Its roles reflect the EFFECTIVE set (monotonic growth for
+  // JIT, stored set for known users).
+  cdrom.db.v1.IDPUser user = 2;
 }

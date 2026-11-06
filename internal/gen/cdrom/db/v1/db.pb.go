@@ -9830,6 +9830,11 @@ type IDPAuthCode struct {
 	Name          string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`
 	Email         string                 `protobuf:"bytes,7,opt,name=email,proto3" json:"email,omitempty"`
 	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// roles are SIMULATED claim-derived roles stamped by the dev shim's
+	// ?roles= affordance (corporate-issuer simulation; empty for real
+	// sign-ins). Carried across the code round-trip so the issued token bears
+	// them (F-28.4 Slice 3 gate demos).
+	Roles         []string `protobuf:"bytes,9,rep,name=roles,proto3" json:"roles,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -9916,6 +9921,13 @@ func (x *IDPAuthCode) GetEmail() string {
 func (x *IDPAuthCode) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *IDPAuthCode) GetRoles() []string {
+	if x != nil {
+		return x.Roles
 	}
 	return nil
 }
@@ -20218,7 +20230,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x1aListIDPSigningKeysResponse\x12.\n" +
 	"\x04keys\x18\x01 \x03(\v2\x1a.cdrom.db.v1.IDPSigningKeyR\x04keys\"J\n" +
 	"\x18SetIDPSigningKeysRequest\x12.\n" +
-	"\x04keys\x18\x01 \x03(\v2\x1a.cdrom.db.v1.IDPSigningKeyR\x04keys\"\x87\x02\n" +
+	"\x04keys\x18\x01 \x03(\v2\x1a.cdrom.db.v1.IDPSigningKeyR\x04keys\"\x9d\x02\n" +
 	"\vIDPAuthCode\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12!\n" +
@@ -20228,7 +20240,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x04name\x18\x06 \x01(\tR\x04name\x12\x14\n" +
 	"\x05email\x18\a \x01(\tR\x05email\x129\n" +
 	"\n" +
-	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"G\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x14\n" +
+	"\x05roles\x18\t \x03(\tR\x05roles\"G\n" +
 	"\x17StoreIDPAuthCodeRequest\x12,\n" +
 	"\x04code\x18\x01 \x01(\v2\x18.cdrom.db.v1.IDPAuthCodeR\x04code\"/\n" +
 	"\x19ConsumeIDPAuthCodeRequest\x12\x12\n" +

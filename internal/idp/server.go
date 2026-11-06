@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -43,7 +44,13 @@ type authCode struct {
 	subject       string
 	name          string
 	email         string
-	createdAt     time.Time
+	// roles are SIMULATED claim-derived roles the dev shim (?roles=a,b,c)
+	// stamps onto the issued token — modeling a CORPORATE ISSUER that signs
+	// for its own personnel with group claims (the built-in IdP never does
+	// this for real logins; its tokens carry the row's roles). Dev-tooling
+	// affordance: it powers the admission gate's JIT demos/tests.
+	roles     []string
+	createdAt time.Time
 }
 
 // AuthCodeStore persists the IdP's single-use OIDC authorization codes so
@@ -76,6 +83,7 @@ func (s *dbAuthCodeStore) Store(ctx context.Context, code *authCode) error {
 		Subject:       code.subject,
 		Name:          code.name,
 		Email:         code.email,
+		Roles:         code.roles,
 		CreatedAt:     timestamppb.New(code.createdAt),
 	}}
 	if _, err := s.db.StoreIDPAuthCode(ctx, req); err != nil {
@@ -98,6 +106,7 @@ func (s *dbAuthCodeStore) Consume(ctx context.Context, code string) (*authCode, 
 		subject:       c.GetSubject(),
 		name:          c.GetName(),
 		email:         c.GetEmail(),
+		roles:         c.GetRoles(),
 		createdAt:     time.Now(),
 	}, nil
 }
@@ -287,6 +296,19 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if subject == "" {
 		subject = defaultSubject
 	}
+	// DEV SHIM AFFORDANCE: simulate a corporate issuer's GROUP CLAIMS by
+	// stamping simulated roles onto the issued token (?roles=a,b,c). Real
+	// sign-ins (username/password) never carry simulated claims — the gate's
+	// JIT demos ride this because the built-in IdP signs only for its own
+	// registered users.
+	var simRoles []string
+	if rv := q.Get("roles"); rv != "" {
+		for _, piece := range strings.Split(rv, ",") {
+			if p := strings.TrimSpace(piece); p != "" {
+				simRoles = append(simRoles, p)
+			}
+		}
+	}
 	if redirectURI == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "redirect_uri is required"})
 		return
@@ -313,6 +335,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		subject:       subject,
 		name:          subject,
 		email:         "",
+		roles:         simRoles,
 		createdAt:     time.Now(),
 	}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -387,6 +410,10 @@ func (s *Server) handleAuthCodeGrant(w http.ResponseWriter, r *http.Request) err
 		"iat":   now.Unix(),
 		"name":  ac.name,
 		"email": ac.email,
+	}
+	if len(ac.roles) > 0 {
+		// Simulated corporate claims (the dev shim's ?roles= — see authCode).
+		claims["roles"] = ac.roles
 	}
 	idToken, err := s.km.Sign(claims)
 	if err != nil {

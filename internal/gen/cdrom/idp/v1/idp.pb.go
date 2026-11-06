@@ -23,6 +23,74 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// AdmissionVerdict is the gate's determination for a presented principal.
+type AdmissionVerdict int32
+
+const (
+	// ADMITTED_UNSPECIFIED is the zero value (no verdict).
+	AdmissionVerdict_ADMITTED_UNSPECIFIED AdmissionVerdict = 0
+	// ADMITTED: the principal is known + active (or was just-created via JIT).
+	AdmissionVerdict_ADMITTED AdmissionVerdict = 1
+	// DEACTIVATED: the row exists but active=false (denied; "on leave").
+	AdmissionVerdict_DEACTIVATED AdmissionVerdict = 2
+	// DEPROVISIONED: the row is tombstoned (denied; departed).
+	AdmissionVerdict_DEPROVISIONED AdmissionVerdict = 3
+	// UNKNOWN_REJECTED: no row exists and JIT is unavailable — either SCIM is
+	// enabled (the corporate directory is the sole source of truth) or the
+	// username failed the sanity bounds (denied; no row created).
+	AdmissionVerdict_UNKNOWN_REJECTED AdmissionVerdict = 4
+	// NO_ROLES_REJECTED: JIT would apply but the claim-derived role set is
+	// EMPTY (denied; no row created — fail-closed).
+	AdmissionVerdict_NO_ROLES_REJECTED AdmissionVerdict = 5
+)
+
+// Enum value maps for AdmissionVerdict.
+var (
+	AdmissionVerdict_name = map[int32]string{
+		0: "ADMITTED_UNSPECIFIED",
+		1: "ADMITTED",
+		2: "DEACTIVATED",
+		3: "DEPROVISIONED",
+		4: "UNKNOWN_REJECTED",
+		5: "NO_ROLES_REJECTED",
+	}
+	AdmissionVerdict_value = map[string]int32{
+		"ADMITTED_UNSPECIFIED": 0,
+		"ADMITTED":             1,
+		"DEACTIVATED":          2,
+		"DEPROVISIONED":        3,
+		"UNKNOWN_REJECTED":     4,
+		"NO_ROLES_REJECTED":    5,
+	}
+)
+
+func (x AdmissionVerdict) Enum() *AdmissionVerdict {
+	p := new(AdmissionVerdict)
+	*p = x
+	return p
+}
+
+func (x AdmissionVerdict) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AdmissionVerdict) Descriptor() protoreflect.EnumDescriptor {
+	return file_cdrom_idp_v1_idp_proto_enumTypes[0].Descriptor()
+}
+
+func (AdmissionVerdict) Type() protoreflect.EnumType {
+	return &file_cdrom_idp_v1_idp_proto_enumTypes[0]
+}
+
+func (x AdmissionVerdict) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AdmissionVerdict.Descriptor instead.
+func (AdmissionVerdict) EnumDescriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{0}
+}
+
 // MintJobTokenRequest is the request to mint a job token.
 type MintJobTokenRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -2868,6 +2936,144 @@ func (x *DeriveScimKeyResponse) GetPrefix() string {
 	return ""
 }
 
+// AdmitPrincipalRequest presents a principal's identity for adjudication.
+// The fields mirror what the API's auth middleware extracts from a verified
+// token (or an API-key credential): the username (the subject claim), the
+// display name, the email, and the CLAIM-DERIVED role set.
+type AdmitPrincipalRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// username is the principal's login identifier (the token's subject claim,
+	// or the API-key owner). REQUIRED. Undergoes the sanity bounds.
+	Username string `protobuf:"bytes,1,opt,name=username,proto3" json:"username,omitempty"`
+	// name is the display name (OPTIONAL; refreshed onto JIT rows).
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// email is the principal's email (OPTIONAL; refreshed onto JIT rows).
+	Email string `protobuf:"bytes,3,opt,name=email,proto3" json:"email,omitempty"`
+	// roles is the CLAIM-DERIVED role set (REQUIRED NON-EMPTY for JIT creation;
+	// ignored for known users — their roles are operator-/SCIM-controlled).
+	Roles         []string `protobuf:"bytes,4,rep,name=roles,proto3" json:"roles,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdmitPrincipalRequest) Reset() {
+	*x = AdmitPrincipalRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdmitPrincipalRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdmitPrincipalRequest) ProtoMessage() {}
+
+func (x *AdmitPrincipalRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdmitPrincipalRequest.ProtoReflect.Descriptor instead.
+func (*AdmitPrincipalRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *AdmitPrincipalRequest) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *AdmitPrincipalRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *AdmitPrincipalRequest) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
+
+func (x *AdmitPrincipalRequest) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+// AdmitPrincipalResponse carries the verdict and (when admitted) the
+// AUTHORITATIVE user profile — the caller adopts the row's roles/state, not
+// the presented ones, so a JIT user's monotonic role growth and a known
+// user's operator grants are reflected faithfully.
+type AdmitPrincipalResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// verdict is the gate's determination.
+	Verdict AdmissionVerdict `protobuf:"varint,1,opt,name=verdict,proto3,enum=cdrom.idp.v1.AdmissionVerdict" json:"verdict,omitempty"`
+	// user is the admitted row's profile (set only when verdict=ADMITTED);
+	// nil otherwise. Its roles reflect the EFFECTIVE set (monotonic growth for
+	// JIT, stored set for known users).
+	User          *v1.IDPUser `protobuf:"bytes,2,opt,name=user,proto3" json:"user,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdmitPrincipalResponse) Reset() {
+	*x = AdmitPrincipalResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdmitPrincipalResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdmitPrincipalResponse) ProtoMessage() {}
+
+func (x *AdmitPrincipalResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdmitPrincipalResponse.ProtoReflect.Descriptor instead.
+func (*AdmitPrincipalResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *AdmitPrincipalResponse) GetVerdict() AdmissionVerdict {
+	if x != nil {
+		return x.Verdict
+	}
+	return AdmissionVerdict_ADMITTED_UNSPECIFIED
+}
+
+func (x *AdmitPrincipalResponse) GetUser() *v1.IDPUser {
+	if x != nil {
+		return x.User
+	}
+	return nil
+}
+
 // Generic EQUALITY filter (attribute, case_insensitive, value): attribute
 // is one of userName, externalId, email, firstName, lastName, active,
 // provisioned; case_insensitive loosens the string comparisons (booleans
@@ -2883,7 +3089,7 @@ type ListUsersRequest_FilterPredicate struct {
 
 func (x *ListUsersRequest_FilterPredicate) Reset() {
 	*x = ListUsersRequest_FilterPredicate{}
-	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[44]
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2895,7 +3101,7 @@ func (x *ListUsersRequest_FilterPredicate) String() string {
 func (*ListUsersRequest_FilterPredicate) ProtoMessage() {}
 
 func (x *ListUsersRequest_FilterPredicate) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[44]
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3134,7 +3340,22 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\x15DeriveScimKeyResponse\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1a\n" +
 	"\bencoding\x18\x02 \x01(\tR\bencoding\x12\x16\n" +
-	"\x06prefix\x18\x03 \x01(\tR\x06prefix2\x82\x14\n" +
+	"\x06prefix\x18\x03 \x01(\tR\x06prefix\"s\n" +
+	"\x15AdmitPrincipalRequest\x12\x1a\n" +
+	"\busername\x18\x01 \x01(\tR\busername\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
+	"\x05email\x18\x03 \x01(\tR\x05email\x12\x14\n" +
+	"\x05roles\x18\x04 \x03(\tR\x05roles\"|\n" +
+	"\x16AdmitPrincipalResponse\x128\n" +
+	"\averdict\x18\x01 \x01(\x0e2\x1e.cdrom.idp.v1.AdmissionVerdictR\averdict\x12(\n" +
+	"\x04user\x18\x02 \x01(\v2\x14.cdrom.db.v1.IDPUserR\x04user*\x8b\x01\n" +
+	"\x10AdmissionVerdict\x12\x18\n" +
+	"\x14ADMITTED_UNSPECIFIED\x10\x00\x12\f\n" +
+	"\bADMITTED\x10\x01\x12\x0f\n" +
+	"\vDEACTIVATED\x10\x02\x12\x11\n" +
+	"\rDEPROVISIONED\x10\x03\x12\x14\n" +
+	"\x10UNKNOWN_REJECTED\x10\x04\x12\x15\n" +
+	"\x11NO_ROLES_REJECTED\x10\x052\xdf\x14\n" +
 	"\x03IdP\x12U\n" +
 	"\fMintJobToken\x12!.cdrom.idp.v1.MintJobTokenRequest\x1a\".cdrom.idp.v1.MintJobTokenResponse\x12@\n" +
 	"\x05Login\x12\x1a.cdrom.idp.v1.LoginRequest\x1a\x1b.cdrom.idp.v1.LoginResponse\x12?\n" +
@@ -3166,7 +3387,8 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\x18RemoveServiceAccountRole\x12-.cdrom.idp.v1.RemoveServiceAccountRoleRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12v\n" +
 	"\x17VerifyServiceAccountKey\x12,.cdrom.idp.v1.VerifyServiceAccountKeyRequest\x1a-.cdrom.idp.v1.VerifyServiceAccountKeyResponse\x12\x7f\n" +
 	"\x1aResetServiceAccountLockout\x12/.cdrom.idp.v1.ResetServiceAccountLockoutRequest\x1a0.cdrom.idp.v1.ResetServiceAccountLockoutResponse\x12X\n" +
-	"\rDeriveScimKey\x12\".cdrom.idp.v1.DeriveScimKeyRequest\x1a#.cdrom.idp.v1.DeriveScimKeyResponseB'Z%cdrom/internal/gen/cdrom/idp/v1;idpv1b\x06proto3"
+	"\rDeriveScimKey\x12\".cdrom.idp.v1.DeriveScimKeyRequest\x1a#.cdrom.idp.v1.DeriveScimKeyResponse\x12[\n" +
+	"\x0eAdmitPrincipal\x12#.cdrom.idp.v1.AdmitPrincipalRequest\x1a$.cdrom.idp.v1.AdmitPrincipalResponseB'Z%cdrom/internal/gen/cdrom/idp/v1;idpv1b\x06proto3"
 
 var (
 	file_cdrom_idp_v1_idp_proto_rawDescOnce sync.Once
@@ -3180,136 +3402,144 @@ func file_cdrom_idp_v1_idp_proto_rawDescGZIP() []byte {
 	return file_cdrom_idp_v1_idp_proto_rawDescData
 }
 
-var file_cdrom_idp_v1_idp_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
+var file_cdrom_idp_v1_idp_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_cdrom_idp_v1_idp_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_cdrom_idp_v1_idp_proto_goTypes = []any{
-	(*MintJobTokenRequest)(nil),                // 0: cdrom.idp.v1.MintJobTokenRequest
-	(*MintJobTokenResponse)(nil),               // 1: cdrom.idp.v1.MintJobTokenResponse
-	(*LoginRequest)(nil),                       // 2: cdrom.idp.v1.LoginRequest
-	(*LoginResponse)(nil),                      // 3: cdrom.idp.v1.LoginResponse
-	(*RegisterRequest)(nil),                    // 4: cdrom.idp.v1.RegisterRequest
-	(*ListUsersRequest)(nil),                   // 5: cdrom.idp.v1.ListUsersRequest
-	(*ListUsersResponse)(nil),                  // 6: cdrom.idp.v1.ListUsersResponse
-	(*CreateUserRequest)(nil),                  // 7: cdrom.idp.v1.CreateUserRequest
-	(*UpdateUserRequest)(nil),                  // 8: cdrom.idp.v1.UpdateUserRequest
-	(*DeleteUserRequest)(nil),                  // 9: cdrom.idp.v1.DeleteUserRequest
-	(*DeleteUserResponse)(nil),                 // 10: cdrom.idp.v1.DeleteUserResponse
-	(*CreateAPIKeyRequest)(nil),                // 11: cdrom.idp.v1.CreateAPIKeyRequest
-	(*CreateAPIKeyResponse)(nil),               // 12: cdrom.idp.v1.CreateAPIKeyResponse
-	(*GetAPIKeyRequest)(nil),                   // 13: cdrom.idp.v1.GetAPIKeyRequest
-	(*ListAPIKeysRequest)(nil),                 // 14: cdrom.idp.v1.ListAPIKeysRequest
-	(*ListAPIKeysResponse)(nil),                // 15: cdrom.idp.v1.ListAPIKeysResponse
-	(*UpdateAPIKeyRequest)(nil),                // 16: cdrom.idp.v1.UpdateAPIKeyRequest
-	(*RotateAPIKeyRequest)(nil),                // 17: cdrom.idp.v1.RotateAPIKeyRequest
-	(*RotateAPIKeyResponse)(nil),               // 18: cdrom.idp.v1.RotateAPIKeyResponse
-	(*DeleteAPIKeyRequest)(nil),                // 19: cdrom.idp.v1.DeleteAPIKeyRequest
-	(*DeleteAPIKeyResponse)(nil),               // 20: cdrom.idp.v1.DeleteAPIKeyResponse
-	(*VerifyAPIKeyRequest)(nil),                // 21: cdrom.idp.v1.VerifyAPIKeyRequest
-	(*VerifyAPIKeyResponse)(nil),               // 22: cdrom.idp.v1.VerifyAPIKeyResponse
-	(*ResetAPIKeyLockoutRequest)(nil),          // 23: cdrom.idp.v1.ResetAPIKeyLockoutRequest
-	(*ResetAPIKeyLockoutResponse)(nil),         // 24: cdrom.idp.v1.ResetAPIKeyLockoutResponse
-	(*CreateServiceAccountRequest)(nil),        // 25: cdrom.idp.v1.CreateServiceAccountRequest
-	(*CreateServiceAccountResponse)(nil),       // 26: cdrom.idp.v1.CreateServiceAccountResponse
-	(*ServiceAccountPlaintextKey)(nil),         // 27: cdrom.idp.v1.ServiceAccountPlaintextKey
-	(*GetServiceAccountRequest)(nil),           // 28: cdrom.idp.v1.GetServiceAccountRequest
-	(*ListServiceAccountsRequest)(nil),         // 29: cdrom.idp.v1.ListServiceAccountsRequest
-	(*ListServiceAccountsResponse)(nil),        // 30: cdrom.idp.v1.ListServiceAccountsResponse
-	(*UpdateServiceAccountRequest)(nil),        // 31: cdrom.idp.v1.UpdateServiceAccountRequest
-	(*RotateServiceAccountKeyRequest)(nil),     // 32: cdrom.idp.v1.RotateServiceAccountKeyRequest
-	(*RotateServiceAccountKeyResponse)(nil),    // 33: cdrom.idp.v1.RotateServiceAccountKeyResponse
-	(*ServiceAccountStateRequest)(nil),         // 34: cdrom.idp.v1.ServiceAccountStateRequest
-	(*DeleteServiceAccountRequest)(nil),        // 35: cdrom.idp.v1.DeleteServiceAccountRequest
-	(*AssignServiceAccountRolesRequest)(nil),   // 36: cdrom.idp.v1.AssignServiceAccountRolesRequest
-	(*RemoveServiceAccountRoleRequest)(nil),    // 37: cdrom.idp.v1.RemoveServiceAccountRoleRequest
-	(*VerifyServiceAccountKeyRequest)(nil),     // 38: cdrom.idp.v1.VerifyServiceAccountKeyRequest
-	(*VerifyServiceAccountKeyResponse)(nil),    // 39: cdrom.idp.v1.VerifyServiceAccountKeyResponse
-	(*ResetServiceAccountLockoutRequest)(nil),  // 40: cdrom.idp.v1.ResetServiceAccountLockoutRequest
-	(*ResetServiceAccountLockoutResponse)(nil), // 41: cdrom.idp.v1.ResetServiceAccountLockoutResponse
-	(*DeriveScimKeyRequest)(nil),               // 42: cdrom.idp.v1.DeriveScimKeyRequest
-	(*DeriveScimKeyResponse)(nil),              // 43: cdrom.idp.v1.DeriveScimKeyResponse
-	(*ListUsersRequest_FilterPredicate)(nil),   // 44: cdrom.idp.v1.ListUsersRequest.FilterPredicate
-	(*v1.IDPUser)(nil),                         // 45: cdrom.db.v1.IDPUser
-	(*v1.IDPAPIKey)(nil),                       // 46: cdrom.db.v1.IDPAPIKey
-	(*durationpb.Duration)(nil),                // 47: google.protobuf.Duration
-	(*v1.ServiceAccount)(nil),                  // 48: cdrom.db.v1.ServiceAccount
+	(AdmissionVerdict)(0),                      // 0: cdrom.idp.v1.AdmissionVerdict
+	(*MintJobTokenRequest)(nil),                // 1: cdrom.idp.v1.MintJobTokenRequest
+	(*MintJobTokenResponse)(nil),               // 2: cdrom.idp.v1.MintJobTokenResponse
+	(*LoginRequest)(nil),                       // 3: cdrom.idp.v1.LoginRequest
+	(*LoginResponse)(nil),                      // 4: cdrom.idp.v1.LoginResponse
+	(*RegisterRequest)(nil),                    // 5: cdrom.idp.v1.RegisterRequest
+	(*ListUsersRequest)(nil),                   // 6: cdrom.idp.v1.ListUsersRequest
+	(*ListUsersResponse)(nil),                  // 7: cdrom.idp.v1.ListUsersResponse
+	(*CreateUserRequest)(nil),                  // 8: cdrom.idp.v1.CreateUserRequest
+	(*UpdateUserRequest)(nil),                  // 9: cdrom.idp.v1.UpdateUserRequest
+	(*DeleteUserRequest)(nil),                  // 10: cdrom.idp.v1.DeleteUserRequest
+	(*DeleteUserResponse)(nil),                 // 11: cdrom.idp.v1.DeleteUserResponse
+	(*CreateAPIKeyRequest)(nil),                // 12: cdrom.idp.v1.CreateAPIKeyRequest
+	(*CreateAPIKeyResponse)(nil),               // 13: cdrom.idp.v1.CreateAPIKeyResponse
+	(*GetAPIKeyRequest)(nil),                   // 14: cdrom.idp.v1.GetAPIKeyRequest
+	(*ListAPIKeysRequest)(nil),                 // 15: cdrom.idp.v1.ListAPIKeysRequest
+	(*ListAPIKeysResponse)(nil),                // 16: cdrom.idp.v1.ListAPIKeysResponse
+	(*UpdateAPIKeyRequest)(nil),                // 17: cdrom.idp.v1.UpdateAPIKeyRequest
+	(*RotateAPIKeyRequest)(nil),                // 18: cdrom.idp.v1.RotateAPIKeyRequest
+	(*RotateAPIKeyResponse)(nil),               // 19: cdrom.idp.v1.RotateAPIKeyResponse
+	(*DeleteAPIKeyRequest)(nil),                // 20: cdrom.idp.v1.DeleteAPIKeyRequest
+	(*DeleteAPIKeyResponse)(nil),               // 21: cdrom.idp.v1.DeleteAPIKeyResponse
+	(*VerifyAPIKeyRequest)(nil),                // 22: cdrom.idp.v1.VerifyAPIKeyRequest
+	(*VerifyAPIKeyResponse)(nil),               // 23: cdrom.idp.v1.VerifyAPIKeyResponse
+	(*ResetAPIKeyLockoutRequest)(nil),          // 24: cdrom.idp.v1.ResetAPIKeyLockoutRequest
+	(*ResetAPIKeyLockoutResponse)(nil),         // 25: cdrom.idp.v1.ResetAPIKeyLockoutResponse
+	(*CreateServiceAccountRequest)(nil),        // 26: cdrom.idp.v1.CreateServiceAccountRequest
+	(*CreateServiceAccountResponse)(nil),       // 27: cdrom.idp.v1.CreateServiceAccountResponse
+	(*ServiceAccountPlaintextKey)(nil),         // 28: cdrom.idp.v1.ServiceAccountPlaintextKey
+	(*GetServiceAccountRequest)(nil),           // 29: cdrom.idp.v1.GetServiceAccountRequest
+	(*ListServiceAccountsRequest)(nil),         // 30: cdrom.idp.v1.ListServiceAccountsRequest
+	(*ListServiceAccountsResponse)(nil),        // 31: cdrom.idp.v1.ListServiceAccountsResponse
+	(*UpdateServiceAccountRequest)(nil),        // 32: cdrom.idp.v1.UpdateServiceAccountRequest
+	(*RotateServiceAccountKeyRequest)(nil),     // 33: cdrom.idp.v1.RotateServiceAccountKeyRequest
+	(*RotateServiceAccountKeyResponse)(nil),    // 34: cdrom.idp.v1.RotateServiceAccountKeyResponse
+	(*ServiceAccountStateRequest)(nil),         // 35: cdrom.idp.v1.ServiceAccountStateRequest
+	(*DeleteServiceAccountRequest)(nil),        // 36: cdrom.idp.v1.DeleteServiceAccountRequest
+	(*AssignServiceAccountRolesRequest)(nil),   // 37: cdrom.idp.v1.AssignServiceAccountRolesRequest
+	(*RemoveServiceAccountRoleRequest)(nil),    // 38: cdrom.idp.v1.RemoveServiceAccountRoleRequest
+	(*VerifyServiceAccountKeyRequest)(nil),     // 39: cdrom.idp.v1.VerifyServiceAccountKeyRequest
+	(*VerifyServiceAccountKeyResponse)(nil),    // 40: cdrom.idp.v1.VerifyServiceAccountKeyResponse
+	(*ResetServiceAccountLockoutRequest)(nil),  // 41: cdrom.idp.v1.ResetServiceAccountLockoutRequest
+	(*ResetServiceAccountLockoutResponse)(nil), // 42: cdrom.idp.v1.ResetServiceAccountLockoutResponse
+	(*DeriveScimKeyRequest)(nil),               // 43: cdrom.idp.v1.DeriveScimKeyRequest
+	(*DeriveScimKeyResponse)(nil),              // 44: cdrom.idp.v1.DeriveScimKeyResponse
+	(*AdmitPrincipalRequest)(nil),              // 45: cdrom.idp.v1.AdmitPrincipalRequest
+	(*AdmitPrincipalResponse)(nil),             // 46: cdrom.idp.v1.AdmitPrincipalResponse
+	(*ListUsersRequest_FilterPredicate)(nil),   // 47: cdrom.idp.v1.ListUsersRequest.FilterPredicate
+	(*v1.IDPUser)(nil),                         // 48: cdrom.db.v1.IDPUser
+	(*v1.IDPAPIKey)(nil),                       // 49: cdrom.db.v1.IDPAPIKey
+	(*durationpb.Duration)(nil),                // 50: google.protobuf.Duration
+	(*v1.ServiceAccount)(nil),                  // 51: cdrom.db.v1.ServiceAccount
 }
 var file_cdrom_idp_v1_idp_proto_depIdxs = []int32{
-	45, // 0: cdrom.idp.v1.LoginResponse.user:type_name -> cdrom.db.v1.IDPUser
-	44, // 1: cdrom.idp.v1.ListUsersRequest.generic_filter:type_name -> cdrom.idp.v1.ListUsersRequest.FilterPredicate
-	45, // 2: cdrom.idp.v1.ListUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
-	46, // 3: cdrom.idp.v1.CreateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	46, // 4: cdrom.idp.v1.ListAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
-	46, // 5: cdrom.idp.v1.RotateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	47, // 6: cdrom.idp.v1.VerifyAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
-	46, // 7: cdrom.idp.v1.VerifyAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	45, // 8: cdrom.idp.v1.VerifyAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
-	48, // 9: cdrom.idp.v1.CreateServiceAccountResponse.account:type_name -> cdrom.db.v1.ServiceAccount
-	27, // 10: cdrom.idp.v1.CreateServiceAccountResponse.keys:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
-	48, // 11: cdrom.idp.v1.ListServiceAccountsResponse.accounts:type_name -> cdrom.db.v1.ServiceAccount
-	48, // 12: cdrom.idp.v1.RotateServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
-	27, // 13: cdrom.idp.v1.RotateServiceAccountKeyResponse.key:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
-	47, // 14: cdrom.idp.v1.VerifyServiceAccountKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
-	48, // 15: cdrom.idp.v1.VerifyServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
-	0,  // 16: cdrom.idp.v1.IdP.MintJobToken:input_type -> cdrom.idp.v1.MintJobTokenRequest
-	2,  // 17: cdrom.idp.v1.IdP.Login:input_type -> cdrom.idp.v1.LoginRequest
-	4,  // 18: cdrom.idp.v1.IdP.Register:input_type -> cdrom.idp.v1.RegisterRequest
-	5,  // 19: cdrom.idp.v1.IdP.ListUsers:input_type -> cdrom.idp.v1.ListUsersRequest
-	7,  // 20: cdrom.idp.v1.IdP.CreateUser:input_type -> cdrom.idp.v1.CreateUserRequest
-	8,  // 21: cdrom.idp.v1.IdP.UpdateUser:input_type -> cdrom.idp.v1.UpdateUserRequest
-	9,  // 22: cdrom.idp.v1.IdP.DeleteUser:input_type -> cdrom.idp.v1.DeleteUserRequest
-	11, // 23: cdrom.idp.v1.IdP.CreateAPIKey:input_type -> cdrom.idp.v1.CreateAPIKeyRequest
-	13, // 24: cdrom.idp.v1.IdP.GetAPIKey:input_type -> cdrom.idp.v1.GetAPIKeyRequest
-	14, // 25: cdrom.idp.v1.IdP.ListAPIKeys:input_type -> cdrom.idp.v1.ListAPIKeysRequest
-	16, // 26: cdrom.idp.v1.IdP.UpdateAPIKey:input_type -> cdrom.idp.v1.UpdateAPIKeyRequest
-	17, // 27: cdrom.idp.v1.IdP.RotateAPIKey:input_type -> cdrom.idp.v1.RotateAPIKeyRequest
-	19, // 28: cdrom.idp.v1.IdP.DeleteAPIKey:input_type -> cdrom.idp.v1.DeleteAPIKeyRequest
-	21, // 29: cdrom.idp.v1.IdP.VerifyAPIKey:input_type -> cdrom.idp.v1.VerifyAPIKeyRequest
-	23, // 30: cdrom.idp.v1.IdP.ResetAPIKeyLockout:input_type -> cdrom.idp.v1.ResetAPIKeyLockoutRequest
-	25, // 31: cdrom.idp.v1.IdP.CreateServiceAccount:input_type -> cdrom.idp.v1.CreateServiceAccountRequest
-	28, // 32: cdrom.idp.v1.IdP.GetServiceAccount:input_type -> cdrom.idp.v1.GetServiceAccountRequest
-	29, // 33: cdrom.idp.v1.IdP.ListServiceAccounts:input_type -> cdrom.idp.v1.ListServiceAccountsRequest
-	31, // 34: cdrom.idp.v1.IdP.UpdateServiceAccount:input_type -> cdrom.idp.v1.UpdateServiceAccountRequest
-	32, // 35: cdrom.idp.v1.IdP.RotateServiceAccountKey:input_type -> cdrom.idp.v1.RotateServiceAccountKeyRequest
-	34, // 36: cdrom.idp.v1.IdP.DisableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
-	34, // 37: cdrom.idp.v1.IdP.EnableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
-	35, // 38: cdrom.idp.v1.IdP.DeleteServiceAccount:input_type -> cdrom.idp.v1.DeleteServiceAccountRequest
-	36, // 39: cdrom.idp.v1.IdP.AssignServiceAccountRoles:input_type -> cdrom.idp.v1.AssignServiceAccountRolesRequest
-	37, // 40: cdrom.idp.v1.IdP.RemoveServiceAccountRole:input_type -> cdrom.idp.v1.RemoveServiceAccountRoleRequest
-	38, // 41: cdrom.idp.v1.IdP.VerifyServiceAccountKey:input_type -> cdrom.idp.v1.VerifyServiceAccountKeyRequest
-	40, // 42: cdrom.idp.v1.IdP.ResetServiceAccountLockout:input_type -> cdrom.idp.v1.ResetServiceAccountLockoutRequest
-	42, // 43: cdrom.idp.v1.IdP.DeriveScimKey:input_type -> cdrom.idp.v1.DeriveScimKeyRequest
-	1,  // 44: cdrom.idp.v1.IdP.MintJobToken:output_type -> cdrom.idp.v1.MintJobTokenResponse
-	3,  // 45: cdrom.idp.v1.IdP.Login:output_type -> cdrom.idp.v1.LoginResponse
-	45, // 46: cdrom.idp.v1.IdP.Register:output_type -> cdrom.db.v1.IDPUser
-	6,  // 47: cdrom.idp.v1.IdP.ListUsers:output_type -> cdrom.idp.v1.ListUsersResponse
-	45, // 48: cdrom.idp.v1.IdP.CreateUser:output_type -> cdrom.db.v1.IDPUser
-	45, // 49: cdrom.idp.v1.IdP.UpdateUser:output_type -> cdrom.db.v1.IDPUser
-	10, // 50: cdrom.idp.v1.IdP.DeleteUser:output_type -> cdrom.idp.v1.DeleteUserResponse
-	12, // 51: cdrom.idp.v1.IdP.CreateAPIKey:output_type -> cdrom.idp.v1.CreateAPIKeyResponse
-	46, // 52: cdrom.idp.v1.IdP.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	15, // 53: cdrom.idp.v1.IdP.ListAPIKeys:output_type -> cdrom.idp.v1.ListAPIKeysResponse
-	46, // 54: cdrom.idp.v1.IdP.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	18, // 55: cdrom.idp.v1.IdP.RotateAPIKey:output_type -> cdrom.idp.v1.RotateAPIKeyResponse
-	20, // 56: cdrom.idp.v1.IdP.DeleteAPIKey:output_type -> cdrom.idp.v1.DeleteAPIKeyResponse
-	22, // 57: cdrom.idp.v1.IdP.VerifyAPIKey:output_type -> cdrom.idp.v1.VerifyAPIKeyResponse
-	24, // 58: cdrom.idp.v1.IdP.ResetAPIKeyLockout:output_type -> cdrom.idp.v1.ResetAPIKeyLockoutResponse
-	26, // 59: cdrom.idp.v1.IdP.CreateServiceAccount:output_type -> cdrom.idp.v1.CreateServiceAccountResponse
-	48, // 60: cdrom.idp.v1.IdP.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	30, // 61: cdrom.idp.v1.IdP.ListServiceAccounts:output_type -> cdrom.idp.v1.ListServiceAccountsResponse
-	48, // 62: cdrom.idp.v1.IdP.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	33, // 63: cdrom.idp.v1.IdP.RotateServiceAccountKey:output_type -> cdrom.idp.v1.RotateServiceAccountKeyResponse
-	48, // 64: cdrom.idp.v1.IdP.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	48, // 65: cdrom.idp.v1.IdP.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	48, // 66: cdrom.idp.v1.IdP.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	48, // 67: cdrom.idp.v1.IdP.AssignServiceAccountRoles:output_type -> cdrom.db.v1.ServiceAccount
-	48, // 68: cdrom.idp.v1.IdP.RemoveServiceAccountRole:output_type -> cdrom.db.v1.ServiceAccount
-	39, // 69: cdrom.idp.v1.IdP.VerifyServiceAccountKey:output_type -> cdrom.idp.v1.VerifyServiceAccountKeyResponse
-	41, // 70: cdrom.idp.v1.IdP.ResetServiceAccountLockout:output_type -> cdrom.idp.v1.ResetServiceAccountLockoutResponse
-	43, // 71: cdrom.idp.v1.IdP.DeriveScimKey:output_type -> cdrom.idp.v1.DeriveScimKeyResponse
-	44, // [44:72] is the sub-list for method output_type
-	16, // [16:44] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	48, // 0: cdrom.idp.v1.LoginResponse.user:type_name -> cdrom.db.v1.IDPUser
+	47, // 1: cdrom.idp.v1.ListUsersRequest.generic_filter:type_name -> cdrom.idp.v1.ListUsersRequest.FilterPredicate
+	48, // 2: cdrom.idp.v1.ListUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
+	49, // 3: cdrom.idp.v1.CreateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	49, // 4: cdrom.idp.v1.ListAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
+	49, // 5: cdrom.idp.v1.RotateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	50, // 6: cdrom.idp.v1.VerifyAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	49, // 7: cdrom.idp.v1.VerifyAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	48, // 8: cdrom.idp.v1.VerifyAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
+	51, // 9: cdrom.idp.v1.CreateServiceAccountResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	28, // 10: cdrom.idp.v1.CreateServiceAccountResponse.keys:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
+	51, // 11: cdrom.idp.v1.ListServiceAccountsResponse.accounts:type_name -> cdrom.db.v1.ServiceAccount
+	51, // 12: cdrom.idp.v1.RotateServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	28, // 13: cdrom.idp.v1.RotateServiceAccountKeyResponse.key:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
+	50, // 14: cdrom.idp.v1.VerifyServiceAccountKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	51, // 15: cdrom.idp.v1.VerifyServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	0,  // 16: cdrom.idp.v1.AdmitPrincipalResponse.verdict:type_name -> cdrom.idp.v1.AdmissionVerdict
+	48, // 17: cdrom.idp.v1.AdmitPrincipalResponse.user:type_name -> cdrom.db.v1.IDPUser
+	1,  // 18: cdrom.idp.v1.IdP.MintJobToken:input_type -> cdrom.idp.v1.MintJobTokenRequest
+	3,  // 19: cdrom.idp.v1.IdP.Login:input_type -> cdrom.idp.v1.LoginRequest
+	5,  // 20: cdrom.idp.v1.IdP.Register:input_type -> cdrom.idp.v1.RegisterRequest
+	6,  // 21: cdrom.idp.v1.IdP.ListUsers:input_type -> cdrom.idp.v1.ListUsersRequest
+	8,  // 22: cdrom.idp.v1.IdP.CreateUser:input_type -> cdrom.idp.v1.CreateUserRequest
+	9,  // 23: cdrom.idp.v1.IdP.UpdateUser:input_type -> cdrom.idp.v1.UpdateUserRequest
+	10, // 24: cdrom.idp.v1.IdP.DeleteUser:input_type -> cdrom.idp.v1.DeleteUserRequest
+	12, // 25: cdrom.idp.v1.IdP.CreateAPIKey:input_type -> cdrom.idp.v1.CreateAPIKeyRequest
+	14, // 26: cdrom.idp.v1.IdP.GetAPIKey:input_type -> cdrom.idp.v1.GetAPIKeyRequest
+	15, // 27: cdrom.idp.v1.IdP.ListAPIKeys:input_type -> cdrom.idp.v1.ListAPIKeysRequest
+	17, // 28: cdrom.idp.v1.IdP.UpdateAPIKey:input_type -> cdrom.idp.v1.UpdateAPIKeyRequest
+	18, // 29: cdrom.idp.v1.IdP.RotateAPIKey:input_type -> cdrom.idp.v1.RotateAPIKeyRequest
+	20, // 30: cdrom.idp.v1.IdP.DeleteAPIKey:input_type -> cdrom.idp.v1.DeleteAPIKeyRequest
+	22, // 31: cdrom.idp.v1.IdP.VerifyAPIKey:input_type -> cdrom.idp.v1.VerifyAPIKeyRequest
+	24, // 32: cdrom.idp.v1.IdP.ResetAPIKeyLockout:input_type -> cdrom.idp.v1.ResetAPIKeyLockoutRequest
+	26, // 33: cdrom.idp.v1.IdP.CreateServiceAccount:input_type -> cdrom.idp.v1.CreateServiceAccountRequest
+	29, // 34: cdrom.idp.v1.IdP.GetServiceAccount:input_type -> cdrom.idp.v1.GetServiceAccountRequest
+	30, // 35: cdrom.idp.v1.IdP.ListServiceAccounts:input_type -> cdrom.idp.v1.ListServiceAccountsRequest
+	32, // 36: cdrom.idp.v1.IdP.UpdateServiceAccount:input_type -> cdrom.idp.v1.UpdateServiceAccountRequest
+	33, // 37: cdrom.idp.v1.IdP.RotateServiceAccountKey:input_type -> cdrom.idp.v1.RotateServiceAccountKeyRequest
+	35, // 38: cdrom.idp.v1.IdP.DisableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
+	35, // 39: cdrom.idp.v1.IdP.EnableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
+	36, // 40: cdrom.idp.v1.IdP.DeleteServiceAccount:input_type -> cdrom.idp.v1.DeleteServiceAccountRequest
+	37, // 41: cdrom.idp.v1.IdP.AssignServiceAccountRoles:input_type -> cdrom.idp.v1.AssignServiceAccountRolesRequest
+	38, // 42: cdrom.idp.v1.IdP.RemoveServiceAccountRole:input_type -> cdrom.idp.v1.RemoveServiceAccountRoleRequest
+	39, // 43: cdrom.idp.v1.IdP.VerifyServiceAccountKey:input_type -> cdrom.idp.v1.VerifyServiceAccountKeyRequest
+	41, // 44: cdrom.idp.v1.IdP.ResetServiceAccountLockout:input_type -> cdrom.idp.v1.ResetServiceAccountLockoutRequest
+	43, // 45: cdrom.idp.v1.IdP.DeriveScimKey:input_type -> cdrom.idp.v1.DeriveScimKeyRequest
+	45, // 46: cdrom.idp.v1.IdP.AdmitPrincipal:input_type -> cdrom.idp.v1.AdmitPrincipalRequest
+	2,  // 47: cdrom.idp.v1.IdP.MintJobToken:output_type -> cdrom.idp.v1.MintJobTokenResponse
+	4,  // 48: cdrom.idp.v1.IdP.Login:output_type -> cdrom.idp.v1.LoginResponse
+	48, // 49: cdrom.idp.v1.IdP.Register:output_type -> cdrom.db.v1.IDPUser
+	7,  // 50: cdrom.idp.v1.IdP.ListUsers:output_type -> cdrom.idp.v1.ListUsersResponse
+	48, // 51: cdrom.idp.v1.IdP.CreateUser:output_type -> cdrom.db.v1.IDPUser
+	48, // 52: cdrom.idp.v1.IdP.UpdateUser:output_type -> cdrom.db.v1.IDPUser
+	11, // 53: cdrom.idp.v1.IdP.DeleteUser:output_type -> cdrom.idp.v1.DeleteUserResponse
+	13, // 54: cdrom.idp.v1.IdP.CreateAPIKey:output_type -> cdrom.idp.v1.CreateAPIKeyResponse
+	49, // 55: cdrom.idp.v1.IdP.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	16, // 56: cdrom.idp.v1.IdP.ListAPIKeys:output_type -> cdrom.idp.v1.ListAPIKeysResponse
+	49, // 57: cdrom.idp.v1.IdP.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	19, // 58: cdrom.idp.v1.IdP.RotateAPIKey:output_type -> cdrom.idp.v1.RotateAPIKeyResponse
+	21, // 59: cdrom.idp.v1.IdP.DeleteAPIKey:output_type -> cdrom.idp.v1.DeleteAPIKeyResponse
+	23, // 60: cdrom.idp.v1.IdP.VerifyAPIKey:output_type -> cdrom.idp.v1.VerifyAPIKeyResponse
+	25, // 61: cdrom.idp.v1.IdP.ResetAPIKeyLockout:output_type -> cdrom.idp.v1.ResetAPIKeyLockoutResponse
+	27, // 62: cdrom.idp.v1.IdP.CreateServiceAccount:output_type -> cdrom.idp.v1.CreateServiceAccountResponse
+	51, // 63: cdrom.idp.v1.IdP.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	31, // 64: cdrom.idp.v1.IdP.ListServiceAccounts:output_type -> cdrom.idp.v1.ListServiceAccountsResponse
+	51, // 65: cdrom.idp.v1.IdP.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	34, // 66: cdrom.idp.v1.IdP.RotateServiceAccountKey:output_type -> cdrom.idp.v1.RotateServiceAccountKeyResponse
+	51, // 67: cdrom.idp.v1.IdP.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	51, // 68: cdrom.idp.v1.IdP.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	51, // 69: cdrom.idp.v1.IdP.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	51, // 70: cdrom.idp.v1.IdP.AssignServiceAccountRoles:output_type -> cdrom.db.v1.ServiceAccount
+	51, // 71: cdrom.idp.v1.IdP.RemoveServiceAccountRole:output_type -> cdrom.db.v1.ServiceAccount
+	40, // 72: cdrom.idp.v1.IdP.VerifyServiceAccountKey:output_type -> cdrom.idp.v1.VerifyServiceAccountKeyResponse
+	42, // 73: cdrom.idp.v1.IdP.ResetServiceAccountLockout:output_type -> cdrom.idp.v1.ResetServiceAccountLockoutResponse
+	44, // 74: cdrom.idp.v1.IdP.DeriveScimKey:output_type -> cdrom.idp.v1.DeriveScimKeyResponse
+	46, // 75: cdrom.idp.v1.IdP.AdmitPrincipal:output_type -> cdrom.idp.v1.AdmitPrincipalResponse
+	47, // [47:76] is the sub-list for method output_type
+	18, // [18:47] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_idp_v1_idp_proto_init() }
@@ -3322,13 +3552,14 @@ func file_cdrom_idp_v1_idp_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_idp_v1_idp_proto_rawDesc), len(file_cdrom_idp_v1_idp_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   45,
+			NumEnums:      1,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_cdrom_idp_v1_idp_proto_goTypes,
 		DependencyIndexes: file_cdrom_idp_v1_idp_proto_depIdxs,
+		EnumInfos:         file_cdrom_idp_v1_idp_proto_enumTypes,
 		MessageInfos:      file_cdrom_idp_v1_idp_proto_msgTypes,
 	}.Build()
 	File_cdrom_idp_v1_idp_proto = out.File

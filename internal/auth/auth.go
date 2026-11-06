@@ -47,6 +47,74 @@ type Auth struct {
 	// serviceAccountEnabled reports whether service-account authentication is
 	// active.
 	serviceAccountEnabled bool
+	// admissionPolicy, when set, ADJUDICATES every authenticated HUMAN user
+	// principal PER REQUEST (F-28.4 Slice 3 — the admission gate): invoked
+	// after token verification, before the request proceeds. Service-account
+	// principals and the auth-disabled passthrough (synthetic admin) are
+	// UNGATED. The implementation must NOT cache (verify-per-request).
+	admissionPolicy AdmissionPolicy
+}
+
+// AdmissionDecision is the gate's verdict for one presented principal.
+type AdmissionDecision struct {
+	// Allowed reports whether the principal may proceed.
+	Allowed bool
+	// Reason is the DISTINCT denial text the middleware renders (403 body)
+	// when !Allowed and !InfrastructureFailure.
+	Reason string
+	// InfrastructureFailure marks a DECISION FAILURE (the adjudicator is
+	// unreachable/down) — the middleware fails CLOSED with 503, never 403
+	// (a down gate must not masquerade as a denial).
+	InfrastructureFailure bool
+}
+
+// AdmissionPolicy adjudicates an authenticated HUMAN principal (an OIDC
+// token or a user API key) AGAINST THE DIRECTORY, per request. The API wires
+// it to the IdP's AdmitPrincipal gRPC (the consolidated gate); the auth
+// package itself stays IdP-agnostic.
+type AdmissionPolicy func(ctx context.Context, user User) AdmissionDecision
+
+// SetAdmissionPolicy attaches the admission gate (F-28.4 Slice 3). When left
+// unset (nil) the middleware imposes no gate (today's behavior).
+func (a *Auth) SetAdmissionPolicy(p AdmissionPolicy) {
+	a.admissionPolicy = p
+}
+
+// passAdmission runs the admission gate for a HUMAN principal (no-op when no
+// policy is attached). It WRITES the denial/fault response and reports
+// whether the request MAY proceed.
+func (a *Auth) passAdmission(w http.ResponseWriter, r *http.Request, user User) bool {
+	if a.admissionPolicy == nil {
+		return true
+	}
+	decision := a.admissionPolicy(r.Context(), user)
+	switch {
+	case decision.Allowed:
+		return true
+	case decision.InfrastructureFailure:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"authentication service unavailable; try again later"}`))
+		return false
+	default:
+		text := decision.Reason
+		if text == "" {
+			text = "access denied"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":` + jsonString(text) + `}`))
+		return false
+	}
+}
+
+// jsonString renders s as a JSON string literal (marshaling escapes safely).
+func jsonString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `"access denied"`
+	}
+	return string(b)
 }
 
 // APIKeyVerifier authenticates an API-key credential (F-25): it checks a
@@ -253,6 +321,8 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 					_, _ = w.Write([]byte(`{"error":"authentication required"}`))
 					return
 				}
+				// Machine principals are OUTSIDE the admission gate (F-28.4
+				// S3): the gate adjudicates HUMAN user principals only.
 				next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
 				return
 			}
@@ -268,6 +338,11 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
 					_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+					return
+				}
+				// Human principal via API key: GATED (F-28.4 S3) — the gate
+				// correlates on the OWNER'S username (the key's owner).
+				if !a.passAdmission(w, r, user) {
 					return
 				}
 				next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
@@ -286,6 +361,11 @@ func (a *Auth) MiddlewareExempt(next http.Handler, exempt ...string) http.Handle
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+			return
+		}
+		// Human principal via OIDC token: GATED (F-28.4 S3) — the admission
+		// policy adjudicates the verified principal PER REQUEST (no cache).
+		if !a.passAdmission(w, r, user) {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), user)))
@@ -356,7 +436,7 @@ func parseServiceAccountBearer(r *http.Request) (loginName, apiKey string, ok bo
 // roles claim (stamped by the built-in IdP) is always read; the configured
 // claim mapping is additive, so a principal can have token-stamped and
 // claim-mapped roles at once.
-func userFromIDToken(idToken *oidc.IDToken, roles config.RolesConfig) User {
+func userFromIDToken(idToken *oidc.IDToken, cfg config.AuthConfig) User {
 	var claims struct {
 		Subject string   `json:"sub"`
 		UserID  string   `json:"user_id"`
@@ -365,12 +445,20 @@ func userFromIDToken(idToken *oidc.IDToken, roles config.RolesConfig) User {
 		Roles   []string `json:"roles"`
 	}
 	_ = idToken.Claims(&claims)
-	// The principal's Username is the token's subject (F-28.4): the built-in
-	// IdP stamps `sub` with the user's username, so the admission gate and
-	// the approver-set matching correlate on it. Foreign issuers stamp their
-	// own subject — equally usable as the correlation key. The numeric ID
-	// (the `user_id` claim) keys owner-scoped lookups.
-	user := User{Subject: claims.Subject, Username: claims.Subject, UserID: claims.UserID, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
+	// The principal's subject is read from the CONFIGURED subject claim
+	// (F-28.4 Slice 3; default `sub`): the built-in IdP stamps `sub` with the
+	// user's username, so the admission gate and the approver-set matching
+	// correlate on it. A corporate IdP may stamp its subject elsewhere
+	// (e.g. `preferred_username`) — the option accommodates that. The
+	// numeric ID (the `user_id` claim) keys owner-scoped lookups.
+	subject := claims.Subject
+	if cfg.SubjectClaim != "" && cfg.SubjectClaim != "sub" {
+		values := claimValues(idToken, cfg.SubjectClaim)
+		if len(values) > 0 {
+			subject = values[0]
+		}
+	}
+	user := User{Subject: subject, Username: subject, UserID: claims.UserID, Name: claims.Name, Email: claims.Email, Roles: claims.Roles}
 	// Capture the token's VERBATIM claims (F-27): a claim name → its value(s).
 	// The API honors approval groups whose membership is derived from a claim
 	// (a group's claim derivation matches a decider whose token carries the
@@ -401,9 +489,9 @@ func userFromIDToken(idToken *oidc.IDToken, roles config.RolesConfig) User {
 	// to role names, so group membership in an enterprise IdP drives Cdrom
 	// roles without Cdrom's user directory knowing the user at all. When the
 	// role claim is unset, claim mapping is disabled.
-	if roles.RoleClaim != "" {
-		for _, value := range claimValues(idToken, roles.RoleClaim) {
-			if role := mappedRole(roles, value); role != "" {
+	if cfg.Roles.RoleClaim != "" {
+		for _, value := range claimValues(idToken, cfg.Roles.RoleClaim) {
+			if role := mappedRole(cfg.Roles, value); role != "" {
 				user.Roles = appendRole(user.Roles, role)
 			}
 		}

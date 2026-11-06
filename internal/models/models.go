@@ -1658,6 +1658,10 @@ type IDPAuthCode struct {
 	Subject       string `json:"subject"`
 	Name          string `json:"name"`
 	Email         string `json:"email"`
+	// Roles are SIMULATED claim-derived roles the dev shim's ?roles= stamps
+	// onto the issued token (corporate-issuer simulation; empty for real
+	// sign-ins) — carried across the code round-trip (F-28.4 Slice 3).
+	Roles []string `gorm:"type:text;serializer:json" json:"roles,omitempty"`
 }
 
 // IDPUser is a registered user of the local identity provider. The IdP uses

@@ -981,6 +981,7 @@ func TestIDPAuthCodes(t *testing.T) {
 			Subject:     "alice",
 			Name:        "alice",
 			Email:       "alice@example.com",
+			Roles:       []string{"operator", "deploy-bot"},
 			CreatedAt:   timestamppb.New(time.Now()),
 		},
 	}); err != nil {
@@ -994,6 +995,11 @@ func TestIDPAuthCodes(t *testing.T) {
 	}
 	if got.GetSubject() != "alice" {
 		t.Fatalf("subject = %q, want alice", got.GetSubject())
+	}
+	// The dev shim's simulated roles survive the round-trip (F-28.4 S3: the
+	// issued token must bear them).
+	if len(got.GetRoles()) != 2 || got.GetRoles()[0] != "operator" || got.GetRoles()[1] != "deploy-bot" {
+		t.Fatalf("roles = %v, want [operator deploy-bot]", got.GetRoles())
 	}
 
 	// Consuming again is a NotFound (single use).

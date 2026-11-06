@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -532,6 +533,191 @@ func (s *GRPCServer) DeleteUser(ctx context.Context, req *idppb.DeleteUserReques
 	}
 	s.refreshUserMetrics(ctx)
 	return &idppb.DeleteUserResponse{Status: "deleted"}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate (F-28.4 Slice 3)
+// ---------------------------------------------------------------------------
+
+// TRUST-THE-ISSUER (ruled 2026-11-05): the gate places NO charset or shape
+// constraint on subject-derived usernames. Subjects arrive from the
+// CONFIGURED issuers the operator elected to honor (enterprise SSO, the
+// built-in IdP, the dev shim); Azure AD UPNs carry "@" and operators
+// routinely elect emails AS usernames. The directory treats usernames as
+// opaque unique keys (varchar(255) UNIQUE in the schema; nothing downstream
+// interprets their shape), so a narrower bound would silently bar legitimate
+// corporations — including SCIM-synced identities the SCIM path gladly
+// stores. The subject IS the identity: exotics are ordinary rows (inert —
+// nobody looks them up), and the subject is normalized by TRIMMING at the
+// gate boundary, so padded presentations collapse onto the trimmed identity
+// (one row, no shadow twins). The only refusal is EMPTY-AFTER-TRIM: a
+// malformed request (InvalidArgument), not a verdict.
+
+// AdmitPrincipal adjudicates a presented principal against the user
+// directory — the CONSOLIDATED ADMISSION GATE the API's auth middleware
+// invokes PER REQUEST (no caching) for every human user principal. Judgment
+// is ORIGIN-INDEPENDENT (weighs the claims, not the signer). The BRANCH GRAPH:
+//
+//	known + tombstoned                    ⇒ DEPROVISIONED
+//	known + deactivated                   ⇒ DEACTIVATED
+//	known + active, JIT-born (prov && no
+//	  externalId)                          ⇒ refresh name/email from the args
+//	                                      (provided ones) + GROW roles
+//	                                      monotonically (stored ∪ incoming) ⇒ ADMITTED
+//	known + active, otherwise (local or
+//	  SCIM-managed)                        ⇒ admitted TOUCHED (no overwrite)
+//	unknown + scim.enabled                ⇒ UNKNOWN_REJECTED (no JIT)
+//	unknown + jit + empty claim roles     ⇒ NO_ROLES_REJECTED (no row)
+//	unknown + jit                         ⇒ CREATE (provisioned, stock-free
+//	                                      roles) ⇒ ADMITTED
+//
+// Denials are RESPONSES (the RPC succeeds; the verdict carries the reason) so
+// the caller meters every outcome uniformly.
+func (s *GRPCServer) AdmitPrincipal(ctx context.Context, req *idppb.AdmitPrincipalRequest) (*idppb.AdmitPrincipalResponse, error) {
+	if s.users == nil {
+		return nil, status.Error(codes.Unimplemented, "user store is not configured")
+	}
+	username := strings.TrimSpace(req.GetUsername())
+	if username == "" {
+		return nil, status.Error(codes.InvalidArgument, "username is required")
+	}
+	existing, err := s.users.GetByUsername(ctx, username, true)
+	if err != nil && status.Code(err) != codes.NotFound {
+		return nil, err
+	}
+	if existing != nil {
+		return s.admitKnown(ctx, existing, req)
+	}
+	// UNKNOWN: the mode fork.
+	if s.cfg.Scim.Enabled {
+		// The corporate directory is the SOLE source of truth — no JIT.
+		return admitDenial(idppb.AdmissionVerdict_UNKNOWN_REJECTED), nil
+	}
+	roles := dedupeRoles(req.GetRoles())
+	if len(roles) == 0 {
+		// Fail-closed: a JIT birth demands claim-derived roles (no stock-role
+		// injection); the operator grants a role mapping first.
+		return admitDenial(idppb.AdmissionVerdict_NO_ROLES_REJECTED), nil
+	}
+	first, last := splitCompactName(req.GetName())
+	created, err := s.users.Create(ctx, &User{
+		Username:    username,
+		FirstName:   first,
+		LastName:    last,
+		Email:       req.GetEmail(),
+		Roles:       roles,
+		Provisioned: true,
+	})
+	if err != nil {
+		if status.Code(err) == codes.AlreadyExists {
+			// Replication race: another admittance created the row meanwhile —
+			// re-judge it as a known row.
+			if refetched, rerr := s.users.GetByUsername(ctx, username, true); rerr == nil {
+				return s.admitKnown(ctx, refetched, req)
+			}
+		}
+		return nil, err
+	}
+	s.logger.Info("idp: JIT-provisioned user", "username", username, "roles", roles)
+	return s.admitGranted(created), nil
+}
+
+// admitKnown adjudicates an EXISTING row (any state).
+func (s *GRPCServer) admitKnown(ctx context.Context, u *User, req *idppb.AdmitPrincipalRequest) (*idppb.AdmitPrincipalResponse, error) {
+	switch {
+	case u.DeletedAt != nil:
+		return admitDenial(idppb.AdmissionVerdict_DEPROVISIONED), nil
+	case !u.Active:
+		return admitDenial(idppb.AdmissionVerdict_DEACTIVATED), nil
+	}
+	// ACTIVE. JIT-born rows (provisioned, no externalId) REFRESH name/email
+	// from the args (provided ones only — Update's supplied-value semantics
+	// leave absences untouched) and GROW roles monotonically (stored ∪
+	// incoming — a claim dropping off never strips an operator grant). The
+	// write happens ONLY WHEN SOMETHING MOVES (a resync contact that changes
+	// nothing is a pure read — no gratuitous UpdatedAt churn). Local and
+	// SCIM-managed rows are admitted TOUCHED.
+	if u.Provisioned && u.ExternalID == "" {
+		union := mergeRoles(u.Roles, dedupeRoles(req.GetRoles()))
+		first, last := splitCompactName(req.GetName())
+		nameMoves := req.GetName() != "" && (first != u.FirstName || last != u.LastName)
+		emailMoves := req.GetEmail() != "" && req.GetEmail() != u.Email
+		if nameMoves || emailMoves || !sameStrings(union, u.Roles) {
+			refreshed, err := s.users.Update(ctx, &User{
+				ID:        u.ID,
+				FirstName: first,
+				LastName:  last,
+				Email:     req.GetEmail(),
+				Roles:     union,
+			})
+			if err != nil {
+				return nil, err
+			}
+			u = refreshed
+		}
+	}
+	return s.admitGranted(u), nil
+}
+
+func (s *GRPCServer) admitGranted(u *User) *idppb.AdmitPrincipalResponse {
+	return &idppb.AdmitPrincipalResponse{Verdict: idppb.AdmissionVerdict_ADMITTED, User: userToProto(u)}
+}
+
+func admitDenial(v idppb.AdmissionVerdict) *idppb.AdmitPrincipalResponse {
+	return &idppb.AdmitPrincipalResponse{Verdict: v}
+}
+
+// dedupeRoles collapses a role set to its unique NON-EMPTY members (stable
+// order).
+func dedupeRoles(in []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, r := range in {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// mergeRoles unions base ∪ incoming (base order first, newcomers appended).
+func mergeRoles(base, incoming []string) []string {
+	merged := append([]string{}, base...)
+	for _, r := range incoming {
+		found := false
+		for _, b := range merged {
+			if b == r {
+				found = true
+				break
+			}
+		}
+		if !found {
+			merged = append(merged, r)
+		}
+	}
+	return merged
+}
+
+// sameStrings reports whether two string slices hold the same ELEMENTS
+// (multiset-insensitive, order-insensitive).
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := map[string]int{}
+	for _, s := range a {
+		counts[s]++
+	}
+	for _, s := range b {
+		counts[s]--
+		if counts[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

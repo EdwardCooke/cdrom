@@ -77,6 +77,9 @@ e2e_start idp-u "$WORK/idp-u.log" 'idp starting' \
   CDROM_IDP_SCIM_KEYS_PEPPER="$PEPPER" CDROM_SCIM_ENABLED=true \
   CDROM_AUDIT_FILE="$WORK/idp-u-audit.log" CDROM_AUDIT_FORMAT=json \
   CDROM_LOG_FORMAT=text -- "$BIN/idp"
+# Deterministic handle for the fail-closed leg: e2e_start recorded THIS
+# process as the newest member of the harness's PIDS array.
+idpu_pid="${PIDS[${#PIDS[@]}-1]}"
 e2e_start api-u "$WORK/api-u.log" 'serving' \
   CDROM_API_HTTP_ADDR=127.0.0.1:8083 CDROM_LISTEN_ADDR=127.0.0.1:7118 \
   CDROM_AUTH_ENABLED=true CDROM_AUTH_ISSUER=http://127.0.0.1:7104 \
@@ -213,5 +216,122 @@ for i in $(seq 1 10); do
 done
 [ "$AUDIT_OK" = "yes" ] \
   || { echo ">> SCIM audit events missing/misinattributed (provision: ${PROV:0:200}; reprovision: ${REP:0:200})"; exit 1; }
+
+# ============================================================================
+# Slice 3 — the admission gate (JIT vs SCIM modes, verify-per-request)
+# ============================================================================
+# Two MODE HOSTS share the stack's database (hence the same user table):
+#   - api-rbac  (:8081) ⇢ the STACK's IdP (:7104, SCIM DISABLED) ⇒ JIT mode
+#   - api-u     (:8083) ⇢ the peppered replica (:7116, SCIM ENABLED) ⇒ SCIM mode
+# The dev shim (GET /auth?user=X&roles=A,B) STANDS IN FOR A CORPORATE ISSUER:
+# it signs a token for X bearing simulated group claims — the built-in IdP
+# never signs for unknown subjects on its own, so this is the e2e's only
+# foreign-token vector. api-rbac's issuer (127.0.0.1:7104) matches the shim
+# token's iss (the shim echoes its request host).
+log ">> admission gate: JIT mode (SCIM disabled) auto-provisions on first sight"
+# shim_token <user> [<comma-roles>] — run the dev shim's authorization-code
+# flow against the STACK's IdP (SCIM disabled ⇒ JIT mode) and print the
+# ACCESS TOKEN. The ?roles= param simulates a CORPORATE issuer's group claims
+# (the built-in IdP never signs for unknown subjects on its own, so this is
+# the e2e's only foreign-token vector). The shim token's iss echoes its
+# request host (127.0.0.1:7104) — api-rbac's configured issuer. The probe
+# route is GET /api/pipelines (the stock "user" role holds
+# pipelines.can-view — the gate's 403s are distinguished from RBAC's by
+# BODY TEXT, so the gate and RBAC layers are told apart).
+shim_token() {
+  local user="$1" roles="${2:-}" qs location code_val tok_raw tok
+  qs="user=$user&redirect_uri=http://127.0.0.1:8081/api/auth/callback&client_id=cdrom-ui"
+  [ -n "$roles" ] && qs="$qs&roles=$roles"
+  location=$(curl -s --max-time 10 -o /dev/null -w '%{redirect_url}' "http://127.0.0.1:7104/auth?$qs")
+  code_val=$(printf '%s' "$location" | sed -n 's/.*code=\([^&]*\).*/\1/p')
+  [ -n "$code_val" ] || { echo ">> shim redirect lacked a code: $location"; exit 1; }
+  tok_raw=$(curl -s --max-time 10 -X POST "http://127.0.0.1:7104/token" \
+    -d "grant_type=authorization_code&code=$code_val&client_id=cdrom-ui&redirect_uri=http://127.0.0.1:8081/api/auth/callback")
+  tok=$(printf '%s' "$tok_raw" | jq -r '.access_token // empty')
+  [ -n "$tok" ] || { echo ">> shim token exchange failed: $tok_raw"; exit 1; }
+  printf '%s' "$tok"
+}
+gate_probe() { # <api-base> <token> → sets GP_CODE / GP_BODY
+  local out
+  out=$(curl -s --max-time 10 -w $'\n%{http_code}' "$1/api/pipelines" -H "Authorization: Bearer $2" || true)
+  GP_CODE=$(printf '%s' "$out" | tail -n 1)
+  GP_BODY=$(printf '%s' "$out" | sed '$d')
+}
+JIT_TOK=$(shim_token "jit.alice" "user")
+gate_probe "$RBAC" "$JIT_TOK"
+[ "$GP_CODE" = "200" ] || { echo ">> JIT first sight = $GP_CODE, want 200 (auto-provisioned + admitted) [$GP_BODY]"; exit 1; }
+# The row EXISTS now (visible through the SCIM surface's list — same table).
+scim_req GET "/Users?filter=userName%20eq%20%22jit.alice%22"
+[ "$SCIM_CODE" = "200" ] || { echo ">> JIT row list = $SCIM_CODE, want 200 ($SCIM_BODY)"; exit 1; }
+printf '%s' "$SCIM_BODY" | jq -e '.totalResults == 1 and .Resources[0].userName == "jit.alice"' >/dev/null \
+  || { echo ">> JIT row missing/altered: $SCIM_BODY"; exit 1; }
+# Return visit: admitted again (monotonic — the claim set is a subset, so the
+# birth grants RETAIN; nothing is stripped).
+gate_probe "$RBAC" "$JIT_TOK"
+[ "$GP_CODE" = "200" ] || { echo ">> JIT return visit = $GP_CODE, want 200 [$GP_BODY]"; exit 1; }
+
+log ">> admission gate: JIT with ZERO mapped roles is denied — and creates NO row"
+ZERO_TOK=$(shim_token "zero.claim")
+gate_probe "$RBAC" "$ZERO_TOK"
+[ "$GP_CODE" = "403" ] || { echo ">> zero-roles = $GP_CODE, want 403 (no_roles_rejected) [$GP_BODY]"; exit 1; }
+printf '%s' "$GP_BODY" | grep -q "no roles are mapped" \
+  || { echo ">> zero-roles 403 lacks the gate's distinct text: $GP_BODY"; exit 1; }
+scim_req GET "/Users?filter=userName%20eq%20%22zero.claim%22"
+printf '%s' "$SCIM_BODY" | jq -e '.totalResults == 0' >/dev/null \
+  || { echo ">> zero-roles denial left a residual row: $SCIM_BODY"; exit 1; }
+
+log ">> admission gate: SCIM mode denies an unknown subject (no JIT)"
+# phantom.unknown has NO row (unlike jit.alice, which JIT-created) — the
+# peppered replica (SCIM ENABLED) must refuse it outright.
+PHANTOM_TOK=$(shim_token "phantom.unknown" "user")
+gate_probe "$API_U" "$PHANTOM_TOK"
+[ "$GP_CODE" = "403" ] || { echo ">> SCIM-mode unknown = $GP_CODE, want 403 (unknown_rejected) [$GP_BODY]"; exit 1; }
+printf '%s' "$GP_BODY" | grep -q "not recognized" \
+  || { echo ">> SCIM-mode 403 lacks the gate's distinct text: $GP_BODY"; exit 1; }
+scim_req GET "/Users?filter=userName%20eq%20%22phantom.unknown%22"
+printf '%s' "$SCIM_BODY" | jq -e '.totalResults == 0' >/dev/null \
+  || { echo ">> SCIM-mode denial left a residual row: $SCIM_BODY"; exit 1; }
+
+log ">> admission gate: a SCIM deactivation BITES THE NEXT LOGIN (verify-per-request)"
+# alice.corp is alive + active (rehired in the lifecycle leg). Her shim token
+# is admitted, then SCIM deactivates her, then the SAME token is refused
+# IMMEDIATELY (no cache grace period).
+HIRER_TOK=$(shim_token "alice.corp" "user")
+gate_probe "$API_U" "$HIRER_TOK"
+[ "$GP_CODE" = "200" ] || { echo ">> pre-deactivation admit = $GP_CODE, want 200 [$GP_BODY]"; exit 1; }
+scim_req GET "/Users?filter=userName%20eq%20%22alice.corp%22"
+HIRER_ID=$(printf '%s' "$SCIM_BODY" | jq -r '.Resources[0].id // empty')
+[ -n "$HIRER_ID" ] || { echo ">> could not locate alice.corp's id: $SCIM_BODY"; exit 1; }
+scim_req PATCH "/Users/$HIRER_ID" '{"operations":[{"op":"replace","path":"/active","value":false}]}'
+[ "$SCIM_CODE" = "200" ] || { echo ">> SCIM deactivate = $SCIM_CODE, want 200 ($SCIM_BODY)"; exit 1; }
+gate_probe "$API_U" "$HIRER_TOK"
+[ "$GP_CODE" = "403" ] || { echo ">> post-deactivation admit = $GP_CODE, want 403 (bite NOW — no cache) [$GP_BODY]"; exit 1; }
+printf '%s' "$GP_BODY" | grep -q "deactivated" \
+  || { echo ">> deactivation 403 lacks the gate's distinct text: $GP_BODY"; exit 1; }
+# Restore her (tidiness).
+scim_req PATCH "/Users/$HIRER_ID" '{"operations":[{"op":"replace","path":"/active","value":true}]}'
+[ "$SCIM_CODE" = "200" ] || { echo ">> restore-active = $SCIM_CODE, want 200"; exit 1; }
+
+log ">> admission gate: RBAC denial is DISTINGUISHABLE from a gate denial"
+# NEGATIVE CONTROL: a known user (ada) with a role that grants nothing — the
+# gate ADMITS her (she exists + is active), THEN RBAC refuses. The 403 body
+# must lack every gate phrase (layer separation proven).
+CONTROL_TOK=$(shim_token "$E2E_USER_ADA_USERNAME" "voidrole")
+gate_probe "$RBAC" "$CONTROL_TOK"
+[ "$GP_CODE" = "403" ] || { echo ">> RBAC control = $GP_CODE, want 403 [$GP_BODY]"; exit 1; }
+if printf '%s' "$GP_BODY" | grep -qiE "no roles are mapped|not recognized|deactivated|deprovisioned"; then
+  echo ">> RBAC 403 mimicked a gate denial: $GP_BODY"; exit 1
+fi
+
+log ">> admission gate: IdP down ⇒ FAIL CLOSED (503, not a disguised denial)"
+# Stop the peppered replica (api-u's IdP); its lazy gRPC dial then fails and
+# the gate must refuse with 503 — never a 403 (a down gate is not a denial).
+kill "$idpu_pid" 2>/dev/null || true
+wait_dead=0
+while kill -0 "$idpu_pid" 2>/dev/null && [ "$wait_dead" -lt 25 ]; do
+  sleep 0.2; wait_dead=$((wait_dead + 1))
+done
+gate_probe "$API_U" "$HIRER_TOK"
+[ "$GP_CODE" = "503" ] || { echo ">> IdP-down admit = $GP_CODE, want 503 (fail closed) [$GP_BODY]"; exit 1; }
 
 log ">> 22-scim-users PASSED"

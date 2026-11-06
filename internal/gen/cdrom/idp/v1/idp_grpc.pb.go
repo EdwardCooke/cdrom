@@ -48,6 +48,7 @@ const (
 	IdP_VerifyServiceAccountKey_FullMethodName    = "/cdrom.idp.v1.IdP/VerifyServiceAccountKey"
 	IdP_ResetServiceAccountLockout_FullMethodName = "/cdrom.idp.v1.IdP/ResetServiceAccountLockout"
 	IdP_DeriveScimKey_FullMethodName              = "/cdrom.idp.v1.IdP/DeriveScimKey"
+	IdP_AdmitPrincipal_FullMethodName             = "/cdrom.idp.v1.IdP/AdmitPrincipal"
 )
 
 // IdPClient is the client API for IdP service.
@@ -179,6 +180,28 @@ type IdPClient interface {
 	// the 201. Nothing is stored here: this is a pure derivation, so the RPC is
 	// available even before any pool rows exist (the bootstrap ritual).
 	DeriveScimKey(ctx context.Context, in *DeriveScimKeyRequest, opts ...grpc.CallOption) (*DeriveScimKeyResponse, error)
+	// AdmitPrincipal (F-28.4 Slice 3) ADJUDICATES a presented principal against
+	// the user directory — the consolidated admission gate the API's auth
+	// middleware invokes PER REQUEST (no caching) for every human user
+	// principal (OIDC tokens and user API keys; service accounts and job tokens
+	// are exempt). Judgment is ORIGIN-INDEPENDENT: the gate weighs the claims
+	// presented, not who signed them (the built-in IdP issues user tokens only
+	// for valid credentials, so the gate chiefly adjudicates foreign-issued
+	// tokens). Modes (mutually exclusive, chosen by idp.scim.enabled):
+	//   - KNOWN + ACTIVE ⇒ ADMITTED (locally-registered and SCIM-managed rows
+	//     alike — admitted untouched; no overwrite).
+	//   - DEACTIVATED / TOMBSTONED ⇒ DENIED with the distinct verdicts.
+	//   - UNKNOWN + SCIM ENABLED ⇒ DENIED (no JIT; the corporate directory is
+	//     the sole source of truth).
+	//   - UNKNOWN + SCIM DISABLED ⇒ JUST-IN-TIME CREATION: a row is created
+	//     (provisioned=true, external_id="", name/email from the args, roles =
+	//     the CLAIM-DERIVED set — REQUIRED NON-EMPTY; empty roles ⇒ DENIED with
+	//     NO row created, fail-closed) and the verdict is ADMITTED. Returning
+	//     JIT users REFRESH name/email from the args and GROW roles
+	//     MONOTONICALLY (stored ∪ incoming).
+	// The username undergoes LIGHT SANITY BOUNDS (length/charset); violations
+	// are DENIED (UNKNOWN_REJECTED) with no row created.
+	AdmitPrincipal(ctx context.Context, in *AdmitPrincipalRequest, opts ...grpc.CallOption) (*AdmitPrincipalResponse, error)
 }
 
 type idPClient struct {
@@ -469,6 +492,16 @@ func (c *idPClient) DeriveScimKey(ctx context.Context, in *DeriveScimKeyRequest,
 	return out, nil
 }
 
+func (c *idPClient) AdmitPrincipal(ctx context.Context, in *AdmitPrincipalRequest, opts ...grpc.CallOption) (*AdmitPrincipalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdmitPrincipalResponse)
+	err := c.cc.Invoke(ctx, IdP_AdmitPrincipal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdPServer is the server API for IdP service.
 // All implementations must embed UnimplementedIdPServer
 // for forward compatibility.
@@ -598,6 +631,28 @@ type IdPServer interface {
 	// the 201. Nothing is stored here: this is a pure derivation, so the RPC is
 	// available even before any pool rows exist (the bootstrap ritual).
 	DeriveScimKey(context.Context, *DeriveScimKeyRequest) (*DeriveScimKeyResponse, error)
+	// AdmitPrincipal (F-28.4 Slice 3) ADJUDICATES a presented principal against
+	// the user directory — the consolidated admission gate the API's auth
+	// middleware invokes PER REQUEST (no caching) for every human user
+	// principal (OIDC tokens and user API keys; service accounts and job tokens
+	// are exempt). Judgment is ORIGIN-INDEPENDENT: the gate weighs the claims
+	// presented, not who signed them (the built-in IdP issues user tokens only
+	// for valid credentials, so the gate chiefly adjudicates foreign-issued
+	// tokens). Modes (mutually exclusive, chosen by idp.scim.enabled):
+	//   - KNOWN + ACTIVE ⇒ ADMITTED (locally-registered and SCIM-managed rows
+	//     alike — admitted untouched; no overwrite).
+	//   - DEACTIVATED / TOMBSTONED ⇒ DENIED with the distinct verdicts.
+	//   - UNKNOWN + SCIM ENABLED ⇒ DENIED (no JIT; the corporate directory is
+	//     the sole source of truth).
+	//   - UNKNOWN + SCIM DISABLED ⇒ JUST-IN-TIME CREATION: a row is created
+	//     (provisioned=true, external_id="", name/email from the args, roles =
+	//     the CLAIM-DERIVED set — REQUIRED NON-EMPTY; empty roles ⇒ DENIED with
+	//     NO row created, fail-closed) and the verdict is ADMITTED. Returning
+	//     JIT users REFRESH name/email from the args and GROW roles
+	//     MONOTONICALLY (stored ∪ incoming).
+	// The username undergoes LIGHT SANITY BOUNDS (length/charset); violations
+	// are DENIED (UNKNOWN_REJECTED) with no row created.
+	AdmitPrincipal(context.Context, *AdmitPrincipalRequest) (*AdmitPrincipalResponse, error)
 	mustEmbedUnimplementedIdPServer()
 }
 
@@ -691,6 +746,9 @@ func (UnimplementedIdPServer) ResetServiceAccountLockout(context.Context, *Reset
 }
 func (UnimplementedIdPServer) DeriveScimKey(context.Context, *DeriveScimKeyRequest) (*DeriveScimKeyResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeriveScimKey not implemented")
+}
+func (UnimplementedIdPServer) AdmitPrincipal(context.Context, *AdmitPrincipalRequest) (*AdmitPrincipalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdmitPrincipal not implemented")
 }
 func (UnimplementedIdPServer) mustEmbedUnimplementedIdPServer() {}
 func (UnimplementedIdPServer) testEmbeddedByValue()             {}
@@ -1217,6 +1275,24 @@ func _IdP_DeriveScimKey_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IdP_AdmitPrincipal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdmitPrincipalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).AdmitPrincipal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_AdmitPrincipal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).AdmitPrincipal(ctx, req.(*AdmitPrincipalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IdP_ServiceDesc is the grpc.ServiceDesc for IdP service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1335,6 +1411,10 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeriveScimKey",
 			Handler:    _IdP_DeriveScimKey_Handler,
+		},
+		{
+			MethodName: "AdmitPrincipal",
+			Handler:    _IdP_AdmitPrincipal_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

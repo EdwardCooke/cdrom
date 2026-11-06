@@ -258,6 +258,19 @@ Tick each feature off as it lands.
       database via a generic equality algebra — the listing service accepts
       canonical-attribute predicates (case sensitivity pinned per predicate,
       booleans literal, unknown attributes InvalidArgument), also exposed on
-      the IdP gRPC `ListUsers.generic_filter` for future admin user-search)_
+      the IdP gRPC `ListUsers.generic_filter` for future admin user-search;
+      S3 consolidated admission gate landed: the IdP's `AdmitPrincipal`
+      adjudicates every HUMAN principal PER REQUEST (no cache — a SCIM
+      deactivation bites the next hop) from the API's auth middleware via
+      the `Auth.SetAdmissionPolicy` seam; origin-independent judgment
+      (foreign-issuer tokens included); SCIM-enabled ⇒ unknown denied,
+      SCIM-disabled ⇒ JIT auto-provision (claim roles required at birth,
+      monotonic role growth + name/email refresh on return visits,
+      write-only-if-moving); distinct 403 texts per verdict, IdP-down ⇒
+      503 fail-closed; machine principals (service accounts, job tokens)
+      exempt; `cdrom_admissions_total{verdict}`; trust-the-issuer subject
+      handling (no charset bounds — Azure UPNs/'emails-as-usernames');
+      dev-shim `?roles=` corporate-issuer simulation powering the e2e gate
+      legs)_
 - [ ] F-28.5 SCIM group management
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)
