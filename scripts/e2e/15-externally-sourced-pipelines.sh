@@ -46,7 +46,7 @@
 # lease); its cadence resolution is covered by the unit tests — this script
 # proves the end-to-end DATA PLUMBING.
 #
-# Standalone: boots its own stack (WITH A WORKER) + its own fetcher, which the
+# Standalone: boots its own stack (WITH A AGENT) + its own fetcher, which the
 # API dials (CDROM_PIPELINE_SOURCE_ADDR pointed at it). Shared (run from
 # e2e.sh): the stack is already up INCLUDING a stock fetcher (the API dials it
 # at startup), so this script reuses it and places its definition files in the
@@ -75,7 +75,7 @@ if [ -z "${E2E_STACK_READY:-}" ]; then
   export CDROM_PIPELINE_SOURCE_ADDR="$E2E_FS_ADDR"
 fi
 
-# WITH A WORKER (standalone): the run-half needs a target to execute the job
+# WITH A AGENT (standalone): the run-half needs a target to execute the job
 # on. (The shared stack already runs one.)
 e2e_boot_stack with-agent
 
@@ -98,7 +98,7 @@ metadata:
   description: externally sourced demo
 spec:
   # Default agent group (F-17): the job targets the resident "default" group
-  # (an EMPTY target group would await an ephemeral agent, which the e2e
+  # (an EMPTY target group would await an ephemeral worker, which the e2e
   # stack has none of).
   agentGroup: default
   periodicRefresh:

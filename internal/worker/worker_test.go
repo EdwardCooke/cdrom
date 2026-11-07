@@ -1,4 +1,4 @@
-package agent
+package worker
 
 import (
 	"context"
@@ -22,14 +22,14 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// fakeAgentAPI is a stub APIClient for agent tests. Only the methods an agent
+// fakeWorkerAPI is a stub APIClient for worker tests. Only the methods a worker
 // uses are implemented; the rest are never called. GetJob returns the job's
 // stored status until a short delay elapses, after which it reports the job
 // as cancelled (simulating the scheduler's CancelJob marking it cancelled in
-// the database, which the agent observes on its next poll, F-05).
+// the database, which the worker observes on its next poll, F-05).
 // StreamJobLogs fails so the log sink (best-effort) does not block the job.
-type fakeAgentAPI struct {
-	apipb.APIClient // nil; only the methods below are used by the agent
+type fakeWorkerAPI struct {
+	apipb.APIClient // nil; only the methods below are used by the worker
 	mu              sync.Mutex
 	statuses        []dbpb.JobStatus
 	job             *apipb.Job
@@ -39,7 +39,7 @@ type fakeAgentAPI struct {
 	exchanges []string
 }
 
-func (f *fakeAgentAPI) GetJob(ctx context.Context, in *apipb.GetJobRequest, opts ...grpc.CallOption) (*apipb.Job, error) {
+func (f *fakeWorkerAPI) GetJob(ctx context.Context, in *apipb.GetJobRequest, opts ...grpc.CallOption) (*apipb.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.start.IsZero() {
@@ -62,14 +62,14 @@ func (f *fakeAgentAPI) GetJob(ctx context.Context, in *apipb.GetJobRequest, opts
 	}, nil
 }
 
-func (f *fakeAgentAPI) ReportJobStatus(ctx context.Context, in *apipb.ReportJobStatusRequest, opts ...grpc.CallOption) (*apipb.Job, error) {
+func (f *fakeWorkerAPI) ReportJobStatus(ctx context.Context, in *apipb.ReportJobStatusRequest, opts ...grpc.CallOption) (*apipb.Job, error) {
 	f.mu.Lock()
 	f.statuses = append(f.statuses, in.GetStatus())
 	f.mu.Unlock()
 	return &apipb.Job{Id: in.GetJobId(), Status: in.GetStatus()}, nil
 }
 
-func (f *fakeAgentAPI) StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[apipb.JobLogChunk, apipb.StreamJobLogsResponse], error) {
+func (f *fakeWorkerAPI) StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[apipb.JobLogChunk, apipb.StreamJobLogsResponse], error) {
 	return nil, status.Error(codes.Unavailable, "streaming disabled in test")
 }
 
@@ -77,37 +77,37 @@ func (f *fakeAgentAPI) StreamJobLogs(ctx context.Context, opts ...grpc.CallOptio
 // token_exchange step handler). The fake records the (job, audience) and
 // returns a token derived from the audience so a test can assert the exchange
 // happened.
-func (f *fakeAgentAPI) ExchangeJobToken(ctx context.Context, in *apipb.ExchangeJobTokenRequest, opts ...grpc.CallOption) (*apipb.ExchangeJobTokenResponse, error) {
+func (f *fakeWorkerAPI) ExchangeJobToken(ctx context.Context, in *apipb.ExchangeJobTokenRequest, opts ...grpc.CallOption) (*apipb.ExchangeJobTokenResponse, error) {
 	f.mu.Lock()
 	f.exchanges = append(f.exchanges, in.GetAudience())
 	f.mu.Unlock()
 	return &apipb.ExchangeJobTokenResponse{Token: "token-for-" + in.GetAudience()}, nil
 }
 
-// TestAgentCancelInterruptsRunningJob verifies cancellation propagation for an
-// ephemeral agent (F-05): the agent polls the API for its job's status and,
+// TestWorkerCancelInterruptsRunningJob verifies cancellation propagation for an
+// ephemeral worker (F-05): the worker polls the API for its job's status and,
 // when it observes the job cancelled, interrupts the running step (terminating
 // the command) and reports the job as cancelled.
-func TestAgentCancelInterruptsRunningJob(t *testing.T) {
+func TestWorkerCancelInterruptsRunningJob(t *testing.T) {
 	// A step that blocks until its context is done: a stand-in for a long
 	// command that must be interrupted on cancel.
-	executor.RegisterStepType("agent-cancel-blocker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
+	executor.RegisterStepType("worker-cancel-blocker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
 		<-ctx.Done()
 		return ctx.Err()
 	})
 
 	// Shorten the poll interval so the test is fast.
-	orig := agentCancelPollInterval
-	agentCancelPollInterval = 20 * time.Millisecond
-	t.Cleanup(func() { agentCancelPollInterval = orig })
+	orig := workerCancelPollInterval
+	workerCancelPollInterval = 20 * time.Millisecond
+	t.Cleanup(func() { workerCancelPollInterval = orig })
 
-	api := &fakeAgentAPI{job: &apipb.Job{
+	api := &fakeWorkerAPI{job: &apipb.Job{
 		Id:     7,
 		Name:   "long",
 		Status: dbpb.JobStatus_JOB_STATUS_PENDING,
-		Spec:   &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "agent-cancel-blocker"}}},
+		Spec:   &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "worker-cancel-blocker"}}},
 	}}
-	a := New("agent-host", 7, Dependencies{API: api}, testLogger())
+	a := New("worker-host", 7, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -119,7 +119,7 @@ func TestAgentCancelInterruptsRunningJob(t *testing.T) {
 		t.Errorf("status = %v, want CANCELLED", status)
 	}
 
-	// The agent reported running and then cancelled.
+	// The worker reported running and then cancelled.
 	api.mu.Lock()
 	got := append([]dbpb.JobStatus(nil), api.statuses...)
 	api.mu.Unlock()
@@ -133,20 +133,20 @@ func TestAgentCancelInterruptsRunningJob(t *testing.T) {
 		}
 	}
 	if !sawRunning {
-		t.Errorf("agent did not report RUNNING (reported %v)", got)
+		t.Errorf("worker did not report RUNNING (reported %v)", got)
 	}
 	if !sawCancelled {
-		t.Errorf("agent did not report CANCELLED (reported %v)", got)
+		t.Errorf("worker did not report CANCELLED (reported %v)", got)
 	}
 }
 
-// TestAgentTokenExchangeStep verifies that an agent running a job with a
+// TestWorkerTokenExchangeStep verifies that a worker running a job with a
 // token_exchange step calls the API's ExchangeJobToken RPC (presenting the
 // job's own token) for the step's audience and reports the job succeeded.
-func TestAgentTokenExchangeStep(t *testing.T) {
+func TestWorkerTokenExchangeStep(t *testing.T) {
 	// The job completes (the token_exchange step is fast) well before the fake
 	// API's 100ms cancellation delay, so it reports succeeded.
-	api := &fakeAgentAPI{job: &apipb.Job{
+	api := &fakeWorkerAPI{job: &apipb.Job{
 		Id:    9,
 		Name:  "exchange",
 		Token: "job-token-9",
@@ -157,7 +157,7 @@ func TestAgentTokenExchangeStep(t *testing.T) {
 			},
 		}},
 	}}
-	a := New("agent-host", 9, Dependencies{API: api}, testLogger())
+	a := New("worker-host", 9, Dependencies{API: api}, testLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -169,7 +169,7 @@ func TestAgentTokenExchangeStep(t *testing.T) {
 		t.Errorf("status = %v, want SUCCEEDED", status)
 	}
 
-	// The agent exchanged a token for the step's audience.
+	// The worker exchanged a token for the step's audience.
 	api.mu.Lock()
 	got := append([]string(nil), api.exchanges...)
 	api.mu.Unlock()

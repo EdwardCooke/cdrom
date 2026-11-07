@@ -11,7 +11,7 @@
 // The concrete handlers live in internal/stephandlers (and, later, in
 // plugins); this package is the generic dispatch engine and knows only the
 // DefaultType name, not the handlers themselves. The package is shared by the
-// long-lived agent and the ephemeral agent, and must run on both Windows and
+// long-lived agent and the ephemeral worker, and must run on both Windows and
 // Linux.
 package executor
 
@@ -35,7 +35,7 @@ import (
 )
 
 // ErrTimeout is returned by Execute (and wrapped by step handlers) when a job
-// or a step exceeds its declared timeout. Callers (the agent and agent) use
+// or a step exceeds its declared timeout. Callers (the agent and worker) use
 // errors.Is(err, ErrTimeout) to report the job as timed_out rather than
 // failed. A step handler that runs a command should wrap the context's
 // DeadlineExceeded error with ErrTimeout so the distinction survives the
@@ -43,7 +43,7 @@ import (
 var ErrTimeout = errors.New("executor: timed out")
 
 // ErrCancelled is returned by Execute (wrapped by a StepBarrier) when a job is
-// cancelled while a agent is waiting at a step barrier. Callers (the agent)
+// cancelled while an agent is waiting at a step barrier. Callers (the agent)
 // use errors.Is(err, ErrCancelled) to report the job as cancelled rather than
 // failed. A job that is cancelled while a step is running is surfaced through
 // the job's context cancellation instead (see the agent's user-cancel path).
@@ -142,11 +142,11 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 			continue
 		}
 		// A step with `once` set (F-01) runs on at most one target of a job
-		// that fans out to a agent group: before running it, this target
+		// that fans out to an agent group: before running it, this target
 		// claims a durable slot (job id + step name + attempt) through the
 		// OnceClaimer. When another target already claimed it in the same
 		// attempt, this target skips the step (recorded skipped, not failed).
-		// A target with no claimer (an ephemeral agent, or a single-target
+		// A target with no claimer (an ephemeral worker, or a single-target
 		// job) runs the step. The claim is made after the condition check, so
 		// a condition-skipped step does not consume the slot.
 		if step.GetOnce() {
@@ -237,7 +237,7 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 		// The step succeeded. If the job uses the cross-agent step barrier and
 		// there is a next step, synchronize with the job's other agents: wait
 		// until every agent alive at this step's start has completed it before
-		// starting the next step. A agent that dies mid-step is dropped from
+		// starting the next step. An agent that dies mid-step is dropped from
 		// the barrier, so a dead agent cannot wedge the job. The barrier is
 		// bounded by the job's context (the job-level timeout, when set), so a
 		// job stuck at a barrier times out like any other hung job.
@@ -256,7 +256,7 @@ func Execute(ctx context.Context, spec *dbpb.JobSpec, logger *slog.Logger) error
 // the step's per-step timeout, when set — and the step itself, and returns a
 // descriptive error when the step fails.
 //
-// Handlers are expected to be safe for concurrent use: a agent may run steps
+// Handlers are expected to be safe for concurrent use: an agent may run steps
 // from different jobs on different goroutines.
 type StepHandler func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error
 
@@ -368,22 +368,22 @@ func StepNameFromContext(ctx context.Context) string {
 	return name
 }
 
-// StepBarrier synchronizes the agents of a job that fans out to a agent
-// group at each step boundary (the cross-agent step barrier). After a agent
+// StepBarrier synchronizes the agents of a job that fans out to an agent
+// group at each step boundary (the cross-agent step barrier). After an agent
 // completes a step, Execute calls SyncStep for that step: the agent reports
 // its completion and then waits until every agent alive at the step's start
-// has completed it, before starting the next step. A agent that dies
+// has completed it, before starting the next step. An agent that dies
 // mid-step is dropped from the barrier (it is no longer alive), so a dead
 // agent cannot wedge the job.
 //
 // The barrier is set in the context (via ContextWithStepBarrier) only for a
-// job that has the step-barrier flag set and targets a agent group; a job on
-// a single target (an ephemeral agent) runs its steps unbarriered.
+// job that has the step-barrier flag set and targets an agent group; a job on
+// a single target (an ephemeral worker) runs its steps unbarriered.
 //
 // Implementations must be safe for concurrent use. SyncStep is called with the
 // job's context (already bounded by the job-level timeout, when set) and must
 // return promptly when that context is cancelled (the agent is shutting down
-// or the job was cancelled). When the job is cancelled while a agent is
+// or the job was cancelled). When the job is cancelled while an agent is
 // waiting, SyncStep returns ErrCancelled (wrapped with the context) so the
 // agent can report the job as cancelled.
 type StepBarrier interface {
@@ -757,7 +757,7 @@ func StageAreaFromContext(ctx context.Context) *StageArea {
 // job's own token. The executor calls Claim before running a step with `once`
 // set: when it returns false the step was already claimed by another target in
 // the same attempt, so the executor skips the step (recorded skipped, not
-// failed). A target that is not part of a fan-out (an ephemeral agent, or a
+// failed). A target that is not part of a fan-out (an ephemeral worker, or a
 // group with one agent) returns true so the step runs.
 //
 // Implementations must be safe for concurrent use. Claim is called with the

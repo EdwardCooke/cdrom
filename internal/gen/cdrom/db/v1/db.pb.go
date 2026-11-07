@@ -404,24 +404,24 @@ func (ApprovalPolicy) EnumDescriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{5}
 }
 
-// FailureMode controls how a job that runs on several workers (a job targeting
-// a worker group, which runs on every worker in the group) is judged from the
+// FailureMode controls how a job that runs on several agents (a job targeting
+// an agent group, which runs on every agent in the group) is judged from the
 // per-agent outcomes. It is set at the pipeline level and may be overridden
 // per job; a job that sets no failure mode inherits its pipeline's (defaulting
-// to ALL). It only affects jobs that fan out to more than one worker; a job on
+// to ALL). It only affects jobs that fan out to more than one agent; a job on
 // a single target is unaffected.
 type FailureMode int32
 
 const (
 	FailureMode_FAILURE_MODE_UNSPECIFIED FailureMode = 0
-	// FAILURE_MODE_ALL: the job succeeds only if every worker's run succeeds;
-	// any worker that fails or times out fails the job.
+	// FAILURE_MODE_ALL: the job succeeds only if every agent's run succeeds;
+	// any agent that fails or times out fails the job.
 	FailureMode_FAILURE_MODE_ALL FailureMode = 1
-	// FAILURE_MODE_BEST_EFFORT: the job succeeds if every worker's run reaches
+	// FAILURE_MODE_BEST_EFFORT: the job succeeds if every agent's run reaches
 	// a terminal state (a per-agent failure or timeout is recorded but does
 	// not fail the job).
 	FailureMode_FAILURE_MODE_BEST_EFFORT FailureMode = 2
-	// FAILURE_MODE_ANY: the job succeeds as soon as one worker's run succeeds.
+	// FAILURE_MODE_ANY: the job succeeds as soon as one agent's run succeeds.
 	FailureMode_FAILURE_MODE_ANY FailureMode = 3
 )
 
@@ -1159,7 +1159,7 @@ type Pipeline struct {
 	CreatedAt   *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt   *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// failure_mode is the pipeline's default failure mode (see FailureMode) for
-	// its jobs that fan out to a worker group. A job that sets its own
+	// its jobs that fan out to an agent group. A job that sets its own
 	// failure_mode overrides the pipeline's; a job that sets none inherits this
 	// value (defaulting to ALL when the pipeline sets none).
 	FailureMode FailureMode `protobuf:"varint,6,opt,name=failure_mode,json=failureMode,proto3,enum=cdrom.db.v1.FailureMode" json:"failure_mode,omitempty"`
@@ -1200,7 +1200,7 @@ type Pipeline struct {
 	// labels are the pipeline's labels (F-29): a set of key/value pairs that label
 	// the pipeline. They are metadata (they never gate, route, or serialize
 	// work) and are combined with the labels of a run's other resources (job,
-	// environment, worker group, worker) onto the run's job instances. Empty
+	// environment, agent group, agent) onto the run's job instances. Empty
 	// means the pipeline has no labels.
 	Labels map[string]string `protobuf:"bytes,13,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// variable_sets are the pipeline's named variable sets (F-21.1.3): each is
@@ -3113,7 +3113,7 @@ type ListRunsRequest struct {
 	// carry every one of the given key/value labels (F-29): a run matches when at
 	// least one of its job instances has a label row for each key with the
 	// corresponding value. A run's labels are the combined labels stored on its job
-	// instances (the pipeline + job + environment + worker group + worker labels
+	// instances (the pipeline + job + environment + agent group + agent labels
 	// combined when the run was created), so this is what makes a run
 	// searchable by tag. When empty, all runs are returned.
 	Labels        map[string]string `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -4039,7 +4039,7 @@ type JobStep struct {
 	// stops the job.
 	IgnoreFailed bool `protobuf:"varint,10,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
 	// once, when true, means the step runs on at most one target of a job that
-	// fans out to a worker group (F-01): the first target to reach the step
+	// fans out to an agent group (F-01): the first target to reach the step
 	// claims a durable slot (job id + step name + attempt) and runs it; every
 	// other target that reaches the same step in the same attempt sees the slot
 	// already claimed and skips the step (recorded skipped, not failed). A
@@ -4226,26 +4226,26 @@ type JobSpec struct {
 	// not change the job's own status or stop a failed step from failing the
 	// job (that is a step's ignore_failed).
 	IgnoreFailed bool `protobuf:"varint,4,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
-	// failure_mode controls how a job that runs on several workers (a job
-	// targeting a worker group, which runs on every worker in the group) is
+	// failure_mode controls how a job that runs on several agents (a job
+	// targeting an agent group, which runs on every agent in the group) is
 	// judged from the per-agent outcomes. It is set at the pipeline level and
 	// may be overridden per job; a job that sets no failure mode inherits its
 	// pipeline's (defaulting to ALL). It only affects jobs that fan out to
-	// more than one worker; a job on a single target is unaffected.
-	//   - ALL: the job succeeds only if every worker's run succeeds; any
-	//     worker that fails or times out fails the job.
-	//   - BEST_EFFORT: the job succeeds if every worker's run reaches a
+	// more than one agent; a job on a single target is unaffected.
+	//   - ALL: the job succeeds only if every agent's run succeeds; any
+	//     agent that fails or times out fails the job.
+	//   - BEST_EFFORT: the job succeeds if every agent's run reaches a
 	//     terminal state (a per-agent failure or timeout is recorded but does
 	//     not fail the job).
-	//   - ANY: the job succeeds as soon as one worker's run succeeds.
+	//   - ANY: the job succeeds as soon as one agent's run succeeds.
 	FailureMode FailureMode `protobuf:"varint,5,opt,name=failure_mode,json=failureMode,proto3,enum=cdrom.db.v1.FailureMode" json:"failure_mode,omitempty"`
-	// step_barrier, when true, makes a job that runs on several workers (a job
-	// targeting a worker group) run its steps in lockstep: no worker proceeds
-	// to step N+1 until every worker that is alive has completed step N. The
-	// barrier is computed over the workers that are alive at the time each step
-	// starts (a worker that dies mid-job is dropped from the barrier, so it
+	// step_barrier, when true, makes a job that runs on several agents (a job
+	// targeting an agent group) run its steps in lockstep: no agent proceeds
+	// to step N+1 until every agent that is alive has completed step N. The
+	// barrier is computed over the agents that are alive at the time each step
+	// starts (an agent that dies mid-job is dropped from the barrier, so it
 	// does not block the others). It only affects jobs that fan out to more
-	// than one worker; a job on a single target is unaffected.
+	// than one agent; a job on a single target is unaffected.
 	StepBarrier bool `protobuf:"varint,6,opt,name=step_barrier,json=stepBarrier,proto3" json:"step_barrier,omitempty"`
 	// concurrency_keys are the job's concurrency keys (F-16): named, global
 	// locks that serialize this job against other jobs (in any pipeline or run)
@@ -4364,7 +4364,7 @@ type Job struct {
 	PipelineId int64     `protobuf:"varint,2,opt,name=pipeline_id,json=pipelineId,proto3" json:"pipeline_id,omitempty"`
 	Name       string    `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
 	Status     JobStatus `protobuf:"varint,4,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
-	// target_group selects a group of long-lived workers; empty means the job
+	// target_group selects a group of long-lived agents; empty means the job
 	// runs on an ephemeral Kubernetes agent.
 	TargetGroup string                 `protobuf:"bytes,5,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	StartedAt   *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
@@ -4425,12 +4425,12 @@ type Job struct {
 	// denormalized from the spec (or the pipeline's default) when the job was
 	// created. The scheduler's job-status loop uses it to derive the job's
 	// overall status from the per-agent outcomes of a job that fanned out to
-	// a worker group.
+	// an agent group.
 	FailureMode FailureMode `protobuf:"varint,19,opt,name=failure_mode,json=failureMode,proto3,enum=cdrom.db.v1.FailureMode" json:"failure_mode,omitempty"`
 	// step_barrier is the job's step-barrier flag (see JobSpec.step_barrier),
 	// denormalized from the spec when the job was created. When true, a job
-	// that fanned out to a worker group runs its steps in lockstep: no worker
-	// proceeds to step N+1 until every worker alive at step N's start has
+	// that fanned out to an agent group runs its steps in lockstep: no agent
+	// proceeds to step N+1 until every agent alive at step N's start has
 	// completed step N.
 	StepBarrier bool `protobuf:"varint,20,opt,name=step_barrier,json=stepBarrier,proto3" json:"step_barrier,omitempty"`
 	// key is the job's stable, pipeline-scoped identifier (F-08): a short name
@@ -4516,7 +4516,7 @@ type Job struct {
 	ConcurrencyAdmittedAt *timestamppb.Timestamp `protobuf:"bytes,35,opt,name=concurrency_admitted_at,json=concurrencyAdmittedAt,proto3" json:"concurrency_admitted_at,omitempty"`
 	// environment is the name of the environment this job targets (F-17); empty
 	// means the job targets its raw target_group (the pre-F-17 behavior). A job
-	// targeting an environment is dispatched to the live workers that registered
+	// targeting an environment is dispatched to the live agents that registered
 	// that environment (intersected with the environment's target_group when
 	// set), and is subject to the environment's approval and automation
 	// policies. It is denormalized from the job definition onto the job
@@ -4536,7 +4536,7 @@ type Job struct {
 	Approval ApprovalPolicy `protobuf:"varint,38,opt,name=approval,proto3,enum=cdrom.db.v1.ApprovalPolicy" json:"approval,omitempty"`
 	// labels are the job's combined labels (F-29): the union of the labels of every
 	// resource in the job's context — its pipeline, the job itself, the
-	// environment it targets (if any), and the worker group it targets (if
+	// environment it targets (if any), and the agent group it targets (if
 	// any) — with the more specific source winning on a key collision. They
 	// are computed when the job instance is created and stored as a snapshot:
 	// relabeling a resource later does not change the labels recorded on a past
@@ -5008,7 +5008,7 @@ type JobDefinition struct {
 	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	// name is the job's display name; when empty the pipeline's key is used.
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// target_group selects a group of long-lived workers; empty means the job
+	// target_group selects a group of long-lived agents; empty means the job
 	// runs on an ephemeral Kubernetes agent.
 	TargetGroup string `protobuf:"bytes,3,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	// spec is the execution spec to snapshot onto each of the job's run
@@ -5039,7 +5039,7 @@ type JobDefinition struct {
 	Approval ApprovalPolicy `protobuf:"varint,9,opt,name=approval,proto3,enum=cdrom.db.v1.ApprovalPolicy" json:"approval,omitempty"`
 	// labels are the job's labels (F-29): a set of key/value pairs that label the
 	// job. They are combined with the labels of the run's other resources
-	// (pipeline, environment, worker group, worker) onto the run's job
+	// (pipeline, environment, agent group, agent) onto the run's job
 	// instances. Empty means the job has no labels.
 	Labels map[string]string `protobuf:"bytes,10,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// variables are the job's effective variables (F-21.1.3): the union of the
@@ -6042,13 +6042,13 @@ func (x *ClaimJobResponse) GetClaimed() bool {
 
 type ListPendingByGroupRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// group is the worker group to list pending jobs for.
+	// group is the agent group to list pending jobs for.
 	Group string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	// environments are the environments the calling worker belongs to (F-17).
+	// environments are the environments the calling agent belongs to (F-17).
 	// A pending job that targets one of them is returned even when its target
-	// group differs from `group`, so a worker that serves an environment picks
+	// group differs from `group`, so an agent that serves an environment picks
 	// up its jobs on the poll (catch-up) path. The authoritative target_group
-	// intersection is enforced when the worker starts the job.
+	// intersection is enforced when the agent starts the job.
 	Environments  []string `protobuf:"bytes,2,rep,name=environments,proto3" json:"environments,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6098,41 +6098,41 @@ func (x *ListPendingByGroupRequest) GetEnvironments() []string {
 	return nil
 }
 
-// JobExecution is one worker's run of a job (fan-out). A job that targets a
-// worker group runs on every worker in the group; each worker's run is a
+// JobExecution is one agent's run of a job (fan-out). A job that targets a
+// agent group runs on every agent in the group; each agent's run is a
 // separate JobExecution, tracked independently so the job's overall status can
 // be derived from the per-agent outcomes (see FailureMode). A job that runs
-// on a single target (an ephemeral agent, or a group with one worker) has a
+// on a single target (an ephemeral agent, or a group with one agent) has a
 // single execution.
 type JobExecution struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// job_id is the job this execution runs.
 	JobId int64 `protobuf:"varint,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker that runs (or ran) this execution.
+	// agent_name is the agent that runs (or ran) this execution.
 	AgentName string `protobuf:"bytes,3,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// attempt is the job attempt this execution belongs to (F-04); a retry
 	// creates a fresh set of executions.
 	Attempt int32 `protobuf:"varint,4,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	// status is this execution's state: RUNNING while the worker is executing
+	// status is this execution's state: RUNNING while the agent is executing
 	// the job, and a terminal status (SUCCEEDED, FAILED, CANCELLED, or
-	// TIMED_OUT) once the worker reports its outcome.
+	// TIMED_OUT) once the agent reports its outcome.
 	Status     JobStatus              `protobuf:"varint,5,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
 	StartedAt  *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
 	FinishedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=finished_at,json=finishedAt,proto3" json:"finished_at,omitempty"`
 	CreatedAt  *timestamppb.Timestamp `protobuf:"bytes,8,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt  *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// step_results is the terminal outcome of each step that ran (or was
-	// skipped by its condition) during this worker's run of the job (F-06).
+	// skipped by its condition) during this agent's run of the job (F-06).
 	StepResults []*StepResult `protobuf:"bytes,10,rep,name=step_results,json=stepResults,proto3" json:"step_results,omitempty"`
-	// outputs are the named values this worker's run produced (F-06).
+	// outputs are the named values this agent's run produced (F-06).
 	Outputs map[string]string `protobuf:"bytes,11,rep,name=outputs,proto3" json:"outputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// labels are this worker's execution's combined labels (F-29): the job
-	// instance's base label set (pipeline + job + environment + worker group)
-	// merged with the labels of the worker that ran this execution (the worker's
-	// labels win on a key collision). They are set when the worker starts the
+	// labels are this agent's execution's combined labels (F-29): the job
+	// instance's base label set (pipeline + job + environment + agent group)
+	// merged with the labels of the agent that ran this execution (the agent's
+	// labels win on a key collision). They are set when the agent starts the
 	// execution (StartJobExecution), so a fan-out job's each-agent execution
-	// carries that worker's own labels. Empty means the execution has no labels.
+	// carries that agent's own labels. Empty means the execution has no labels.
 	Labels        map[string]string `protobuf:"bytes,12,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6253,13 +6253,13 @@ func (x *JobExecution) GetLabels() map[string]string {
 }
 
 // StartJobExecutionRequest asks the database to record that the calling
-// worker has started running a job (fan-out). It creates the worker's
+// agent has started running a job (fan-out). It creates the agent's
 // JobExecution for the job's current attempt and marks the job running.
 type StartJobExecutionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// job_id is the job the worker is starting.
+	// job_id is the job the agent is starting.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker starting the job.
+	// agent_name is the agent starting the job.
 	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// started_at is the timestamp to record when the execution starts; when
 	// absent the server stamps the current time.
@@ -6320,15 +6320,15 @@ func (x *StartJobExecutionRequest) GetStartedAt() *timestamppb.Timestamp {
 }
 
 // StartJobExecutionResponse is the result of a StartJobExecution call. When
-// started is true, execution carries the worker's new execution; when started
+// started is true, execution carries the agent's new execution; when started
 // is false the job was not started (it is no longer pending, or it is not
-// targeted at a worker group) and execution is empty.
+// targeted at an agent group) and execution is empty.
 type StartJobExecutionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// started is true when the worker's execution was recorded and the job is
+	// started is true when the agent's execution was recorded and the job is
 	// running.
 	Started bool `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`
-	// execution is the worker's execution (set only when started is true).
+	// execution is the agent's execution (set only when started is true).
 	Execution     *JobExecution `protobuf:"bytes,2,opt,name=execution,proto3" json:"execution,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6378,7 +6378,7 @@ func (x *StartJobExecutionResponse) GetExecution() *JobExecution {
 	return nil
 }
 
-// ListJobExecutionsRequest asks for a job's executions (one per worker that
+// ListJobExecutionsRequest asks for a job's executions (one per agent that
 // started it, for its current attempt).
 type ListJobExecutionsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -6469,15 +6469,15 @@ func (x *ListJobExecutionsResponse) GetExecutions() []*JobExecution {
 	return nil
 }
 
-// UpdateJobExecutionRequest records a worker's outcome for its execution of a
+// UpdateJobExecutionRequest records an agent's outcome for its execution of a
 // job (fan-out).
 type UpdateJobExecutionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the execution runs.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker whose execution is updated.
+	// agent_name is the agent whose execution is updated.
 	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	// status is the execution's new status (a terminal status on the worker's
+	// status is the execution's new status (a terminal status on the agent's
 	// final report).
 	Status JobStatus `protobuf:"varint,3,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
 	// finished_at is the timestamp to record when the execution finishes; when
@@ -6565,12 +6565,12 @@ func (x *UpdateJobExecutionRequest) GetOutputs() map[string]string {
 	return nil
 }
 
-// AbandonAgentExecutionsRequest asks the database to abandon a worker's
+// AbandonAgentExecutionsRequest asks the database to abandon an agent's
 // running executions (fan-out).
 type AbandonAgentExecutionsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// agent_name is the worker whose running executions are abandoned.
-	AgentName    string `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	// agent_name is the agent whose running executions are abandoned.
+	AgentName     string `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6612,19 +6612,19 @@ func (x *AbandonAgentExecutionsRequest) GetAgentName() string {
 	return ""
 }
 
-// StepCompletion is one worker's completion of a step of a job (the
-// cross-agent step barrier). A job that runs on several workers with a step
-// barrier runs its steps in lockstep: no worker proceeds to step N+1 until
-// every worker that is alive has completed step N. Each worker's completion of
-// a step is recorded here (one row per (job, worker, step, attempt)); the
-// barrier for a step is satisfied once every worker alive at the step's start
+// StepCompletion is one agent's completion of a step of a job (the
+// cross-agent step barrier). A job that runs on several agents with a step
+// barrier runs its steps in lockstep: no agent proceeds to step N+1 until
+// every agent that is alive has completed step N. Each agent's completion of
+// a step is recorded here (one row per (job, agent, step, attempt)); the
+// barrier for a step is satisfied once every agent alive at the step's start
 // has a completion row for it.
 type StepCompletion struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// job_id is the job this step belongs to.
 	JobId int64 `protobuf:"varint,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker that completed the step.
+	// agent_name is the agent that completed the step.
 	AgentName string `protobuf:"bytes,3,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// step_name is the step's name (its identity in the job's spec).
 	StepName string `protobuf:"bytes,4,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
@@ -6716,15 +6716,15 @@ func (x *StepCompletion) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
-// ReportStepCompletionRequest records that a worker has completed a step of a
+// ReportStepCompletionRequest records that an agent has completed a step of a
 // job (the cross-agent step barrier).
 type ReportStepCompletionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the step belongs to.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker that completed the step.
+	// agent_name is the agent that completed the step.
 	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	// step_name is the step's name (the step the worker completed).
+	// step_name is the step's name (the step the agent completed).
 	StepName      string `protobuf:"bytes,3,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6782,8 +6782,8 @@ func (x *ReportStepCompletionRequest) GetStepName() string {
 }
 
 // CheckStepBarrierRequest asks whether the barrier for a job's step is
-// satisfied (every worker alive at the step's start has completed it) or
-// whether the job has been cancelled (so a waiting worker can stop).
+// satisfied (every agent alive at the step's start has completed it) or
+// whether the job has been cancelled (so a waiting agent can stop).
 type CheckStepBarrierRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job to check.
@@ -6841,10 +6841,10 @@ func (x *CheckStepBarrierRequest) GetStepName() string {
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
 type CheckStepBarrierResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// satisfied is true when every worker alive at the step's start has
-	// completed the step (the worker may proceed to the next step).
+	// satisfied is true when every agent alive at the step's start has
+	// completed the step (the agent may proceed to the next step).
 	Satisfied bool `protobuf:"varint,1,opt,name=satisfied,proto3" json:"satisfied,omitempty"`
-	// cancelled is true when the job has been cancelled (a waiting worker
+	// cancelled is true when the job has been cancelled (a waiting agent
 	// should stop and report the job cancelled).
 	Cancelled     bool `protobuf:"varint,2,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -7057,7 +7057,7 @@ type Event struct {
 	// id is the monotonic cursor consumers track.
 	Id int64 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// name is the event kind: "assignment", "cancel", "job_status",
-	// "run_status", "worker", or "job_log_updated".
+	// "run_status", "agent", or "job_log_updated".
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// agent_group is the group the event is relevant to (for group-scoped
 	// events like assignment); empty for events that are not group-scoped.
@@ -7067,7 +7067,7 @@ type Event struct {
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// environment is the environment the event is relevant to (F-17); set for
 	// assignment events of a job that targets an environment, so an API pod can
-	// nudge its local workers that belong to it. Empty otherwise.
+	// nudge its local agents that belong to it. Empty otherwise.
 	Environment   string `protobuf:"bytes,6,opt,name=environment,proto3" json:"environment,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -7149,11 +7149,11 @@ type PublishAssignmentRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	JobId int64                  `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	// target_group is the group the job targets (recorded so an API pod can
-	// filter the event against the groups of its local workers).
+	// filter the event against the groups of its local agents).
 	TargetGroup string `protobuf:"bytes,2,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	// environment is the environment the job targets (F-17); empty for a job
 	// that targets a raw group. Recorded so an API pod can nudge its local
-	// workers that belong to the environment.
+	// agents that belong to the environment.
 	Environment   string `protobuf:"bytes,3,opt,name=environment,proto3" json:"environment,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -7379,7 +7379,7 @@ type PublishAgentEventRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Group string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
-	// action is the worker lifecycle action: "registered", "deregistered", or
+	// action is the agent lifecycle action: "registered", "deregistered", or
 	// "watching".
 	Action        string `protobuf:"bytes,3,opt,name=action,proto3" json:"action,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -8183,19 +8183,19 @@ type Agent struct {
 	Group      string                 `protobuf:"bytes,3,opt,name=group,proto3" json:"group,omitempty"`
 	Address    string                 `protobuf:"bytes,4,opt,name=address,proto3" json:"address,omitempty"`
 	LastSeenAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
-	// environments are the names of the environments this worker belongs to
-	// (F-17). Membership is many-to-many: a worker may list several
+	// environments are the names of the environments this agent belongs to
+	// (F-17). Membership is many-to-many: an agent may list several
 	// environments, and an environment can be served by many agents. A job
-	// targeting an environment is dispatched to the live workers that
-	// registered it. Empty means the worker is reachable only by its group.
+	// targeting an environment is dispatched to the live agents that
+	// registered it. Empty means the agent is reachable only by its group.
 	Environments []string `protobuf:"bytes,6,rep,name=environments,proto3" json:"environments,omitempty"`
-	// labels are the worker's labels (F-29): a set of key/value pairs that label
-	// the agent. A worker declares them at registration (configurable, like
+	// labels are the agent's labels (F-29): a set of key/value pairs that label
+	// the agent. An agent declares them at registration (configurable, like
 	// its environments, F-17); re-registration updates them. When a job is
-	// dispatched to the worker, the worker's labels are merged into the job's
-	// execution's label set (the worker's labels win on a key collision). They are
+	// dispatched to the agent, the agent's labels are merged into the job's
+	// execution's label set (the agent's labels win on a key collision). They are
 	// metadata (they never gate, route, or serialize work). Empty means the
-	// worker has no labels.
+	// agent has no labels.
 	Labels        map[string]string `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -8285,11 +8285,11 @@ type RegisterAgentRequest struct {
 	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Group   string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
 	Address string                 `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
-	// environments are the names of the environments this worker belongs to
-	// (F-17); the worker declares them at registration (configurable, multiple).
+	// environments are the names of the environments this agent belongs to
+	// (F-17); the agent declares them at registration (configurable, multiple).
 	// Re-registration (e.g. after a restart) updates the membership.
 	Environments []string `protobuf:"bytes,4,rep,name=environments,proto3" json:"environments,omitempty"`
-	// labels are the worker's labels (F-29); the worker declares them at
+	// labels are the agent's labels (F-29); the agent declares them at
 	// registration (configurable, like its environments, F-17). Re-registration
 	// (e.g. after a restart) updates them.
 	Labels        map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -8408,7 +8408,7 @@ func (x *GetAgentRequest) GetName() string {
 
 type ListAgentsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// group of "" lists workers in all groups.
+	// group of "" lists agents in all groups.
 	Group         string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -8453,7 +8453,7 @@ func (x *ListAgentsRequest) GetGroup() string {
 
 type ListAgentsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Agents       []*Agent              `protobuf:"bytes,1,rep,name=workers,proto3" json:"workers,omitempty"`
+	Agents        []*Agent               `protobuf:"bytes,1,rep,name=agents,proto3" json:"agents,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8585,7 +8585,7 @@ func (x *DeleteAgentRequest) GetName() string {
 
 // Environment is a named deployment target that groups execution targets and
 // carries the deployment policy that governs how work reaches it (F-17). It
-// names the workers that serve it (via worker membership and an optional
+// names the agents that serve it (vian agent membership and an optional
 // target group) and carries two gates: an approval policy (requires_approval,
 // an F-13 gate) and an automation policy (automatic / manual) that decides
 // whether a run proceeds on its own or pauses for an explicit proceed call.
@@ -8597,10 +8597,10 @@ type Environment struct {
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// description is a human-readable description of the environment.
 	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
-	// target_group is the worker group that serves the environment; empty means
-	// the environment is served by ephemeral agents (or, when a worker declares
-	// the environment, by the workers that registered it). A job targeting the
-	// environment is dispatched to the live workers that registered it,
+	// target_group is the agent group that serves the environment; empty means
+	// the environment is served by ephemeral agents (or, when an agent declares
+	// the environment, by the agents that registered it). A job targeting the
+	// environment is dispatched to the live agents that registered it,
 	// intersected with this group when one is set.
 	TargetGroup string `protobuf:"bytes,4,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	// requires_approval, when true, inserts an F-13 approval gate before a job
@@ -9214,18 +9214,18 @@ func (x *ProceedJobResponse) GetProceeded() bool {
 	return false
 }
 
-// AgentGroup is a named group of long-lived workers (F-29). A worker group is
-// the unit a job targets (a job's target_group names it) and the unit a worker
-// belongs to (a worker's group names it). It is a first-class, labelable row:
+// AgentGroup is a named group of long-lived agents (F-29). An agent group is
+// the unit a job targets (a job's target_group names it) and the unit an agent
+// belongs to (an agent's group names it). It is a first-class, labelable row:
 // its labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
-// worker's declared group string) — so a group that has no row simply
+// agent's declared group string) — so a group that has no row simply
 // contributes no labels and jobs targeting it still run on its agents.
 type AgentGroup struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// name is the group's unique name (e.g. "build", "prod-fleet"); it is the
-	// value a worker's group field and a job's target_group reference.
+	// value an agent's group field and a job's target_group reference.
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// description is a human-readable description of the group.
 	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
@@ -9466,7 +9466,7 @@ func (x *ListAgentGroupsRequest) GetNamePrefix() string {
 
 type ListAgentGroupsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Groups        []*AgentGroup         `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
+	Groups        []*AgentGroup          `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13239,7 +13239,7 @@ func (x *NextSecretNonceResponse) GetNonce() int64 {
 }
 
 // ClaimStepOnceRequest asks the database to claim the "run this step" slot for
-// a step of a job that fans out to a worker group (F-01): the first target to
+// a step of a job that fans out to an agent group (F-01): the first target to
 // claim (job id + step name + attempt) wins and runs the step; every other
 // target that reaches the same step in the same attempt sees the slot already
 // claimed and skips the step. A retry (F-04) is a new attempt, so it may claim
@@ -15880,7 +15880,7 @@ type AuditEvent struct {
 	Action string `protobuf:"bytes,4,opt,name=action,proto3" json:"action,omitempty"`
 	// target_kind is the kind of resource the action acted on (e.g.
 	// "pipeline", "run", "job", "role", "role-binding", "user", "secret",
-	// "worker", "login").
+	// "agent", "login").
 	TargetKind string `protobuf:"bytes,5,opt,name=target_kind,json=targetKind,proto3" json:"target_kind,omitempty"`
 	// target_id is the id (or name, for name-keyed resources such as roles) of
 	// the resource the action acted on; empty when the action has no single
@@ -16823,7 +16823,7 @@ type QueuePendingJob struct {
 	PipelineId int64 `protobuf:"varint,3,opt,name=pipeline_id,json=pipelineId,proto3" json:"pipeline_id,omitempty"`
 	// run_id is the job's run (0 when it is not part of a run).
 	RunId int64 `protobuf:"varint,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	// target_group is the job's target worker group (empty for an ephemeral
+	// target_group is the job's target agent group (empty for an ephemeral
 	// agent).
 	TargetGroup string `protobuf:"bytes,5,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	// created_at is when the job was created (its position in the queue).
@@ -16915,11 +16915,11 @@ func (x *QueuePendingJob) GetBlockedBy() []string {
 	return nil
 }
 
-// QueueGroupLoad is the load of one worker group (F-16): how many jobs are
+// QueueGroupLoad is the load of one agent group (F-16): how many jobs are
 // running in the group and the group's configured limit (0 = unlimited).
 type QueueGroupLoad struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// group is the worker group's name.
+	// group is the agent group's name.
 	Group string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
 	// running is the number of jobs currently running in the group.
 	Running int32 `protobuf:"varint,2,opt,name=running,proto3" json:"running,omitempty"`
@@ -17141,10 +17141,10 @@ type ConcurrencyLimit struct {
 	// id is the rule's id.
 	Id int64 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// kind is the dimension the rule bounds: "global" (the system-wide cap),
-	// "group" (a worker group's cap), or "key" (a concurrency key's cap).
+	// "group" (an agent group's cap), or "key" (a concurrency key's cap).
 	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
 	// pattern is a regular expression matched against the dimension's name (a
-	// worker group's name or a concurrency key's name). It is empty for the
+	// agent group's name or a concurrency key's name). It is empty for the
 	// single "global" resource. It is validated (compiled) when the rule is
 	// saved.
 	Pattern string `protobuf:"bytes,3,opt,name=pattern,proto3" json:"pattern,omitempty"`
@@ -20535,12 +20535,12 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\aclaimed\x18\x01 \x01(\bR\aclaimed\"U\n" +
 	"\x19ListPendingByGroupRequest\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\"\n" +
-	"\fenvironments\x18\x02 \x03(\tR\fenvironments\"\xc2\x05\n" +
+	"\fenvironments\x18\x02 \x03(\tR\fenvironments\"\xc0\x05\n" +
 	"\fJobExecution\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x15\n" +
-	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x03 \x01(\tR\n" +
-	"agentName\x12\x18\n" +
+	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x03 \x01(\tR\tagentName\x12\x18\n" +
 	"\aattempt\x18\x04 \x01(\x05R\aattempt\x12.\n" +
 	"\x06status\x18\x05 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x129\n" +
 	"\n" +
@@ -20560,11 +20560,11 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x01\n" +
 	"\x18StartJobExecutionRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x02 \x01(\tR\n" +
-	"agentName\x129\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x02 \x01(\tR\tagentName\x129\n" +
 	"\n" +
 	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\"n\n" +
 	"\x19StartJobExecutionResponse\x12\x18\n" +
@@ -20575,11 +20575,11 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x19ListJobExecutionsResponse\x129\n" +
 	"\n" +
 	"executions\x18\x01 \x03(\v2\x19.cdrom.db.v1.JobExecutionR\n" +
-	"executions\"\x87\x03\n" +
+	"executions\"\x85\x03\n" +
 	"\x19UpdateJobExecutionRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x02 \x01(\tR\n" +
-	"agentName\x12.\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x02 \x01(\tR\tagentName\x12.\n" +
 	"\x06status\x18\x03 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x12;\n" +
 	"\vfinished_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"finishedAt\x12:\n" +
@@ -20587,25 +20587,25 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\aoutputs\x18\x06 \x03(\v23.cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntryR\aoutputs\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"A\n" +
-	"\x1eAbandonAgentExecutionsRequest\x12\x1f\n" +
-	"\vagent_name\x18\x01 \x01(\tR\n" +
-	"agentName\"\x85\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\">\n" +
+	"\x1dAbandonAgentExecutionsRequest\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x01 \x01(\tR\tagentName\"\x83\x02\n" +
 	"\x0eStepCompletion\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x15\n" +
-	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x03 \x01(\tR\n" +
-	"agentName\x12\x1b\n" +
+	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x03 \x01(\tR\tagentName\x12\x1b\n" +
 	"\tstep_name\x18\x04 \x01(\tR\bstepName\x12\x18\n" +
 	"\aattempt\x18\x05 \x01(\x05R\aattempt\x129\n" +
 	"\n" +
 	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"r\n" +
+	"updated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"p\n" +
 	"\x1bReportStepCompletionRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x02 \x01(\tR\n" +
-	"agentName\x12\x1b\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x02 \x01(\tR\tagentName\x12\x1b\n" +
 	"\tstep_name\x18\x03 \x01(\tR\bstepName\"M\n" +
 	"\x17CheckStepBarrierRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
@@ -20623,11 +20623,12 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x04step\x18\x06 \x01(\tR\x04step\x12\x18\n" +
 	"\aattempt\x18\a \x01(\x05R\aattempt\"5\n" +
 	"\x17ResolveApprovalResponse\x12\x1a\n" +
-	"\bresolved\x18\x01 \x01(\bR\bresolved\"\xc5\x01\n" +
+	"\bresolved\x18\x01 \x01(\bR\bresolved\"\xc3\x01\n" +
 	"\x05Event\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12!\n" +
-	"\fagent_group\x18\x03 \x01(\tR\vagentGroup\x12\x18\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1f\n" +
+	"\vagent_group\x18\x03 \x01(\tR\n" +
+	"agentGroup\x12\x18\n" +
 	"\apayload\x18\x04 \x01(\tR\apayload\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12 \n" +
@@ -20645,8 +20646,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\fmax_attempts\x18\x04 \x01(\x05R\vmaxAttempts\"`\n" +
 	"\x17PublishRunStatusRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\x03R\x05runId\x12.\n" +
-	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.RunStatusR\x06status\"]\n" +
-	"\x19PublishAgentEventRequest\x12\x12\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.RunStatusR\x06status\"\\\n" +
+	"\x18PublishAgentEventRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x16\n" +
 	"\x06action\x18\x03 \x01(\tR\x06action\"\x8c\x01\n" +
@@ -20691,37 +20692,37 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\aclaimed\x18\x01 \x01(\bR\aclaimed\x12\x18\n" +
 	"\aattempt\x18\x02 \x01(\x05R\aattempt\"\"\n" +
 	"\x10DeleteJobRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x03R\x02id\"\xb2\x02\n" +
-	"\x06Agent\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"\xb0\x02\n" +
+	"\x05Agent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x03 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x04 \x01(\tR\aaddress\x12<\n" +
 	"\flast_seen_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastSeenAt\x12\"\n" +
-	"\fenvironments\x18\x06 \x03(\tR\fenvironments\x127\n" +
-	"\x06labels\x18\a \x03(\v2\x1f.cdrom.db.v1.Agent.LabelsEntryR\x06labels\x1a9\n" +
+	"\fenvironments\x18\x06 \x03(\tR\fenvironments\x126\n" +
+	"\x06labels\x18\a \x03(\v2\x1e.cdrom.db.v1.Agent.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x02\n" +
-	"\x15RegisterAgentRequest\x12\x12\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x80\x02\n" +
+	"\x14RegisterAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x03 \x01(\tR\aaddress\x12\"\n" +
-	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12F\n" +
-	"\x06labels\x18\x05 \x03(\v2..cdrom.db.v1.RegisterAgentRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12E\n" +
+	"\x06labels\x18\x05 \x03(\v2-.cdrom.db.v1.RegisterAgentRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"&\n" +
-	"\x10GetAgentRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"*\n" +
-	"\x12ListAgentsRequest\x12\x14\n" +
-	"\x05group\x18\x01 \x01(\tR\x05group\"D\n" +
-	"\x13ListAgentsResponse\x12-\n" +
-	"\aagents\x18\x01 \x03(\v2\x13.cdrom.db.v1.AgentR\aagents\",\n" +
-	"\x16HeartbeatAgentRequest\x12\x12\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"%\n" +
+	"\x0fGetAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\")\n" +
-	"\x13DeleteAgentRequest\x12\x12\n" +
+	"\x11ListAgentsRequest\x12\x14\n" +
+	"\x05group\x18\x01 \x01(\tR\x05group\"@\n" +
+	"\x12ListAgentsResponse\x12*\n" +
+	"\x06agents\x18\x01 \x03(\v2\x12.cdrom.db.v1.AgentR\x06agents\"+\n" +
+	"\x15HeartbeatAgentRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"(\n" +
+	"\x12DeleteAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\xcb\x03\n" +
 	"\vEnvironment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
@@ -20772,48 +20773,49 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\".\n" +
 	"\x18DeleteEnvironmentRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"C\n" +
-	"\x1fListAgentsByEnvironmentRequest\x12 \n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"B\n" +
+	"\x1eListAgentsByEnvironmentRequest\x12 \n" +
 	"\venvironment\x18\x01 \x01(\tR\venvironment\"@\n" +
 	"\x11ProceedJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x14\n" +
 	"\x05actor\x18\x02 \x01(\tR\x05actor\"2\n" +
 	"\x12ProceedJobResponse\x12\x1c\n" +
-	"\tproceeded\x18\x01 \x01(\bR\tproceeded\"\xc2\x02\n" +
-	"\vAgentGroup\x12\x0e\n" +
+	"\tproceeded\x18\x01 \x01(\bR\tproceeded\"\xc0\x02\n" +
+	"\n" +
+	"AgentGroup\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x03 \x01(\tR\vdescription\x12<\n" +
-	"\x06labels\x18\x04 \x03(\v2$.cdrom.db.v1.AgentGroup.LabelsEntryR\x06labels\x129\n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12;\n" +
+	"\x06labels\x18\x04 \x03(\v2#.cdrom.db.v1.AgentGroup.LabelsEntryR\x06labels\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd6\x01\n" +
-	"\x18CreateAgentGroupRequest\x12\x12\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd4\x01\n" +
+	"\x17CreateAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\x12I\n" +
-	"\x06labels\x18\x03 \x03(\v21.cdrom.db.v1.CreateAgentGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12H\n" +
+	"\x06labels\x18\x03 \x03(\v20.cdrom.db.v1.CreateAgentGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"+\n" +
-	"\x15GetAgentGroupRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\":\n" +
-	"\x17ListAgentGroupsRequest\x12\x1f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"*\n" +
+	"\x14GetAgentGroupRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"9\n" +
+	"\x16ListAgentGroupsRequest\x12\x1f\n" +
 	"\vname_prefix\x18\x01 \x01(\tR\n" +
-	"namePrefix\"L\n" +
-	"\x18ListAgentGroupsResponse\x120\n" +
-	"\x06groups\x18\x01 \x03(\v2\x18.cdrom.db.v1.AgentGroupR\x06groups\"\xd6\x01\n" +
-	"\x18UpdateAgentGroupRequest\x12\x12\n" +
+	"namePrefix\"J\n" +
+	"\x17ListAgentGroupsResponse\x12/\n" +
+	"\x06groups\x18\x01 \x03(\v2\x17.cdrom.db.v1.AgentGroupR\x06groups\"\xd4\x01\n" +
+	"\x17UpdateAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\x12I\n" +
-	"\x06labels\x18\x03 \x03(\v21.cdrom.db.v1.UpdateAgentGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12H\n" +
+	"\x06labels\x18\x03 \x03(\v20.cdrom.db.v1.UpdateAgentGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\".\n" +
-	"\x18DeleteAgentGroupRequest\x12\x12\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"-\n" +
+	"\x17DeleteAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\xc8\x01\n" +
 	"\rIDPSigningKey\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x1d\n" +
@@ -21614,7 +21616,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x15STEP_STATUS_SUCCEEDED\x10\x01\x12\x16\n" +
 	"\x12STEP_STATUS_FAILED\x10\x02\x12\x17\n" +
 	"\x13STEP_STATUS_SKIPPED\x10\x03\x12\x19\n" +
-	"\x15STEP_STATUS_TIMED_OUT\x10\x042\xe1q\n" +
+	"\x15STEP_STATUS_TIMED_OUT\x10\x042\xbeq\n" +
 	"\bDatabase\x12K\n" +
 	"\x0eCreatePipeline\x12\".cdrom.db.v1.CreatePipelineRequest\x1a\x15.cdrom.db.v1.Pipeline\x12E\n" +
 	"\vGetPipeline\x12\x1f.cdrom.db.v1.GetPipelineRequest\x1a\x15.cdrom.db.v1.Pipeline\x12V\n" +
@@ -21648,27 +21650,28 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x12ListPendingByGroup\x12&.cdrom.db.v1.ListPendingByGroupRequest\x1a\x1d.cdrom.db.v1.ListJobsResponse\x12b\n" +
 	"\x11StartJobExecution\x12%.cdrom.db.v1.StartJobExecutionRequest\x1a&.cdrom.db.v1.StartJobExecutionResponse\x12b\n" +
 	"\x11ListJobExecutions\x12%.cdrom.db.v1.ListJobExecutionsRequest\x1a&.cdrom.db.v1.ListJobExecutionsResponse\x12W\n" +
-	"\x12UpdateJobExecution\x12&.cdrom.db.v1.UpdateJobExecutionRequest\x1a\x19.cdrom.db.v1.JobExecution\x12^\n" +
-	"\x17AbandonAgentExecutions\x12+.cdrom.db.v1.AbandonAgentExecutionsRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
+	"\x12UpdateJobExecution\x12&.cdrom.db.v1.UpdateJobExecutionRequest\x1a\x19.cdrom.db.v1.JobExecution\x12\\\n" +
+	"\x16AbandonAgentExecutions\x12*.cdrom.db.v1.AbandonAgentExecutionsRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\x14ReportStepCompletion\x12(.cdrom.db.v1.ReportStepCompletionRequest\x1a\x16.google.protobuf.Empty\x12_\n" +
 	"\x10CheckStepBarrier\x12$.cdrom.db.v1.CheckStepBarrierRequest\x1a%.cdrom.db.v1.CheckStepBarrierResponse\x12\\\n" +
 	"\x0fResolveApproval\x12#.cdrom.db.v1.ResolveApprovalRequest\x1a$.cdrom.db.v1.ResolveApprovalResponse\x12]\n" +
 	"\x11PublishAssignment\x12%.cdrom.db.v1.PublishAssignmentRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12U\n" +
 	"\rPublishCancel\x12!.cdrom.db.v1.PublishCancelRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12[\n" +
 	"\x10PublishJobStatus\x12$.cdrom.db.v1.PublishJobStatusRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12[\n" +
-	"\x10PublishRunStatus\x12$.cdrom.db.v1.PublishRunStatusRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12_\n" +
-	"\x12PublishAgentEvent\x12&.cdrom.db.v1.PublishAgentEventRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12]\n" +
+	"\x10PublishRunStatus\x12$.cdrom.db.v1.PublishRunStatusRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12]\n" +
+	"\x11PublishAgentEvent\x12%.cdrom.db.v1.PublishAgentEventRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12]\n" +
 	"\x11PublishLogUpdated\x12%.cdrom.db.v1.PublishLogUpdatedRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12M\n" +
 	"\n" +
 	"TailEvents\x12\x1e.cdrom.db.v1.TailEventsRequest\x1a\x1f.cdrom.db.v1.TailEventsResponse\x12S\n" +
 	"\fAcquireLease\x12 .cdrom.db.v1.AcquireLeaseRequest\x1a!.cdrom.db.v1.AcquireLeaseResponse\x12H\n" +
 	"\fReleaseLease\x12 .cdrom.db.v1.ReleaseLeaseRequest\x1a\x16.google.protobuf.Empty\x12<\n" +
-	"\bGetLease\x12\x1c.cdrom.db.v1.GetLeaseRequest\x1a\x12.cdrom.db.v1.Lease\x12I\n" +
-	"\x0eRegisterAgent\x12\".cdrom.db.v1.RegisterAgentRequest\x1a\x13.cdrom.db.v1.Agent\x12?\n" +
-	"\tGetAgent\x12\x1d.cdrom.db.v1.GetAgentRequest\x1a\x13.cdrom.db.v1.Agent\x12P\n" +
-	"\vListAgents\x12\x1f.cdrom.db.v1.ListAgentsRequest\x1a .cdrom.db.v1.ListAgentsResponse\x12K\n" +
-	"\x0fHeartbeatAgent\x12#.cdrom.db.v1.HeartbeatAgentRequest\x1a\x13.cdrom.db.v1.Agent\x12H\n" +
-	"\fDeleteAgent\x12 .cdrom.db.v1.DeleteAgentRequest\x1a\x16.google.protobuf.Empty\x12e\n" +
+	"\bGetLease\x12\x1c.cdrom.db.v1.GetLeaseRequest\x1a\x12.cdrom.db.v1.Lease\x12F\n" +
+	"\rRegisterAgent\x12!.cdrom.db.v1.RegisterAgentRequest\x1a\x12.cdrom.db.v1.Agent\x12<\n" +
+	"\bGetAgent\x12\x1c.cdrom.db.v1.GetAgentRequest\x1a\x12.cdrom.db.v1.Agent\x12M\n" +
+	"\n" +
+	"ListAgents\x12\x1e.cdrom.db.v1.ListAgentsRequest\x1a\x1f.cdrom.db.v1.ListAgentsResponse\x12H\n" +
+	"\x0eHeartbeatAgent\x12\".cdrom.db.v1.HeartbeatAgentRequest\x1a\x12.cdrom.db.v1.Agent\x12F\n" +
+	"\vDeleteAgent\x12\x1f.cdrom.db.v1.DeleteAgentRequest\x1a\x16.google.protobuf.Empty\x12e\n" +
 	"\x12ListIDPSigningKeys\x12&.cdrom.db.v1.ListIDPSigningKeysRequest\x1a'.cdrom.db.v1.ListIDPSigningKeysResponse\x12R\n" +
 	"\x11SetIDPSigningKeys\x12%.cdrom.db.v1.SetIDPSigningKeysRequest\x1a\x16.google.protobuf.Empty\x12P\n" +
 	"\x10StoreIDPAuthCode\x12$.cdrom.db.v1.StoreIDPAuthCodeRequest\x1a\x16.google.protobuf.Empty\x12V\n" +
@@ -21778,15 +21781,15 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x0eGetEnvironment\x12\".cdrom.db.v1.GetEnvironmentRequest\x1a\x18.cdrom.db.v1.Environment\x12_\n" +
 	"\x10ListEnvironments\x12$.cdrom.db.v1.ListEnvironmentsRequest\x1a%.cdrom.db.v1.ListEnvironmentsResponse\x12T\n" +
 	"\x11UpdateEnvironment\x12%.cdrom.db.v1.UpdateEnvironmentRequest\x1a\x18.cdrom.db.v1.Environment\x12R\n" +
-	"\x11DeleteEnvironment\x12%.cdrom.db.v1.DeleteEnvironmentRequest\x1a\x16.google.protobuf.Empty\x12j\n" +
-	"\x18ListAgentsByEnvironment\x12,.cdrom.db.v1.ListAgentsByEnvironmentRequest\x1a .cdrom.db.v1.ListAgentsResponse\x12M\n" +
+	"\x11DeleteEnvironment\x12%.cdrom.db.v1.DeleteEnvironmentRequest\x1a\x16.google.protobuf.Empty\x12g\n" +
+	"\x17ListAgentsByEnvironment\x12+.cdrom.db.v1.ListAgentsByEnvironmentRequest\x1a\x1f.cdrom.db.v1.ListAgentsResponse\x12M\n" +
 	"\n" +
-	"ProceedJob\x12\x1e.cdrom.db.v1.ProceedJobRequest\x1a\x1f.cdrom.db.v1.ProceedJobResponse\x12T\n" +
-	"\x11CreateAgentGroup\x12%.cdrom.db.v1.CreateAgentGroupRequest\x1a\x18.cdrom.db.v1.AgentGroup\x12N\n" +
-	"\x0eGetAgentGroup\x12\".cdrom.db.v1.GetAgentGroupRequest\x1a\x18.cdrom.db.v1.AgentGroup\x12_\n" +
-	"\x10ListAgentGroups\x12$.cdrom.db.v1.ListAgentGroupsRequest\x1a%.cdrom.db.v1.ListAgentGroupsResponse\x12T\n" +
-	"\x11UpdateAgentGroup\x12%.cdrom.db.v1.UpdateAgentGroupRequest\x1a\x18.cdrom.db.v1.AgentGroup\x12R\n" +
-	"\x11DeleteAgentGroup\x12%.cdrom.db.v1.DeleteAgentGroupRequest\x1a\x16.google.protobuf.Empty\x12^\n" +
+	"ProceedJob\x12\x1e.cdrom.db.v1.ProceedJobRequest\x1a\x1f.cdrom.db.v1.ProceedJobResponse\x12Q\n" +
+	"\x10CreateAgentGroup\x12$.cdrom.db.v1.CreateAgentGroupRequest\x1a\x17.cdrom.db.v1.AgentGroup\x12K\n" +
+	"\rGetAgentGroup\x12!.cdrom.db.v1.GetAgentGroupRequest\x1a\x17.cdrom.db.v1.AgentGroup\x12\\\n" +
+	"\x0fListAgentGroups\x12#.cdrom.db.v1.ListAgentGroupsRequest\x1a$.cdrom.db.v1.ListAgentGroupsResponse\x12Q\n" +
+	"\x10UpdateAgentGroup\x12$.cdrom.db.v1.UpdateAgentGroupRequest\x1a\x17.cdrom.db.v1.AgentGroup\x12P\n" +
+	"\x10DeleteAgentGroup\x12$.cdrom.db.v1.DeleteAgentGroupRequest\x1a\x16.google.protobuf.Empty\x12^\n" +
 	"\x15AllocateStorageObject\x12).cdrom.db.v1.AllocateStorageObjectRequest\x1a\x1a.cdrom.db.v1.StorageObject\x12\\\n" +
 	"\x14ConfirmStorageObject\x12(.cdrom.db.v1.ConfirmStorageObjectRequest\x1a\x1a.cdrom.db.v1.StorageObject\x12T\n" +
 	"\x10GetStorageObject\x12$.cdrom.db.v1.GetStorageObjectRequest\x1a\x1a.cdrom.db.v1.StorageObject\x12e\n" +
@@ -21882,7 +21885,7 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*ListJobExecutionsRequest)(nil),              // 68: cdrom.db.v1.ListJobExecutionsRequest
 	(*ListJobExecutionsResponse)(nil),             // 69: cdrom.db.v1.ListJobExecutionsResponse
 	(*UpdateJobExecutionRequest)(nil),             // 70: cdrom.db.v1.UpdateJobExecutionRequest
-	(*AbandonAgentExecutionsRequest)(nil),        // 71: cdrom.db.v1.AbandonAgentExecutionsRequest
+	(*AbandonAgentExecutionsRequest)(nil),         // 71: cdrom.db.v1.AbandonAgentExecutionsRequest
 	(*StepCompletion)(nil),                        // 72: cdrom.db.v1.StepCompletion
 	(*ReportStepCompletionRequest)(nil),           // 73: cdrom.db.v1.ReportStepCompletionRequest
 	(*CheckStepBarrierRequest)(nil),               // 74: cdrom.db.v1.CheckStepBarrierRequest
@@ -21894,7 +21897,7 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*PublishCancelRequest)(nil),                  // 80: cdrom.db.v1.PublishCancelRequest
 	(*PublishJobStatusRequest)(nil),               // 81: cdrom.db.v1.PublishJobStatusRequest
 	(*PublishRunStatusRequest)(nil),               // 82: cdrom.db.v1.PublishRunStatusRequest
-	(*PublishAgentEventRequest)(nil),             // 83: cdrom.db.v1.PublishAgentEventRequest
+	(*PublishAgentEventRequest)(nil),              // 83: cdrom.db.v1.PublishAgentEventRequest
 	(*PublishLogUpdatedRequest)(nil),              // 84: cdrom.db.v1.PublishLogUpdatedRequest
 	(*PublishEventResponse)(nil),                  // 85: cdrom.db.v1.PublishEventResponse
 	(*TailEventsRequest)(nil),                     // 86: cdrom.db.v1.TailEventsRequest
@@ -21908,13 +21911,13 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*RerunJobRequest)(nil),                       // 94: cdrom.db.v1.RerunJobRequest
 	(*ClaimJobRetryResponse)(nil),                 // 95: cdrom.db.v1.ClaimJobRetryResponse
 	(*DeleteJobRequest)(nil),                      // 96: cdrom.db.v1.DeleteJobRequest
-	(*Agent)(nil),                                // 97: cdrom.db.v1.Agent
-	(*RegisterAgentRequest)(nil),                 // 98: cdrom.db.v1.RegisterAgentRequest
-	(*GetAgentRequest)(nil),                      // 99: cdrom.db.v1.GetAgentRequest
-	(*ListAgentsRequest)(nil),                    // 100: cdrom.db.v1.ListAgentsRequest
-	(*ListAgentsResponse)(nil),                   // 101: cdrom.db.v1.ListAgentsResponse
-	(*HeartbeatAgentRequest)(nil),                // 102: cdrom.db.v1.HeartbeatAgentRequest
-	(*DeleteAgentRequest)(nil),                   // 103: cdrom.db.v1.DeleteAgentRequest
+	(*Agent)(nil),                                 // 97: cdrom.db.v1.Agent
+	(*RegisterAgentRequest)(nil),                  // 98: cdrom.db.v1.RegisterAgentRequest
+	(*GetAgentRequest)(nil),                       // 99: cdrom.db.v1.GetAgentRequest
+	(*ListAgentsRequest)(nil),                     // 100: cdrom.db.v1.ListAgentsRequest
+	(*ListAgentsResponse)(nil),                    // 101: cdrom.db.v1.ListAgentsResponse
+	(*HeartbeatAgentRequest)(nil),                 // 102: cdrom.db.v1.HeartbeatAgentRequest
+	(*DeleteAgentRequest)(nil),                    // 103: cdrom.db.v1.DeleteAgentRequest
 	(*Environment)(nil),                           // 104: cdrom.db.v1.Environment
 	(*CreateEnvironmentRequest)(nil),              // 105: cdrom.db.v1.CreateEnvironmentRequest
 	(*GetEnvironmentRequest)(nil),                 // 106: cdrom.db.v1.GetEnvironmentRequest
@@ -21922,16 +21925,16 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*ListEnvironmentsResponse)(nil),              // 108: cdrom.db.v1.ListEnvironmentsResponse
 	(*UpdateEnvironmentRequest)(nil),              // 109: cdrom.db.v1.UpdateEnvironmentRequest
 	(*DeleteEnvironmentRequest)(nil),              // 110: cdrom.db.v1.DeleteEnvironmentRequest
-	(*ListAgentsByEnvironmentRequest)(nil),       // 111: cdrom.db.v1.ListAgentsByEnvironmentRequest
+	(*ListAgentsByEnvironmentRequest)(nil),        // 111: cdrom.db.v1.ListAgentsByEnvironmentRequest
 	(*ProceedJobRequest)(nil),                     // 112: cdrom.db.v1.ProceedJobRequest
 	(*ProceedJobResponse)(nil),                    // 113: cdrom.db.v1.ProceedJobResponse
-	(*AgentGroup)(nil),                           // 114: cdrom.db.v1.AgentGroup
-	(*CreateAgentGroupRequest)(nil),              // 115: cdrom.db.v1.CreateAgentGroupRequest
-	(*GetAgentGroupRequest)(nil),                 // 116: cdrom.db.v1.GetAgentGroupRequest
-	(*ListAgentGroupsRequest)(nil),               // 117: cdrom.db.v1.ListAgentGroupsRequest
-	(*ListAgentGroupsResponse)(nil),              // 118: cdrom.db.v1.ListAgentGroupsResponse
-	(*UpdateAgentGroupRequest)(nil),              // 119: cdrom.db.v1.UpdateAgentGroupRequest
-	(*DeleteAgentGroupRequest)(nil),              // 120: cdrom.db.v1.DeleteAgentGroupRequest
+	(*AgentGroup)(nil),                            // 114: cdrom.db.v1.AgentGroup
+	(*CreateAgentGroupRequest)(nil),               // 115: cdrom.db.v1.CreateAgentGroupRequest
+	(*GetAgentGroupRequest)(nil),                  // 116: cdrom.db.v1.GetAgentGroupRequest
+	(*ListAgentGroupsRequest)(nil),                // 117: cdrom.db.v1.ListAgentGroupsRequest
+	(*ListAgentGroupsResponse)(nil),               // 118: cdrom.db.v1.ListAgentGroupsResponse
+	(*UpdateAgentGroupRequest)(nil),               // 119: cdrom.db.v1.UpdateAgentGroupRequest
+	(*DeleteAgentGroupRequest)(nil),               // 120: cdrom.db.v1.DeleteAgentGroupRequest
 	(*IDPSigningKey)(nil),                         // 121: cdrom.db.v1.IDPSigningKey
 	(*ListIDPSigningKeysRequest)(nil),             // 122: cdrom.db.v1.ListIDPSigningKeysRequest
 	(*ListIDPSigningKeysResponse)(nil),            // 123: cdrom.db.v1.ListIDPSigningKeysResponse

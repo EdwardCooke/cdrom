@@ -39,7 +39,7 @@ Prometheus at each one (adjust the host for your deployment):
 | api       | `127.0.0.1:9104`    | `:9104`             |
 | idp       | `127.0.0.1:9105`    | `:9105`             |
 
-> **Note on agent/agent ports.** Agents and workers both default to `:9100`.
+> **Note on agent/worker ports.** Agents and workers both default to `:9100`.
 > When several targets run on one host, give each a distinct
 > `CDROM_METRICS_ADDR` (e.g. `:9106`, `:9107`, …) so their ports do not
 > collide. In the bundled `local/docker-compose.yaml` each service is given a
@@ -80,7 +80,7 @@ heap, GC, CPU, file descriptors) comes for free.
   `unknown_rejected` / `no_roles_rejected` / `infra_failure` — judged PER
   REQUEST, no cache; metered by the API adapter from the IdP's verdicts). Probe steps surface
   through the agent's generic step counters
-  (`cdrom_worker_steps_total{step_type="probe"}`).
+  (`cdrom_agent_steps_total{step_type="probe"}`).
 - **Scheduler** — `cdrom_scheduler_dispatches_total{outcome}`,
   `cdrom_scheduler_admission_checks_total` / `cdrom_scheduler_admission_duration_seconds`,
   `cdrom_scheduler_queue_wait_seconds{group}`, `cdrom_scheduler_runs_total{status,trigger,environment}`,
@@ -97,12 +97,12 @@ heap, GC, CPU, file descriptors) comes for free.
   `cdrom_artifacts_bytes_total{op}`, `cdrom_artifacts_duration_seconds{op}`.
 - **IdP** — `cdrom_idp_tokens_minted_total{kind}`, `cdrom_idp_logins_total{outcome}`,
   `cdrom_idp_keys`, `cdrom_idp_key_rotations_total`, `cdrom_idp_users`.
-- **Agent / agent** — `cdrom_worker_jobs_total{status}`,
-  `cdrom_worker_job_duration_seconds{status}`, `cdrom_worker_steps_total{step_type,status}`,
-  `cdrom_worker_step_duration_seconds{step_type}`, `cdrom_worker_inflight`,
-  `cdrom_worker_watch_state{state}` (agent), `cdrom_worker_polls_total{outcome}`
-  (agent), `cdrom_worker_heartbeat_failures_total` (agent),
-  `cdrom_worker_log_bytes_total`.
+- **Agent / agent** — `cdrom_agent_jobs_total{status}`,
+  `cdrom_agent_job_duration_seconds{status}`, `cdrom_agent_steps_total{step_type,status}`,
+  `cdrom_agent_step_duration_seconds{step_type}`, `cdrom_agent_inflight`,
+  `cdrom_agent_watch_state{state}` (agent), `cdrom_agent_polls_total{outcome}`
+  (agent), `cdrom_agent_heartbeat_failures_total` (agent),
+  `cdrom_agent_log_bytes_total`.
 
 ## Deployment reporting (DORA-style indicators)
 

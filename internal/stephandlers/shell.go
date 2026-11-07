@@ -6,7 +6,7 @@
 //
 // A target (or a plugin) adds more step types by calling
 // executor.RegisterStepType with a new handler — the same mechanism a future
-// plugin architecture will use. The agent and agent blank-import this
+// plugin architecture will use. The agent and worker blank-import this
 // package so the built-in handlers are registered before any job runs.
 package stephandlers
 

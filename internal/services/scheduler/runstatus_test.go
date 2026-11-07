@@ -244,7 +244,7 @@ func (f *fakeCreateRunDB) AcquireJobSlots(ctx context.Context, in *dbpb.AcquireJ
 // (F-07) creates the run via the Database service and then drives the
 // instances: dependency-free instances with a target group are dispatched to
 // the API, instances with dependencies are held pending (not dispatched), and
-// instances with an empty target group are left for an ephemeral agent (not
+// instances with an empty target group are left for an ephemeral worker (not
 // dispatched).
 func TestCreateRunDrivesInstances(t *testing.T) {
 	db := &fakeCreateRunDB{

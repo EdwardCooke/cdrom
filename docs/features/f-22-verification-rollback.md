@@ -418,7 +418,7 @@ covers the readiness-poll majority.
 Mirrors the F-18 handler anatomy: render params, call the API, report. New
 typed capability on the executor context (obtained via
 `RestorerFromContext`, implemented in `internal/notify` alongside `Notifier`
-— same api-client/job-ID/token triple; wired into agent and agent contexts):
+— same api-client/job-ID/token triple; wired into agent and worker contexts):
 
 ```go
 type Restorer interface {
@@ -545,7 +545,7 @@ Errors map 1:1 from the guarded path (cooldown, no-anchor, bad cut point).
 
 ### Doc debt (landing obligation)
 
-Update `WORKER.md` (feature index: F-22 done; step-handler roster gains
+Update `AGENT.md` (feature index: F-22 done; step-handler roster gains
 `probe`/`rollback`), `docs/Architecture.md` (REST + RPC inventories, config
 reference), `docs/Features.md` (checkboxes), `docs/Monitoring.md` (new
 series).
@@ -625,7 +625,7 @@ Slice C (drafted above; acceptance):
       _(audit `run.restore` with actor `job:<id>` and door `armed`/`manual` —
       grepped in e2e; `cdrom_api_restorations_total{door,result}` in
       `internal/metrics/api.go`; probes surface through
-      `cdrom_worker_steps_total{step_type="probe"}`.)_
+      `cdrom_agent_steps_total{step_type="probe"}`.)_
 - [x] E2E demonstrates the full arc: failed verification → branched rollback
       → resumption with carried-over prefix → no re-arm on repeat failure.
       _(`scripts/e2e/17-restoration.sh` — good run anchors, bad run fails the

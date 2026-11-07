@@ -107,7 +107,7 @@ func TestDispatchRunInstanceHoldsNeeds(t *testing.T) {
 	// An instance with no dependencies and a target group is dispatched.
 	s.dispatchRunInstance(ctx, &dbpb.Job{Id: 2, RunId: 10, TargetGroup: "linux"})
 	// An instance with no dependencies and no target group is queued for an
-	// ephemeral agent (not dispatched).
+	// ephemeral worker (not dispatched).
 	s.dispatchRunInstance(ctx, &dbpb.Job{Id: 3, RunId: 10})
 
 	if got := db.assignments; len(got) != 1 || got[0] != 2 {

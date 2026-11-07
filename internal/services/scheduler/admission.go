@@ -186,7 +186,7 @@ func (s *Server) runAdmission(ctx context.Context, db concurrencyAdmitter) {
 		if job.GetTargetGroup() != "" {
 			db.PublishAssignment(ctx, &dbpb.PublishAssignmentRequest{JobId: job.GetId(), TargetGroup: job.GetTargetGroup()})
 		} else {
-			s.logger.Info("scheduler: run instance queued for ephemeral agent", "job", job.GetId(), "run", job.GetRunId())
+			s.logger.Info("scheduler: run instance queued for ephemeral worker", "job", job.GetId(), "run", job.GetRunId())
 		}
 	}
 }

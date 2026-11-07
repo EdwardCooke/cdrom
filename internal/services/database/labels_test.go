@@ -29,13 +29,13 @@ func labelRows(t *testing.T, db *gorm.DB, ownerType string, ownerID uint) map[st
 // TestLabelsStoredNormalized verifies that a resource's labels are persisted
 // as one row per key/value pair in the Label table (F-29) — not as a JSON
 // document on the parent row — so they can be searched by key and/or value.
-// It checks the pipeline, a job definition, an environment, a agent group,
-// and a agent.
+// It checks the pipeline, a job definition, an environment, an agent group,
+// and an agent.
 func TestLabelsStoredNormalized(t *testing.T) {
 	client, db := startServerDB(t)
 	ctx := context.Background()
 
-	// A agent group with labels.
+	// An agent group with labels.
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
 		Name: "pool",
 		Labels: map[string]string{"team": "platform"},
@@ -50,7 +50,7 @@ func TestLabelsStoredNormalized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
-	// A agent with labels.
+	// An agent with labels.
 	if _, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{
 		Name:  "w1",
 		Group: "pool",
@@ -224,7 +224,7 @@ func TestRunLabelCombining(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// A agent group with labels.
+	// An agent group with labels.
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
 		Name: "linux-pool",
 		Labels: map[string]string{"team": "platform", "rack": "1"},
@@ -363,21 +363,21 @@ func TestRunLabelCombiningPrecedence(t *testing.T) {
 	}
 }
 
-// TestStartJobExecutionMergesAgentLabels verifies that when a agent starts a
+// TestStartJobExecutionMergesAgentLabels verifies that when an agent starts a
 // job execution, the execution's labels are the job instance's base label set
 // merged with the agent's labels (the agent's labels win on a collision) (F-29).
 func TestStartJobExecutionMergesAgentLabels(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	// A agent group (so the job has a base label set from the group).
+	// An agent group (so the job has a base label set from the group).
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
 		Name: "pool",
 		Labels: map[string]string{"team": "platform"},
 	}); err != nil {
 		t.Fatalf("CreateAgentGroup: %v", err)
 	}
-	// A agent in the group, with its own labels.
+	// An agent in the group, with its own labels.
 	if _, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{
 		Name:  "w1",
 		Group: "pool",

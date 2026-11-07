@@ -33,7 +33,7 @@ inputs, not by editing the definition.
       strings) — or a defined fallback policy is documented.
 - [x] Parameter values are visible on the run (non-secret ones).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **Parameters are declared on the pipeline.** A `Parameter` (name, optional
   `default`, optional `description`) is a first-class message on `Pipeline`
   (and on `CreatePipelineRequest` / `UpdatePipelineRequest`), stored as a JSON

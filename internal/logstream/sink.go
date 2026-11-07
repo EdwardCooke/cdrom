@@ -1,7 +1,7 @@
 // Package logstream implements an executor.LogSink that streams a job's step
 // output (stdout/stderr) to the API's StreamJobLogs RPC in near-real-time.
 //
-// Both the long-lived agent and the ephemeral agent use it: they open a sink
+// Both the long-lived agent and the ephemeral worker use it: they open a sink
 // for a job, set it in the executor's context (executor.ContextWithLogSink),
 // and run the job's spec. As each step produces output, the built-in shell
 // handler writes it to the sink, which sends it to the API. The API persists

@@ -265,7 +265,7 @@ func (m *APIMetrics) SetWSClients(n int) {
 // UpdateAgents recomputes the agents gauge from the given agent states. For
 // each agent it counts the agent under (group, environment, state) for each
 // environment it belongs to (or the empty environment when it belongs to
-// none), so a agent in several environments is counted under each.
+// none), so an agent in several environments is counted under each.
 func (m *APIMetrics) UpdateAgents(states []AgentState) {
 	if m == nil {
 		return

@@ -22,7 +22,7 @@ const (
 	DefaultSchedulerAddress = "127.0.0.1:7102"
 	DefaultArtifactsAddress = "127.0.0.1:7103"
 	// DefaultAPIAddress is the gRPC address of the API service (the control
-	// plane that agents, workers, and the scheduler dial).
+	// plane that agents, agents, and the scheduler dial).
 	DefaultAPIAddress = "127.0.0.1:7105"
 	// DefaultAPIHTTPAddress is the HTTP address the API binds for the UI.
 	DefaultAPIHTTPAddress = "127.0.0.1:8080"
@@ -57,7 +57,7 @@ type Config struct {
 	// ArtifactsAddress is the gRPC address of the artifacts service.
 	ArtifactsAddress string
 	// APIAddress is the gRPC address of the API service (the control plane
-	// that agents, workers, and the scheduler dial).
+	// that agents, agents, and the scheduler dial).
 	APIAddress string
 	// APIHTTPAddress is the HTTP address the API binds for the UI.
 	APIHTTPAddress string
@@ -131,30 +131,30 @@ type Config struct {
 	// binary uses it; other binaries ignore it.
 	PipelineSourceSyncTimeout time.Duration
 
-	// AgentName and AgentGroup identify a agent process.
+	// AgentName and AgentGroup identify an agent process.
 	AgentName  string
 	AgentGroup string
 
-	// AgentEnvironments are the environments a agent belongs to (F-17). A
+	// AgentEnvironments are the environments an agent belongs to (F-17). An
 	// agent may belong to several; jobs targeting an environment are dispatched
 	// to the live agents registered for it.
 	AgentEnvironments []string
 
 	// AgentLabels are the agent's labels (F-29): a set of key/value pairs that
-	// label the agent. A agent declares them at registration (configurable,
+	// label the agent. An agent declares them at registration (configurable,
 	// like its environments, F-17); a job dispatched to the agent merges them
 	// into the job's execution's label set. They are set via the config file's
-	// agent_tags or the CDROM_AGENT_LABELS env var (a comma-separated list of
+	// agent_labels or the CDROM_AGENT_LABELS env var (a comma-separated list of
 	// key=value pairs).
 	AgentLabels map[string]string
 
-	// AgentJobID is the job an ephemeral agent was spawned to execute.
-	AgentJobID string
+	// WorkerJobID is the job an ephemeral worker was spawned to execute.
+	WorkerJobID string
 
-	// AgentName identifies an ephemeral agent process. It defaults to the host
-	// name the agent runs on (see defaultAgentName); it is reported with the
-	// job's status so the API can record which target ran the job.
-	AgentName string
+	// WorkerName identifies an ephemeral worker process. It defaults to the
+	// host name the worker runs on (see defaultWorkerName); it is reported
+	// with the job's status so the API can record which target ran the job.
+	WorkerName string
 
 	// AgentRoot is the base directory a target creates its per-job STAGED
 	// WORKING AREA under (F-21.6): downloads, extractions, and publish
@@ -163,7 +163,7 @@ type Config struct {
 	// storage in deployments: the target warns at startup when the effective
 	// base resolves to a tmpfs mount (staged files then consume MEMORY and
 	// can starve the host). Set via the config file's agent_root or the
-	// CDROM_AGENT_ROOT env var. Only the agent and agent binaries use it.
+	// CDROM_AGENT_ROOT env var. Only the agent and worker binaries use it.
 	AgentRoot string
 
 	// TLS configures mutual TLS for gRPC communication between services.
@@ -188,7 +188,7 @@ type Config struct {
 	IdPGRPCAddress string
 
 	// GRPCAuth configures job-token authentication on the API's gRPC surface
-	// (the control plane that agents and workers talk to). When enabled, the
+	// (the control plane that agents and agents talk to). When enabled, the
 	// API verifies the job tokens it hands to execution targets (minted by the
 	// IdP) on job-scoped calls. Disabled by default so a local run works with
 	// no identity provider.
@@ -1070,7 +1070,7 @@ func LoadWithFile(file string) (*Config, error) {
 		AgentGroup:                    "default",
 		AgentEnvironments:             []string{},
 		AgentLabels:                   map[string]string{},
-		AgentName:                      defaultAgentName(),
+		WorkerName:                    defaultWorkerName(),
 		// AgentRoot defaults to empty: the target uses the OS temp dir for its
 		// staged working area (F-21.6). Operators on memory-constrained hosts
 		// (containers with tmpfs /tmp) set agent_root / CDROM_AGENT_ROOT to a
@@ -1199,8 +1199,8 @@ type fileConfig struct {
 	AgentGroup        *string            `yaml:"agent_group"`
 	AgentEnvironments *[]string          `yaml:"agent_environments"`
 	AgentLabels       *map[string]string `yaml:"agent_labels"`
-	AgentJobID         *string            `yaml:"agent_job_id"`
-	AgentName          *string            `yaml:"agent_name"`
+	WorkerJobID       *string            `yaml:"worker_job_id"`
+	WorkerName        *string            `yaml:"worker_name"`
 	// AgentRoot is the base directory for a target's staged working area
 	// (F-21.6); empty means the OS temp dir. Env: CDROM_AGENT_ROOT.
 	AgentRoot *string `yaml:"agent_root"`
@@ -1374,11 +1374,11 @@ func applyFile(cfg *Config, path string) error {
 	if f.AgentLabels != nil {
 		cfg.AgentLabels = *f.AgentLabels
 	}
-	if f.AgentJobID != nil {
-		cfg.AgentJobID = *f.AgentJobID
+	if f.WorkerJobID != nil {
+		cfg.WorkerJobID = *f.WorkerJobID
 	}
-	if f.AgentName != nil {
-		cfg.AgentName = *f.AgentName
+	if f.WorkerName != nil {
+		cfg.WorkerName = *f.WorkerName
 	}
 	if f.AgentRoot != nil {
 		cfg.AgentRoot = *f.AgentRoot
@@ -1705,8 +1705,8 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("CDROM_AGENT_LABELS"); v != "" {
 		cfg.AgentLabels = parseLabels(v)
 	}
-	cfg.AgentJobID = envOr("CDROM_WORKER_JOB_ID", cfg.AgentJobID)
-	cfg.AgentName = envOr("CDROM_WORKER_NAME", cfg.AgentName)
+	cfg.WorkerJobID = envOr("CDROM_WORKER_JOB_ID", cfg.WorkerJobID)
+	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.AgentRoot = envOr("CDROM_AGENT_ROOT", cfg.AgentRoot)
 	cfg.DB.Backend = database.Backend(envOr("CDROM_DB_BACKEND", string(cfg.DB.Backend)))
 	cfg.DB.SQLitePath = envOr("CDROM_DB_SQLITE_PATH", cfg.DB.SQLitePath)
@@ -1970,16 +1970,16 @@ func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) error {
 	return nil
 }
 
-// defaultAgentName is the default identity of an ephemeral agent: the host
+// defaultWorkerName is the default identity of an ephemeral worker: the host
 // name it runs on. When the host name cannot be determined it falls back to
-// "agent". It is the same mechanism a agent's name is set by (a config value
-// that can be overridden by a file or environment variable), so an agent and
-// a agent are identified the same way.
-func defaultAgentName() string {
+// "worker". It is the same mechanism an agent's name is set by (a config
+// value that can be overridden by a file or environment variable), so an
+// agent and a worker are identified the same way.
+func defaultWorkerName() string {
 	if host, err := os.Hostname(); err == nil && host != "" {
 		return host
 	}
-	return "agent"
+	return "worker"
 }
 
 // splitAndTrim splits s on commas and trims surrounding whitespace from each

@@ -1,6 +1,6 @@
-// Command agent is the Cdrom ephemeral agent.
+// Command worker is the Cdrom ephemeral worker.
 //
-// An agent is a short-lived process spawned in Kubernetes to execute a single
+// A worker is a short-lived process spawned in Kubernetes to execute a single
 // one-off job, then terminate. It talks only to the API service. Must run on
 // both Windows and Linux.
 package main
@@ -11,7 +11,7 @@ import (
 	"os"
 	"strconv"
 
-	"cdrom/internal/agent"
+	"cdrom/internal/worker"
 	"cdrom/internal/config"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -33,37 +33,37 @@ func main() {
 		logger.Error("config: invalid", "err", err)
 		os.Exit(1)
 	}
-	if cfg.AgentJobID == "" {
-		logger.Error("agent: agent_job_id is required (config file or CDROM_WORKER_JOB_ID)")
+	if cfg.WorkerJobID == "" {
+		logger.Error("worker: worker_job_id is required (config file or CDROM_WORKER_JOB_ID)")
 		os.Exit(1)
 	}
-	jobID, err := strconv.ParseInt(cfg.AgentJobID, 10, 64)
+	jobID, err := strconv.ParseInt(cfg.WorkerJobID, 10, 64)
 	if err != nil {
-		logger.Error("agent: invalid agent_job_id", "value", cfg.AgentJobID, "err", err)
+		logger.Error("worker: invalid worker_job_id", "value", cfg.WorkerJobID, "err", err)
 		os.Exit(1)
 	}
 
 	ctx := context.Background()
 
-	// Metrics (F-20): the agent serves /metrics and /healthz on a dedicated
+	// Metrics (F-20): the worker serves /metrics and /healthz on a dedicated
 	// metrics port (separate from the API's service ports). When disabled
 	// (metrics.enabled: false) the listener is not started and recording is a
-	// no-op (the metric set is nil). The agent is short-lived, so the metrics
+	// no-op (the metric set is nil). The worker is short-lived, so the metrics
 	// server lives only for the duration of the job.
-	var agentMetrics *metrics.AgentMetrics
+	var workerMetrics *metrics.AgentMetrics
 	metricsAddr := cfg.Metrics.Addr
 	if metricsAddr == "" {
-		metricsAddr = metrics.DefaultMetricsAddr("agent")
+		metricsAddr = metrics.DefaultMetricsAddr("worker")
 	}
 	if cfg.Metrics.Enabled {
 		collector := metrics.NewCollector()
-		agentMetrics = metrics.NewAgentMetrics(collector.Registry)
+		workerMetrics = metrics.NewAgentMetrics(collector.Registry)
 		go func() {
 			if err := collector.StartMetrics(ctx, metricsAddr); err != nil {
 				logger.Error("metrics: start", "addr", metricsAddr, "err", err)
 			}
 		}()
-		logger.Info("cdrom agent metrics starting", "addr", metricsAddr)
+		logger.Info("cdrom worker metrics starting", "addr", metricsAddr)
 	}
 
 	apiConn, err := grpcutil.Dial(ctx, cfg.APIAddress, cfg.TLS)
@@ -73,21 +73,21 @@ func main() {
 	}
 	defer apiConn.Close()
 
-	a := agent.New(cfg.AgentName, jobID, agent.Dependencies{
+	a := worker.New(cfg.WorkerName, jobID, worker.Dependencies{
 		API:      apipb.NewAPIClient(apiConn),
-		AgentRoot: cfg.AgentRoot,
+		AgentRoot:  cfg.AgentRoot,
 	}, logger)
-	// Attach the agent's Prometheus metric set (F-20) so it records its job,
+	// Attach the worker's Prometheus metric set (F-20) so it records its job,
 	// steps, in-flight count, and log bytes.
-	a.SetMetrics(agentMetrics)
+	a.SetMetrics(workerMetrics)
 
-	logger.Info("cdrom agent starting", "job", jobID, "name", cfg.AgentName, "api", cfg.APIAddress)
+	logger.Info("cdrom worker starting", "job", jobID, "name", cfg.WorkerName, "api", cfg.APIAddress)
 	status, err := a.Run(ctx)
 	if err != nil {
-		logger.Error("agent: run", "err", err)
+		logger.Error("worker: run", "err", err)
 		os.Exit(1)
 	}
-	logger.Info("cdrom agent finished", "job", jobID, "status", fmt.Sprint(status))
+	logger.Info("cdrom worker finished", "job", jobID, "status", fmt.Sprint(status))
 	if status == dbpb.JobStatus_JOB_STATUS_FAILED || status == dbpb.JobStatus_JOB_STATUS_TIMED_OUT {
 		os.Exit(1)
 	}

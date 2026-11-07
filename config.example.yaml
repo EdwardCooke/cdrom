@@ -5,7 +5,7 @@
 #   ./bin/api --config-file config.yaml
 #
 # Every key is optional; omitted keys fall back to built-in defaults.
-# Environment variables (see WORKER.md) take precedence over this file.
+# Environment variables (see AGENT.md) take precedence over this file.
 
 # Address this binary's own gRPC server binds to (the gRPC port for the
 # service servers and for the API). The API's HTTP port for the UI is set
@@ -50,21 +50,21 @@ db:
 # Agent identity (used by the agent).
 #agent_name: agent-1
 #agent_group: default
-# Environments the agent belongs to (F-17). A agent may belong to several;
+# Environments the agent belongs to (F-17). An agent may belong to several;
 # jobs targeting an environment are dispatched to the live agents registered
 # for it. Comma-separated via CDROM_AGENT_ENVIRONMENTS.
 #agent_environments: [dev, staging]
 
-# Job an ephemeral agent was spawned to execute (used by the agent).
+# Job an ephemeral worker was spawned to execute (used by the agent).
 #agent_job_id: "123"
 
-# Identity of an ephemeral agent (used by the agent). Defaults to the host
+# Identity of an ephemeral worker (used by the agent). Defaults to the host
 # name the agent runs on; reported with the job's status so the API can
 # record which target ran the job.
 #agent_name: my-host
 
 # Base directory for a target's per-job staged working area (F-21.6; used by
-# the agent and the agent). Jobs' downloads, extractions, and publish
+# the agent and the worker). Jobs' downloads, extractions, and publish
 # assemblies land in <agent_root>/cdrom-stage-<random>. Defaults to the OS
 # temp dir. Point it at DISK-BACKED storage when the temp dir is RAM-backed
 # (a container's tmpfs /tmp): the target WARNS at startup when the effective
@@ -248,7 +248,7 @@ db:
 #idp_grpc_address: 127.0.0.1:7106
 
 # Job-token authentication on the API's gRPC surface (used by agents and
-# workers). Disabled by default: when enabled is false (or unset) the API
+# agents). Disabled by default: when enabled is false (or unset) the API
 # accepts gRPC calls without a job token. When enabled, the API mints a job
 # token from the IdP (via the IdP's gRPC MintJobToken RPC, authenticating with
 # its mTLS client certificate) for every job it dispatches or hands to an

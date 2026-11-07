@@ -110,7 +110,7 @@ func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, publisher j
 	now := time.Now()
 	for _, job := range jobs {
 		if job.GetTargetGroup() != "" {
-			// A job that targets a agent group runs on every agent in the
+			// A job that targets an agent group runs on every agent in the
 			// group (fan-out). Each agent enforces its own execution's timeout
 			// and reports it to its execution; the job's overall status is
 			// derived from the executions by the job-status loop, which drops a

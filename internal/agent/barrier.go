@@ -11,18 +11,18 @@ import (
 	"cdrom/internal/grpcutil"
 )
 
-// stepBarrierPollInterval is how often a agent waiting at a step barrier
+// stepBarrierPollInterval is how often an agent waiting at a step barrier
 // re-checks the barrier (F-23-style polling as the authoritative catch-up
 // path). It is a variable (not a constant) so tests can shorten it.
 var stepBarrierPollInterval = 1 * time.Second
 
 // stepBarrier is the agent's implementation of executor.StepBarrier: it
-// synchronizes the agents of a job that fans out to a agent group at each
-// step boundary. After a agent completes a step it reports the completion to
+// synchronizes the agents of a job that fans out to an agent group at each
+// step boundary. After an agent completes a step it reports the completion to
 // the API (which records a StepCompletion row for the job's current attempt)
 // and then polls the API's CheckStepBarrier until every agent alive at the
 // step's start has completed it (satisfied), the job is cancelled, or the
-// job's context is done. A agent that dies mid-step is dropped from the
+// job's context is done. An agent that dies mid-step is dropped from the
 // barrier (it is no longer alive), so a dead agent cannot wedge the job.
 type stepBarrier struct {
 	api       apipb.APIClient

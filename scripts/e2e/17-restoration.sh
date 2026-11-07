@@ -45,7 +45,7 @@ e2e_boot_stack with-agent
 # consider only what was written AFTER this incarnation began — otherwise a
 # stale line from an earlier member satisfies a grep early (or correlates the
 # WRONG run). Standalone mode: the logs are fresh, so the baseline is ~0.
-WORKER_LOG_BASE=$(stat -c%s "$WORK/agent.log" 2>/dev/null || echo 0)
+AGENT_LOG_BASE=$(stat -c%s "$WORK/agent.log" 2>/dev/null || echo 0)
 API_LOG_BASE=$(stat -c%s "$WORK/api.log" 2>/dev/null || echo 0)
 AUDIT_BOOT_BASE=$(stat -c%s "$WORK/audit.log" 2>/dev/null || echo 0)
 # newpart FILE OFFSET DEST copies the bytes of FILE from OFFSET onwards (the
@@ -255,7 +255,7 @@ dump_failure() {
 # the ticks stretch. A tight budget here is a standing invitation to flake.
 SLICE_W="$WORK/.agent.slice" SLICE_A="$WORK/.api.slice"
 i=0
-until newpart "$WORK/agent.log" "$WORKER_LOG_BASE" "$SLICE_W" && grep -qF 'executor: rollback initiated' "$SLICE_W" 2>/dev/null; do
+until newpart "$WORK/agent.log" "$AGENT_LOG_BASE" "$SLICE_W" && grep -qF 'executor: rollback initiated' "$SLICE_W" 2>/dev/null; do
   i=$((i+1))
   [ $i -le 600 ] || { dump_failure "timed out waiting for the armed rollback step to fire"; exit 1; }
   if [ $((i % 10)) -eq 0 ]; then echo "...waiting for the armed rollback to fire (iteration $i)"; fi

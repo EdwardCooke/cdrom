@@ -212,7 +212,7 @@ type Pipeline struct {
 	Name        string `gorm:"uniqueIndex;not null" json:"name"`
 	Description string `json:"description"`
 	// FailureMode is the pipeline's default failure mode (see FailureMode) for
-	// its jobs that fan out to a agent group. A job that sets its own
+	// its jobs that fan out to an agent group. A job that sets its own
 	// FailureMode overrides the pipeline's; a job that sets none inherits this
 	// value (defaulting to FailureModeAll when the pipeline sets none).
 	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
@@ -819,7 +819,7 @@ const (
 )
 
 // FailureMode controls how a job that runs on several agents (a job targeting
-// a agent group, which runs on every agent in the group) is judged from the
+// an agent group, which runs on every agent in the group) is judged from the
 // per-agent outcomes. It is set at the pipeline level and may be overridden
 // per job; a job that sets no failure mode inherits its pipeline's (defaulting
 // to FailureModeAll). It only affects jobs that fan out to more than one
@@ -933,7 +933,7 @@ type JobStep struct {
 	// IgnoreFailed stops the job.
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
 	// Once (F-01), when true, means the step runs on at most one target of a
-	// job that fans out to a agent group: the first target to claim the
+	// job that fans out to an agent group: the first target to claim the
 	// step's slot runs it, the others skip it (recorded skipped, not failed).
 	// A retry (a new attempt) may run it again.
 	Once bool `json:"once,omitempty"`
@@ -973,14 +973,14 @@ type JobSpec struct {
 	// does not change the job's own status or stop a failed step from failing
 	// the job (that is a step's IgnoreFailed).
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
-	// FailureMode controls how a job that fans out to a agent group is judged
+	// FailureMode controls how a job that fans out to an agent group is judged
 	// from the per-agent outcomes (see FailureMode). An empty value means the
 	// job inherits its pipeline's failure mode (defaulting to FailureModeAll).
 	FailureMode FailureMode `json:"failure_mode,omitempty"`
-	// StepBarrier, when true, makes a job that fans out to a agent group
-	// synchronize its agents at each step boundary: after a agent completes
+	// StepBarrier, when true, makes a job that fans out to an agent group
+	// synchronize its agents at each step boundary: after an agent completes
 	// a step it waits until every agent alive at the step's start has
-	// completed it before starting the next step. A agent that dies mid-step
+	// completed it before starting the next step. An agent that dies mid-step
 	// is dropped from the barrier (it is no longer alive), so a dead agent
 	// cannot wedge the job. It only affects jobs that fan out to more than
 	// one agent; a job on a single target runs its steps unbarriered.
@@ -1106,7 +1106,7 @@ type Job struct {
 	// FailureMode is the job's failure mode (see FailureMode), denormalized
 	// from the spec (or the pipeline's default) when the job was created. The
 	// scheduler's job-status loop uses it to derive the job's overall status
-	// from the per-agent outcomes of a job that fanned out to a agent group.
+	// from the per-agent outcomes of a job that fanned out to an agent group.
 	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
 	// StepBarrier is the job's step-barrier flag (see JobSpec.StepBarrier),
 	// denormalized from the spec when the job was created. It is set on the
@@ -1311,7 +1311,7 @@ type Job struct {
 
 // ConcurrencyResource is the durable, atomic slot accounting for one
 // concurrency resource (F-16). A resource is a concurrency key, or the
-// synthetic "group:<name>" resource (a agent group's cap) or "global"
+// synthetic "group:<name>" resource (an agent group's cap) or "global"
 // resource (the system-wide cap). Held is the number of jobs currently
 // holding a slot on the resource. The Database service enforces the resource's
 // limit by atomically incrementing Held (only while Held is below the limit)
@@ -1333,7 +1333,7 @@ type ConcurrencyResource struct {
 // cap on how many jobs may run concurrently against one dimension. A rule has
 // a Kind (which dimension it bounds: "global" the system-wide cap, "group" a
 // agent group's cap, or "key" a concurrency key's cap), a Pattern (a regular
-// expression matched against the dimension's name — a agent group's name or a
+// expression matched against the dimension's name — an agent group's name or a
 // concurrency key's name; empty for the single "global" resource), and a Limit
 // (the cap on concurrent jobs; 0 means unlimited).
 //
@@ -1456,7 +1456,7 @@ type SourceCredential struct {
 // current attempt (the cross-agent step barrier). A job that fans out to a
 // agent group with the step barrier enabled waits, after each step, until
 // every agent alive at the step's start has a StepCompletion row for that
-// step; the barrier is satisfied when that is the case. A agent that dies
+// step; the barrier is satisfied when that is the case. An agent that dies
 // mid-step is dropped from the barrier (it is no longer alive), so a dead
 // agent cannot wedge the job.
 type StepCompletion struct {
@@ -1473,7 +1473,7 @@ type StepCompletion struct {
 }
 
 // StepOnceClaim is the durable "run this step" slot for a step of a job that
-// fans out to a agent group (F-01). A step with `once` set runs on at most
+// fans out to an agent group (F-01). A step with `once` set runs on at most
 // one target: the first target to claim (job id + step name + attempt) creates
 // this row and runs the step; every other target that reaches the same step in
 // the same attempt finds the row already claimed and skips the step. A retry
@@ -1496,7 +1496,7 @@ type StepOnceClaim struct {
 // agent group runs on every agent in the group; each agent's run is a
 // separate JobExecution, tracked independently so the job's overall status can
 // be derived from the per-agent outcomes (see FailureMode). A job that runs
-// on a single target (an ephemeral agent, or a group with one agent) has a
+// on a single target (an ephemeral worker, or a group with one agent) has a
 // single execution.
 //
 // The Job row's status is the *derived* overall status (maintained by the
@@ -1551,16 +1551,16 @@ type Agent struct {
 	Address    string     `json:"address"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
 	// Environments are the names of the environments this agent belongs to
-	// (F-17). Membership is many-to-many: a agent may list several
+	// (F-17). Membership is many-to-many: an agent may list several
 	// environments (a `prod-auto` agent can also serve `staging`), and an
 	// environment can be served by many agents. A job targeting environment
-	// E is dispatched to the live agents that registered E. A agent that
+	// E is dispatched to the live agents that registered E. An agent that
 	// belongs to no environment is reachable only by its raw Group (the
 	// pre-F-17 behavior). It is stored as a JSON document in a text column
 	// (portable across SQLite and PostgreSQL), like the other list fields.
 	Environments []string `gorm:"type:text;serializer:json" json:"environments,omitempty"`
 	// Labels are the agent's labels (F-29): a set of key/value pairs that label
-	// the agent. A agent declares them at registration (configurable, like
+	// the agent. An agent declares them at registration (configurable, like
 	// its environments, F-17); re-registration updates them. When a job is
 	// dispatched to the agent, the agent's labels are merged into the job's
 	// execution's label set (the agent's labels win on a key collision). They
@@ -1574,7 +1574,7 @@ type Agent struct {
 // Environment is a named deployment target that groups execution targets and
 // carries the deployment policy that governs how work reaches it (F-17). An
 // environment is the unit of "where does this run, and how strictly is it
-// gated": it names the agents that serve it (via agent membership and an
+// gated": it names the agents that serve it (vian agent membership and an
 // optional target group) and carries two gates — an approval policy
 // (RequiresApproval, an F-13 approval gate) and an automation policy
 // (Automation, automatic/manual) that decides whether a run proceeds on its
@@ -1582,7 +1582,7 @@ type Agent struct {
 //
 // Environments are stored in the database (owned by the Database service) and
 // managed through the API (CRUD), so an admin can create `prod-auto`, flip
-// `prod` to manual, or add a agent to an environment at runtime without a
+// `prod` to manual, or add an agent to an environment at runtime without a
 // redeployment.
 type Environment struct {
 	gorm.Model
@@ -1592,7 +1592,7 @@ type Environment struct {
 	// Description is a human-readable description of the environment.
 	Description string `json:"description"`
 	// TargetGroup is the agent group that serves the environment; empty means
-	// the environment is served by ephemeral workers (or, when a agent
+	// the environment is served by ephemeral workers (or, when an agent
 	// declares the environment, by the agents that registered it). A job
 	// targeting the environment is dispatched to the live agents that
 	// registered it, intersected with this group when one is set.
@@ -2275,10 +2275,10 @@ type AuditEvent struct {
 	Details string `gorm:"type:text" json:"details,omitempty"`
 }
 
-// AgentGroup is a named group of long-lived agents (F-29). A agent group
+// AgentGroup is a named group of long-lived agents (F-29). An agent group
 // is the unit a job targets (a job's TargetGroup names it) and the unit a
-// agent belongs to (a agent's Group names it). Before F-29 a group was only
-// an implicit string (a agent's Group value); F-29 makes it a first-class,
+// agent belongs to (an agent's Group names it). Before F-29 a group was only
+// an implicit string (an agent's Group value); F-29 makes it a first-class,
 // labelable row so a group can carry labels (F-29) that are combined onto the
 // runs of the jobs that target it. The row is metadata-only: it does not
 // change dispatch (which still keys off the agent's declared Group string),
@@ -2287,7 +2287,7 @@ type AuditEvent struct {
 type AgentGroup struct {
 	gorm.Model
 	// Name is the group's unique name (e.g. "build", "prod-fleet"); it is
-	// the value a agent's Group field and a job's TargetGroup reference.
+	// the value an agent's Group field and a job's TargetGroup reference.
 	Name string `gorm:"uniqueIndex;not null" json:"name"`
 	// Description is a human-readable description of the group.
 	Description string `json:"description"`

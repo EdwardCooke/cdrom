@@ -13,7 +13,7 @@ option go_package = "cdrom/internal/gen/cdrom/db/v1;dbv1";
 //
 // It is the only component allowed to touch the storage backend (SQLite in
 // development, PostgreSQL in deployment). Every other component — the API,
-// the scheduler, workers, and agents — reads and writes data exclusively
+// the scheduler, agents, and agents — reads and writes data exclusively
 // through this service.
 service Database {
   // Pipelines
@@ -139,23 +139,23 @@ service Database {
   // ClaimJob atomically claims a pending job for execution (F-23): it sets
   // the status to RUNNING (and the started timestamp) only if the job is
   // still PENDING. It returns whether the job was claimed. This is how a
-  // worker (or the API on a worker's behalf) takes ownership of a job it
+  // agent (or the API on an agent's behalf) takes ownership of a job it
   // picked up via the pull path or a push nudge: the conditional update is
   // atomic, so a job delivered by both push and pull is claimed exactly once
   // and the duplicate is a no-op.
   rpc ClaimJob(ClaimJobRequest) returns (ClaimJobResponse);
-  // ListPendingByGroup returns the pending jobs that target the given worker
-  // group (F-23). This is the pull path: a worker (or the API on its behalf)
+  // ListPendingByGroup returns the pending jobs that target the given agent
+  // group (F-23). This is the pull path: an agent (or the API on its behalf)
   // polls it to pick up jobs that were published while it was unreachable, so
   // no job is stranded pending. Filtering in the database keeps the poll from
   // pulling every pending job over the wire as the system grows.
   rpc ListPendingByGroup(ListPendingByGroupRequest) returns (ListJobsResponse);
-  // StartJobExecution records that the calling worker has started running a
-  // job (fan-out): it creates the worker's JobExecution for the job's current
-  // attempt and marks the job running. A job that targets a worker group runs
-  // on every worker in the group; each worker's run is a separate execution,
-  // so the start is not exclusive BETWEEN WORKERS (unlike the old single-claim
-  // work queue). Within a worker it IS exclusive: a worker that already has a
+  // StartJobExecution records that the calling agent has started running a
+  // job (fan-out): it creates the agent's JobExecution for the job's current
+  // attempt and marks the job running. A job that targets an agent group runs
+  // on every agent in the group; each agent's run is a separate execution,
+  // so the start is not exclusive BETWEEN AGENTS (unlike the old single-claim
+  // work queue). Within an agent it IS exclusive: an agent that already has a
   // RUNNING execution of the job (same attempt) is declined a second start —
   // the job row's status is derived (reconciled from the executions by the
   // scheduler), so a fast job can still read as running long after its first
@@ -163,33 +163,33 @@ service Database {
   // push nudges overtaking the first start) would spawn a second execution
   // and run the job twice. Starting an execution for a job that is no longer
   // pending (it reached a terminal state, or it is not targeted at the
-  // worker's group) is rejected.
+  // agent's group) is rejected.
   rpc StartJobExecution(StartJobExecutionRequest) returns (StartJobExecutionResponse);
-  // ListJobExecutions returns a job's executions (one per worker that started
+  // ListJobExecutions returns a job's executions (one per agent that started
   // it, for its current attempt). The scheduler's job-status loop uses it to
-  // derive the job's overall status from the per-worker outcomes (fan-out).
+  // derive the job's overall status from the per-agent outcomes (fan-out).
   rpc ListJobExecutions(ListJobExecutionsRequest) returns (ListJobExecutionsResponse);
-  // UpdateJobExecution records a worker's outcome for its execution of a job
+  // UpdateJobExecution records an agent's outcome for its execution of a job
   // (fan-out): it sets the execution's terminal status (and finished
-  // timestamp, step results, and outputs) for the worker's execution of the
+  // timestamp, step results, and outputs) for the agent's execution of the
   // job's current attempt. The job row's overall status is not touched here —
   // it is derived from the executions by the scheduler's job-status loop.
   rpc UpdateJobExecution(UpdateJobExecutionRequest) returns (JobExecution);
-  // AbandonWorkerExecutions marks all of a worker's running executions as
-  // failed (fan-out). It is called when a worker re-registers after a
-  // restart: the worker's in-progress executions from before the restart are
-  // abandoned (the worker will not resume them) so they do not block the job's
+  // AbandonAgentExecutions marks all of an agent's running executions as
+  // failed (fan-out). It is called when an agent re-registers after a
+  // restart: the agent's in-progress executions from before the restart are
+  // abandoned (the agent will not resume them) so they do not block the job's
   // overall status.
-  rpc AbandonWorkerExecutions(AbandonWorkerExecutionsRequest) returns (google.protobuf.Empty);
-  // ReportStepCompletion records that a worker has completed a step of a job
-  // (the cross-worker step barrier). A worker that runs a job with a step
+  rpc AbandonAgentExecutions(AbandonAgentExecutionsRequest) returns (google.protobuf.Empty);
+  // ReportStepCompletion records that an agent has completed a step of a job
+  // (the cross-agent step barrier). An agent that runs a job with a step
   // barrier reports each step it finishes; the barrier for a step is satisfied
-  // once every worker that is alive has reported that step. The completion is
+  // once every agent that is alive has reported that step. The completion is
   // recorded for the job's current attempt.
   rpc ReportStepCompletion(ReportStepCompletionRequest) returns (google.protobuf.Empty);
   // CheckStepBarrier reports whether the barrier for a job's step is satisfied
-  // (every worker alive at the step's start has completed it) or whether the
-  // job has been cancelled (so a waiting worker can stop). A worker that runs
+  // (every agent alive at the step's start has completed it) or whether the
+  // job has been cancelled (so a waiting agent can stop). An agent that runs
   // a job with a step barrier polls it after each step before proceeding to
   // the next.
   rpc CheckStepBarrier(CheckStepBarrierRequest) returns (CheckStepBarrierResponse);
@@ -204,7 +204,7 @@ service Database {
   // Event log (F-23, high availability). The event log is the shared,
   // append-only coordination bus: the scheduler's background loops and the
   // API publish state changes to it, and every API pod tails it to fan events
-  // out to its local workers and UI clients. Publishing a state change and
+  // out to its local agents and UI clients. Publishing a state change and
   // appending its event is a single transaction, so an event exists iff the
   // state changed.
   // PublishAssignment appends an "assignment" event for a job (a nudge: the
@@ -213,8 +213,8 @@ service Database {
   rpc PublishAssignment(PublishAssignmentRequest) returns (PublishEventResponse);
   // PublishCancel appends a "cancel" event for a job: a signal to the
   // execution target running the job to stop the work (F-05). Every API pod
-  // tails the log and delivers the cancellation to its local workers, so a
-  // cancellation signalled on one pod reaches a worker running the job on
+  // tails the log and delivers the cancellation to its local agents, so a
+  // cancellation signalled on one pod reaches an agent running the job on
   // another pod.
   rpc PublishCancel(PublishCancelRequest) returns (PublishEventResponse);
   // PublishJobStatus appends a "job_status" event for a job's status change.
@@ -223,9 +223,9 @@ service Database {
   rpc PublishJobStatus(PublishJobStatusRequest) returns (PublishEventResponse);
   // PublishRunStatus appends a "run_status" event for a run's status change.
   rpc PublishRunStatus(PublishRunStatusRequest) returns (PublishEventResponse);
-  // PublishWorkerEvent appends a "worker" event for a worker lifecycle change
+  // PublishAgentEvent appends a "agent" event for an agent lifecycle change
   // (registered / deregistered / watching).
-  rpc PublishWorkerEvent(PublishWorkerEventRequest) returns (PublishEventResponse);
+  rpc PublishAgentEvent(PublishAgentEventRequest) returns (PublishEventResponse);
   // PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
   // job's log has grown to a given size. The log bytes themselves live in the
   // artifacts store, never in the event log; a consumer range-reads the delta
@@ -265,12 +265,12 @@ service Database {
   // leader's liveness. A lease that has never been acquired is NotFound.
   rpc GetLease(GetLeaseRequest) returns (Lease);
 
-  // Workers
-  rpc RegisterWorker(RegisterWorkerRequest) returns (Worker);
-  rpc GetWorker(GetWorkerRequest) returns (Worker);
-  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
-  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (Worker);
-  rpc DeleteWorker(DeleteWorkerRequest) returns (google.protobuf.Empty);
+  // Agents
+  rpc RegisterAgent(RegisterAgentRequest) returns (Agent);
+  rpc GetAgent(GetAgentRequest) returns (Agent);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc HeartbeatAgent(HeartbeatAgentRequest) returns (Agent);
+  rpc DeleteAgent(DeleteAgentRequest) returns (google.protobuf.Empty);
 
   // IdP signing keys. The IdP persists its RSA signing keyring here so that
   // multiple IdP replicas share the same keys and serve a consistent JWKS.
@@ -486,12 +486,12 @@ service Database {
   rpc NextSecretNonce(NextSecretNonceRequest) returns (NextSecretNonceResponse);
 
   // ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
-  // step of a job that fans out to a worker group: the first target to claim
+  // step of a job that fans out to an agent group: the first target to claim
   // (job id + step name + attempt) wins and runs the step; every other target
   // that reaches the same step in the same attempt sees the slot already
   // claimed and skips the step. A retry (F-04) is a new attempt, so it may
   // claim again. The claim is durable and shared by every API replica, so the
-  // dedup is correct across pods and worker processes.
+  // dedup is correct across pods and agent processes.
   rpc ClaimStepOnce(ClaimStepOnceRequest) returns (ClaimStepOnceResponse);
 
   // Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
@@ -651,7 +651,7 @@ service Database {
   rpc ReconcileConcurrency(ReconcileConcurrencyRequest) returns (ReconcileConcurrencyResponse);
 
   // Concurrency limit rules (F-16). The limits that bound how much runs in
-  // parallel — the system-wide cap, per-worker-group caps, and per-concurrency-
+  // parallel — the system-wide cap, per-agent-group caps, and per-concurrency-
   // key caps — are stored as regex-based rules in the database (not
   // configuration), so they can be edited at runtime via the API without a
   // redeployment. A rule has a kind (global / group / key), a regex pattern
@@ -758,7 +758,7 @@ service Database {
   // reaches them: an approval policy (requires_approval, an F-13 gate) and an
   // automation policy (automatic / manual). They are stored in the database
   // (owned by the Database service) and managed through the API (CRUD), so an
-  // admin can create `prod-auto`, flip `prod` to manual, or add a worker to an
+  // admin can create `prod-auto`, flip `prod` to manual, or add an agent to an
   // environment at runtime without a redeployment.
   //
   // CreateEnvironment adds an environment. It rejects an empty name and a
@@ -777,11 +777,11 @@ service Database {
   // DeleteEnvironment removes an environment. A missing environment returns
   // NotFound.
   rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (google.protobuf.Empty);
-  // ListWorkersByEnvironment returns the workers that belong to the named
-  // environment (F-17): the workers whose declared environment list includes
-  // it. This is how the API resolves an environment to its target workers
+  // ListAgentsByEnvironment returns the agents that belong to the named
+  // environment (F-17): the agents whose declared environment list includes
+  // it. This is how the API resolves an environment to its target agents
   // when it dispatches a job targeting the environment.
-  rpc ListWorkersByEnvironment(ListWorkersByEnvironmentRequest) returns (ListWorkersResponse);
+  rpc ListAgentsByEnvironment(ListAgentsByEnvironmentRequest) returns (ListAgentsResponse);
   // ProceedJob releases a job held by a `manual` environment (F-17): it
   // conditionally marks the job as running (and stamps the started timestamp)
   // only if the job is still awaiting_proceed. It returns whether the job was
@@ -790,31 +790,31 @@ service Database {
   // already proceeded) is left untouched, so a late proceed is a no-op.
   rpc ProceedJob(ProceedJobRequest) returns (ProceedJobResponse);
 
-  // Worker groups (F-29). A worker group is a named group of long-lived
-  // workers (a job's target_group names it; a worker's group names it). It is
+  // Agent groups (F-29). An agent group is a named group of long-lived
+  // agents (a job's target_group names it; an agent's group names it). It is
   // a first-class, labelable row: its labels are combined onto the runs of the
   // jobs that target it. The row is metadata-only — it does not change
-  // dispatch (which still keys off the worker's declared group string) — so a
+  // dispatch (which still keys off the agent's declared group string) — so a
   // group that has no row simply contributes no labels.
   //
-  // CreateWorkerGroup adds a worker group. It rejects an empty name and a
+  // CreateAgentGroup adds an agent group. It rejects an empty name and a
   // name that collides with an existing group (it is idempotent on name: a
   // create for an existing group is a no-op that returns the existing row).
-  rpc CreateWorkerGroup(CreateWorkerGroupRequest) returns (WorkerGroup);
-  // GetWorkerGroup returns the named worker group. A missing group returns
+  rpc CreateAgentGroup(CreateAgentGroupRequest) returns (AgentGroup);
+  // GetAgentGroup returns the named agent group. A missing group returns
   // NotFound.
-  rpc GetWorkerGroup(GetWorkerGroupRequest) returns (WorkerGroup);
-  // ListWorkerGroups returns every worker group, optionally filtered by name
+  rpc GetAgentGroup(GetAgentGroupRequest) returns (AgentGroup);
+  // ListAgentGroups returns every agent group, optionally filtered by name
   // prefix.
-  rpc ListWorkerGroups(ListWorkerGroupsRequest) returns (ListWorkerGroupsResponse);
-  // UpdateWorkerGroup edits a worker group's description and/or labels. A
+  rpc ListAgentGroups(ListAgentGroupsRequest) returns (ListAgentGroupsResponse);
+  // UpdateAgentGroup edits an agent group's description and/or labels. A
   // missing group returns NotFound.
-  rpc UpdateWorkerGroup(UpdateWorkerGroupRequest) returns (WorkerGroup);
-  // DeleteWorkerGroup removes a worker group. A missing group returns
-  // NotFound. Deleting a group does not affect the workers that belong to it
+  rpc UpdateAgentGroup(UpdateAgentGroupRequest) returns (AgentGroup);
+  // DeleteAgentGroup removes an agent group. A missing group returns
+  // NotFound. Deleting a group does not affect the agents that belong to it
   // (they keep their group string) or the jobs that target it (they still
-  // dispatch to the group's workers); it only removes the group's labels.
-  rpc DeleteWorkerGroup(DeleteWorkerGroupRequest) returns (google.protobuf.Empty);
+  // dispatch to the group's agents); it only removes the group's labels.
+  rpc DeleteAgentGroup(DeleteAgentGroupRequest) returns (google.protobuf.Empty);
 
   // Storage objects (F-21.6 storage redesign). A storage_object is the
   // DATABASE'S record of a file held by the artifacts service: its kind,
@@ -1045,7 +1045,7 @@ message Pipeline {
   google.protobuf.Timestamp created_at = 4;
   google.protobuf.Timestamp updated_at = 5;
   // failure_mode is the pipeline's default failure mode (see FailureMode) for
-  // its jobs that fan out to a worker group. A job that sets its own
+  // its jobs that fan out to an agent group. A job that sets its own
   // failure_mode overrides the pipeline's; a job that sets none inherits this
   // value (defaulting to ALL when the pipeline sets none).
   FailureMode failure_mode = 6;
@@ -1086,7 +1086,7 @@ message Pipeline {
   // labels are the pipeline's labels (F-29): a set of key/value pairs that label
   // the pipeline. They are metadata (they never gate, route, or serialize
   // work) and are combined with the labels of a run's other resources (job,
-  // environment, worker group, worker) onto the run's job instances. Empty
+  // environment, agent group, agent) onto the run's job instances. Empty
   // means the pipeline has no labels.
   map<string, string> labels = 13;
   // variable_sets are the pipeline's named variable sets (F-21.1.3): each is
@@ -1626,7 +1626,7 @@ message ListRunsRequest {
   // carry every one of the given key/value labels (F-29): a run matches when at
   // least one of its job instances has a label row for each key with the
   // corresponding value. A run's labels are the combined labels stored on its job
-  // instances (the pipeline + job + environment + worker group + worker labels
+  // instances (the pipeline + job + environment + agent group + agent labels
   // combined when the run was created), so this is what makes a run
   // searchable by tag. When empty, all runs are returned.
   map<string, string> labels = 4;
@@ -1783,22 +1783,22 @@ enum ApprovalPolicy {
   APPROVAL_POLICY_NONE = 1;
   APPROVAL_POLICY_REQUIRED = 2;
 }
-// FailureMode controls how a job that runs on several workers (a job targeting
-// a worker group, which runs on every worker in the group) is judged from the
-// per-worker outcomes. It is set at the pipeline level and may be overridden
+// FailureMode controls how a job that runs on several agents (a job targeting
+// an agent group, which runs on every agent in the group) is judged from the
+// per-agent outcomes. It is set at the pipeline level and may be overridden
 // per job; a job that sets no failure mode inherits its pipeline's (defaulting
-// to ALL). It only affects jobs that fan out to more than one worker; a job on
+// to ALL). It only affects jobs that fan out to more than one agent; a job on
 // a single target is unaffected.
 enum FailureMode {
   FAILURE_MODE_UNSPECIFIED = 0;
-  // FAILURE_MODE_ALL: the job succeeds only if every worker's run succeeds;
-  // any worker that fails or times out fails the job.
+  // FAILURE_MODE_ALL: the job succeeds only if every agent's run succeeds;
+  // any agent that fails or times out fails the job.
   FAILURE_MODE_ALL = 1;
-  // FAILURE_MODE_BEST_EFFORT: the job succeeds if every worker's run reaches
-  // a terminal state (a per-worker failure or timeout is recorded but does
+  // FAILURE_MODE_BEST_EFFORT: the job succeeds if every agent's run reaches
+  // a terminal state (a per-agent failure or timeout is recorded but does
   // not fail the job).
   FAILURE_MODE_BEST_EFFORT = 2;
-  // FAILURE_MODE_ANY: the job succeeds as soon as one worker's run succeeds.
+  // FAILURE_MODE_ANY: the job succeeds as soon as one agent's run succeeds.
   FAILURE_MODE_ANY = 3;
 }
 // StepStatus is the terminal outcome of a single step within a job's
@@ -1965,13 +1965,13 @@ message JobStep {
   // stops the job.
   bool ignore_failed = 10;
   // once, when true, means the step runs on at most one target of a job that
-  // fans out to a worker group (F-01): the first target to reach the step
+  // fans out to an agent group (F-01): the first target to reach the step
   // claims a durable slot (job id + step name + attempt) and runs it; every
   // other target that reaches the same step in the same attempt sees the slot
   // already claimed and skips the step (recorded skipped, not failed). A
   // retry (F-04) is a new attempt, so it may run the step again. A job on a
   // single target (an ephemeral agent) is unaffected. This is what keeps a
-  // notification step (F-18) from sending once per worker.
+  // notification step (F-18) from sending once per agent.
   bool once = 12;
 }
 
@@ -2009,26 +2009,26 @@ message JobSpec {
   // not change the job's own status or stop a failed step from failing the
   // job (that is a step's ignore_failed).
   bool ignore_failed = 4;
-  // failure_mode controls how a job that runs on several workers (a job
-  // targeting a worker group, which runs on every worker in the group) is
-  // judged from the per-worker outcomes. It is set at the pipeline level and
+  // failure_mode controls how a job that runs on several agents (a job
+  // targeting an agent group, which runs on every agent in the group) is
+  // judged from the per-agent outcomes. It is set at the pipeline level and
   // may be overridden per job; a job that sets no failure mode inherits its
   // pipeline's (defaulting to ALL). It only affects jobs that fan out to
-  // more than one worker; a job on a single target is unaffected.
-  //   - ALL: the job succeeds only if every worker's run succeeds; any
-  //     worker that fails or times out fails the job.
-  //   - BEST_EFFORT: the job succeeds if every worker's run reaches a
-  //     terminal state (a per-worker failure or timeout is recorded but does
+  // more than one agent; a job on a single target is unaffected.
+  //   - ALL: the job succeeds only if every agent's run succeeds; any
+  //     agent that fails or times out fails the job.
+  //   - BEST_EFFORT: the job succeeds if every agent's run reaches a
+  //     terminal state (a per-agent failure or timeout is recorded but does
   //     not fail the job).
-  //   - ANY: the job succeeds as soon as one worker's run succeeds.
+  //   - ANY: the job succeeds as soon as one agent's run succeeds.
   FailureMode failure_mode = 5;
-  // step_barrier, when true, makes a job that runs on several workers (a job
-  // targeting a worker group) run its steps in lockstep: no worker proceeds
-  // to step N+1 until every worker that is alive has completed step N. The
-  // barrier is computed over the workers that are alive at the time each step
-  // starts (a worker that dies mid-job is dropped from the barrier, so it
+  // step_barrier, when true, makes a job that runs on several agents (a job
+  // targeting an agent group) run its steps in lockstep: no agent proceeds
+  // to step N+1 until every agent that is alive has completed step N. The
+  // barrier is computed over the agents that are alive at the time each step
+  // starts (an agent that dies mid-job is dropped from the barrier, so it
   // does not block the others). It only affects jobs that fan out to more
-  // than one worker; a job on a single target is unaffected.
+  // than one agent; a job on a single target is unaffected.
   bool step_barrier = 6;
   // concurrency_keys are the job's concurrency keys (F-16): named, global
   // locks that serialize this job against other jobs (in any pipeline or run)
@@ -2058,7 +2058,7 @@ message Job {
   int64 pipeline_id = 2;
   string name = 3;
   JobStatus status = 4;
-  // target_group selects a group of long-lived workers; empty means the job
+  // target_group selects a group of long-lived agents; empty means the job
   // runs on an ephemeral Kubernetes agent.
   string target_group = 5;
   google.protobuf.Timestamp started_at = 6;
@@ -2118,13 +2118,13 @@ message Job {
   // failure_mode is the job's failure mode (see JobSpec.failure_mode),
   // denormalized from the spec (or the pipeline's default) when the job was
   // created. The scheduler's job-status loop uses it to derive the job's
-  // overall status from the per-worker outcomes of a job that fanned out to
-  // a worker group.
+  // overall status from the per-agent outcomes of a job that fanned out to
+  // an agent group.
   FailureMode failure_mode = 19;
   // step_barrier is the job's step-barrier flag (see JobSpec.step_barrier),
   // denormalized from the spec when the job was created. When true, a job
-  // that fanned out to a worker group runs its steps in lockstep: no worker
-  // proceeds to step N+1 until every worker alive at step N's start has
+  // that fanned out to an agent group runs its steps in lockstep: no agent
+  // proceeds to step N+1 until every agent alive at step N's start has
   // completed step N.
   bool step_barrier = 20;
   // key is the job's stable, pipeline-scoped identifier (F-08): a short name
@@ -2210,7 +2210,7 @@ message Job {
   google.protobuf.Timestamp concurrency_admitted_at = 35;
   // environment is the name of the environment this job targets (F-17); empty
   // means the job targets its raw target_group (the pre-F-17 behavior). A job
-  // targeting an environment is dispatched to the live workers that registered
+  // targeting an environment is dispatched to the live agents that registered
   // that environment (intersected with the environment's target_group when
   // set), and is subject to the environment's approval and automation
   // policies. It is denormalized from the job definition onto the job
@@ -2230,7 +2230,7 @@ message Job {
   ApprovalPolicy approval = 38;
   // labels are the job's combined labels (F-29): the union of the labels of every
   // resource in the job's context — its pipeline, the job itself, the
-  // environment it targets (if any), and the worker group it targets (if
+  // environment it targets (if any), and the agent group it targets (if
   // any) — with the more specific source winning on a key collision. They
   // are computed when the job instance is created and stored as a snapshot:
   // relabeling a resource later does not change the labels recorded on a past
@@ -2326,7 +2326,7 @@ message JobDefinition {
   string key = 1;
   // name is the job's display name; when empty the pipeline's key is used.
   string name = 2;
-  // target_group selects a group of long-lived workers; empty means the job
+  // target_group selects a group of long-lived agents; empty means the job
   // runs on an ephemeral Kubernetes agent.
   string target_group = 3;
   // spec is the execution spec to snapshot onto each of the job's run
@@ -2357,7 +2357,7 @@ message JobDefinition {
   ApprovalPolicy approval = 9;
   // labels are the job's labels (F-29): a set of key/value pairs that label the
   // job. They are combined with the labels of the run's other resources
-  // (pipeline, environment, worker group, worker) onto the run's job
+  // (pipeline, environment, agent group, agent) onto the run's job
   // instances. Empty means the job has no labels.
   map<string, string> labels = 10;
   // variables are the job's effective variables (F-21.1.3): the union of the
@@ -2521,79 +2521,79 @@ message ClaimJobResponse {
 }
 
 message ListPendingByGroupRequest {
-  // group is the worker group to list pending jobs for.
+  // group is the agent group to list pending jobs for.
   string group = 1;
-  // environments are the environments the calling worker belongs to (F-17).
+  // environments are the environments the calling agent belongs to (F-17).
   // A pending job that targets one of them is returned even when its target
-  // group differs from `group`, so a worker that serves an environment picks
+  // group differs from `group`, so an agent that serves an environment picks
   // up its jobs on the poll (catch-up) path. The authoritative target_group
-  // intersection is enforced when the worker starts the job.
+  // intersection is enforced when the agent starts the job.
   repeated string environments = 2;
 }
 
-// JobExecution is one worker's run of a job (fan-out). A job that targets a
-// worker group runs on every worker in the group; each worker's run is a
+// JobExecution is one agent's run of a job (fan-out). A job that targets a
+// agent group runs on every agent in the group; each agent's run is a
 // separate JobExecution, tracked independently so the job's overall status can
-// be derived from the per-worker outcomes (see FailureMode). A job that runs
-// on a single target (an ephemeral agent, or a group with one worker) has a
+// be derived from the per-agent outcomes (see FailureMode). A job that runs
+// on a single target (an ephemeral agent, or a group with one agent) has a
 // single execution.
 message JobExecution {
   int64 id = 1;
   // job_id is the job this execution runs.
   int64 job_id = 2;
-  // worker_name is the worker that runs (or ran) this execution.
-  string worker_name = 3;
+  // agent_name is the agent that runs (or ran) this execution.
+  string agent_name = 3;
   // attempt is the job attempt this execution belongs to (F-04); a retry
   // creates a fresh set of executions.
   int32 attempt = 4;
-  // status is this execution's state: RUNNING while the worker is executing
+  // status is this execution's state: RUNNING while the agent is executing
   // the job, and a terminal status (SUCCEEDED, FAILED, CANCELLED, or
-  // TIMED_OUT) once the worker reports its outcome.
+  // TIMED_OUT) once the agent reports its outcome.
   JobStatus status = 5;
   google.protobuf.Timestamp started_at = 6;
   google.protobuf.Timestamp finished_at = 7;
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
   // step_results is the terminal outcome of each step that ran (or was
-  // skipped by its condition) during this worker's run of the job (F-06).
+  // skipped by its condition) during this agent's run of the job (F-06).
   repeated StepResult step_results = 10;
-  // outputs are the named values this worker's run produced (F-06).
+  // outputs are the named values this agent's run produced (F-06).
   map<string, string> outputs = 11;
-  // labels are this worker's execution's combined labels (F-29): the job
-  // instance's base label set (pipeline + job + environment + worker group)
-  // merged with the labels of the worker that ran this execution (the worker's
-  // labels win on a key collision). They are set when the worker starts the
-  // execution (StartJobExecution), so a fan-out job's each-worker execution
-  // carries that worker's own labels. Empty means the execution has no labels.
+  // labels are this agent's execution's combined labels (F-29): the job
+  // instance's base label set (pipeline + job + environment + agent group)
+  // merged with the labels of the agent that ran this execution (the agent's
+  // labels win on a key collision). They are set when the agent starts the
+  // execution (StartJobExecution), so a fan-out job's each-agent execution
+  // carries that agent's own labels. Empty means the execution has no labels.
   map<string, string> labels = 12;
 }
 
 // StartJobExecutionRequest asks the database to record that the calling
-// worker has started running a job (fan-out). It creates the worker's
+// agent has started running a job (fan-out). It creates the agent's
 // JobExecution for the job's current attempt and marks the job running.
 message StartJobExecutionRequest {
-  // job_id is the job the worker is starting.
+  // job_id is the job the agent is starting.
   int64 job_id = 1;
-  // worker_name is the worker starting the job.
-  string worker_name = 2;
+  // agent_name is the agent starting the job.
+  string agent_name = 2;
   // started_at is the timestamp to record when the execution starts; when
   // absent the server stamps the current time.
   google.protobuf.Timestamp started_at = 3;
 }
 
 // StartJobExecutionResponse is the result of a StartJobExecution call. When
-// started is true, execution carries the worker's new execution; when started
+// started is true, execution carries the agent's new execution; when started
 // is false the job was not started (it is no longer pending, or it is not
-// targeted at a worker group) and execution is empty.
+// targeted at an agent group) and execution is empty.
 message StartJobExecutionResponse {
-  // started is true when the worker's execution was recorded and the job is
+  // started is true when the agent's execution was recorded and the job is
   // running.
   bool started = 1;
-  // execution is the worker's execution (set only when started is true).
+  // execution is the agent's execution (set only when started is true).
   JobExecution execution = 2;
 }
 
-// ListJobExecutionsRequest asks for a job's executions (one per worker that
+// ListJobExecutionsRequest asks for a job's executions (one per agent that
 // started it, for its current attempt).
 message ListJobExecutionsRequest {
   // job_id is the job to list executions for.
@@ -2604,14 +2604,14 @@ message ListJobExecutionsResponse {
   repeated JobExecution executions = 1;
 }
 
-// UpdateJobExecutionRequest records a worker's outcome for its execution of a
+// UpdateJobExecutionRequest records an agent's outcome for its execution of a
 // job (fan-out).
 message UpdateJobExecutionRequest {
   // job_id is the job the execution runs.
   int64 job_id = 1;
-  // worker_name is the worker whose execution is updated.
-  string worker_name = 2;
-  // status is the execution's new status (a terminal status on the worker's
+  // agent_name is the agent whose execution is updated.
+  string agent_name = 2;
+  // status is the execution's new status (a terminal status on the agent's
   // final report).
   JobStatus status = 3;
   // finished_at is the timestamp to record when the execution finishes; when
@@ -2625,26 +2625,26 @@ message UpdateJobExecutionRequest {
   map<string, string> outputs = 6;
 }
 
-// AbandonWorkerExecutionsRequest asks the database to abandon a worker's
+// AbandonAgentExecutionsRequest asks the database to abandon an agent's
 // running executions (fan-out).
-message AbandonWorkerExecutionsRequest {
-  // worker_name is the worker whose running executions are abandoned.
-  string worker_name = 1;
+message AbandonAgentExecutionsRequest {
+  // agent_name is the agent whose running executions are abandoned.
+  string agent_name = 1;
 }
 
-// StepCompletion is one worker's completion of a step of a job (the
-// cross-worker step barrier). A job that runs on several workers with a step
-// barrier runs its steps in lockstep: no worker proceeds to step N+1 until
-// every worker that is alive has completed step N. Each worker's completion of
-// a step is recorded here (one row per (job, worker, step, attempt)); the
-// barrier for a step is satisfied once every worker alive at the step's start
+// StepCompletion is one agent's completion of a step of a job (the
+// cross-agent step barrier). A job that runs on several agents with a step
+// barrier runs its steps in lockstep: no agent proceeds to step N+1 until
+// every agent that is alive has completed step N. Each agent's completion of
+// a step is recorded here (one row per (job, agent, step, attempt)); the
+// barrier for a step is satisfied once every agent alive at the step's start
 // has a completion row for it.
 message StepCompletion {
   int64 id = 1;
   // job_id is the job this step belongs to.
   int64 job_id = 2;
-  // worker_name is the worker that completed the step.
-  string worker_name = 3;
+  // agent_name is the agent that completed the step.
+  string agent_name = 3;
   // step_name is the step's name (its identity in the job's spec).
   string step_name = 4;
   // attempt is the job attempt this completion belongs to (F-04); a retry
@@ -2654,20 +2654,20 @@ message StepCompletion {
   google.protobuf.Timestamp updated_at = 7;
 }
 
-// ReportStepCompletionRequest records that a worker has completed a step of a
-// job (the cross-worker step barrier).
+// ReportStepCompletionRequest records that an agent has completed a step of a
+// job (the cross-agent step barrier).
 message ReportStepCompletionRequest {
   // job_id is the job the step belongs to.
   int64 job_id = 1;
-  // worker_name is the worker that completed the step.
-  string worker_name = 2;
-  // step_name is the step's name (the step the worker completed).
+  // agent_name is the agent that completed the step.
+  string agent_name = 2;
+  // step_name is the step's name (the step the agent completed).
   string step_name = 3;
 }
 
 // CheckStepBarrierRequest asks whether the barrier for a job's step is
-// satisfied (every worker alive at the step's start has completed it) or
-// whether the job has been cancelled (so a waiting worker can stop).
+// satisfied (every agent alive at the step's start has completed it) or
+// whether the job has been cancelled (so a waiting agent can stop).
 message CheckStepBarrierRequest {
   // job_id is the job to check.
   int64 job_id = 1;
@@ -2677,10 +2677,10 @@ message CheckStepBarrierRequest {
 
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
 message CheckStepBarrierResponse {
-  // satisfied is true when every worker alive at the step's start has
-  // completed the step (the worker may proceed to the next step).
+  // satisfied is true when every agent alive at the step's start has
+  // completed the step (the agent may proceed to the next step).
   bool satisfied = 1;
-  // cancelled is true when the job has been cancelled (a waiting worker
+  // cancelled is true when the job has been cancelled (a waiting agent
   // should stop and report the job cancelled).
   bool cancelled = 2;
 }
@@ -2728,28 +2728,28 @@ message Event {
   // id is the monotonic cursor consumers track.
   int64 id = 1;
   // name is the event kind: "assignment", "cancel", "job_status",
-  // "run_status", "worker", or "job_log_updated".
+  // "run_status", "agent", or "job_log_updated".
   string name = 2;
-  // worker_group is the group the event is relevant to (for group-scoped
+  // agent_group is the group the event is relevant to (for group-scoped
   // events like assignment); empty for events that are not group-scoped.
-  string worker_group = 3;
+  string agent_group = 3;
   // payload is the small JSON object that carries the event's data.
   string payload = 4;
   google.protobuf.Timestamp created_at = 5;
   // environment is the environment the event is relevant to (F-17); set for
   // assignment events of a job that targets an environment, so an API pod can
-  // nudge its local workers that belong to it. Empty otherwise.
+  // nudge its local agents that belong to it. Empty otherwise.
   string environment = 6;
 }
 
 message PublishAssignmentRequest {
   int64 job_id = 1;
   // target_group is the group the job targets (recorded so an API pod can
-  // filter the event against the groups of its local workers).
+  // filter the event against the groups of its local agents).
   string target_group = 2;
   // environment is the environment the job targets (F-17); empty for a job
   // that targets a raw group. Recorded so an API pod can nudge its local
-  // workers that belong to the environment.
+  // agents that belong to the environment.
   string environment = 3;
 }
 
@@ -2770,10 +2770,10 @@ message PublishRunStatusRequest {
   RunStatus status = 2;
 }
 
-message PublishWorkerEventRequest {
+message PublishAgentEventRequest {
   string name = 1;
   string group = 2;
-  // action is the worker lifecycle action: "registered", "deregistered", or
+  // action is the agent lifecycle action: "registered", "deregistered", or
   // "watching".
   string action = 3;
 }
@@ -2892,60 +2892,60 @@ message DeleteJobRequest {
   int64 id = 1;
 }
 
-message Worker {
+message Agent {
   int64 id = 1;
   string name = 2;
   string group = 3;
   string address = 4;
   google.protobuf.Timestamp last_seen_at = 5;
-  // environments are the names of the environments this worker belongs to
-  // (F-17). Membership is many-to-many: a worker may list several
-  // environments, and an environment can be served by many workers. A job
-  // targeting an environment is dispatched to the live workers that
-  // registered it. Empty means the worker is reachable only by its group.
+  // environments are the names of the environments this agent belongs to
+  // (F-17). Membership is many-to-many: an agent may list several
+  // environments, and an environment can be served by many agents. A job
+  // targeting an environment is dispatched to the live agents that
+  // registered it. Empty means the agent is reachable only by its group.
   repeated string environments = 6;
-  // labels are the worker's labels (F-29): a set of key/value pairs that label
-  // the worker. A worker declares them at registration (configurable, like
+  // labels are the agent's labels (F-29): a set of key/value pairs that label
+  // the agent. An agent declares them at registration (configurable, like
   // its environments, F-17); re-registration updates them. When a job is
-  // dispatched to the worker, the worker's labels are merged into the job's
-  // execution's label set (the worker's labels win on a key collision). They are
+  // dispatched to the agent, the agent's labels are merged into the job's
+  // execution's label set (the agent's labels win on a key collision). They are
   // metadata (they never gate, route, or serialize work). Empty means the
-  // worker has no labels.
+  // agent has no labels.
   map<string, string> labels = 7;
 }
 
-message RegisterWorkerRequest {
+message RegisterAgentRequest {
   string name = 1;
   string group = 2;
   string address = 3;
-  // environments are the names of the environments this worker belongs to
-  // (F-17); the worker declares them at registration (configurable, multiple).
+  // environments are the names of the environments this agent belongs to
+  // (F-17); the agent declares them at registration (configurable, multiple).
   // Re-registration (e.g. after a restart) updates the membership.
   repeated string environments = 4;
-  // labels are the worker's labels (F-29); the worker declares them at
+  // labels are the agent's labels (F-29); the agent declares them at
   // registration (configurable, like its environments, F-17). Re-registration
   // (e.g. after a restart) updates them.
   map<string, string> labels = 5;
 }
 
-message GetWorkerRequest {
+message GetAgentRequest {
   string name = 1;
 }
 
-message ListWorkersRequest {
-  // group of "" lists workers in all groups.
+message ListAgentsRequest {
+  // group of "" lists agents in all groups.
   string group = 1;
 }
 
-message ListWorkersResponse {
-  repeated Worker workers = 1;
+message ListAgentsResponse {
+  repeated Agent agents = 1;
 }
 
-message HeartbeatWorkerRequest {
+message HeartbeatAgentRequest {
   string name = 1;
 }
 
-message DeleteWorkerRequest {
+message DeleteAgentRequest {
   string name = 1;
 }
 
@@ -2955,7 +2955,7 @@ message DeleteWorkerRequest {
 
 // Environment is a named deployment target that groups execution targets and
 // carries the deployment policy that governs how work reaches it (F-17). It
-// names the workers that serve it (via worker membership and an optional
+// names the agents that serve it (vian agent membership and an optional
 // target group) and carries two gates: an approval policy (requires_approval,
 // an F-13 gate) and an automation policy (automatic / manual) that decides
 // whether a run proceeds on its own or pauses for an explicit proceed call.
@@ -2966,10 +2966,10 @@ message Environment {
   string name = 2;
   // description is a human-readable description of the environment.
   string description = 3;
-  // target_group is the worker group that serves the environment; empty means
-  // the environment is served by ephemeral agents (or, when a worker declares
-  // the environment, by the workers that registered it). A job targeting the
-  // environment is dispatched to the live workers that registered it,
+  // target_group is the agent group that serves the environment; empty means
+  // the environment is served by ephemeral agents (or, when an agent declares
+  // the environment, by the agents that registered it). A job targeting the
+  // environment is dispatched to the live agents that registered it,
   // intersected with this group when one is set.
   string target_group = 4;
   // requires_approval, when true, inserts an F-13 approval gate before a job
@@ -3033,7 +3033,7 @@ message DeleteEnvironmentRequest {
   string name = 1;
 }
 
-message ListWorkersByEnvironmentRequest {
+message ListAgentsByEnvironmentRequest {
   string environment = 1;
 }
 
@@ -3052,25 +3052,25 @@ message ProceedJobResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Worker groups (F-29)
+// Agent groups (F-29)
 // ---------------------------------------------------------------------------
 
-// WorkerGroup is a named group of long-lived workers (F-29). A worker group is
-// the unit a job targets (a job's target_group names it) and the unit a worker
-// belongs to (a worker's group names it). It is a first-class, labelable row:
+// AgentGroup is a named group of long-lived agents (F-29). An agent group is
+// the unit a job targets (a job's target_group names it) and the unit an agent
+// belongs to (an agent's group names it). It is a first-class, labelable row:
 // its labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
-// worker's declared group string) — so a group that has no row simply
-// contributes no labels and jobs targeting it still run on its workers.
-message WorkerGroup {
+// agent's declared group string) — so a group that has no row simply
+// contributes no labels and jobs targeting it still run on its agents.
+message AgentGroup {
   int64 id = 1;
   // name is the group's unique name (e.g. "build", "prod-fleet"); it is the
-  // value a worker's group field and a job's target_group reference.
+  // value an agent's group field and a job's target_group reference.
   string name = 2;
   // description is a human-readable description of the group.
   string description = 3;
   // labels are the group's labels (F-29): a set of key/value pairs that label the
-  // group. They are managed through the API (the PUT /api/worker-groups/{name}
+  // group. They are managed through the API (the PUT /api/agent-groups/{name}
   // body) and stored in the database. When a job targets the group, the
   // group's labels are combined with the labels of the run's other resources onto
   // the run's job instances. They are metadata (they never gate, route, or
@@ -3080,27 +3080,27 @@ message WorkerGroup {
   google.protobuf.Timestamp updated_at = 6;
 }
 
-message CreateWorkerGroupRequest {
+message CreateAgentGroupRequest {
   string name = 1;
   string description = 2;
-  // labels are the group's labels (F-29); see WorkerGroup.labels.
+  // labels are the group's labels (F-29); see AgentGroup.labels.
   map<string, string> labels = 3;
 }
 
-message GetWorkerGroupRequest {
+message GetAgentGroupRequest {
   string name = 1;
 }
 
-message ListWorkerGroupsRequest {
+message ListAgentGroupsRequest {
   // name_prefix, when set, filters to groups whose name starts with it.
   string name_prefix = 1;
 }
 
-message ListWorkerGroupsResponse {
-  repeated WorkerGroup groups = 1;
+message ListAgentGroupsResponse {
+  repeated AgentGroup groups = 1;
 }
 
-message UpdateWorkerGroupRequest {
+message UpdateAgentGroupRequest {
   string name = 1;
   string description = 2;
   // labels, when present, replaces the group's labels (F-29). When absent the
@@ -3108,7 +3108,7 @@ message UpdateWorkerGroupRequest {
   map<string, string> labels = 3;
 }
 
-message DeleteWorkerGroupRequest {
+message DeleteAgentGroupRequest {
   string name = 1;
 }
 
@@ -3841,7 +3841,7 @@ message NextSecretNonceResponse {
 // ---------------------------------------------------------------------------
 
 // ClaimStepOnceRequest asks the database to claim the "run this step" slot for
-// a step of a job that fans out to a worker group (F-01): the first target to
+// a step of a job that fans out to an agent group (F-01): the first target to
 // claim (job id + step name + attempt) wins and runs the step; every other
 // target that reaches the same step in the same attempt sees the slot already
 // claimed and skips the step. A retry (F-04) is a new attempt, so it may claim
@@ -4319,7 +4319,7 @@ message AuditEvent {
   string action = 4;
   // target_kind is the kind of resource the action acted on (e.g.
   // "pipeline", "run", "job", "role", "role-binding", "user", "secret",
-  // "worker", "login").
+  // "agent", "login").
   string target_kind = 5;
   // target_id is the id (or name, for name-keyed resources such as roles) of
   // the resource the action acted on; empty when the action has no single
@@ -4512,7 +4512,7 @@ message QueuePendingJob {
   int64 pipeline_id = 3;
   // run_id is the job's run (0 when it is not part of a run).
   int64 run_id = 4;
-  // target_group is the job's target worker group (empty for an ephemeral
+  // target_group is the job's target agent group (empty for an ephemeral
   // agent).
   string target_group = 5;
   // created_at is when the job was created (its position in the queue).
@@ -4523,10 +4523,10 @@ message QueuePendingJob {
   repeated string blocked_by = 7;
 }
 
-// QueueGroupLoad is the load of one worker group (F-16): how many jobs are
+// QueueGroupLoad is the load of one agent group (F-16): how many jobs are
 // running in the group and the group's configured limit (0 = unlimited).
 message QueueGroupLoad {
-  // group is the worker group's name.
+  // group is the agent group's name.
   string group = 1;
   // running is the number of jobs currently running in the group.
   int32 running = 2;
@@ -4572,10 +4572,10 @@ message ConcurrencyLimit {
   // id is the rule's id.
   int64 id = 1;
   // kind is the dimension the rule bounds: "global" (the system-wide cap),
-  // "group" (a worker group's cap), or "key" (a concurrency key's cap).
+  // "group" (an agent group's cap), or "key" (a concurrency key's cap).
   string kind = 2;
   // pattern is a regular expression matched against the dimension's name (a
-  // worker group's name or a concurrency key's name). It is empty for the
+  // agent group's name or a concurrency key's name). It is empty for the
   // single "global" resource. It is validated (compiled) when the rule is
   // saved.
   string pattern = 3;

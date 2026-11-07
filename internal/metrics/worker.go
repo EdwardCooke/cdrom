@@ -15,7 +15,7 @@ import (
 // (agent only), its heartbeat failures (agent only), and the log bytes it
 // streams to the API.
 //
-// The agent and the agent share this set: a agent records the watch-state,
+// The agent and the worker share this set: an agent records the watch-state,
 // poll, and heartbeat metrics; an agent (which holds no WatchJobs stream and
 // polls no queue) records only the job/step/in-flight/log metrics.
 //

@@ -8,7 +8,7 @@
 //
 // The area is unique per job INSTANCE AND PER TARGET: fan-out agents each
 // stage their own copy (there is no cross-agent sharing), and the directory
-// sits under the CONFIGURED WORKER ROOT (MkdirTemp-style) so concurrent jobs
+// sits under the CONFIGURED AGENT ROOT (MkdirTemp-style) so concurrent jobs
 // never contend. The agent root defaults to the OS temp dir; operators point
 // it at disk-backed storage (config agent_root / CDROM_AGENT_ROOT) when the
 // temp dir is RAM-backed.

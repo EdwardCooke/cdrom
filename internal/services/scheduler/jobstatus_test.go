@@ -385,7 +385,7 @@ func TestJobStatusLoopDropsDeadAgents(t *testing.T) {
 }
 
 // TestJobStatusLoopSkipsAgentJobs verifies that a job with an empty target
-// group (an ephemeral agent) is not processed by the job-status loop (it
+// group (an ephemeral worker) is not processed by the job-status loop (it
 // reports its status directly to the job row).
 func TestJobStatusLoopSkipsAgentJobs(t *testing.T) {
 	db := &fakeJobStatusDB{

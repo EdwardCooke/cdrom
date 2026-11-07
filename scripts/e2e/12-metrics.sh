@@ -30,7 +30,7 @@
 #      live only on the dedicated ports.
 #
 # The default metrics ports (one per component, 127.0.0.1) are used:
-#   agent/agent :9100, database :9101, scheduler :9102, artifacts :9103,
+#   agent/worker :9100, database :9101, scheduler :9102, artifacts :9103,
 #   api :9104, idp :9105.
 #
 # Usage: scripts/e2e/12-metrics.sh
@@ -43,7 +43,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 # --- dedicated metrics ports (F-20 defaults) --------------------------------
-E2E_METRICS_WORKER=9100
+E2E_METRICS_AGENT=9100
 E2E_METRICS_DATABASE=9101
 E2E_METRICS_SCHEDULER=9102
 E2E_METRICS_ARTIFACTS=9103
@@ -149,7 +149,7 @@ e2e_boot_stack with-agent
 # even before any job runs) prove the port serves the component's own metric
 # set, not just an empty registry.
 log ">> checking each component's dedicated metrics port"
-e2e_metrics_check agent    "$E2E_METRICS_WORKER"    cdrom_worker_inflight
+e2e_metrics_check agent    "$E2E_METRICS_AGENT"    cdrom_agent_inflight
 e2e_metrics_check database  "$E2E_METRICS_DATABASE"  cdrom_db_event_log_size
 e2e_metrics_check scheduler "$E2E_METRICS_SCHEDULER" cdrom_scheduler_leader
 # The artifacts metric set is all label-vecs (no plain gauge), so its baseline
@@ -196,8 +196,8 @@ done
 
 # Now each component's dedicated metrics port must report the job.
 log ">> verifying the job is reflected in each component's metrics"
-e2e_wait_for_metric agent    "$E2E_METRICS_WORKER"    cdrom_worker_jobs_total      'agent recorded the completed job'
-e2e_wait_for_metric agent    "$E2E_METRICS_WORKER"    cdrom_worker_steps_total     'agent recorded the job steps'
+e2e_wait_for_metric agent    "$E2E_METRICS_AGENT"    cdrom_agent_jobs_total      'agent recorded the completed job'
+e2e_wait_for_metric agent    "$E2E_METRICS_AGENT"    cdrom_agent_steps_total     'agent recorded the job steps'
 e2e_wait_for_metric api       "$E2E_METRICS_API"       cdrom_api_job_status_total   'api recorded the job status'
 e2e_wait_for_metric api       "$E2E_METRICS_API"       cdrom_grpc_server_handled_total 'api recorded the gRPC calls'
 e2e_wait_for_metric scheduler "$E2E_METRICS_SCHEDULER" cdrom_scheduler_dispatches_total 'scheduler recorded the dispatch'

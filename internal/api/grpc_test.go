@@ -321,7 +321,7 @@ func TestCancelJobDeliversToAgent(t *testing.T) {
 	client := startAPIServer(t, startArtifactsServer(t), nil)
 	ctx := context.Background()
 
-	// A agent opens a WatchJobs stream.
+	// An agent opens a WatchJobs stream.
 	stream, err := client.WatchJobs(ctx, &apipb.WatchJobsRequest{AgentName: "w1", Group: "pool-a"})
 	if err != nil {
 		t.Fatalf("WatchJobs: %v", err)

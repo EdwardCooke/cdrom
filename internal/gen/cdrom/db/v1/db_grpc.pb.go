@@ -51,7 +51,7 @@ const (
 	Database_StartJobExecution_FullMethodName              = "/cdrom.db.v1.Database/StartJobExecution"
 	Database_ListJobExecutions_FullMethodName              = "/cdrom.db.v1.Database/ListJobExecutions"
 	Database_UpdateJobExecution_FullMethodName             = "/cdrom.db.v1.Database/UpdateJobExecution"
-	Database_AbandonAgentExecutions_FullMethodName        = "/cdrom.db.v1.Database/AbandonAgentExecutions"
+	Database_AbandonAgentExecutions_FullMethodName         = "/cdrom.db.v1.Database/AbandonAgentExecutions"
 	Database_ReportStepCompletion_FullMethodName           = "/cdrom.db.v1.Database/ReportStepCompletion"
 	Database_CheckStepBarrier_FullMethodName               = "/cdrom.db.v1.Database/CheckStepBarrier"
 	Database_ResolveApproval_FullMethodName                = "/cdrom.db.v1.Database/ResolveApproval"
@@ -59,17 +59,17 @@ const (
 	Database_PublishCancel_FullMethodName                  = "/cdrom.db.v1.Database/PublishCancel"
 	Database_PublishJobStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishJobStatus"
 	Database_PublishRunStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishRunStatus"
-	Database_PublishAgentEvent_FullMethodName             = "/cdrom.db.v1.Database/PublishAgentEvent"
+	Database_PublishAgentEvent_FullMethodName              = "/cdrom.db.v1.Database/PublishAgentEvent"
 	Database_PublishLogUpdated_FullMethodName              = "/cdrom.db.v1.Database/PublishLogUpdated"
 	Database_TailEvents_FullMethodName                     = "/cdrom.db.v1.Database/TailEvents"
 	Database_AcquireLease_FullMethodName                   = "/cdrom.db.v1.Database/AcquireLease"
 	Database_ReleaseLease_FullMethodName                   = "/cdrom.db.v1.Database/ReleaseLease"
 	Database_GetLease_FullMethodName                       = "/cdrom.db.v1.Database/GetLease"
-	Database_RegisterAgent_FullMethodName                 = "/cdrom.db.v1.Database/RegisterAgent"
-	Database_GetAgent_FullMethodName                      = "/cdrom.db.v1.Database/GetAgent"
-	Database_ListAgents_FullMethodName                    = "/cdrom.db.v1.Database/ListAgents"
-	Database_HeartbeatAgent_FullMethodName                = "/cdrom.db.v1.Database/HeartbeatAgent"
-	Database_DeleteAgent_FullMethodName                   = "/cdrom.db.v1.Database/DeleteAgent"
+	Database_RegisterAgent_FullMethodName                  = "/cdrom.db.v1.Database/RegisterAgent"
+	Database_GetAgent_FullMethodName                       = "/cdrom.db.v1.Database/GetAgent"
+	Database_ListAgents_FullMethodName                     = "/cdrom.db.v1.Database/ListAgents"
+	Database_HeartbeatAgent_FullMethodName                 = "/cdrom.db.v1.Database/HeartbeatAgent"
+	Database_DeleteAgent_FullMethodName                    = "/cdrom.db.v1.Database/DeleteAgent"
 	Database_ListIDPSigningKeys_FullMethodName             = "/cdrom.db.v1.Database/ListIDPSigningKeys"
 	Database_SetIDPSigningKeys_FullMethodName              = "/cdrom.db.v1.Database/SetIDPSigningKeys"
 	Database_StoreIDPAuthCode_FullMethodName               = "/cdrom.db.v1.Database/StoreIDPAuthCode"
@@ -173,13 +173,13 @@ const (
 	Database_ListEnvironments_FullMethodName               = "/cdrom.db.v1.Database/ListEnvironments"
 	Database_UpdateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/UpdateEnvironment"
 	Database_DeleteEnvironment_FullMethodName              = "/cdrom.db.v1.Database/DeleteEnvironment"
-	Database_ListAgentsByEnvironment_FullMethodName       = "/cdrom.db.v1.Database/ListAgentsByEnvironment"
+	Database_ListAgentsByEnvironment_FullMethodName        = "/cdrom.db.v1.Database/ListAgentsByEnvironment"
 	Database_ProceedJob_FullMethodName                     = "/cdrom.db.v1.Database/ProceedJob"
-	Database_CreateAgentGroup_FullMethodName              = "/cdrom.db.v1.Database/CreateAgentGroup"
-	Database_GetAgentGroup_FullMethodName                 = "/cdrom.db.v1.Database/GetAgentGroup"
-	Database_ListAgentGroups_FullMethodName               = "/cdrom.db.v1.Database/ListAgentGroups"
-	Database_UpdateAgentGroup_FullMethodName              = "/cdrom.db.v1.Database/UpdateAgentGroup"
-	Database_DeleteAgentGroup_FullMethodName              = "/cdrom.db.v1.Database/DeleteAgentGroup"
+	Database_CreateAgentGroup_FullMethodName               = "/cdrom.db.v1.Database/CreateAgentGroup"
+	Database_GetAgentGroup_FullMethodName                  = "/cdrom.db.v1.Database/GetAgentGroup"
+	Database_ListAgentGroups_FullMethodName                = "/cdrom.db.v1.Database/ListAgentGroups"
+	Database_UpdateAgentGroup_FullMethodName               = "/cdrom.db.v1.Database/UpdateAgentGroup"
+	Database_DeleteAgentGroup_FullMethodName               = "/cdrom.db.v1.Database/DeleteAgentGroup"
 	Database_AllocateStorageObject_FullMethodName          = "/cdrom.db.v1.Database/AllocateStorageObject"
 	Database_ConfirmStorageObject_FullMethodName           = "/cdrom.db.v1.Database/ConfirmStorageObject"
 	Database_GetStorageObject_FullMethodName               = "/cdrom.db.v1.Database/GetStorageObject"
@@ -198,7 +198,7 @@ const (
 //
 // It is the only component allowed to touch the storage backend (SQLite in
 // development, PostgreSQL in deployment). Every other component — the API,
-// the scheduler, workers, and agents — reads and writes data exclusively
+// the scheduler, agents, and agents — reads and writes data exclusively
 // through this service.
 type DatabaseClient interface {
 	// Pipelines
@@ -321,23 +321,23 @@ type DatabaseClient interface {
 	// ClaimJob atomically claims a pending job for execution (F-23): it sets
 	// the status to RUNNING (and the started timestamp) only if the job is
 	// still PENDING. It returns whether the job was claimed. This is how a
-	// worker (or the API on a worker's behalf) takes ownership of a job it
+	// agent (or the API on an agent's behalf) takes ownership of a job it
 	// picked up via the pull path or a push nudge: the conditional update is
 	// atomic, so a job delivered by both push and pull is claimed exactly once
 	// and the duplicate is a no-op.
 	ClaimJob(ctx context.Context, in *ClaimJobRequest, opts ...grpc.CallOption) (*ClaimJobResponse, error)
-	// ListPendingByGroup returns the pending jobs that target the given worker
-	// group (F-23). This is the pull path: a worker (or the API on its behalf)
+	// ListPendingByGroup returns the pending jobs that target the given agent
+	// group (F-23). This is the pull path: an agent (or the API on its behalf)
 	// polls it to pick up jobs that were published while it was unreachable, so
 	// no job is stranded pending. Filtering in the database keeps the poll from
 	// pulling every pending job over the wire as the system grows.
 	ListPendingByGroup(ctx context.Context, in *ListPendingByGroupRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
-	// StartJobExecution records that the calling worker has started running a
-	// job (fan-out): it creates the worker's JobExecution for the job's current
-	// attempt and marks the job running. A job that targets a worker group runs
-	// on every worker in the group; each worker's run is a separate execution,
-	// so the start is not exclusive BETWEEN WORKERS (unlike the old single-claim
-	// work queue). Within a worker it IS exclusive: a worker that already has a
+	// StartJobExecution records that the calling agent has started running a
+	// job (fan-out): it creates the agent's JobExecution for the job's current
+	// attempt and marks the job running. A job that targets an agent group runs
+	// on every agent in the group; each agent's run is a separate execution,
+	// so the start is not exclusive BETWEEN AGENTS (unlike the old single-claim
+	// work queue). Within an agent it IS exclusive: an agent that already has a
 	// RUNNING execution of the job (same attempt) is declined a second start —
 	// the job row's status is derived (reconciled from the executions by the
 	// scheduler), so a fast job can still read as running long after its first
@@ -345,33 +345,33 @@ type DatabaseClient interface {
 	// push nudges overtaking the first start) would spawn a second execution
 	// and run the job twice. Starting an execution for a job that is no longer
 	// pending (it reached a terminal state, or it is not targeted at the
-	// worker's group) is rejected.
+	// agent's group) is rejected.
 	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
-	// ListJobExecutions returns a job's executions (one per worker that started
+	// ListJobExecutions returns a job's executions (one per agent that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
 	// derive the job's overall status from the per-agent outcomes (fan-out).
 	ListJobExecutions(ctx context.Context, in *ListJobExecutionsRequest, opts ...grpc.CallOption) (*ListJobExecutionsResponse, error)
-	// UpdateJobExecution records a worker's outcome for its execution of a job
+	// UpdateJobExecution records an agent's outcome for its execution of a job
 	// (fan-out): it sets the execution's terminal status (and finished
-	// timestamp, step results, and outputs) for the worker's execution of the
+	// timestamp, step results, and outputs) for the agent's execution of the
 	// job's current attempt. The job row's overall status is not touched here —
 	// it is derived from the executions by the scheduler's job-status loop.
 	UpdateJobExecution(ctx context.Context, in *UpdateJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error)
-	// AbandonAgentExecutions marks all of a worker's running executions as
-	// failed (fan-out). It is called when a worker re-registers after a
-	// restart: the worker's in-progress executions from before the restart are
-	// abandoned (the worker will not resume them) so they do not block the job's
+	// AbandonAgentExecutions marks all of an agent's running executions as
+	// failed (fan-out). It is called when an agent re-registers after a
+	// restart: the agent's in-progress executions from before the restart are
+	// abandoned (the agent will not resume them) so they do not block the job's
 	// overall status.
 	AbandonAgentExecutions(ctx context.Context, in *AbandonAgentExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// ReportStepCompletion records that a worker has completed a step of a job
-	// (the cross-agent step barrier). A worker that runs a job with a step
+	// ReportStepCompletion records that an agent has completed a step of a job
+	// (the cross-agent step barrier). An agent that runs a job with a step
 	// barrier reports each step it finishes; the barrier for a step is satisfied
-	// once every worker that is alive has reported that step. The completion is
+	// once every agent that is alive has reported that step. The completion is
 	// recorded for the job's current attempt.
 	ReportStepCompletion(ctx context.Context, in *ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
-	// (every worker alive at the step's start has completed it) or whether the
-	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// (every agent alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting agent can stop). An agent that runs
 	// a job with a step barrier polls it after each step before proceeding to
 	// the next.
 	CheckStepBarrier(ctx context.Context, in *CheckStepBarrierRequest, opts ...grpc.CallOption) (*CheckStepBarrierResponse, error)
@@ -385,7 +385,7 @@ type DatabaseClient interface {
 	// Event log (F-23, high availability). The event log is the shared,
 	// append-only coordination bus: the scheduler's background loops and the
 	// API publish state changes to it, and every API pod tails it to fan events
-	// out to its local workers and UI clients. Publishing a state change and
+	// out to its local agents and UI clients. Publishing a state change and
 	// appending its event is a single transaction, so an event exists iff the
 	// state changed.
 	// PublishAssignment appends an "assignment" event for a job (a nudge: the
@@ -394,8 +394,8 @@ type DatabaseClient interface {
 	PublishAssignment(ctx context.Context, in *PublishAssignmentRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 	// PublishCancel appends a "cancel" event for a job: a signal to the
 	// execution target running the job to stop the work (F-05). Every API pod
-	// tails the log and delivers the cancellation to its local workers, so a
-	// cancellation signalled on one pod reaches a worker running the job on
+	// tails the log and delivers the cancellation to its local agents, so a
+	// cancellation signalled on one pod reaches an agent running the job on
 	// another pod.
 	PublishCancel(ctx context.Context, in *PublishCancelRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 	// PublishJobStatus appends a "job_status" event for a job's status change.
@@ -404,7 +404,7 @@ type DatabaseClient interface {
 	PublishJobStatus(ctx context.Context, in *PublishJobStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 	// PublishRunStatus appends a "run_status" event for a run's status change.
 	PublishRunStatus(ctx context.Context, in *PublishRunStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
-	// PublishAgentEvent appends a "worker" event for a worker lifecycle change
+	// PublishAgentEvent appends a "agent" event for an agent lifecycle change
 	// (registered / deregistered / watching).
 	PublishAgentEvent(ctx context.Context, in *PublishAgentEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 	// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
@@ -656,12 +656,12 @@ type DatabaseClient interface {
 	// persisted here so it survives API restarts and is shared by all replicas.
 	NextSecretNonce(ctx context.Context, in *NextSecretNonceRequest, opts ...grpc.CallOption) (*NextSecretNonceResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
-	// step of a job that fans out to a worker group: the first target to claim
+	// step of a job that fans out to an agent group: the first target to claim
 	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. A retry (F-04) is a new attempt, so it may
 	// claim again. The claim is durable and shared by every API replica, so the
-	// dedup is correct across pods and worker processes.
+	// dedup is correct across pods and agent processes.
 	ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error)
 	// Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
 	// effective permissions are the union of the permissions of every role
@@ -919,7 +919,7 @@ type DatabaseClient interface {
 	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
 	// automation policy (automatic / manual). They are stored in the database
 	// (owned by the Database service) and managed through the API (CRUD), so an
-	// admin can create `prod-auto`, flip `prod` to manual, or add a worker to an
+	// admin can create `prod-auto`, flip `prod` to manual, or add an agent to an
 	// environment at runtime without a redeployment.
 	//
 	// CreateEnvironment adds an environment. It rejects an empty name and a
@@ -938,9 +938,9 @@ type DatabaseClient interface {
 	// DeleteEnvironment removes an environment. A missing environment returns
 	// NotFound.
 	DeleteEnvironment(ctx context.Context, in *DeleteEnvironmentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// ListAgentsByEnvironment returns the workers that belong to the named
-	// environment (F-17): the workers whose declared environment list includes
-	// it. This is how the API resolves an environment to its target workers
+	// ListAgentsByEnvironment returns the agents that belong to the named
+	// environment (F-17): the agents whose declared environment list includes
+	// it. This is how the API resolves an environment to its target agents
 	// when it dispatches a job targeting the environment.
 	ListAgentsByEnvironment(ctx context.Context, in *ListAgentsByEnvironmentRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
 	// ProceedJob releases a job held by a `manual` environment (F-17): it
@@ -950,30 +950,30 @@ type DatabaseClient interface {
 	// job that is no longer awaiting_proceed (it was cancelled, or it was
 	// already proceeded) is left untouched, so a late proceed is a no-op.
 	ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*ProceedJobResponse, error)
-	// Agent groups (F-29). A worker group is a named group of long-lived
-	// workers (a job's target_group names it; a worker's group names it). It is
+	// Agent groups (F-29). An agent group is a named group of long-lived
+	// agents (a job's target_group names it; an agent's group names it). It is
 	// a first-class, labelable row: its labels are combined onto the runs of the
 	// jobs that target it. The row is metadata-only — it does not change
-	// dispatch (which still keys off the worker's declared group string) — so a
+	// dispatch (which still keys off the agent's declared group string) — so a
 	// group that has no row simply contributes no labels.
 	//
-	// CreateAgentGroup adds a worker group. It rejects an empty name and a
+	// CreateAgentGroup adds an agent group. It rejects an empty name and a
 	// name that collides with an existing group (it is idempotent on name: a
 	// create for an existing group is a no-op that returns the existing row).
 	CreateAgentGroup(ctx context.Context, in *CreateAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error)
-	// GetAgentGroup returns the named worker group. A missing group returns
+	// GetAgentGroup returns the named agent group. A missing group returns
 	// NotFound.
 	GetAgentGroup(ctx context.Context, in *GetAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error)
-	// ListAgentGroups returns every worker group, optionally filtered by name
+	// ListAgentGroups returns every agent group, optionally filtered by name
 	// prefix.
 	ListAgentGroups(ctx context.Context, in *ListAgentGroupsRequest, opts ...grpc.CallOption) (*ListAgentGroupsResponse, error)
-	// UpdateAgentGroup edits a worker group's description and/or labels. A
+	// UpdateAgentGroup edits an agent group's description and/or labels. A
 	// missing group returns NotFound.
 	UpdateAgentGroup(ctx context.Context, in *UpdateAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error)
-	// DeleteAgentGroup removes a worker group. A missing group returns
-	// NotFound. Deleting a group does not affect the workers that belong to it
+	// DeleteAgentGroup removes an agent group. A missing group returns
+	// NotFound. Deleting a group does not affect the agents that belong to it
 	// (they keep their group string) or the jobs that target it (they still
-	// dispatch to the group's workers); it only removes the group's labels.
+	// dispatch to the group's agents); it only removes the group's labels.
 	DeleteAgentGroup(ctx context.Context, in *DeleteAgentGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Storage objects (F-21.6 storage redesign). A storage_object is the
 	// DATABASE'S record of a file held by the artifacts service: its kind,
@@ -2722,7 +2722,7 @@ func (c *databaseClient) ResolvePackageReference(ctx context.Context, in *Resolv
 //
 // It is the only component allowed to touch the storage backend (SQLite in
 // development, PostgreSQL in deployment). Every other component — the API,
-// the scheduler, workers, and agents — reads and writes data exclusively
+// the scheduler, agents, and agents — reads and writes data exclusively
 // through this service.
 type DatabaseServer interface {
 	// Pipelines
@@ -2845,23 +2845,23 @@ type DatabaseServer interface {
 	// ClaimJob atomically claims a pending job for execution (F-23): it sets
 	// the status to RUNNING (and the started timestamp) only if the job is
 	// still PENDING. It returns whether the job was claimed. This is how a
-	// worker (or the API on a worker's behalf) takes ownership of a job it
+	// agent (or the API on an agent's behalf) takes ownership of a job it
 	// picked up via the pull path or a push nudge: the conditional update is
 	// atomic, so a job delivered by both push and pull is claimed exactly once
 	// and the duplicate is a no-op.
 	ClaimJob(context.Context, *ClaimJobRequest) (*ClaimJobResponse, error)
-	// ListPendingByGroup returns the pending jobs that target the given worker
-	// group (F-23). This is the pull path: a worker (or the API on its behalf)
+	// ListPendingByGroup returns the pending jobs that target the given agent
+	// group (F-23). This is the pull path: an agent (or the API on its behalf)
 	// polls it to pick up jobs that were published while it was unreachable, so
 	// no job is stranded pending. Filtering in the database keeps the poll from
 	// pulling every pending job over the wire as the system grows.
 	ListPendingByGroup(context.Context, *ListPendingByGroupRequest) (*ListJobsResponse, error)
-	// StartJobExecution records that the calling worker has started running a
-	// job (fan-out): it creates the worker's JobExecution for the job's current
-	// attempt and marks the job running. A job that targets a worker group runs
-	// on every worker in the group; each worker's run is a separate execution,
-	// so the start is not exclusive BETWEEN WORKERS (unlike the old single-claim
-	// work queue). Within a worker it IS exclusive: a worker that already has a
+	// StartJobExecution records that the calling agent has started running a
+	// job (fan-out): it creates the agent's JobExecution for the job's current
+	// attempt and marks the job running. A job that targets an agent group runs
+	// on every agent in the group; each agent's run is a separate execution,
+	// so the start is not exclusive BETWEEN AGENTS (unlike the old single-claim
+	// work queue). Within an agent it IS exclusive: an agent that already has a
 	// RUNNING execution of the job (same attempt) is declined a second start —
 	// the job row's status is derived (reconciled from the executions by the
 	// scheduler), so a fast job can still read as running long after its first
@@ -2869,33 +2869,33 @@ type DatabaseServer interface {
 	// push nudges overtaking the first start) would spawn a second execution
 	// and run the job twice. Starting an execution for a job that is no longer
 	// pending (it reached a terminal state, or it is not targeted at the
-	// worker's group) is rejected.
+	// agent's group) is rejected.
 	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
-	// ListJobExecutions returns a job's executions (one per worker that started
+	// ListJobExecutions returns a job's executions (one per agent that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
 	// derive the job's overall status from the per-agent outcomes (fan-out).
 	ListJobExecutions(context.Context, *ListJobExecutionsRequest) (*ListJobExecutionsResponse, error)
-	// UpdateJobExecution records a worker's outcome for its execution of a job
+	// UpdateJobExecution records an agent's outcome for its execution of a job
 	// (fan-out): it sets the execution's terminal status (and finished
-	// timestamp, step results, and outputs) for the worker's execution of the
+	// timestamp, step results, and outputs) for the agent's execution of the
 	// job's current attempt. The job row's overall status is not touched here —
 	// it is derived from the executions by the scheduler's job-status loop.
 	UpdateJobExecution(context.Context, *UpdateJobExecutionRequest) (*JobExecution, error)
-	// AbandonAgentExecutions marks all of a worker's running executions as
-	// failed (fan-out). It is called when a worker re-registers after a
-	// restart: the worker's in-progress executions from before the restart are
-	// abandoned (the worker will not resume them) so they do not block the job's
+	// AbandonAgentExecutions marks all of an agent's running executions as
+	// failed (fan-out). It is called when an agent re-registers after a
+	// restart: the agent's in-progress executions from before the restart are
+	// abandoned (the agent will not resume them) so they do not block the job's
 	// overall status.
 	AbandonAgentExecutions(context.Context, *AbandonAgentExecutionsRequest) (*emptypb.Empty, error)
-	// ReportStepCompletion records that a worker has completed a step of a job
-	// (the cross-agent step barrier). A worker that runs a job with a step
+	// ReportStepCompletion records that an agent has completed a step of a job
+	// (the cross-agent step barrier). An agent that runs a job with a step
 	// barrier reports each step it finishes; the barrier for a step is satisfied
-	// once every worker that is alive has reported that step. The completion is
+	// once every agent that is alive has reported that step. The completion is
 	// recorded for the job's current attempt.
 	ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error)
 	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
-	// (every worker alive at the step's start has completed it) or whether the
-	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// (every agent alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting agent can stop). An agent that runs
 	// a job with a step barrier polls it after each step before proceeding to
 	// the next.
 	CheckStepBarrier(context.Context, *CheckStepBarrierRequest) (*CheckStepBarrierResponse, error)
@@ -2909,7 +2909,7 @@ type DatabaseServer interface {
 	// Event log (F-23, high availability). The event log is the shared,
 	// append-only coordination bus: the scheduler's background loops and the
 	// API publish state changes to it, and every API pod tails it to fan events
-	// out to its local workers and UI clients. Publishing a state change and
+	// out to its local agents and UI clients. Publishing a state change and
 	// appending its event is a single transaction, so an event exists iff the
 	// state changed.
 	// PublishAssignment appends an "assignment" event for a job (a nudge: the
@@ -2918,8 +2918,8 @@ type DatabaseServer interface {
 	PublishAssignment(context.Context, *PublishAssignmentRequest) (*PublishEventResponse, error)
 	// PublishCancel appends a "cancel" event for a job: a signal to the
 	// execution target running the job to stop the work (F-05). Every API pod
-	// tails the log and delivers the cancellation to its local workers, so a
-	// cancellation signalled on one pod reaches a worker running the job on
+	// tails the log and delivers the cancellation to its local agents, so a
+	// cancellation signalled on one pod reaches an agent running the job on
 	// another pod.
 	PublishCancel(context.Context, *PublishCancelRequest) (*PublishEventResponse, error)
 	// PublishJobStatus appends a "job_status" event for a job's status change.
@@ -2928,7 +2928,7 @@ type DatabaseServer interface {
 	PublishJobStatus(context.Context, *PublishJobStatusRequest) (*PublishEventResponse, error)
 	// PublishRunStatus appends a "run_status" event for a run's status change.
 	PublishRunStatus(context.Context, *PublishRunStatusRequest) (*PublishEventResponse, error)
-	// PublishAgentEvent appends a "worker" event for a worker lifecycle change
+	// PublishAgentEvent appends a "agent" event for an agent lifecycle change
 	// (registered / deregistered / watching).
 	PublishAgentEvent(context.Context, *PublishAgentEventRequest) (*PublishEventResponse, error)
 	// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
@@ -3180,12 +3180,12 @@ type DatabaseServer interface {
 	// persisted here so it survives API restarts and is shared by all replicas.
 	NextSecretNonce(context.Context, *NextSecretNonceRequest) (*NextSecretNonceResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
-	// step of a job that fans out to a worker group: the first target to claim
+	// step of a job that fans out to an agent group: the first target to claim
 	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. A retry (F-04) is a new attempt, so it may
 	// claim again. The claim is durable and shared by every API replica, so the
-	// dedup is correct across pods and worker processes.
+	// dedup is correct across pods and agent processes.
 	ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error)
 	// Roles (F-14, RBAC). Roles are named sets of permissions; a principal's
 	// effective permissions are the union of the permissions of every role
@@ -3443,7 +3443,7 @@ type DatabaseServer interface {
 	// reaches them: an approval policy (requires_approval, an F-13 gate) and an
 	// automation policy (automatic / manual). They are stored in the database
 	// (owned by the Database service) and managed through the API (CRUD), so an
-	// admin can create `prod-auto`, flip `prod` to manual, or add a worker to an
+	// admin can create `prod-auto`, flip `prod` to manual, or add an agent to an
 	// environment at runtime without a redeployment.
 	//
 	// CreateEnvironment adds an environment. It rejects an empty name and a
@@ -3462,9 +3462,9 @@ type DatabaseServer interface {
 	// DeleteEnvironment removes an environment. A missing environment returns
 	// NotFound.
 	DeleteEnvironment(context.Context, *DeleteEnvironmentRequest) (*emptypb.Empty, error)
-	// ListAgentsByEnvironment returns the workers that belong to the named
-	// environment (F-17): the workers whose declared environment list includes
-	// it. This is how the API resolves an environment to its target workers
+	// ListAgentsByEnvironment returns the agents that belong to the named
+	// environment (F-17): the agents whose declared environment list includes
+	// it. This is how the API resolves an environment to its target agents
 	// when it dispatches a job targeting the environment.
 	ListAgentsByEnvironment(context.Context, *ListAgentsByEnvironmentRequest) (*ListAgentsResponse, error)
 	// ProceedJob releases a job held by a `manual` environment (F-17): it
@@ -3474,30 +3474,30 @@ type DatabaseServer interface {
 	// job that is no longer awaiting_proceed (it was cancelled, or it was
 	// already proceeded) is left untouched, so a late proceed is a no-op.
 	ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error)
-	// Agent groups (F-29). A worker group is a named group of long-lived
-	// workers (a job's target_group names it; a worker's group names it). It is
+	// Agent groups (F-29). An agent group is a named group of long-lived
+	// agents (a job's target_group names it; an agent's group names it). It is
 	// a first-class, labelable row: its labels are combined onto the runs of the
 	// jobs that target it. The row is metadata-only — it does not change
-	// dispatch (which still keys off the worker's declared group string) — so a
+	// dispatch (which still keys off the agent's declared group string) — so a
 	// group that has no row simply contributes no labels.
 	//
-	// CreateAgentGroup adds a worker group. It rejects an empty name and a
+	// CreateAgentGroup adds an agent group. It rejects an empty name and a
 	// name that collides with an existing group (it is idempotent on name: a
 	// create for an existing group is a no-op that returns the existing row).
 	CreateAgentGroup(context.Context, *CreateAgentGroupRequest) (*AgentGroup, error)
-	// GetAgentGroup returns the named worker group. A missing group returns
+	// GetAgentGroup returns the named agent group. A missing group returns
 	// NotFound.
 	GetAgentGroup(context.Context, *GetAgentGroupRequest) (*AgentGroup, error)
-	// ListAgentGroups returns every worker group, optionally filtered by name
+	// ListAgentGroups returns every agent group, optionally filtered by name
 	// prefix.
 	ListAgentGroups(context.Context, *ListAgentGroupsRequest) (*ListAgentGroupsResponse, error)
-	// UpdateAgentGroup edits a worker group's description and/or labels. A
+	// UpdateAgentGroup edits an agent group's description and/or labels. A
 	// missing group returns NotFound.
 	UpdateAgentGroup(context.Context, *UpdateAgentGroupRequest) (*AgentGroup, error)
-	// DeleteAgentGroup removes a worker group. A missing group returns
-	// NotFound. Deleting a group does not affect the workers that belong to it
+	// DeleteAgentGroup removes an agent group. A missing group returns
+	// NotFound. Deleting a group does not affect the agents that belong to it
 	// (they keep their group string) or the jobs that target it (they still
-	// dispatch to the group's workers); it only removes the group's labels.
+	// dispatch to the group's agents); it only removes the group's labels.
 	DeleteAgentGroup(context.Context, *DeleteAgentGroupRequest) (*emptypb.Empty, error)
 	// Storage objects (F-21.6 storage redesign). A storage_object is the
 	// DATABASE'S record of a file held by the artifacts service: its kind,

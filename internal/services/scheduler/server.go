@@ -6,7 +6,7 @@
 // only: it persists the job and appends an "assignment" event to the shared
 // event log, which every API pod tails and fans out to its local agents. The
 // scheduler no longer dials a specific API pod, so a job is delivered to
-// whichever pod a agent happens to be connected to. Jobs with an empty
+// whichever pod an agent happens to be connected to. Jobs with an empty
 // target group are left pending for ephemeral Kubernetes agents.
 //
 // The scheduler holds no durable state of its own: all pipelines, jobs, and
@@ -61,7 +61,7 @@ func (s *Server) SetMetrics(m *metrics.SchedulerMetrics) {
 // target group is set, appends an "assignment" event to the shared event log
 // (F-23). Every API pod tails the log and nudges its local agents in the
 // group, which fetch the job and claim it atomically. Jobs with an empty
-// target group are left pending for an ephemeral agent.
+// target group are left pending for an ephemeral worker.
 //
 // A job with dependencies (DependsOn, F-06) is never dispatched here: it is
 // left pending and the background dependency resolver (dependencies.go)
@@ -140,7 +140,7 @@ func (s *Server) ListJobs(ctx context.Context, req *schedpb.ListJobsRequest) (*s
 // the Database service) and appends a "cancel" event to the shared event log
 // (F-23). Every API pod tails the log and delivers a JobCancellation down its
 // local agents' WatchJobs streams (for a long-lived agent) so the agent
-// running the job interrupts it; an ephemeral agent observes the cancellation
+// running the job interrupts it; an ephemeral worker observes the cancellation
 // on its next GetJob. Only pending or running jobs can be cancelled;
 // cancelling an already-finished job is a no-op (idempotent).
 //
@@ -264,7 +264,7 @@ func (s *Server) rerunJob(ctx context.Context, db jobRerunner, publisher jobPubl
 				"job", updated.GetId(), "group", updated.GetTargetGroup(), "err", err)
 		}
 	} else {
-		s.logger.Info("scheduler: re-run job queued for ephemeral agent", "job", updated.GetId())
+		s.logger.Info("scheduler: re-run job queued for ephemeral worker", "job", updated.GetId())
 	}
 	return job, nil
 }
@@ -514,7 +514,7 @@ func triggerTypeKind(t dbpb.TriggerType) string {
 // depends_on, F-06) is left pending for the dependency resolver; an instance
 // with a target group has an "assignment" event appended to the shared event
 // log (F-23), which every API pod tails and fans out to its local agents; an
-// instance with an empty target group is left pending for an ephemeral agent.
+// instance with an empty target group is left pending for an ephemeral worker.
 func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
 	s.dispatchJob(ctx, job)
 }
@@ -580,7 +580,7 @@ func (s *Server) dispatchJob(ctx context.Context, job *dbpb.Job) {
 	if job.GetTargetGroup() != "" || job.GetEnvironment() != "" {
 		s.publishAssignment(ctx, job.GetId(), job.GetTargetGroup(), job.GetEnvironment())
 	} else {
-		s.logger.Info("scheduler: job queued for ephemeral agent", "job", job.GetId(), "run", job.GetRunId())
+		s.logger.Info("scheduler: job queued for ephemeral worker", "job", job.GetId(), "run", job.GetRunId())
 	}
 }
 
@@ -692,7 +692,7 @@ func (s *Server) ProceedJob(ctx context.Context, req *schedpb.ProceedJobRequest)
 		return nil, err
 	}
 	// The job was released from its hold: dispatch it (admit it and publish an
-	// assignment, or queue it for an ephemeral agent).
+	// assignment, or queue it for an ephemeral worker).
 	s.dispatchJob(ctx, job)
 	return toProtoJob(job), nil
 }

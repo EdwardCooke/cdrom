@@ -2,9 +2,9 @@
 #
 # 07-audit.sh — F-15: the audit log.
 #
-# Boots the stack (with a agent) and generates a spread of audited actions,
+# Boots the stack (with an agent) and generates a spread of audited actions,
 # then verifies that every audited action (a job trigger, an approval
-# decision, a login, a pipeline mutation, a agent lifecycle change, a token
+# decision, a login, a pipeline mutation, an agent lifecycle change, a token
 # exchange, a job status report) is recorded both to a local audit log file
 # (separate from the process's default log) and to the shared audit log in
 # the database (queryable via GET /api/audit). The main API runs with auth
@@ -129,7 +129,7 @@ printf '%s' "$AUDIT_ALL" | jq -e ".[] | select(.action==\"auth.login\") | select
 # A run trigger (a standalone job submit) is recorded.
 printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="run.trigger")' >/dev/null \
   || { echo ">> no run.trigger audit event recorded" >&2; exit 1; }
-# A agent registration is recorded (the agent registered with the API).
+# An agent registration is recorded (the agent registered with the API).
 printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="agent.register")' >/dev/null \
   || { echo ">> no agent.register audit event recorded" >&2; exit 1; }
 # A job status report from the agent is recorded.

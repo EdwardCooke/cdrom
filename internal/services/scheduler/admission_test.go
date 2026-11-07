@@ -106,7 +106,7 @@ func TestRunAdmissionDispatchesAgentJobs(t *testing.T) {
 
 	s.runAdmission(context.Background(), db)
 
-	// The agent job is admitted but not dispatched to a agent group.
+	// The agent job is admitted but not dispatched to an agent group.
 	if got := db.assignments; len(got) != 0 {
 		t.Errorf("assignments = %v, want none (an agent job is not nudged to a group)", got)
 	}

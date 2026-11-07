@@ -70,7 +70,7 @@ platform a first-class, uniform labeling mechanism that:
   (`GET /api/agent-groups`, `GET /api/agent-groups/{name}`,
   `PUT /api/agent-groups/{name}`, `DELETE /api/agent-groups/{name}`); agent
   labels are declared at registration (the gRPC `RegisterAgent` carries them).
-- `internal/agent` + `cmd/agent` + `internal/config` — a agent declares its
+- `internal/agent` + `cmd/agent` + `internal/config` — an agent declares its
   labels at registration (configurable, like its environments) via
   `CDROM_AGENT_LABELS` / the config file's `agent_labels`.
 - `internal/authz` — `agent-groups.can-view` / `agent-groups.can-manage`
@@ -108,18 +108,18 @@ platform a first-class, uniform labeling mechanism that:
   (the `Environment` table, owned by the Database service). This is the
   "from the upcoming UI" path: the UI edits an environment's labels and the API
   persists them.
-- **Agent groups** — a agent group is a first-class, named, labelable row
+- **Agent groups** — an agent group is a first-class, named, labelable row
   (the `AgentGroup` table). It is managed through **new API endpoints**
   (`GET/PUT/DELETE /api/agent-groups[/{name}]`), again the "from the upcoming
-  UI" path: the UI sets a group's labels and the API persists them. A agent
+  UI" path: the UI sets a group's labels and the API persists them. An agent
   group that has never been created has no labels (an empty set); the UI (or an
   admin) creates it and sets its labels.
-- **Agents** — a agent is a long-lived process, so its labels are part of its
+- **Agents** — an agent is a long-lived process, so its labels are part of its
   identity, declared **at registration** (configurable, like its environments
   membership, F-17): `CDROM_AGENT_LABELS` (a `key=value,key2=value2` list) or
   the config file's `agent_labels`. The agent sends them on `RegisterAgent`;
   the API persists them (via the Database service). Re-registration (e.g. after
-  a restart) updates them. Agents are *not* labeled from the UI — a agent's
+  a restart) updates them. Agents are *not* labeled from the UI — an agent's
   labels are set where the agent is deployed.
 
 **Combining: "take all of the labels from everything".**
@@ -132,7 +132,7 @@ every resource in its context. The sources, from least to most specific, are:
 3. **Environment** — the labels of the environment the job targets (F-17);
    absent when the job targets a raw group with no environment.
 4. **Agent group** — the labels of the agent group the job targets; absent
-   when the job runs on an ephemeral agent (no group).
+   when the job runs on an ephemeral worker (no group).
 5. **Agent** — the labels of the agent that runs the job; present only once a
    specific agent is assigned (at dispatch).
 
@@ -153,10 +153,10 @@ set by only one source pass through unchanged.
   definition), so the base combined set is stored on the instance then. This is
   the run's label snapshot: it records the labels that were active when the run
   started, and is not rewritten if a resource is later relabeled.
-- **At dispatch** (the Database service's `StartJobExecution`, when a agent
+- **At dispatch** (the Database service's `StartJobExecution`, when an agent
   claims the job): the assigned **agent's** labels are merged into the job's
   **execution** (`JobExecution.Labels` = the instance's base set + the agent's
-  labels, agent winning on collision). A job that fans out to a agent group
+  labels, agent winning on collision). A job that fans out to an agent group
   (F-17/fan-out) runs on every agent in the group; each agent's execution
   carries the base set plus *that* agent's labels, so a per-agent label (e.g.
   `rack=12`) is visible on the execution that ran on it. The job *instance*
@@ -170,10 +170,10 @@ labels from everything", stored on the job run.
 
 **Agent groups become first-class.**
 
-Today a "agent group" is only a string a agent declares (`Agent.Group`);
+Today a "agent group" is only a string an agent declares (`Agent.Group`);
 there is no row for it, so it cannot carry labels. F-29 adds a `AgentGroup`
 entity (`name` unique, `description`, `labels`) owned by the Database service
-and managed through the API. A agent group's labels are looked up by name when
+and managed through the API. An agent group's labels are looked up by name when
 a job's run is created (a job targeting group `G` picks up `G`'s labels). A
 group that has no `AgentGroup` row simply contributes no labels (the job still
 runs — group membership is unchanged; the row only adds metadata). Creating a
@@ -207,19 +207,19 @@ resolve it to the matching owner / run ids before filtering.
 - **Pipelines & jobs** — labels reuse the existing `pipelines.can-view` /
   `pipelines.can-edit` (F-08/F-11): editing a pipeline's or a job's labels is a
   pipeline edit.
-- **Agents** — a agent's labels are declared by the agent itself at
+- **Agents** — an agent's labels are declared by the agent itself at
   registration (the gRPC target surface, job-token auth); there is no UI
   permission to set another agent's labels.
 
 **Acceptance criteria.**
-- [x] A pipeline, a job in a pipeline, an environment, a agent group, and a
+- [x] A pipeline, a job in a pipeline, an environment, an agent group, and a
       agent can each carry a set of key/value labels; a resource with no
       labels has an empty set.
 - [x] Environment labels are settable through `POST/PUT /api/environments[/{name}]`
       and persisted in the database; agent-group labels are settable through
       `PUT /api/agent-groups/{name}` (and readable through `GET`) and persisted
       in the database — both reachable from the UI without a redeployment.
-- [x] A agent declares its labels at registration (`CDROM_AGENT_LABELS` /
+- [x] An agent declares its labels at registration (`CDROM_AGENT_LABELS` /
       config `agent_labels`); re-registration updates them; they are persisted
       and visible on `GET /api/agents`.
 - [x] When a run is created, each job instance's stored `Labels` equal the
@@ -227,7 +227,7 @@ resolve it to the matching owner / run ids before filtering.
       and the targeted agent group's (if any) labels, with the more-specific
       source winning on a key collision (`agent group > environment > job >
       pipeline` for the base set).
-- [x] When a job is dispatched to a agent, that agent's execution's `Labels`
+- [x] When a job is dispatched to an agent, that agent's execution's `Labels`
       equal the instance's base set plus the agent's labels (agent winning on
       collision); a fan-out job's each-agent execution carries that agent's
       labels.
@@ -253,7 +253,7 @@ resolve it to the matching owner / run ids before filtering.
       job instance that carries it; multiple `label=` parameters are ANDed, and
       a label no resource carries returns an empty set.
 
-**Design decisions (fold into WORKER.md / Architecture.md when implemented).**
+**Design decisions (fold into AGENT.md / Architecture.md when implemented).**
 - **Labels are a uniform `map[string]string` on every resource, stored
   normalized in a `Label` table** (one row per key/value pair, keyed by
   `owner_type` + `owner_id` + `key`), so the same in-memory field shape and the
@@ -279,6 +279,6 @@ resolve it to the matching owner / run ids before filtering.
   narrow one (a `prod` environment's `release`), which is the intuitive
   "the thing closest to the run wins" rule.
 - **Agent labels are declared by the agent at registration** (not from the
-  UI) because a agent is a deployed process whose labels belong with its
+  UI) because an agent is a deployed process whose labels belong with its
   deployment — the same reason its group and environments are declared at
   registration (F-17).

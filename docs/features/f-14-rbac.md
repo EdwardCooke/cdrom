@@ -191,7 +191,7 @@ service-account (F-26) binding mechanisms are not wired in yet; the
 authentication is disabled, requests act as a synthetic admin (the RBAC
 engine is still wired in but bypassed).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **Deny-by-default, union of bindings.** A principal's effective permission
   set is the union of the permissions of every role bound to it (via token
   claim, claim mapping, or stored binding), expanded through role

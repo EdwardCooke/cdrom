@@ -4,7 +4,7 @@ Cdrom — continuous delivery runtime, orchestrator and manager. A pipeline
 tool: defines, schedules, and executes pipeline jobs across distributed
 execution targets.
 
-See [WORKER.md](WORKER.md) for the full architectural context.
+See [AGENT.md](AGENT.md) for the full architectural context.
 
 ## Repository Layout
 
@@ -26,7 +26,7 @@ internal/
     scheduler/ job lifecycle + dispatch
     database/ storage backend abstraction (SQLite / PostgreSQL)
   agent/     long-lived agent implementation
-  agent/      ephemeral agent implementation
+  agent/      ephemeral worker implementation
 ui/           React frontend
   tests/      UI tests
 docs/         documentation

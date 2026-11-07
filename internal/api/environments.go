@@ -22,7 +22,7 @@ import (
 // policy (requires_approval, an F-13 gate) and an automation policy
 // (automatic / manual). They are stored in the database (the Environment
 // table, owned by the Database service) and managed through these endpoints,
-// so an admin can create `prod-auto`, flip `prod` to manual, or add a agent
+// so an admin can create `prod-auto`, flip `prod` to manual, or add an agent
 // to an environment at runtime without a redeployment. A change publishes an
 // environment event so the UI's environments view stays in sync across
 // replicas.

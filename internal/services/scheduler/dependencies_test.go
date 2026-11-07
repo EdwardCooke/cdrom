@@ -167,7 +167,7 @@ func TestResolveJobDependenciesIgnoresJobsWithoutDependencies(t *testing.T) {
 }
 
 // TestResolveJobDependenciesEmptyTargetGroupNoDispatch verifies that a
-// released job with no target group (queued for an ephemeral agent) has its
+// released job with no target group (queued for an ephemeral worker) has its
 // depends_on cleared but is not dispatched (there is no live agent group to
 // fan the job out to).
 func TestResolveJobDependenciesEmptyTargetGroupNoDispatch(t *testing.T) {

@@ -13,7 +13,7 @@ leader election** so only one replica runs the background loops, and
 read of the log delta from the shared artifacts store).
 
 **Why.** Today the control plane assumes a single API instance: agent streams,
-the UI event hub, and job dispatch are per-pod in-memory state. A agent on pod
+the UI event hub, and job dispatch are per-pod in-memory state. An agent on pod
 B never receives a job dispatched via pod A (stranded `pending` forever), UI
 clients only see events from their own pod, and >1 scheduler replica duplicates
 dispatches. This makes the platform deployable as a real HA service (e.g. 4 API
@@ -53,7 +53,7 @@ pods per cluster, dual cluster).
   appended; keep `AppendLog`'s close-per-append (close-to-open consistency).
 
 **Acceptance criteria.**
-- [x] A agent connected to API pod B receives a job dispatched while it is
+- [x] An agent connected to API pod B receives a job dispatched while it is
       registered on pod B, even though the scheduler wrote it via the shared
       event log (no scheduler→specific-pod dependency).
 - [x] A job whose dispatch missed its agent (agent down at dispatch time) is
@@ -63,7 +63,7 @@ pods per cluster, dual cluster).
       produced by activity on pod B (via the shared event log).
 - [x] Two scheduler replicas run concurrently: only the leader runs the
       background loops; no duplicate dispatches or duplicate UI events.
-- [x] A agent's job log is visible (near-live) in a UI connected to a
+- [x] An agent's job log is visible (near-live) in a UI connected to a
       *different* API pod than the one the agent streams to.
 - [x] Killing an API pod does not lose in-flight job delivery: the agent
       reconnects to another pod (2 s backoff) and its poll keeps it in step.

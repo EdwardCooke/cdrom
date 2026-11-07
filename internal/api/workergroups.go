@@ -13,8 +13,8 @@ import (
 // Agent groups (F-29)
 // ---------------------------------------------------------------------------
 //
-// A agent group is a named group of long-lived agents (a job's target_group
-// names it; a agent's group names it). It is a first-class, labelable row: its
+// An agent group is a named group of long-lived agents (a job's target_group
+// names it; an agent's group names it). It is a first-class, labelable row: its
 // labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
 // agent's declared group string) — so a group that has no row simply
@@ -26,7 +26,7 @@ import (
 // agent-groups.can-view; creating/updating/deleting requires
 // agent-groups.can-manage (F-14).
 
-// agentGroupRequest is the JSON form of a agent-group create/update. On
+// agentGroupRequest is the JSON form of an agent-group create/update. On
 // create, name is required; on update, the fields replace the existing values.
 type agentGroupRequest struct {
 	Name        string `json:"name,omitempty"`
@@ -53,7 +53,7 @@ func (s *Server) listAgentGroups(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, nonNil(resp.GetGroups()))
 }
 
-// createAgentGroup adds a agent group (F-29). It requires
+// createAgentGroup adds an agent group (F-29). It requires
 // agent-groups.can-manage. It is idempotent on name: a create for an existing
 // group is a no-op that returns the existing row. On success it records an
 // audit event.
@@ -109,7 +109,7 @@ func (s *Server) getAgentGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, group)
 }
 
-// updateAgentGroup edits a agent group's description and/or labels (F-29). It
+// updateAgentGroup edits an agent group's description and/or labels (F-29). It
 // requires agent-groups.can-manage. On success it records an audit event.
 func (s *Server) updateAgentGroup(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePermission(w, r, authz.PermAgentGroupsManage, authz.Resource{}) {
@@ -145,7 +145,7 @@ func (s *Server) updateAgentGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, group)
 }
 
-// deleteAgentGroup removes a agent group (F-29). It requires
+// deleteAgentGroup removes an agent group (F-29). It requires
 // agent-groups.can-manage. Deleting a group does not affect the agents that
 // belong to it or the jobs that target it; it only removes the group's labels.
 // On success it records an audit event.
@@ -172,7 +172,7 @@ func (s *Server) deleteAgentGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// auditAgentGroupValue renders a agent group as a compact JSON document for
+// auditAgentGroupValue renders an agent group as a compact JSON document for
 // an audit event's old/new value (F-15).
 func auditAgentGroupValue(group *dbpb.AgentGroup) string {
 	return auditJSON(map[string]any{

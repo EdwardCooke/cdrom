@@ -361,19 +361,19 @@ type Agent struct {
 	Group      string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
 	Address    string                 `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
 	LastSeenAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
-	// environments are the names of the environments this worker belongs to
-	// (F-17). Membership is many-to-many: a worker may list several
+	// environments are the names of the environments this agent belongs to
+	// (F-17). Membership is many-to-many: an agent may list several
 	// environments, and an environment can be served by many agents. A job
-	// targeting an environment is dispatched to the live workers that
-	// registered it. Empty means the worker is reachable only by its group.
+	// targeting an environment is dispatched to the live agents that
+	// registered it. Empty means the agent is reachable only by its group.
 	Environments []string `protobuf:"bytes,5,rep,name=environments,proto3" json:"environments,omitempty"`
-	// labels are the worker's labels (F-29): a set of key/value pairs that label
-	// the agent. A worker declares them at registration (configurable, like
+	// labels are the agent's labels (F-29): a set of key/value pairs that label
+	// the agent. An agent declares them at registration (configurable, like
 	// its environments, F-17); re-registration updates them. When a job is
-	// dispatched to the worker, the worker's labels are merged into the job's
-	// execution's label set (the worker's labels win on a key collision). They are
+	// dispatched to the agent, the agent's labels are merged into the job's
+	// execution's label set (the agent's labels win on a key collision). They are
 	// metadata (they never gate, route, or serialize work). Empty means the
-	// worker has no labels.
+	// agent has no labels.
 	Labels        map[string]string `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -456,11 +456,11 @@ type RegisterAgentRequest struct {
 	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Group   string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
 	Address string                 `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
-	// environments are the names of the environments this worker belongs to
-	// (F-17); the worker declares them at registration (configurable, multiple).
+	// environments are the names of the environments this agent belongs to
+	// (F-17); the agent declares them at registration (configurable, multiple).
 	// Re-registration (e.g. after a restart) updates the membership.
 	Environments []string `protobuf:"bytes,4,rep,name=environments,proto3" json:"environments,omitempty"`
-	// labels are the worker's labels (F-29); the worker declares them at
+	// labels are the agent's labels (F-29); the agent declares them at
 	// registration (configurable, like its environments, F-17). Re-registration
 	// (e.g. after a restart) updates them.
 	Labels        map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -623,7 +623,7 @@ func (x *HeartbeatRequest) GetName() string {
 
 type HeartbeatResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// poll_interval_seconds is the interval the API recommends the worker use
+	// poll_interval_seconds is the interval the API recommends the agent use
 	// for heartbeats.
 	PollIntervalSeconds int32 `protobuf:"varint,1,opt,name=poll_interval_seconds,json=pollIntervalSeconds,proto3" json:"poll_interval_seconds,omitempty"`
 	unknownFields       protoimpl.UnknownFields
@@ -710,13 +710,13 @@ type Job struct {
 	RunId int64 `protobuf:"varint,17,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// failure_mode is the job's failure mode (see cdrom.db.v1.FailureMode),
 	// denormalized from the spec (or the pipeline's default) when the job was
-	// created. It controls how a job that fanned out to a worker group is
+	// created. It controls how a job that fanned out to an agent group is
 	// judged from the per-agent outcomes.
 	FailureMode v1.FailureMode `protobuf:"varint,18,opt,name=failure_mode,json=failureMode,proto3,enum=cdrom.db.v1.FailureMode" json:"failure_mode,omitempty"`
 	// step_barrier is the job's step-barrier flag, denormalized from the spec
-	// when the job was created. When true, a job that fans out to a worker
-	// group synchronizes its workers at each step boundary: after a worker
-	// completes a step it waits until every worker alive at the step's start has
+	// when the job was created. When true, a job that fans out to an agent
+	// group synchronizes its agents at each step boundary: after an agent
+	// completes a step it waits until every agent alive at the step's start has
 	// completed it before starting the next step.
 	StepBarrier bool `protobuf:"varint,19,opt,name=step_barrier,json=stepBarrier,proto3" json:"step_barrier,omitempty"`
 	// key is the job's stable, pipeline-scoped identifier (F-08); empty when
@@ -774,7 +774,7 @@ type Job struct {
 	ApprovalReason string `protobuf:"bytes,31,opt,name=approval_reason,json=approvalReason,proto3" json:"approval_reason,omitempty"`
 	// environment is the name of the environment this job targets (F-17); empty
 	// means the job targets its raw target_group. The API uses it to route the
-	// job to the live workers that registered the environment (intersected with
+	// job to the live agents that registered the environment (intersected with
 	// the environment's target_group when set).
 	Environment string `protobuf:"bytes,32,opt,name=environment,proto3" json:"environment,omitempty"`
 	// approval is the job's override of its environment's approval policy
@@ -1126,9 +1126,9 @@ func (x *Job) GetApprovalQuorum() int32 {
 type JobAssignment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Job   *Job                   `protobuf:"bytes,1,opt,name=job,proto3" json:"job,omitempty"`
-	// agent_name is the worker this assignment was dispatched to.
+	// agent_name is the agent this assignment was dispatched to.
 	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	// token is the job token the worker presents to the API (and to outside
+	// token is the job token the agent presents to the API (and to outside
 	// resources) while executing the job.
 	Token         string `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1235,14 +1235,14 @@ func (x *JobCancellation) GetJobId() int64 {
 }
 
 // JobNudge is a lightweight "you have a job" signal (F-23). It carries only
-// the job id, not the spec or token: on receiving it the worker calls GetJob
+// the job id, not the spec or token: on receiving it the agent calls GetJob
 // to fetch the fresh spec, job token, and upstream jobs, then claims and runs
 // the job. This keeps the shared event log lean and replay-safe (a replayed
 // nudge can never carry a stale spec or an expired token). It is the push
-// (fast-path) counterpart to the worker's periodic poll of pending jobs.
+// (fast-path) counterpart to the agent's periodic poll of pending jobs.
 type JobNudge struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// job_id is the job the worker should fetch and run.
+	// job_id is the job the agent should fetch and run.
 	JobId         int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1285,10 +1285,10 @@ func (x *JobNudge) GetJobId() int64 {
 	return 0
 }
 
-// WatchMessage is a single message on a worker's WatchJobs stream. Exactly
+// WatchMessage is a single message on an agent's WatchJobs stream. Exactly
 // one of its fields is set: an assignment (a new job to run, carrying the
-// full job + token), a nudge (a new job to run, by id only — the worker
-// fetches it via GetJob, F-23), or a cancellation (stop a job the worker is
+// full job + token), a nudge (a new job to run, by id only — the agent
+// fetches it via GetJob, F-23), or a cancellation (stop a job the agent is
 // running, F-05).
 type WatchMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1389,12 +1389,12 @@ func (*WatchMessage_Cancellation) isWatchMessage_Message() {}
 func (*WatchMessage_Nudge) isWatchMessage_Message() {}
 
 type WatchJobsRequest struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
 	AgentName string                 `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	Group      string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
-	// environments are the names of the environments this worker belongs to
+	Group     string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
+	// environments are the names of the environments this agent belongs to
 	// (F-17); the API uses them to route jobs that target an environment to the
-	// workers that registered it.
+	// agents that registered it.
 	Environments  []string `protobuf:"bytes,3,rep,name=environments,proto3" json:"environments,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1541,14 +1541,14 @@ func (x *GetJobRequest) GetId() int64 {
 	return 0
 }
 
-// StartJobExecutionRequest asks the API to record that the calling worker has
+// StartJobExecutionRequest asks the API to record that the calling agent has
 // started running a job (fan-out).
 type StartJobExecutionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// job_id is the job the worker is starting.
+	// job_id is the job the agent is starting.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker starting the job.
-	AgentName    string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	// agent_name is the agent starting the job.
+	AgentName     string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1600,14 +1600,14 @@ func (x *StartJobExecutionRequest) GetAgentName() string {
 // StartJobExecutionResponse is the result of a StartJobExecution call. When
 // started is true, job carries the job (spec, upstream jobs, and a fresh job
 // token); when started is false the job was no longer pending (it reached a
-// terminal state, or it is not targeted at the worker's group) and job is
+// terminal state, or it is not targeted at the agent's group) and job is
 // empty.
 type StartJobExecutionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// started is true when the worker's execution was recorded and the job is
+	// started is true when the agent's execution was recorded and the job is
 	// running.
 	Started bool `protobuf:"varint,1,opt,name=started,proto3" json:"started,omitempty"`
-	// job is the job the worker will run (set only when started is true).
+	// job is the job the agent will run (set only when started is true).
 	Job           *Job `protobuf:"bytes,2,opt,name=job,proto3" json:"job,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1658,14 +1658,14 @@ func (x *StartJobExecutionResponse) GetJob() *Job {
 }
 
 // ListPendingJobsRequest asks the API for the pending jobs that target the
-// caller's worker group (F-23).
+// caller's agent group (F-23).
 type ListPendingJobsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// group is the worker group to list pending jobs for.
+	// group is the agent group to list pending jobs for.
 	Group string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	// environments are the environments the calling worker belongs to (F-17).
+	// environments are the environments the calling agent belongs to (F-17).
 	// A pending job that targets one of them is returned even when its target
-	// group differs from `group`, so a worker that serves an environment picks
+	// group differs from `group`, so an agent that serves an environment picks
 	// up its jobs on the poll (catch-up) path.
 	Environments  []string `protobuf:"bytes,2,rep,name=environments,proto3" json:"environments,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1773,11 +1773,11 @@ type ReportJobStatusRequest struct {
 	// outputs are the named values the job produced (F-06); absent/empty leaves
 	// the previously recorded outputs unchanged.
 	Outputs map[string]string `protobuf:"bytes,6,rep,name=outputs,proto3" json:"outputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// agent_name is the worker reporting the status (set by long-lived
-	// workers). When set and the job targets a worker group, the status is
-	// recorded against the worker's execution of the job (fan-out) rather than
+	// agent_name is the agent reporting the status (set by long-lived
+	// agents). When set and the job targets an agent group, the status is
+	// recorded against the agent's execution of the job (fan-out) rather than
 	// the job row; the job's overall status is derived from the executions by
-	// the scheduler. An ephemeral agent (no worker name) reports against the
+	// the scheduler. An ephemeral agent (no agent name) reports against the
 	// job row directly.
 	AgentName string `protobuf:"bytes,7,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// approval_message is the (rendered) message an approval gate (F-13) shows
@@ -1912,15 +1912,15 @@ func (x *ReportJobStatusRequest) GetApprovalStep() string {
 	return ""
 }
 
-// ReportStepCompletionRequest records that the calling worker has completed a
+// ReportStepCompletionRequest records that the calling agent has completed a
 // step of a job (the cross-agent step barrier).
 type ReportStepCompletionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the step belongs to.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// agent_name is the worker that completed the step.
+	// agent_name is the agent that completed the step.
 	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
-	// step_name is the step's name (the step the worker completed).
+	// step_name is the step's name (the step the agent completed).
 	StepName      string `protobuf:"bytes,3,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2036,10 +2036,10 @@ func (x *CheckStepBarrierRequest) GetStepName() string {
 // CheckStepBarrierResponse is the result of a CheckStepBarrier call.
 type CheckStepBarrierResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// satisfied is true when every worker alive at the step's start has
-	// completed the step (the worker may proceed to the next step).
+	// satisfied is true when every agent alive at the step's start has
+	// completed the step (the agent may proceed to the next step).
 	Satisfied bool `protobuf:"varint,1,opt,name=satisfied,proto3" json:"satisfied,omitempty"`
-	// cancelled is true when the job has been cancelled (a waiting worker
+	// cancelled is true when the job has been cancelled (a waiting agent
 	// should stop and report the job cancelled).
 	Cancelled     bool `protobuf:"varint,2,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2439,7 +2439,7 @@ func (x *DispatchJobRequest) GetJob() *Job {
 
 type DispatchJobResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// dispatched is the number of live workers that received the assignment.
+	// dispatched is the number of live agents that received the assignment.
 	Dispatched    int32 `protobuf:"varint,1,opt,name=dispatched,proto3" json:"dispatched,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3050,7 +3050,7 @@ func (x *SendWebhookResponse) GetStatusCode() int32 {
 }
 
 // ClaimStepOnceRequest asks the API to claim the "run this step" slot for a
-// step of a job that fans out to a worker group (F-01). The API proxies the
+// step of a job that fans out to an agent group (F-01). The API proxies the
 // claim to the Database service, which holds the durable slot.
 type ClaimStepOnceRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3362,28 +3362,28 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x13ListLogFilesRequest\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\"C\n" +
 	"\x14ListLogFilesResponse\x12+\n" +
-	"\x05files\x18\x01 \x03(\v2\x15.cdrom.api.v1.LogFileR\x05files\"\xa3\x02\n" +
-	"\x06Agent\x12\x12\n" +
+	"\x05files\x18\x01 \x03(\v2\x15.cdrom.api.v1.LogFileR\x05files\"\xa1\x02\n" +
+	"\x05Agent\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x03 \x01(\tR\aaddress\x12<\n" +
 	"\flast_seen_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastSeenAt\x12\"\n" +
-	"\fenvironments\x18\x05 \x03(\tR\fenvironments\x128\n" +
-	"\x06labels\x18\x06 \x03(\v2 .cdrom.api.v1.Agent.LabelsEntryR\x06labels\x1a9\n" +
+	"\fenvironments\x18\x05 \x03(\tR\fenvironments\x127\n" +
+	"\x06labels\x18\x06 \x03(\v2\x1f.cdrom.api.v1.Agent.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x02\n" +
-	"\x15RegisterAgentRequest\x12\x12\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x81\x02\n" +
+	"\x14RegisterAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x03 \x01(\tR\aaddress\x12\"\n" +
-	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12G\n" +
-	"\x06labels\x18\x05 \x03(\v2/.cdrom.api.v1.RegisterAgentRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12F\n" +
+	"\x06labels\x18\x05 \x03(\v2..cdrom.api.v1.RegisterAgentRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"-\n" +
-	"\x17DeregisterAgentRequest\x12\x12\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\",\n" +
+	"\x16DeregisterAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"&\n" +
 	"\x10HeartbeatRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"G\n" +
@@ -3446,11 +3446,11 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +
 	"\x0eArtifactsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"k\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
 	"\rJobAssignment\x12#\n" +
-	"\x03job\x18\x01 \x01(\v2\x11.cdrom.api.v1.JobR\x03job\x12\x1f\n" +
-	"\vagent_name\x18\x02 \x01(\tR\n" +
-	"agentName\x12\x14\n" +
+	"\x03job\x18\x01 \x01(\v2\x11.cdrom.api.v1.JobR\x03job\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x02 \x01(\tR\tagentName\x12\x14\n" +
 	"\x05token\x18\x03 \x01(\tR\x05token\"(\n" +
 	"\x0fJobCancellation\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"!\n" +
@@ -3462,20 +3462,20 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"assignment\x12C\n" +
 	"\fcancellation\x18\x02 \x01(\v2\x1d.cdrom.api.v1.JobCancellationH\x00R\fcancellation\x12.\n" +
 	"\x05nudge\x18\x03 \x01(\v2\x16.cdrom.api.v1.JobNudgeH\x00R\x05nudgeB\t\n" +
-	"\amessage\"m\n" +
-	"\x10WatchJobsRequest\x12\x1f\n" +
-	"\vagent_name\x18\x01 \x01(\tR\n" +
-	"agentName\x12\x14\n" +
+	"\amessage\"k\n" +
+	"\x10WatchJobsRequest\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x01 \x01(\tR\tagentName\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\"\n" +
 	"\fenvironments\x18\x03 \x03(\tR\fenvironments\")\n" +
 	"\x10CancelJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\"\x1f\n" +
 	"\rGetJobRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x03R\x02id\"R\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\"P\n" +
 	"\x18StartJobExecutionRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x02 \x01(\tR\n" +
-	"agentName\"Z\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x02 \x01(\tR\tagentName\"Z\n" +
 	"\x19StartJobExecutionResponse\x12\x18\n" +
 	"\astarted\x18\x01 \x01(\bR\astarted\x12#\n" +
 	"\x03job\x18\x02 \x01(\v2\x11.cdrom.api.v1.JobR\x03job\"R\n" +
@@ -3483,7 +3483,7 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\"\n" +
 	"\fenvironments\x18\x02 \x03(\tR\fenvironments\"@\n" +
 	"\x17ListPendingJobsResponse\x12%\n" +
-	"\x04jobs\x18\x01 \x03(\v2\x11.cdrom.api.v1.JobR\x04jobs\"\xe5\x04\n" +
+	"\x04jobs\x18\x01 \x03(\v2\x11.cdrom.api.v1.JobR\x04jobs\"\xe3\x04\n" +
 	"\x16ReportJobStatusRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12.\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x129\n" +
@@ -3492,9 +3492,9 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\vfinished_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"finishedAt\x12:\n" +
 	"\fstep_results\x18\x05 \x03(\v2\x17.cdrom.db.v1.StepResultR\vstepResults\x12K\n" +
-	"\aoutputs\x18\x06 \x03(\v21.cdrom.api.v1.ReportJobStatusRequest.OutputsEntryR\aoutputs\x12\x1f\n" +
-	"\vagent_name\x18\a \x01(\tR\n" +
-	"agentName\x12)\n" +
+	"\aoutputs\x18\x06 \x03(\v21.cdrom.api.v1.ReportJobStatusRequest.OutputsEntryR\aoutputs\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\a \x01(\tR\tagentName\x12)\n" +
 	"\x10approval_message\x18\b \x01(\tR\x0fapprovalMessage\x12-\n" +
 	"\x12approval_approvers\x18\t \x03(\tR\x11approvalApprovers\x12'\n" +
 	"\x0fapproval_quorum\x18\n" +
@@ -3502,11 +3502,11 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\rapproval_step\x18\v \x01(\tR\fapprovalStep\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"p\n" +
 	"\x1bReportStepCompletionRequest\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vagent_name\x18\x02 \x01(\tR\n" +
-	"agentName\x12\x1b\n" +
+	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x02 \x01(\tR\tagentName\x12\x1b\n" +
 	"\tstep_name\x18\x03 \x01(\tR\bstepName\"M\n" +
 	"\x17CheckStepBarrierRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
@@ -3592,10 +3592,10 @@ const file_cdrom_api_v1_api_proto_rawDesc = "" +
 	"\fJobLogStream\x12\x1e\n" +
 	"\x1aJOB_LOG_STREAM_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15JOB_LOG_STREAM_STDOUT\x10\x01\x12\x19\n" +
-	"\x15JOB_LOG_STREAM_STDERR\x10\x022\x9f\x11\n" +
-	"\x03API\x12K\n" +
-	"\x0eRegisterAgent\x12#.cdrom.api.v1.RegisterAgentRequest\x1a\x14.cdrom.api.v1.Agent\x12Q\n" +
-	"\x10DeregisterAgent\x12%.cdrom.api.v1.DeregisterAgentRequest\x1a\x16.google.protobuf.Empty\x12L\n" +
+	"\x15JOB_LOG_STREAM_STDERR\x10\x022\x9a\x11\n" +
+	"\x03API\x12H\n" +
+	"\rRegisterAgent\x12\".cdrom.api.v1.RegisterAgentRequest\x1a\x13.cdrom.api.v1.Agent\x12O\n" +
+	"\x0fDeregisterAgent\x12$.cdrom.api.v1.DeregisterAgentRequest\x1a\x16.google.protobuf.Empty\x12L\n" +
 	"\tHeartbeat\x12\x1e.cdrom.api.v1.HeartbeatRequest\x1a\x1f.cdrom.api.v1.HeartbeatResponse\x12I\n" +
 	"\tWatchJobs\x12\x1e.cdrom.api.v1.WatchJobsRequest\x1a\x1a.cdrom.api.v1.WatchMessage0\x01\x128\n" +
 	"\x06GetJob\x12\x1b.cdrom.api.v1.GetJobRequest\x1a\x11.cdrom.api.v1.Job\x12d\n" +
@@ -3643,9 +3643,9 @@ var file_cdrom_api_v1_api_proto_goTypes = []any{
 	(*LogFileChunk)(nil),                // 3: cdrom.api.v1.LogFileChunk
 	(*ListLogFilesRequest)(nil),         // 4: cdrom.api.v1.ListLogFilesRequest
 	(*ListLogFilesResponse)(nil),        // 5: cdrom.api.v1.ListLogFilesResponse
-	(*Agent)(nil),                      // 6: cdrom.api.v1.Agent
-	(*RegisterAgentRequest)(nil),       // 7: cdrom.api.v1.RegisterAgentRequest
-	(*DeregisterAgentRequest)(nil),     // 8: cdrom.api.v1.DeregisterAgentRequest
+	(*Agent)(nil),                       // 6: cdrom.api.v1.Agent
+	(*RegisterAgentRequest)(nil),        // 7: cdrom.api.v1.RegisterAgentRequest
+	(*DeregisterAgentRequest)(nil),      // 8: cdrom.api.v1.DeregisterAgentRequest
 	(*HeartbeatRequest)(nil),            // 9: cdrom.api.v1.HeartbeatRequest
 	(*HeartbeatResponse)(nil),           // 10: cdrom.api.v1.HeartbeatResponse
 	(*Job)(nil),                         // 11: cdrom.api.v1.Job

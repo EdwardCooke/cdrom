@@ -39,8 +39,8 @@ const (
 // Scheduler manages job lifecycle and dispatch.
 //
 // The API/controller layer calls SubmitJob to create a job. When the job
-// targets a group of long-lived workers, the scheduler pushes it to the API
-// (DispatchJob), which fans it out to the live workers in that group. Jobs
+// targets a group of long-lived agents, the scheduler pushes it to the API
+// (DispatchJob), which fans it out to the live agents in that group. Jobs
 // with an empty target group are queued for ephemeral Kubernetes agents,
 // which the control plane spawns.
 //
@@ -85,7 +85,7 @@ type SchedulerClient interface {
 	// CreateRun starts a new execution of a pipeline (F-07): it creates a
 	// PipelineRun and one job instance per job definition in the pipeline,
 	// then drives them (dispatching the dependency-free instances to the API,
-	// which fans them out to the live workers; instances with dependencies are
+	// which fans them out to the live agents; instances with dependencies are
 	// left pending for the dependency resolver). The run's overall status is
 	// derived from its job instances by the scheduler's run-status loop.
 	CreateRun(ctx context.Context, in *CreateRunRequest, opts ...grpc.CallOption) (*Run, error)
@@ -232,8 +232,8 @@ func (c *schedulerClient) RestartRun(ctx context.Context, in *RestartRunRequest,
 // Scheduler manages job lifecycle and dispatch.
 //
 // The API/controller layer calls SubmitJob to create a job. When the job
-// targets a group of long-lived workers, the scheduler pushes it to the API
-// (DispatchJob), which fans it out to the live workers in that group. Jobs
+// targets a group of long-lived agents, the scheduler pushes it to the API
+// (DispatchJob), which fans it out to the live agents in that group. Jobs
 // with an empty target group are queued for ephemeral Kubernetes agents,
 // which the control plane spawns.
 //
@@ -278,7 +278,7 @@ type SchedulerServer interface {
 	// CreateRun starts a new execution of a pipeline (F-07): it creates a
 	// PipelineRun and one job instance per job definition in the pipeline,
 	// then drives them (dispatching the dependency-free instances to the API,
-	// which fans them out to the live workers; instances with dependencies are
+	// which fans them out to the live agents; instances with dependencies are
 	// left pending for the dependency resolver). The run's overall status is
 	// derived from its job instances by the scheduler's run-status loop.
 	CreateRun(context.Context, *CreateRunRequest) (*Run, error)

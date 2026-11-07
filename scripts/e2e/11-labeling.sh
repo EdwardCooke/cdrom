@@ -4,9 +4,9 @@
 # groups, and agents are combined onto a run's job instances and are
 # searchable by label key/value.
 #
-# Boots the stack (with a agent in the "default" group) and:
+# Boots the stack (with an agent in the "default" group) and:
 #
-#   1. creates a agent group ("default") carrying a label (rack=1);
+#   1. creates an agent group ("default") carrying a label (rack=1);
 #   2. creates a pipeline carrying a label (team=backend) with a single job
 #      that targets the "default" group;
 #   3. triggers a run of the pipeline and waits for it to run to succeeded;
@@ -40,7 +40,7 @@ e2e_boot_stack with-agent
 
 API=http://127.0.0.1:8080
 
-# --- create a agent group carrying a label (F-29) --------------------------
+# --- create an agent group carrying a label (F-29) --------------------------
 # The e2e agent registers in the "default" group; giving that group a row
 # with a label exercises the agent-group label source of the run's combined
 # set.

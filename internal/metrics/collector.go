@@ -126,7 +126,7 @@ func (c *Collector) StartMetrics(ctx context.Context, addr string) error {
 // config's metrics.addr is empty.
 func DefaultMetricsAddr(component string) string {
 	switch component {
-	case "agent", "agent":
+	case "agent", "worker":
 		return "127.0.0.1:9100"
 	case "database":
 		return "127.0.0.1:9101"

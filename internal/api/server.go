@@ -1121,7 +1121,7 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 		}
 		// The job's agent group (F-17): the file's agentGroup (defaulting to
 		// the pipeline's spec.agentGroup) takes precedence over the JSON
-		// target_group; a job with neither runs on an ephemeral agent.
+		// target_group; a job with neither runs on an ephemeral worker.
 		targetGroup := job.TargetGroup
 		if job.AgentGroup != "" {
 			targetGroup = job.AgentGroup
@@ -1644,7 +1644,7 @@ type jobStepRequest struct {
 	Condition    string            `json:"condition,omitempty"`
 	IgnoreFailed bool              `json:"ignore_failed,omitempty"`
 	// Once (F-01) marks the step to run on at most one target of a job that
-	// fans out to a agent group: the first target to claim the step's slot
+	// fans out to an agent group: the first target to claim the step's slot
 	// runs it, the others skip it.
 	Once   bool                          `json:"once,omitempty"`
 	Params map[string]*paramValueRequest `json:"params,omitempty"`
@@ -1683,7 +1683,7 @@ type jobSpecRequest struct {
 	// FailureMode is the job's failure mode (F-01): "all" (default),
 	// "best_effort", or "any"; empty means the job inherits the pipeline's.
 	FailureMode string `json:"failure_mode,omitempty"`
-	// StepBarrier, when true, makes a job that fans out to a agent group
+	// StepBarrier, when true, makes a job that fans out to an agent group
 	// synchronize its agents at each step boundary (F-01).
 	StepBarrier bool `json:"step_barrier,omitempty"`
 	// ConcurrencyKeys are the job's concurrency keys (F-16): named, global

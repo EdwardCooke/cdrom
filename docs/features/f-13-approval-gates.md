@@ -26,7 +26,7 @@ a human sign-off.
 - UI — an approval prompt (reads `awaiting_approval` + `approval_message` from
   `GET /api/jobs/{id}`, calls approve/reject).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - The gate is a **step** (`type: "approval"`), not a job-level flag: a job
   pauses at the approval step and its later steps run only after approval. The
   step's `message` param is a Go template rendered against the step's condition

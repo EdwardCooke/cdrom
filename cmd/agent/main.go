@@ -1,7 +1,7 @@
 // Command agent is the Cdrom long-lived agent.
 //
-// A agent is a resident process on a deployment target. Agents belong to a
-// group; jobs can be dispatched to agents by group name. A agent talks
+// An agent is a resident process on a deployment target. Agents belong to a
+// group; jobs can be dispatched to agents by group name. An agent talks
 // only to the API service. Must run on both Windows and Linux.
 package main
 

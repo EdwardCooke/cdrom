@@ -48,7 +48,7 @@ func (f *fakeWatchStream) Recv() (*apipb.WatchMessage, error) {
 // returns the job in jobs for a startable job id (the agent fetches the full
 // job from the start, not from the nudge); ListPendingJobs returns no jobs so
 // the agent's periodic poll does not interfere with the tests.
-// stepCompletion is a (job, step) pair the fake was told a agent completed
+// stepCompletion is a (job, step) pair the fake was told an agent completed
 // (the cross-agent step barrier).
 type stepCompletion struct {
 	jobID int64
@@ -287,8 +287,8 @@ func TestAgentCancelForUnknownJobIsNoop(t *testing.T) {
 	}
 }
 
-// TestAgentStepBarrierSyncs verifies that a agent running a job with the
-// step-barrier flag set (and targeting a agent group) reports each completed
+// TestAgentStepBarrierSyncs verifies that an agent running a job with the
+// step-barrier flag set (and targeting an agent group) reports each completed
 // step to the API and waits at the barrier between steps, then reports the
 // job succeeded once the barrier is satisfied.
 func TestAgentStepBarrierSyncs(t *testing.T) {
@@ -352,7 +352,7 @@ func TestAgentStepBarrierSyncs(t *testing.T) {
 	}
 }
 
-// TestAgentStepBarrierCancelled verifies that a agent waiting at a step
+// TestAgentStepBarrierCancelled verifies that an agent waiting at a step
 // barrier reports the job cancelled when the API reports the job was
 // cancelled (distinct from a failure).
 func TestAgentStepBarrierCancelled(t *testing.T) {
@@ -402,7 +402,7 @@ func TestAgentStepBarrierCancelled(t *testing.T) {
 	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_CANCELLED)
 }
 
-// TestAgentTokenExchangeStep verifies that a agent running a job with a
+// TestAgentTokenExchangeStep verifies that an agent running a job with a
 // token_exchange step calls the API's ExchangeJobToken RPC (presenting the
 // job's own token) for the step's audience and reports the job succeeded.
 func TestAgentTokenExchangeStep(t *testing.T) {

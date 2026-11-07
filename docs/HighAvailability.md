@@ -3,7 +3,7 @@
 This document describes the design for making the Cdrom control plane
 high-availability: multiple API pods, multiple scheduler replicas, and a
 shared event log so that job delivery and live events work correctly
-regardless of which pod a agent or UI client lands on.
+regardless of which pod an agent or UI client lands on.
 
 > **Status:** implemented. The control plane is now HA-ready: a shared
 > event log is the coordination bus, job delivery is hybrid push + pull
@@ -27,7 +27,7 @@ per-pod in-memory state:
 Job delivery is a **one-shot push** from the scheduler into one pod's
 in-memory map (`DispatchJob` → `dispatch()` iterates `s.live`). So:
 
-- A agent connected to **API pod B** never receives a job dispatched via
+- An agent connected to **API pod B** never receives a job dispatched via
   **API pod A** — the job is left `pending` with nothing to re-dispatch it.
 - Every background loop's fan-out (watchdog, retry, dependency resolver,
   run-status, cancel) has the same hole: the scheduler dials **one** API
@@ -81,7 +81,7 @@ flowchart TB
         TAIL2 --> HUB2
     end
 
-    subgraph WORKER["Agents / Works"]
+    subgraph AGENT["Agents / Works"]
         W1["agent-1<br/>(polls 1 s + push)"]
         W2["agent-2<br/>(polls 1 s + push)"]
         U1["UI client<br/>(WS on pod 1)"]
@@ -360,7 +360,7 @@ shutdown the holder releases the lease so a peer can take over immediately
 rather than waiting for the TTL to lapse.
 
 The **API needs no leader election**: each pod appends only the events *it*
-observed (a agent registering on pod B is published by pod B, once), so
+observed (an agent registering on pod B is published by pod B, once), so
 there's no duplication.
 
 ---

@@ -12,16 +12,16 @@ package notify
 // token.
 //
 // The OnceClaimer enforces a step's `once` field (F-01): a step with `once`
-// set runs on at most one target of a job that fans out to a agent group. The
+// set runs on at most one target of a job that fans out to an agent group. The
 // target calls the API's ClaimStepOnce RPC (which claims a durable slot in the
 // Database service, keyed by job id + step name + attempt); when it returns
 // false the step was already claimed by another target in the same attempt, so
 // the executor skips the step.
 //
-// Both the long-lived agent and the ephemeral agent use these: each sets them
+// Both the long-lived agent and the ephemeral worker use these: each sets them
 // in the executor's context (via executor.ContextWithNotifier and
 // executor.ContextWithOnceClaimer) before running a job's spec. They are the
-// single shared implementations, so the agent and agent do not each carry a
+// single shared implementations, so the agent and worker do not each carry a
 // copy.
 
 import (

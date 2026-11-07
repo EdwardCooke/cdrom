@@ -73,7 +73,7 @@ func (f *fakeTargetAPI) StreamJobLogs(ctx context.Context, opts ...grpc.CallOpti
 // reporter, the upstream jobs and the job's identity (for a step's
 // condition), the run's parameters and identity (for spec interpolation), and
 // the token exchanger are all set, and the step barrier is set only when the
-// job has the step-barrier flag set and targets a agent group.
+// job has the step-barrier flag set and targets an agent group.
 func TestRunJobBuildsRunContext(t *testing.T) {
 	captured := captureContext()
 	api := &fakeTargetAPI{}
@@ -123,7 +123,7 @@ func TestRunJobBuildsRunContext(t *testing.T) {
 }
 
 // TestRunJobNoBarrierForAgent verifies that a job that does not target a
-// agent group (an ephemeral agent) runs its steps unbarriered: the step
+// agent group (an ephemeral worker) runs its steps unbarriered: the step
 // barrier is not set in the run context even when the job has the flag set.
 func TestRunJobNoBarrierForAgent(t *testing.T) {
 	captured := captureContext()

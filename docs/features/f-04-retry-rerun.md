@@ -28,7 +28,7 @@ tools always offer retry and "run again".
 - [x] Re-running a finished job produces a new execution with a fresh status.
 - [x] Attempts are visible (UI shows attempt N of M).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **A retry is a new attempt on the same `Job` row** (not a new `Job`), so the
   pipeline run stays coherent. The job's `attempt` counter (1-based) is
   incremented by the scheduler each time it re-dispatches a failed job, and the

@@ -31,7 +31,7 @@
 #      tree — asserting sanitization (star_.cfg, bad_name_.cfg) and collision
 #      allocation (du_p.txt + du_p1.txt). Plus the emptiness negative.
 #
-# Standalone: boots its own stack (WITH A WORKER). Shared (run from e2e.sh):
+# Standalone: boots its own stack (WITH A AGENT). Shared (run from e2e.sh):
 # the stack is already up.
 #
 # Registered in scripts/e2e.sh (after 15-externally-sourced-pipelines.sh).

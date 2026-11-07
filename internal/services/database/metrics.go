@@ -89,7 +89,7 @@ func (s *Server) refreshMetrics(ctx context.Context) {
 
 	// Concurrency slots (F-16): the durable slots held per resource. A
 	// resource's kind is derived from its key: "global" is the system-wide
-	// cap, "group:<name>" is a agent group's cap, and anything else is a
+	// cap, "group:<name>" is an agent group's cap, and anything else is a
 	// concurrency key.
 	var resources []models.ConcurrencyResource
 	if err := db.Find(&resources).Error; err == nil {
@@ -107,7 +107,7 @@ func (s *Server) refreshMetrics(ctx context.Context) {
 
 // slotKindAndResource maps a concurrency resource's key to its kind
 // (global / group / key) and name (F-16): "global" is the system-wide cap,
-// "group:<name>" is a agent group's cap, and anything else is a concurrency
+// "group:<name>" is an agent group's cap, and anything else is a concurrency
 // key.
 func slotKindAndResource(key string) (kind, resource string) {
 	switch {

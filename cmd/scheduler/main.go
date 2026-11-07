@@ -4,7 +4,7 @@
 // writes to the shared Database service only: it persists the job and appends
 // an "assignment" event to the shared event log, which every API pod tails and
 // fans out to its local agents. It no longer dials a specific API pod, so a
-// job is delivered to whichever pod a agent happens to be connected to. Jobs
+// job is delivered to whichever pod an agent happens to be connected to. Jobs
 // with an empty target group are queued for ephemeral Kubernetes agents. All
 // durable state is persisted through the Database service.
 //

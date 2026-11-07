@@ -115,7 +115,7 @@ different pipelines and runs.
   double-dispatch the last free slot, and a restart re-derives held slots from
   the live job rows rather than from in-memory state.
 - **The gate sits on the scheduler's dispatch path.** Before the scheduler
-  appends an "assignment" event (or queues a job for an ephemeral agent), it
+  appends an "assignment" event (or queues a job for an ephemeral worker), it
   checks that none of the job's keys are held and, if so, atomically marks
   them held. If *any* key is held, the job is left `pending` and a background
   loop (alongside the dependency resolver, F-06/F-08) re-checks pending jobs
@@ -145,7 +145,7 @@ different pipelines and runs.
   Database service, so they can be edited at runtime via the API
   (`GET/POST/PUT/DELETE /api/concurrency-limits`) without a redeployment. A
   rule's `pattern` is a regular expression matched against the dimension's
-  name (a agent group's name or a concurrency key's name; empty for the
+  name (an agent group's name or a concurrency key's name; empty for the
   single `global` resource). A concrete resource's effective limit is the
   limit of the **most specific (longest) matching rule** of its kind; a
   resource matching no rule falls back to a default (a concurrency key

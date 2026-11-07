@@ -25,7 +25,7 @@ import (
 const (
 	// globalResourceKey is the synthetic resource for the system-wide cap.
 	globalResourceKey = "global"
-	// groupResourcePrefix prefixes a agent group's synthetic resource name.
+	// groupResourcePrefix prefixes an agent group's synthetic resource name.
 	groupResourcePrefix = "group:"
 )
 
@@ -80,7 +80,7 @@ func (r *limitRules) globalLimit() int {
 	return 0
 }
 
-// groupLimit returns the cap for a agent group: the limit of the most
+// groupLimit returns the cap for an agent group: the limit of the most
 // specific (longest) matching group rule, or 0 (unlimited) when no rule
 // matches.
 func (r *limitRules) groupLimit(group string) int {

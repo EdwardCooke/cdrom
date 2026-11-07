@@ -2,7 +2,7 @@
 #
 # 18-approval-groups.sh — F-27: approval groups (named approver sets).
 #
-# Boots the stack (with a agent) plus a SECOND, RBAC-enabled API (:8081) that
+# Boots the stack (with an agent) plus a SECOND, RBAC-enabled API (:8081) that
 # shares the stack's IdP + db + scheduler. Approval-gated JOBS are submitted to
 # the OPEN main API (:8080) — the agent runs them and pauses them at the gate
 # — while the approve/reject decisions and group MANAGEMENT are driven on the

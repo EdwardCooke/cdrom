@@ -13,13 +13,13 @@ option go_package = "cdrom/internal/gen/cdrom/scheduler/v1;schedulerv1";
 // Scheduler manages job lifecycle and dispatch.
 //
 // The API/controller layer calls SubmitJob to create a job. When the job
-// targets a group of long-lived workers, the scheduler pushes it to the API
-// (DispatchJob), which fans it out to the live workers in that group. Jobs
+// targets a group of long-lived agents, the scheduler pushes it to the API
+// (DispatchJob), which fans it out to the live agents in that group. Jobs
 // with an empty target group are queued for ephemeral Kubernetes agents,
 // which the control plane spawns.
 //
 // The scheduler persists all state through the Database service, so it holds
-// no data of its own. Worker registration, WatchJobs streams, and job status
+// no data of its own. Agent registration, WatchJobs streams, and job status
 // reporting live on the API service, which is the single control plane that
 // execution targets talk to.
 service Scheduler {
@@ -46,7 +46,7 @@ service Scheduler {
   // environment (F-17): for each of the run's jobs that is awaiting_proceed
   // it releases the hold (Database.ProceedJob, conditionally — only if the job
   // is still awaiting_proceed) and dispatches it (an assignment event for a
-  // worker-group job, or a re-queue for an ephemeral agent). A job that is no
+  // agent-group job, or a re-queue for an ephemeral agent). A job that is no
   // longer awaiting_proceed (it was cancelled, or it was already proceeded) is
   // left untouched, so a late proceed is a no-op. It returns the run and the
   // number of jobs it proceeded.
@@ -59,7 +59,7 @@ service Scheduler {
   // CreateRun starts a new execution of a pipeline (F-07): it creates a
   // PipelineRun and one job instance per job definition in the pipeline,
   // then drives them (dispatching the dependency-free instances to the API,
-  // which fans them out to the live workers; instances with dependencies are
+  // which fans them out to the live agents; instances with dependencies are
   // left pending for the dependency resolver). The run's overall status is
   // derived from its job instances by the scheduler's run-status loop.
   rpc CreateRun(CreateRunRequest) returns (Run);
@@ -138,7 +138,7 @@ message Job {
   string environment = 23;
   // labels are the job's combined labels (F-29): the union of the labels of every
   // resource in the job's context — its pipeline, the job itself, the
-  // environment it targets (if any), and the worker group it targets (if
+  // environment it targets (if any), and the agent group it targets (if
   // any) — with the more specific source winning on a key collision. They are
   // computed when the job instance is created and stored as a snapshot. They
   // are metadata (they never gate, route, or serialize work). Empty means the
@@ -182,7 +182,7 @@ message Job {
 message SubmitJobRequest {
   int64 pipeline_id = 1;
   string name = 2;
-  // target_group selects a group of long-lived workers; empty means the job
+  // target_group selects a group of long-lived agents; empty means the job
   // is queued for an ephemeral Kubernetes agent.
   string target_group = 3;
   // spec is the execution spec to snapshot onto the job; when absent the job

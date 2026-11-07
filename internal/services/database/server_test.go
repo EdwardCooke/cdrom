@@ -1903,7 +1903,7 @@ func TestUpdateRun(t *testing.T) {
 // Job executions (fan-out)
 // ---------------------------------------------------------------------------
 
-// newGroupJob creates a pipeline with a single job targeting a agent group,
+// newGroupJob creates a pipeline with a single job targeting an agent group,
 // materializes a manual run, and returns the run's job INSTANCE — a startable
 // work item. It deliberately does NOT return the pipeline DEFINITION row:
 // StartJobExecution refuses definition rows (a job with a pipeline but no run
@@ -1938,7 +1938,7 @@ func newGroupJob(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, 
 	return instance
 }
 
-// TestStartJobExecution verifies that a agent starting a pending group job
+// TestStartJobExecution verifies that an agent starting a pending group job
 // records its execution and marks the job running (fan-out).
 func TestStartJobExecution(t *testing.T) {
 	client := startServer(t)
@@ -1983,7 +1983,7 @@ func TestStartJobExecution(t *testing.T) {
 
 // TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution
 // verifies the DOUBLE-DELIVERY GUARD (flaky e2e 2026-11-07, scenario 16):
-// once a agent has started a (job, agent, attempt) episode, a duplicate
+// once an agent has started a (job, agent, attempt) episode, a duplicate
 // delivery is DECLINED — in BOTH phases of the episode: while the first
 // execution is still running, AND after it has finished while the job row
 // still reads running (the derived status lags the executions — the exact
@@ -2095,7 +2095,7 @@ func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
 }
 
 // TestStartJobExecutionRejectsAgentJob verifies that a job with an empty
-// target group (an ephemeral agent) is not started by a agent.
+// target group (an ephemeral worker) is not started by an agent.
 func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
@@ -2117,7 +2117,7 @@ func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
 	}
 }
 
-// TestUpdateJobExecution verifies that a agent's outcome is recorded on its
+// TestUpdateJobExecution verifies that an agent's outcome is recorded on its
 // execution, and that a late report for an execution that already reached a
 // terminal status is a no-op (it cannot clobber the terminal status).
 func TestUpdateJobExecution(t *testing.T) {
@@ -2163,7 +2163,7 @@ func TestUpdateJobExecution(t *testing.T) {
 	}
 }
 
-// TestAbandonAgentExecutions verifies that a agent's running executions are
+// TestAbandonAgentExecutions verifies that an agent's running executions are
 // marked failed when the agent re-registers after a restart (fan-out): the
 // stale in-progress executions do not block the job's overall status.
 func TestAbandonAgentExecutions(t *testing.T) {
@@ -2384,7 +2384,7 @@ func TestGetLeaseNotFound(t *testing.T) {
 // Cross-agent step barrier
 // ---------------------------------------------------------------------------
 
-// registerAgent registers (or refreshes) a agent in the group, which sets
+// registerAgent registers (or refreshes) an agent in the group, which sets
 // its last_seen_at to now (so it is alive).
 func registerAgent(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, group string) {
 	t.Helper()
@@ -2393,7 +2393,7 @@ func registerAgent(t *testing.T, client dbpb.DatabaseClient, ctx context.Context
 	}
 }
 
-// reportStepCompletion reports that a agent completed a step of a job.
+// reportStepCompletion reports that an agent completed a step of a job.
 func reportStepCompletion(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, agent, stepName string) {
 	t.Helper()
 	if _, err := client.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{JobId: jobID, AgentName: agent, StepName: stepName}); err != nil {
@@ -2494,7 +2494,7 @@ func TestCheckStepBarrierCancelled(t *testing.T) {
 }
 
 // TestCheckStepBarrierAgentJob verifies that a job with an empty target group
-// (an ephemeral agent) has no barrier to wait on (it is vacuously satisfied).
+// (an ephemeral worker) has no barrier to wait on (it is vacuously satisfied).
 func TestCheckStepBarrierAgentJob(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
@@ -2515,16 +2515,16 @@ func TestCheckStepBarrierAgentJob(t *testing.T) {
 	}
 }
 
-// TestCheckStepBarrierDeadAgentDropped verifies that a agent that is not
+// TestCheckStepBarrierDeadAgentDropped verifies that an agent that is not
 // alive (it has not heartbeated within the liveness window) is dropped from
 // the barrier: its missing step completion does not block the job. This is
-// what lets a job complete when a agent in the group dies mid-step.
+// what lets a job complete when an agent in the group dies mid-step.
 func TestCheckStepBarrierDeadAgentDropped(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
 
-	// Shorten the liveness window so a agent that is not refreshed goes stale
+	// Shorten the liveness window so an agent that is not refreshed goes stale
 	// quickly; restore it afterwards.
 	original := agentAliveThreshold
 	agentAliveThreshold = 30 * time.Millisecond

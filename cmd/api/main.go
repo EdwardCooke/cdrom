@@ -1,7 +1,7 @@
 // Command api is the Cdrom API/controller service.
 //
 // It is the single control plane. It exposes the HTTP API consumed by the UI
-// and a gRPC API consumed by execution targets (agents, workers) and the
+// and a gRPC API consumed by execution targets (agents, agents) and the
 // scheduler. It routes requests to the service layer (database, scheduler,
 // artifacts) and holds the agents' WatchJobs streams. No business logic
 // belongs here.
@@ -48,7 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The API's own gRPC listen address (dial target for agents, workers,
+	// The API's own gRPC listen address (dial target for agents, agents,
 	// and the scheduler).
 	grpcAddr := cfg.ListenAddress
 	if grpcAddr == "" {
@@ -350,7 +350,7 @@ func main() {
 		}
 	}()
 
-	// Job-token auth for the gRPC surface (agents, workers). Disabled by
+	// Job-token auth for the gRPC surface (agents, agents). Disabled by
 	// default; when enabled the API mints job tokens via the IdP (the only
 	// caller of its job-token endpoint, authenticated with its mTLS client
 	// certificate) and verifies them on job-scoped calls. It performs OIDC
@@ -364,7 +364,7 @@ func main() {
 		}
 	}
 
-	// gRPC server (agents, workers, scheduler).
+	// gRPC server (agents, agents, scheduler).
 	creds, err := grpcutil.ServerCreds(cfg.TLS)
 	if err != nil {
 		logger.Error("tls: server creds", "err", err)

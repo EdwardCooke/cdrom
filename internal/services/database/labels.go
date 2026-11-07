@@ -311,14 +311,14 @@ func (s *Server) runBaseLabels(tx *gorm.DB, pipelineLabels, jobLabels map[string
 // Agent groups (F-29)
 // ---------------------------------------------------------------------------
 //
-// A agent group is a named group of long-lived agents (a job's target_group
-// names it; a agent's group names it). It is a first-class, labelable row: its
+// An agent group is a named group of long-lived agents (a job's target_group
+// names it; an agent's group names it). It is a first-class, labelable row: its
 // labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
 // agent's declared group string) — so a group that has no row simply
 // contributes no labels and jobs targeting it still run on its agents.
 
-// CreateAgentGroup adds a agent group (F-29). It is idempotent on name: a
+// CreateAgentGroup adds an agent group (F-29). It is idempotent on name: a
 // create for an existing group is a no-op that returns the existing row (its
 // description and labels are left unchanged).
 func (s *Server) CreateAgentGroup(ctx context.Context, req *dbpb.CreateAgentGroupRequest) (*dbpb.AgentGroup, error) {
@@ -387,7 +387,7 @@ func (s *Server) ListAgentGroups(ctx context.Context, req *dbpb.ListAgentGroupsR
 	return response, nil
 }
 
-// UpdateAgentGroup edits a agent group's description and/or labels. A missing
+// UpdateAgentGroup edits an agent group's description and/or labels. A missing
 // group returns NotFound.
 func (s *Server) UpdateAgentGroup(ctx context.Context, req *dbpb.UpdateAgentGroupRequest) (*dbpb.AgentGroup, error) {
 	if req.GetName() == "" {
@@ -416,7 +416,7 @@ func (s *Server) UpdateAgentGroup(ctx context.Context, req *dbpb.UpdateAgentGrou
 	return toProtoAgentGroup(&group), nil
 }
 
-// DeleteAgentGroup removes a agent group. A missing group returns NotFound.
+// DeleteAgentGroup removes an agent group. A missing group returns NotFound.
 // Deleting a group does not affect the agents that belong to it (they keep
 // their group string) or the jobs that target it (they still dispatch to the
 // group's agents); it only removes the group's labels.
@@ -439,7 +439,7 @@ func (s *Server) DeleteAgentGroup(ctx context.Context, req *dbpb.DeleteAgentGrou
 	return &emptypb.Empty{}, nil
 }
 
-// toProtoAgentGroup converts a agent group model into its proto form (F-29).
+// toProtoAgentGroup converts an agent group model into its proto form (F-29).
 func toProtoAgentGroup(group *models.AgentGroup) *dbpb.AgentGroup {
 	return &dbpb.AgentGroup{
 		Id:          int64(group.ID),

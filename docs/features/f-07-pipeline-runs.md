@@ -30,7 +30,7 @@ A run is the unit CD tools report on.
       non-skipped jobs succeeded).
 - [x] Historical runs are retained and browsable.
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **`PipelineRun` is a first-class entity.** A run is one execution of a
   pipeline: it carries `pipeline_id`, an overall `status` (`pending`,
   `running`, `succeeded`, `failed`, `cancelled`), a `trigger` (how it was
@@ -50,7 +50,7 @@ A run is the unit CD tools report on.
   `target_group` is dispatched to the API (which fans it out to the live
   agents); a job with `depends_on` is left `pending` for the dependency
   resolver (F-06); a job with an empty `target_group` and no dependencies is
-  left `pending` for an ephemeral agent.
+  left `pending` for an ephemeral worker.
 - **Run status is derived, not reported.** A run has no target of its own, so
   its status is *derived* from its job instances by a background **run-status
   loop** (`internal/services/scheduler/runstatus.go`, started from

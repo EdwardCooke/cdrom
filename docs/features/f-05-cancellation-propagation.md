@@ -26,12 +26,12 @@ the command. A real cancel must reach the target.
 - [x] The job's final status is `cancelled` and the target stops work.
 - [x] Cancelling an already-finished job is a no-op (idempotent).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **The cancel signal rides the existing `WatchJobs` stream.** The API's
   `WatchJobs` server stream now carries a `WatchMessage` (a oneof of
   `JobAssignment` and `JobCancellation`) instead of a bare `JobAssignment`.
   When the scheduler cancels a job it calls the API's `CancelJob` RPC, which
-  pushes a `JobCancellation` down every live agent's stream. A agent that is
+  pushes a `JobCancellation` down every live agent's stream. An agent that is
   running the job interrupts the running step (cancelling the job's context,
   which terminates the command) and reports `cancelled`; a cancellation for a
   job that is not running on that agent is ignored (the job's status is

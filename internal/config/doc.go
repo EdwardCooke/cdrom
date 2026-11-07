@@ -1,5 +1,5 @@
 // Package config provides shared configuration loading for all cdrom
-// binaries (api, agent, agent, and the gRPC service servers).
+// binaries (api, agent, worker, and the gRPC service servers).
 //
 // Configuration is resolved in three layers, in increasing order of
 // precedence:

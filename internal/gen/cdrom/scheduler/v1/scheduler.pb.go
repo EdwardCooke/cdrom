@@ -83,7 +83,7 @@ type Job struct {
 	Environment string `protobuf:"bytes,23,opt,name=environment,proto3" json:"environment,omitempty"`
 	// labels are the job's combined labels (F-29): the union of the labels of every
 	// resource in the job's context — its pipeline, the job itself, the
-	// environment it targets (if any), and the worker group it targets (if
+	// environment it targets (if any), and the agent group it targets (if
 	// any) — with the more specific source winning on a key collision. They are
 	// computed when the job instance is created and stored as a snapshot. They
 	// are metadata (they never gate, route, or serialize work). Empty means the
@@ -363,7 +363,7 @@ type SubmitJobRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	PipelineId int64                  `protobuf:"varint,1,opt,name=pipeline_id,json=pipelineId,proto3" json:"pipeline_id,omitempty"`
 	Name       string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// target_group selects a group of long-lived workers; empty means the job
+	// target_group selects a group of long-lived agents; empty means the job
 	// is queued for an ephemeral Kubernetes agent.
 	TargetGroup string `protobuf:"bytes,3,opt,name=target_group,json=targetGroup,proto3" json:"target_group,omitempty"`
 	// spec is the execution spec to snapshot onto the job; when absent the job

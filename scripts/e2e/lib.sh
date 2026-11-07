@@ -73,7 +73,7 @@ E2E_OWN_STACK=0
 # never depends on committed/stale certs; ruled 2026-11-06) and EXPORTS the
 # CDROM_TLS_* triple that every service launched afterwards inherits: e2e_start
 # execs `env … cmd` in the CURRENT environment, so one export turns the ENTIRE
-# gRPC mesh (db, scheduler, artifacts, idp, api, pipelinesource, agent, agent,
+# gRPC mesh (db, scheduler, artifacts, idp, api, pipelinesource, agent, worker,
 # and every per-scenario replica) into mutual TLS with zero per-launch edits.
 # CURL_CA_BUNDLE makes every curl in the suite trust OUR CA, so https:// probes
 # to the IdP's OIDC/SCIM surfaces verify instead of failing.
@@ -159,7 +159,7 @@ e2e_cleanup() {
 # e2e_boot_stack [with-agent]
 # Boots the full local stack (db, scheduler, artifacts, idp, api) against a
 # throwaway SQLite database in a fresh temp directory, and installs the
-# cleanup trap. With "with-agent" it also starts a agent in the "default"
+# cleanup trap. With "with-agent" it also starts an agent in the "default"
 # group and waits for its WatchJobs stream to be open on the API.
 #
 # The API runs with job-token auth enabled (the IdP mints the job tokens the

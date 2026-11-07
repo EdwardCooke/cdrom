@@ -59,7 +59,7 @@ just by humans.
 - [x] An event trigger starts a run when the watched condition is met.
 - [x] Trigger source is recorded on the run (manual / cron / webhook / event).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **Triggers live on the pipeline.** A `Pipeline` carries a `Triggers` list
   (a JSON column via GORM's `serializer:json`), each a `Trigger` with a
   `name` (unique within the pipeline), a `type` (`cron` / `webhook` /

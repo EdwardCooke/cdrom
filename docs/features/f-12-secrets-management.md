@@ -52,7 +52,7 @@ pipeline definition (in plaintext) or in logs.
       nonce is a shared, DB-backed counter so no (key, nonce) pair is ever
       reused across API replicas).
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **A single key in configuration; the API is the only encryption authority.**
   The built-in store is AES-256-GCM with a 32-byte key from the `secrets`
   config section (`CDROM_SECRETS_KEY`, base64). When no key is configured the
@@ -81,7 +81,7 @@ pipeline definition (in plaintext) or in logs.
   `run_params` denormalization. A run against a specific version carries that
   version's secrets, so a re-run of an old run uses the old secrets.
 - **The API decrypts at dispatch and hands plaintext to the target.** When the
-  API hands a job to an execution target (`GetJob` for workers,
+  API hands a job to an execution target (`GetJob` for agents,
   `StartJobExecution` for agents, and the dispatch push), it decrypts the
   job's stored ciphertexts into a name → plaintext map on the API's `Job`
   (`secrets`), which the target puts on the executor's run context. The

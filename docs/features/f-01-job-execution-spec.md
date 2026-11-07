@@ -59,13 +59,13 @@ missing piece.
       `skipped`, not failed), and a retry (a new attempt) may run it again.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - The spec is a **per-run snapshot** stored on the `Job` row (a JSON `text`
   column via GORM's `serializer:json`), so a pipeline edit never changes what
   a past run did.
 - The canonical spec type is `cdrom.db.v1.JobSpec`; the API and scheduler
   protos reference it rather than redefining it.
-- Execution is shared by agent and agent in `internal/executor`
+- Execution is shared by agent and worker in `internal/executor`
   (`executor.Execute(ctx, spec, logger)`).
 - **Step types & handlers:** the executor (`internal/executor`) is the generic
   dispatch engine; a step's `type` selects an `executor.StepHandler` (empty →
@@ -77,7 +77,7 @@ missing piece.
   `executor.RegisterStepType(name, handler)` (e.g. `ansible`, `terraform`,
   `argo`). An unregistered type fails the job with a clear error.
   `params` carries handler-specific configuration so a new type needs no
-  spec-schema change. The agent and agent blank-import `internal/stephandlers`
+  spec-schema change. The agent and worker blank-import `internal/stephandlers`
   so the built-in handlers are registered before any job runs. This is the
   seam for the later plugin architecture.
 - **Shell contract:** the shell handler reads its `command` (string param),
@@ -101,7 +101,7 @@ missing piece.
   step-output name the token is written under, default `token`) from the step's
   `params`. It obtains the exchanged token from the execution target through the
   executor's `TokenExchange` (set via `executor.ContextWithTokenExchange`): the
-  agent and agent implement it by calling the API's `ExchangeJobToken` RPC,
+  agent and worker implement it by calling the API's `ExchangeJobToken` RPC,
   presenting the job's own token. The executor gives every step a per-step
   output directory (the step's env carries `executor.StepOutputDirEnv`), so the
   handler always writes the token into it under the output name; the executor
@@ -113,14 +113,14 @@ missing piece.
 - **`once` (run a step on one target of a fan-out job).** A step may set
   `once` (a boolean field on `JobStep`, alongside `condition` and
   `ignore_failed`). When set, the executor runs the step on at most one target
-  of a job that fans out to a agent group: before running it, the target
+  of a job that fans out to an agent group: before running it, the target
   claims a durable slot (job id + step name + attempt) in the Database service
   (a guarded atomic claim, like F-16's slot accounting); the first target to
   claim it runs the step, and every other target that reaches the same step in
   the same attempt sees the slot already claimed and **skips** the step
   (recorded `skipped`, not failed, so it does not stop the job). A retry
   (F-04) is a new attempt, so it may run the step again. A job on a single
-  target (an ephemeral agent) is unaffected — there is only one target to
+  target (an ephemeral worker) is unaffected — there is only one target to
   claim. This is what keeps a notification step (F-18) from sending once per
   agent, and lets any step type (e.g. a one-shot `shell` command) run on a
   single agent of a group.

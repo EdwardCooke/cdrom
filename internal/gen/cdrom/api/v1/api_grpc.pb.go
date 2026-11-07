@@ -21,8 +21,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	API_RegisterAgent_FullMethodName       = "/cdrom.api.v1.API/RegisterAgent"
-	API_DeregisterAgent_FullMethodName     = "/cdrom.api.v1.API/DeregisterAgent"
+	API_RegisterAgent_FullMethodName        = "/cdrom.api.v1.API/RegisterAgent"
+	API_DeregisterAgent_FullMethodName      = "/cdrom.api.v1.API/DeregisterAgent"
 	API_Heartbeat_FullMethodName            = "/cdrom.api.v1.API/Heartbeat"
 	API_WatchJobs_FullMethodName            = "/cdrom.api.v1.API/WatchJobs"
 	API_GetJob_FullMethodName               = "/cdrom.api.v1.API/GetJob"
@@ -55,52 +55,52 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // API is the gRPC surface the API/controller service exposes to execution
-// targets (long-lived workers and ephemeral agents) and to the scheduler.
+// targets (long-lived agents and ephemeral agents) and to the scheduler.
 //
 // Agents and agents talk ONLY to the API. The API is the single control
-// plane: it holds the workers' WatchJobs streams, relays job assignments
+// plane: it holds the agents' WatchJobs streams, relays job assignments
 // pushed by the scheduler (DispatchJob), and proxies artifact
 // uploads/downloads to the artifacts service.
 type APIClient interface {
-	// Agent lifecycle (called by long-lived workers).
+	// Agent lifecycle (called by long-lived agents).
 	RegisterAgent(ctx context.Context, in *RegisterAgentRequest, opts ...grpc.CallOption) (*Agent, error)
 	DeregisterAgent(ctx context.Context, in *DeregisterAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
-	// Execution side (called by workers and agents).
+	// Execution side (called by agents and agents).
 	//
-	// WatchJobs is a server stream: the worker identifies itself and receives a
+	// WatchJobs is a server stream: the agent identifies itself and receives a
 	// WatchMessage for every job dispatched to its group (a JobAssignment or a
 	// JobNudge, F-23) and for every cancellation of a job it is running (a
 	// JobCancellation, F-05).
 	WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMessage], error)
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
-	// StartJobExecution records that the calling worker has started running a
-	// job (fan-out): it creates the worker's JobExecution for the job's current
+	// StartJobExecution records that the calling agent has started running a
+	// job (fan-out): it creates the agent's JobExecution for the job's current
 	// attempt (via the Database service) and returns the job with its spec,
-	// upstream jobs, and a fresh job token. A job that targets a worker group
-	// runs on every worker in the group, so the start is not exclusive — every
-	// worker in the group starts its own execution. Starting an execution for a
+	// upstream jobs, and a fresh job token. A job that targets an agent group
+	// runs on every agent in the group, so the start is not exclusive — every
+	// agent in the group starts its own execution. Starting an execution for a
 	// job that is no longer pending (it reached a terminal state, or it is not
-	// targeted at the worker's group) is rejected, so a job that finished
-	// before a slow worker started it is not run.
+	// targeted at the agent's group) is rejected, so a job that finished
+	// before a slow agent started it is not run.
 	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
-	// ListPendingJobs returns the pending jobs that target the caller's worker
-	// group (F-23). This is the worker's pull path: it polls it on a short
+	// ListPendingJobs returns the pending jobs that target the caller's agent
+	// group (F-23). This is the agent's pull path: it polls it on a short
 	// interval to pick up jobs that were published while it was unreachable, so
 	// no job is stranded pending. It wraps the Database service's
 	// ListPendingByGroup.
 	ListPendingJobs(ctx context.Context, in *ListPendingJobsRequest, opts ...grpc.CallOption) (*ListPendingJobsResponse, error)
 	ReportJobStatus(ctx context.Context, in *ReportJobStatusRequest, opts ...grpc.CallOption) (*Job, error)
-	// ReportStepCompletion records that the calling worker has completed a step
-	// of a job (the cross-agent step barrier). A worker that runs a job with a
+	// ReportStepCompletion records that the calling agent has completed a step
+	// of a job (the cross-agent step barrier). An agent that runs a job with a
 	// step barrier reports each step it finishes; the barrier for a step is
-	// satisfied once every worker that is alive has completed it. The API
+	// satisfied once every agent that is alive has completed it. The API
 	// forwards the completion to the Database service. When job-token auth is
 	// enabled the caller must present a job token scoped to the job.
 	ReportStepCompletion(ctx context.Context, in *ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
-	// (every worker alive at the step's start has completed it) or whether the
-	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// (every agent alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting agent can stop). An agent that runs
 	// a job with a step barrier polls it after each step before proceeding to
 	// the next. The API forwards the check to the Database service. When
 	// job-token auth is enabled the caller must present a job token scoped to
@@ -115,11 +115,11 @@ type APIClient interface {
 	CheckApproval(ctx context.Context, in *CheckApprovalRequest, opts ...grpc.CallOption) (*CheckApprovalResponse, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
-	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
+	// down the agent's WatchJobs stream (for a long-lived agent) or, for an
 	// ephemeral agent, records the cancellation so the agent's next GetJob
 	// reflects it. It is a no-op when the job is not running on a live target.
 	CancelJob(ctx context.Context, in *CancelJobRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// StreamJobLogs is a client stream: an execution target (worker or agent)
+	// StreamJobLogs is a client stream: an execution target (agent or agent)
 	// opens it at the start of a job and sends a JobLogChunk for each chunk of
 	// step output (stdout/stderr). The first chunk of each step carries
 	// metadata (job_id, step_name, stream); subsequent chunks carry data. The
@@ -135,7 +135,7 @@ type APIClient interface {
 	// runners requesting a new token for a different audience mid-job.
 	ExchangeJobToken(ctx context.Context, in *ExchangeJobTokenRequest, opts ...grpc.CallOption) (*ExchangeJobTokenResponse, error)
 	// Dispatch (called by the scheduler). The scheduler pushes a job here; the
-	// API fans it out to the live workers in the job's target group.
+	// API fans it out to the live agents in the job's target group.
 	DispatchJob(ctx context.Context, in *DispatchJobRequest, opts ...grpc.CallOption) (*DispatchJobResponse, error)
 	// NotifyJobStatus (called by the scheduler). The scheduler's watchdog uses
 	// it to fan a job-status change (e.g. a job reaped as timed_out) out to the
@@ -152,7 +152,7 @@ type APIClient interface {
 	// status changes. It does not touch the database (the scheduler already
 	// persisted the change); it only publishes the event.
 	NotifyRunStatus(ctx context.Context, in *NotifyRunStatusRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Artifact proxy (called by workers and agents). The API forwards these to
+	// Artifact proxy (called by agents and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
 	//
 	// The CONTRACT is logical FILES: (namespace, name)-addressed, described by
@@ -178,12 +178,12 @@ type APIClient interface {
 	// the step's headers and body, within the API's configured response timeout.
 	SendWebhook(ctx context.Context, in *SendWebhookRequest, opts ...grpc.CallOption) (*SendWebhookResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
-	// step of a job that fans out to a worker group: the first target to claim
+	// step of a job that fans out to an agent group: the first target to claim
 	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. The API proxies the claim to the Database
 	// service (which holds the durable slot), so the dedup is correct across
-	// every API replica and worker process. When job-token auth is enabled the
+	// every API replica and agent process. When job-token auth is enabled the
 	// caller must present a job token scoped to the job.
 	ClaimStepOnce(ctx context.Context, in *ClaimStepOnceRequest, opts ...grpc.CallOption) (*ClaimStepOnceResponse, error)
 	// Restoration (F-22). A rollback step handler on an execution target calls
@@ -513,52 +513,52 @@ func (c *aPIClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.
 // for forward compatibility.
 //
 // API is the gRPC surface the API/controller service exposes to execution
-// targets (long-lived workers and ephemeral agents) and to the scheduler.
+// targets (long-lived agents and ephemeral agents) and to the scheduler.
 //
 // Agents and agents talk ONLY to the API. The API is the single control
-// plane: it holds the workers' WatchJobs streams, relays job assignments
+// plane: it holds the agents' WatchJobs streams, relays job assignments
 // pushed by the scheduler (DispatchJob), and proxies artifact
 // uploads/downloads to the artifacts service.
 type APIServer interface {
-	// Agent lifecycle (called by long-lived workers).
+	// Agent lifecycle (called by long-lived agents).
 	RegisterAgent(context.Context, *RegisterAgentRequest) (*Agent, error)
 	DeregisterAgent(context.Context, *DeregisterAgentRequest) (*emptypb.Empty, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
-	// Execution side (called by workers and agents).
+	// Execution side (called by agents and agents).
 	//
-	// WatchJobs is a server stream: the worker identifies itself and receives a
+	// WatchJobs is a server stream: the agent identifies itself and receives a
 	// WatchMessage for every job dispatched to its group (a JobAssignment or a
 	// JobNudge, F-23) and for every cancellation of a job it is running (a
 	// JobCancellation, F-05).
 	WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[WatchMessage]) error
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
-	// StartJobExecution records that the calling worker has started running a
-	// job (fan-out): it creates the worker's JobExecution for the job's current
+	// StartJobExecution records that the calling agent has started running a
+	// job (fan-out): it creates the agent's JobExecution for the job's current
 	// attempt (via the Database service) and returns the job with its spec,
-	// upstream jobs, and a fresh job token. A job that targets a worker group
-	// runs on every worker in the group, so the start is not exclusive — every
-	// worker in the group starts its own execution. Starting an execution for a
+	// upstream jobs, and a fresh job token. A job that targets an agent group
+	// runs on every agent in the group, so the start is not exclusive — every
+	// agent in the group starts its own execution. Starting an execution for a
 	// job that is no longer pending (it reached a terminal state, or it is not
-	// targeted at the worker's group) is rejected, so a job that finished
-	// before a slow worker started it is not run.
+	// targeted at the agent's group) is rejected, so a job that finished
+	// before a slow agent started it is not run.
 	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
-	// ListPendingJobs returns the pending jobs that target the caller's worker
-	// group (F-23). This is the worker's pull path: it polls it on a short
+	// ListPendingJobs returns the pending jobs that target the caller's agent
+	// group (F-23). This is the agent's pull path: it polls it on a short
 	// interval to pick up jobs that were published while it was unreachable, so
 	// no job is stranded pending. It wraps the Database service's
 	// ListPendingByGroup.
 	ListPendingJobs(context.Context, *ListPendingJobsRequest) (*ListPendingJobsResponse, error)
 	ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error)
-	// ReportStepCompletion records that the calling worker has completed a step
-	// of a job (the cross-agent step barrier). A worker that runs a job with a
+	// ReportStepCompletion records that the calling agent has completed a step
+	// of a job (the cross-agent step barrier). An agent that runs a job with a
 	// step barrier reports each step it finishes; the barrier for a step is
-	// satisfied once every worker that is alive has completed it. The API
+	// satisfied once every agent that is alive has completed it. The API
 	// forwards the completion to the Database service. When job-token auth is
 	// enabled the caller must present a job token scoped to the job.
 	ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error)
 	// CheckStepBarrier reports whether the barrier for a job's step is satisfied
-	// (every worker alive at the step's start has completed it) or whether the
-	// job has been cancelled (so a waiting worker can stop). A worker that runs
+	// (every agent alive at the step's start has completed it) or whether the
+	// job has been cancelled (so a waiting agent can stop). An agent that runs
 	// a job with a step barrier polls it after each step before proceeding to
 	// the next. The API forwards the check to the Database service. When
 	// job-token auth is enabled the caller must present a job token scoped to
@@ -573,11 +573,11 @@ type APIServer interface {
 	CheckApproval(context.Context, *CheckApprovalRequest) (*CheckApprovalResponse, error)
 	// CancelJob is called by the scheduler to signal the execution target
 	// running a job to stop the work (F-05). The API delivers a JobCancellation
-	// down the worker's WatchJobs stream (for a long-lived worker) or, for an
+	// down the agent's WatchJobs stream (for a long-lived agent) or, for an
 	// ephemeral agent, records the cancellation so the agent's next GetJob
 	// reflects it. It is a no-op when the job is not running on a live target.
 	CancelJob(context.Context, *CancelJobRequest) (*emptypb.Empty, error)
-	// StreamJobLogs is a client stream: an execution target (worker or agent)
+	// StreamJobLogs is a client stream: an execution target (agent or agent)
 	// opens it at the start of a job and sends a JobLogChunk for each chunk of
 	// step output (stdout/stderr). The first chunk of each step carries
 	// metadata (job_id, step_name, stream); subsequent chunks carry data. The
@@ -593,7 +593,7 @@ type APIServer interface {
 	// runners requesting a new token for a different audience mid-job.
 	ExchangeJobToken(context.Context, *ExchangeJobTokenRequest) (*ExchangeJobTokenResponse, error)
 	// Dispatch (called by the scheduler). The scheduler pushes a job here; the
-	// API fans it out to the live workers in the job's target group.
+	// API fans it out to the live agents in the job's target group.
 	DispatchJob(context.Context, *DispatchJobRequest) (*DispatchJobResponse, error)
 	// NotifyJobStatus (called by the scheduler). The scheduler's watchdog uses
 	// it to fan a job-status change (e.g. a job reaped as timed_out) out to the
@@ -610,7 +610,7 @@ type APIServer interface {
 	// status changes. It does not touch the database (the scheduler already
 	// persisted the change); it only publishes the event.
 	NotifyRunStatus(context.Context, *NotifyRunStatusRequest) (*emptypb.Empty, error)
-	// Artifact proxy (called by workers and agents). The API forwards these to
+	// Artifact proxy (called by agents and agents). The API forwards these to
 	// the artifacts service so execution targets never talk to it directly.
 	//
 	// The CONTRACT is logical FILES: (namespace, name)-addressed, described by
@@ -636,12 +636,12 @@ type APIServer interface {
 	// the step's headers and body, within the API's configured response timeout.
 	SendWebhook(context.Context, *SendWebhookRequest) (*SendWebhookResponse, error)
 	// ClaimStepOnce (F-01) atomically claims the "run this step" slot for a
-	// step of a job that fans out to a worker group: the first target to claim
+	// step of a job that fans out to an agent group: the first target to claim
 	// (job id + step name + attempt) wins and runs the step; every other target
 	// that reaches the same step in the same attempt sees the slot already
 	// claimed and skips the step. The API proxies the claim to the Database
 	// service (which holds the durable slot), so the dedup is correct across
-	// every API replica and worker process. When job-token auth is enabled the
+	// every API replica and agent process. When job-token auth is enabled the
 	// caller must present a job token scoped to the job.
 	ClaimStepOnce(context.Context, *ClaimStepOnceRequest) (*ClaimStepOnceResponse, error)
 	// Restoration (F-22). A rollback step handler on an execution target calls

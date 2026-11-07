@@ -22,7 +22,7 @@ old run reproduces the old definition.
 - [x] A run records which version it executed.
 - [x] A run can be re-executed against its original version.
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **A version is an immutable snapshot, not a diff.** Each change to a
   pipeline (create or update) records a new `PipelineVersion` row: a full
   snapshot of the definition at that version — name, description, failure

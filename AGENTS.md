@@ -59,7 +59,7 @@ more replicas) → **services** (standalone gRPC servers) → **execution target
     `git` binary), pins SSH host keys, and serves fetched bytes to the API.
 - **Execution layer** — long-lived **agents** (resident, targetable by group
   and environment; hold a `WatchJobs` stream *and* poll as the authoritative
-  delivery path, F-23) and ephemeral **workers** (spun up in Kubernetes for a
+  delivery path, F-23) and ephemeral **agents** (spun up in Kubernetes for a
   one-off job; `GetJob` → run → report). Both run on Windows and Linux.
 
 **Topology rule:** execution targets talk **only** to the API. The API talks
@@ -252,7 +252,7 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 
 ## Cross-Platform Requirements
 
-- Both agents **and** workers must run on **Windows and Linux**.
+- Both agents **and** agents must run on **Windows and Linux**.
 - Portable Go only (`filepath`, `os` env handling); no hard-coded path
   separators, Unix-only syscalls, or shell assumptions without a Windows
   equivalent. Windows path/line-ending handling is a known failure mode.
@@ -310,7 +310,7 @@ internal/
                 clients, shallow bare-object-store git cache, strict SSH
                 host-key pinning
   agent/       long-lived agent (registration, WatchJobs + poll, StepBarrier)
-  agent/        ephemeral agent (GetJob → run → report; unbarriered)
+  agent/        ephemeral worker (GetJob → run → report; unbarriered)
   idp/          local OIDC IdP (JWT issuer, auto key rotation; users, keys,
                 codes via the Database service)
 proto/          protobuf definitions (proto/cdrom/<service>/v1/)
@@ -367,7 +367,7 @@ env vars; every binary accepts `--config-file <path>`, see
 Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH` / `CDROM_DB_POSTGRES_DSN`,
 `CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_AGENT_{NAME,GROUP,ENVIRONMENTS,LABELS}`,
-`CDROM_WORKER_{JOB_ID,NAME}`, `CDROM_AGENT_ROOT` (agent/agent staged-working-area
+`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_AGENT_ROOT` (agent/agent staged-working-area
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
 resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
 (OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping,

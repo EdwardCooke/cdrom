@@ -2,7 +2,7 @@
 #
 # 02-timeout.sh — F-03: a job-level timeout terminates the job as timed_out.
 #
-# Boots the stack (with a agent) and submits a job whose single step sleeps
+# Boots the stack (with an agent) and submits a job whose single step sleeps
 # well past the job's declared timeout. The agent terminates the sleeping
 # step at the job's deadline and reports the job as timed_out (status 6), not
 # failed. The step declares no per-step timeout, so only the job-level

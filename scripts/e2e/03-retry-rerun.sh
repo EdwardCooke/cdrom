@@ -2,7 +2,7 @@
 #
 # 03-retry-rerun.sh — F-04: retry policy and re-run of a finished job.
 #
-# Boots the stack (with a agent) and verifies:
+# Boots the stack (with an agent) and verifies:
 #   1. a job whose single step always fails, with a retry policy of
 #      max_attempts 2 (so it runs at most 3 times: 1 initial + 2 retries)
 #      and a 1s backoff, is re-dispatched by the scheduler's retry loop

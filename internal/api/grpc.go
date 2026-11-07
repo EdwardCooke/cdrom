@@ -43,7 +43,7 @@ import (
 // heartbeatInterval is the recommended agent heartbeat cadence.
 const heartbeatInterval = 10 * time.Second
 
-// assignmentQueueSize bounds how many assignments can be queued for a agent
+// assignmentQueueSize bounds how many assignments can be queued for an agent
 // between deliveries.
 const assignmentQueueSize = 64
 
@@ -167,7 +167,7 @@ type GRPCServer struct {
 	rollbackCfg config.RollbackConfig
 }
 
-// liveAgent is a agent with an open WatchJobs stream.
+// liveAgent is an agent with an open WatchJobs stream.
 type liveAgent struct {
 	name  string
 	group string
@@ -258,7 +258,7 @@ func (s *GRPCServer) RegisterAgent(ctx context.Context, req *apipb.RegisterAgent
 	if err != nil {
 		return nil, err
 	}
-	// A agent that re-registers after a restart will not resume the jobs it
+	// An agent that re-registers after a restart will not resume the jobs it
 	// was running before the restart. Abandon its stale running executions
 	// (fan-out) so they do not block the jobs' overall status. Best-effort: a
 	// failure here does not fail the registration (the scheduler's job-status
@@ -355,7 +355,7 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 
 	s.mu.Lock()
 	if existing, ok := s.watchers[name]; ok {
-		// A agent should have at most one stream; replace the stale one.
+		// An agent should have at most one stream; replace the stale one.
 		close(existing)
 	}
 	s.watchers[name] = assignmentChannel
@@ -421,11 +421,11 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 // StartJobExecution records that the calling agent has started running a job
 // (fan-out). It creates the agent's JobExecution for the job's current
 // attempt via the Database service and, on success, returns the job with its
-// spec, upstream jobs, and a fresh job token. A job that targets a agent
+// spec, upstream jobs, and a fresh job token. A job that targets an agent
 // group runs on every agent in the group, so the start is not exclusive:
 // every agent in the group starts its own execution. Starting an execution
 // for a job that is no longer pending (it reached a terminal state, or it is
-// not targeted at a agent group) is rejected, so a job that finished before a
+// not targeted at an agent group) is rejected, so a job that finished before a
 // slow agent started it is not run.
 func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobExecutionRequest) (*apipb.StartJobExecutionResponse, error) {
 	if req.GetJobId() == 0 {
@@ -446,7 +446,7 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	}
 	if !resp.GetStarted() {
 		// The job was no longer pending (it reached a terminal state, or it is
-		// not targeted at a agent group); the caller skips it.
+		// not targeted at an agent group); the caller skips it.
 		return &apipb.StartJobExecutionResponse{Started: false}, nil
 	}
 	// The job is now running on this agent. Fetch it fresh (it now carries the
@@ -512,7 +512,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	}
 	// A report of awaiting_approval (F-13) is a job-level pause: the approval
 	// gate is job-level (one approval unblocks every agent of a fan-out job),
-	// so it is recorded on the job row — not a agent's execution — with the
+	// so it is recorded on the job row — not an agent's execution — with the
 	// message shown to the user. This applies to both group and single-target
 	// jobs. The job row is updated directly (not via the execution), and the
 	// status is published so the UI sees the gate and its message.
@@ -550,7 +550,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		s.recordJobStatusMetrics(ctx, updated)
 		return toAPIJob(updated), nil
 	}
-	// A report from a named agent for a job that targets a agent group is a
+	// A report from a named agent for a job that targets an agent group is a
 	// fan-out report: it is recorded against the agent's execution of the job
 	// (one per agent), not the job row. The job's overall status is derived
 	// from the executions by the scheduler's job-status loop, so the job row
@@ -585,8 +585,8 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			return toAPIJob(job), nil
 		}
 	}
-	// A report from an ephemeral agent (no agent name) — or a job that does
-	// not target a agent group — updates the job row directly.
+	// A report from an ephemeral worker (no agent name) — or a job that does
+	// not target an agent group — updates the job row directly.
 	updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
 		Id:          req.GetJobId(),
 		Status:      req.GetStatus(),
@@ -654,8 +654,8 @@ func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.Report
 
 // CheckStepBarrier reports whether the barrier for a job's step is satisfied
 // (every agent alive at the step's start has completed it) or whether the job
-// has been cancelled. It forwards the check to the Database service. A agent
-// that is not alive is dropped from the barrier, so a agent that dies
+// has been cancelled. It forwards the check to the Database service. An agent
+// that is not alive is dropped from the barrier, so an agent that dies
 // mid-step cannot wedge the job. When job-token auth is enabled the caller
 // must present a valid job token scoped to this job.
 func (s *GRPCServer) CheckStepBarrier(ctx context.Context, req *apipb.CheckStepBarrierRequest) (*apipb.CheckStepBarrierResponse, error) {
@@ -1060,8 +1060,8 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 
 // reportActor returns the actor identity for a job status report or token
 // exchange from an execution target: the agent's name when the report names
-// a agent (a long-lived agent), or the job's identity ("job:<id>") when it
-// does not (an ephemeral agent reports against the job row directly).
+// an agent (a long-lived agent), or the job's identity ("job:<id>") when it
+// does not (an ephemeral worker reports against the job row directly).
 func (s *GRPCServer) reportActor(agentName string, jobID int64) string {
 	if agentName != "" {
 		return agentName
@@ -1510,7 +1510,7 @@ func renderMarkdown(md string) []byte {
 // targets an environment (F-17) is dispatched to the live agents that belong
 // to it; a job that targets a raw group (and no environment) is dispatched to
 // the live agents in that group. A job with neither an environment nor a
-// target group is for an ephemeral agent and is not dispatched to live
+// target group is for an ephemeral worker and is not dispatched to live
 // agents.
 func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequest) (*apipb.DispatchJobResponse, error) {
 	job := req.GetJob()
@@ -1606,7 +1606,7 @@ func (s *GRPCServer) NotifyRunStatus(ctx context.Context, req *apipb.NotifyRunSt
 // CancelJob is called by the scheduler to signal the execution target running
 // a job to stop the work (F-05). For a long-lived agent it delivers a
 // JobCancellation down the agent's WatchJobs stream; the agent interrupts
-// the running step and reports the job as cancelled. For an ephemeral agent
+// the running step and reports the job as cancelled. For an ephemeral worker
 // (no live agent stream) there is nothing to signal — the agent observes the
 // cancellation on its next GetJob and stops on its own. It is a no-op when the
 // job is not running on a live target.
@@ -1733,7 +1733,7 @@ func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log str
 // serves the job and returns how many agents received it. A job that targets
 // an environment (F-17) is pushed to the live agents that belong to it; a job
 // that targets a raw group (and no environment) is pushed to the live agents
-// in that group. The push is best-effort: a agent that receives it but does
+// in that group. The push is best-effort: an agent that receives it but does
 // not actually serve the job (e.g. it is not in the environment's target
 // group) is rejected when it starts the job (StartJobExecution is the
 // authoritative routing gate).
@@ -2138,7 +2138,7 @@ func (s *GRPCServer) removeLive(name string) {
 }
 
 // agentStates snapshots the live agents' identity and state for the agents
-// gauge (F-20): a agent that holds an open WatchJobs stream is "watching",
+// gauge (F-20): an agent that holds an open WatchJobs stream is "watching",
 // otherwise it is "registered".
 func (s *GRPCServer) agentStates() []metrics.AgentState {
 	s.mu.Lock()

@@ -24,7 +24,7 @@ import (
 // (the target talks only to the API), the job's token (presented on the API
 // calls the shared execution makes), the target's name (the agent's name, so
 // a fan-out job's outcome is recorded against the agent's execution; empty
-// for an ephemeral agent, which reports straight to the job row), and the
+// for an ephemeral worker, which reports straight to the job row), and the
 // logger. StepBarrier is the target's cross-agent step barrier (the agent's
 // implementation, when the job has the step-barrier flag set and targets a
 // agent group); it is nil for an agent and for a job that runs unbarriered.
@@ -52,7 +52,7 @@ type Context struct {
 // jobs and the job's identity (for a step's condition, F-06), the run's
 // parameters and identity (for spec interpolation, F-10), and a token
 // exchanger (so a step handler can request a job token for a different
-// audience). When the job has the step-barrier flag set and targets a agent
+// audience). When the job has the step-barrier flag set and targets an agent
 // group, the target's StepBarrier is set in the context so the executor
 // synchronizes the job's agents at each step boundary.
 //
@@ -135,8 +135,8 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	// claim it skips the step. A retry (a new attempt) may run it again.
 	ctx = executor.ContextWithOnceClaimer(ctx, notify.NewClaimer(tc.API, job.GetId(), tc.Token, job.GetAttempt()))
 	// The cross-agent step barrier: when the job has the step-barrier flag set
-	// and targets a agent group, the agents synchronize at each step boundary
-	// (after a agent completes a step it waits until every agent alive at the
+	// and targets an agent group, the agents synchronize at each step boundary
+	// (after an agent completes a step it waits until every agent alive at the
 	// step's start has completed it). A job on a single target (an ephemeral
 	// agent) runs its steps unbarriered.
 	if job.GetStepBarrier() && job.GetTargetGroup() != "" && tc.StepBarrier != nil {
@@ -144,7 +144,7 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	}
 	// The job's staged working area (F-21.6): lazily created on first use,
 	// exported to every step as CDROM_STAGE_DIR, removed best-effort once the
-	// job finishes. Rooted at the target's WORKER ROOT (config agent_root /
+	// job finishes. Rooted at the target's AGENT ROOT (config agent_root /
 	// CDROM_AGENT_ROOT; empty = the OS temp dir) so operators can steer staged
 	// files AWAY from RAM-backed mounts.
 	sa := newStageArea(tc.AgentRoot, logger)
@@ -204,7 +204,7 @@ func FinishJob(ctx context.Context, tc *Context, jobID int64, collector *executo
 			return dbpb.JobStatus_JOB_STATUS_CANCELLED
 		}
 		// A cancellation observed at a step barrier (the job was cancelled
-		// while a agent waited for its peers to finish a step) is also
+		// while an agent waited for its peers to finish a step) is also
 		// reported as cancelled, distinct from a failure.
 		if errors.Is(err, executor.ErrCancelled) {
 			tc.Logger.Info("job cancelled (step barrier)", "job", jobID)
@@ -270,8 +270,8 @@ func stepStatusName(status executor.StepStatus) string {
 
 // JobStatusName maps a job's terminal status to its metric label value (the
 // same convention the API uses for cdrom_api_job_status_total, so a job's
-// status is labeled identically on both sides). The agent and agent use it
-// to label their cdrom_worker_jobs_total / job-duration metrics.
+// status is labeled identically on both sides). The agent and worker use it
+// to label their cdrom_agent_jobs_total / job-duration metrics.
 func JobStatusName(status dbpb.JobStatus) string {
 	switch status {
 	case dbpb.JobStatus_JOB_STATUS_SUCCEEDED:
@@ -290,7 +290,7 @@ func JobStatusName(status dbpb.JobStatus) string {
 }
 
 // countingSink wraps a logstream.Sink and counts the bytes it streams to the
-// API (F-20, cdrom_worker_log_bytes_total). It is the value a target puts in
+// API (F-20, cdrom_agent_log_bytes_total). It is the value a target puts in
 // the executor's context as the job's log sink. When the underlying sink is
 // nil (streaming disabled) it is a no-op.
 type countingSink struct {

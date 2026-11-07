@@ -2246,8 +2246,8 @@ func (s *Server) ResolveApproval(ctx context.Context, req *dbpb.ResolveApprovalR
 
 // ClaimJob atomically claims a pending job for execution (F-23): it sets the
 // status to running (and the started timestamp) only if the job is still
-// pending. It returns whether the job was claimed. This is how a agent (or
-// the API on a agent's behalf) takes ownership of a job it picked up via the
+// pending. It returns whether the job was claimed. This is how an agent (or
+// the API on an agent's behalf) takes ownership of a job it picked up via the
 // pull path or a push nudge: the conditional update is atomic, so a job
 // delivered by both push and pull is claimed exactly once and the duplicate is
 // a no-op.
@@ -2275,7 +2275,7 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 
 // ListPendingByGroup returns the pending jobs that target the given agent
 // group (F-23), or — when the caller names environments (F-17) — that target
-// one of them. This is the pull path: a agent (or the API on its behalf)
+// one of them. This is the pull path: an agent (or the API on its behalf)
 // polls it to pick up jobs that were published while it was unreachable, so
 // no job is stranded pending. Filtering in the database keeps the poll from
 // pulling every pending job over the wire as the system grows. A job that
@@ -2286,7 +2286,7 @@ func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingBy
 	db := s.db.WithContext(ctx).Model(&models.Job{}).Where("status = ?", models.JobStatusPending)
 	// A pending job is relevant to the caller when it targets the caller's
 	// group (pre-F-17) or one of the caller's environments (F-17). The two
-	// are OR'd: a agent that serves an environment picks up its jobs even
+	// are OR'd: an agent that serves an environment picks up its jobs even
 	// when the environment's target group differs from the agent's own group.
 	var conds []string
 	var args []any
@@ -2316,7 +2316,7 @@ func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingBy
 
 // StartJobExecution records that the calling agent has started running a job
 // (fan-out): it creates the agent's JobExecution for the job's current
-// attempt and marks the job running. A job that targets a agent group runs on
+// attempt and marks the job running. A job that targets an agent group runs on
 // every agent in the group; each agent's run is a separate execution, so the
 // start is not exclusive (unlike the old single-claim work queue).
 //
@@ -2349,7 +2349,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if isTerminalJobStatus(job.Status) {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// A agent that has ALREADY STARTED this (job, agent, attempt) in the
+	// An agent that has ALREADY STARTED this (job, agent, attempt) in the
 	// current EPISODE is declined a second start. The job row's status is
 	// DERIVED (the scheduler's job-status loop reconciles it from the
 	// executions), so a FAST job can still read as running LONG AFTER ITS
@@ -2393,10 +2393,10 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	// scheduler's dependency resolver (F-06/F-08), not by the pull path: the
 	// resolver releases it (clearing depends_on and, for a branch job,
 	// capturing the dependencies' terminal observations, F-22) exactly once,
-	// and only then may a agent start it. Rejecting the start here is the
-	// AUTHORITATIVE guard against a agent stealing a held job from the pull
+	// and only then may an agent start it. Rejecting the start here is the
+	// AUTHORITATIVE guard against an agent stealing a held job from the pull
 	// path (ListPendingByGroup offers every pending job in the group; without
-	// this gate a agent could start a job whose dependencies have not been
+	// this gate an agent could start a job whose dependencies have not been
 	// adjudicated — running it with stale/absent upstream data).
 	if len(job.DependsOn) > 0 {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
@@ -2410,9 +2410,9 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
 	if job.Environment != "" {
-		// The job targets an environment (F-17): only a agent that belongs to
+		// The job targets an environment (F-17): only an agent that belongs to
 		// the environment (intersected with the environment's target group when
-		// one is set) may start it. A agent that does not serve the
+		// one is set) may start it. An agent that does not serve the
 		// environment is rejected, so a job delivered to the wrong agent is
 		// not run. This is the authoritative routing gate for environment
 		// jobs.
@@ -2421,7 +2421,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		}
 	} else if job.TargetGroup == "" {
 		// A job with an empty target group and no environment runs on an
-		// ephemeral agent, not on a long-lived agent; a agent starting it is
+		// ephemeral worker, not on a long-lived agent; an agent starting it is
 		// a no-op.
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
@@ -2433,7 +2433,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	// (pipeline + job + environment + agent group) merged with the labels of the
 	// agent that runs this execution (the agent's labels win on a key
 	// collision). A fan-out job's each-agent execution thus carries that
-	// agent's own labels. A agent with no labels contributes nothing.
+	// agent's own labels. An agent with no labels contributes nothing.
 	executionLabels := job.Labels
 	if agentLabels := s.agentLabels(ctx, req.GetAgentName()); len(agentLabels) > 0 {
 		executionLabels = combineLabels(job.Labels, agentLabels)
@@ -2519,13 +2519,13 @@ func (s *Server) ListJobExecutions(ctx context.Context, req *dbpb.ListJobExecuti
 	return response, nil
 }
 
-// UpdateJobExecution records a agent's outcome for its execution of a job
+// UpdateJobExecution records an agent's outcome for its execution of a job
 // (fan-out): it sets the execution's status (and finished timestamp, step
 // results, and outputs) for the agent's execution of the job's current
 // attempt. The job row's overall status is not touched here — it is derived
 // from the executions by the scheduler's job-status loop. A late report for an
 // execution that already reached a terminal status is a no-op (the conditional
-// update only applies while the execution is running), so a agent that
+// update only applies while the execution is running), so an agent that
 // finished just as its job was cancelled cannot clobber the terminal status.
 func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExecutionRequest) (*dbpb.JobExecution, error) {
 	if req.GetJobId() == 0 {
@@ -2592,8 +2592,8 @@ func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExec
 	return toProtoJobExecution(&execution), nil
 }
 
-// AbandonAgentExecutions marks all of a agent's running executions as failed
-// (fan-out). It is called when a agent re-registers after a restart: the
+// AbandonAgentExecutions marks all of an agent's running executions as failed
+// (fan-out). It is called when an agent re-registers after a restart: the
 // agent's in-progress executions from before the restart are abandoned (the
 // agent will not resume them) so they do not block the job's overall status.
 // The job row's overall status is re-derived by the scheduler's job-status
@@ -2617,9 +2617,9 @@ func (s *Server) AbandonAgentExecutions(ctx context.Context, req *dbpb.AbandonAg
 	return &emptypb.Empty{}, nil
 }
 
-// ReportStepCompletion records that a agent completed a step of a job (the
+// ReportStepCompletion records that an agent completed a step of a job (the
 // cross-agent step barrier). It upserts a StepCompletion row for the job's
-// current attempt: a agent that reports the same step twice (e.g. after a
+// current attempt: an agent that reports the same step twice (e.g. after a
 // retry of the same attempt) updates the existing row rather than inserting a
 // duplicate. The row is keyed by (job, agent, step, attempt).
 func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepCompletionRequest) (*emptypb.Empty, error) {
@@ -2655,8 +2655,8 @@ func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepC
 
 // CheckStepBarrier reports whether the barrier for a job's step is satisfied
 // (every agent alive at the step's start has completed it) or whether the job
-// has been cancelled. A agent that is not alive (it has not heartbeated
-// within the liveness window) is dropped from the barrier, so a agent that
+// has been cancelled. An agent that is not alive (it has not heartbeated
+// within the liveness window) is dropped from the barrier, so an agent that
 // dies mid-step cannot wedge the job. The barrier is satisfied when every
 // alive agent in the job's group has a StepCompletion row for the job's
 // current attempt and the step in question.
@@ -2674,8 +2674,8 @@ func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrie
 	if job.Status == models.JobStatusCancelled {
 		return &dbpb.CheckStepBarrierResponse{Cancelled: true}, nil
 	}
-	// The barrier only applies to a job that fans out to a agent group; a job
-	// on a single target (an ephemeral agent) has no barrier to wait on.
+	// The barrier only applies to a job that fans out to an agent group; a job
+	// on a single target (an ephemeral worker) has no barrier to wait on.
 	if job.TargetGroup == "" {
 		return &dbpb.CheckStepBarrierResponse{Satisfied: true}, nil
 	}
@@ -2683,7 +2683,7 @@ func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrie
 	if err := db.Where("agent_group = ?", job.TargetGroup).Find(&agents).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// A agent is alive when its last_seen_at is within the liveness window.
+	// An agent is alive when its last_seen_at is within the liveness window.
 	now := time.Now().UTC()
 	alive := make([]string, 0, len(agents))
 	for i := range agents {
@@ -2844,7 +2844,7 @@ func (s *Server) DeleteJob(ctx context.Context, req *dbpb.DeleteJobRequest) (*em
 // Agents
 // ---------------------------------------------------------------------------
 
-// RegisterAgent upserts a agent by name: an unknown name creates the
+// RegisterAgent upserts an agent by name: an unknown name creates the
 // agent, a known name updates its group and address.
 func (s *Server) RegisterAgent(ctx context.Context, req *dbpb.RegisterAgentRequest) (*dbpb.Agent, error) {
 	if req.GetName() == "" {
@@ -4925,7 +4925,7 @@ func (s *Server) NextSecretNonce(ctx context.Context, _ *dbpb.NextSecretNonceReq
 }
 
 // ClaimStepOnce atomically claims the "run this step" slot for a step of a job
-// that fans out to a agent group (F-01): the first target to claim
+// that fans out to an agent group (F-01): the first target to claim
 // (job id + step name + attempt) wins and runs the step; every other target
 // that reaches the same step in the same attempt sees the slot already claimed
 // and skips the step. A retry (F-04) is a new attempt, so it may claim again.
@@ -5077,8 +5077,8 @@ const defaultLeaseTTL = 10 * time.Second
 // heartbeat is older than this, even if the TTL backstop has not lapsed.
 const defaultLeaseHeartbeatTTL = 30 * time.Second
 
-// agentAliveThreshold is how recent a agent's last_seen_at must be for it to
-// be considered alive. A agent that has not heartbeated within this window is
+// agentAliveThreshold is how recent an agent's last_seen_at must be for it to
+// be considered alive. An agent that has not heartbeated within this window is
 // considered dead and is dropped from a job's step barrier (its missing step
 // completion does not block the job). The agent heartbeats every ~10s, so the
 // threshold is a few missed heartbeats. It mirrors the scheduler's
@@ -5172,7 +5172,7 @@ func (s *Server) PublishRunStatus(ctx context.Context, req *dbpb.PublishRunStatu
 	return &dbpb.PublishEventResponse{Id: id}, nil
 }
 
-// PublishAgentEvent appends a "agent" event for a agent lifecycle change.
+// PublishAgentEvent appends a "agent" event for an agent lifecycle change.
 func (s *Server) PublishAgentEvent(ctx context.Context, req *dbpb.PublishAgentEventRequest) (*dbpb.PublishEventResponse, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")

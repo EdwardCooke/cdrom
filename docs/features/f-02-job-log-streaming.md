@@ -40,7 +40,7 @@ local to the agent/agent and there is no central view.
       the step progresses.
 - [x] Ability to retrieve the logs for a particular step and job from the api server.
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **Transport:** a new `StreamJobLogs` client-stream RPC on the API
   (`proto/cdrom/api/v1/api.proto`). The target opens one stream per job and
   sends a `JobLogChunk` per output chunk; the first chunk of a step's output

@@ -1,7 +1,7 @@
 // Package agent implements the long-lived agent: a resident process on a
 // deployment target, targetable by group. Must run on both Windows and Linux.
 //
-// A agent talks ONLY to the API service. It registers with the API, holds a
+// An agent talks ONLY to the API service. It registers with the API, holds a
 // WatchJobs stream open, and executes the jobs the API dispatches to its
 // group. Job status is reported back to the API, and all logging is local
 // (stdout or a file) — there is no central logs service.
@@ -25,7 +25,7 @@ import (
 	_ "cdrom/internal/stephandlers"
 )
 
-// Dependencies are the gRPC clients a agent needs. The agent talks only to
+// Dependencies are the gRPC clients an agent needs. The agent talks only to
 // the API service.
 type Dependencies struct {
 	API apipb.APIClient
@@ -71,7 +71,7 @@ type Agent struct {
 	inflight map[int64]*jobRun // jobID -> run state for a running job
 }
 
-// New creates a agent with the given identity and service dependencies.
+// New creates an agent with the given identity and service dependencies.
 // environments are the environments the agent belongs to (F-17); they are
 // declared at registration and used to route environment jobs to this agent.
 // labels are the agent's labels (F-29); they are declared at registration and
@@ -321,7 +321,7 @@ func (w *Agent) heartbeat(ctx context.Context) {
 // jobRun is the per-job execution state the agent tracks so a cancellation
 // (F-05) can interrupt a running job: cancel terminates the job's context
 // (killing the running step), and userCancel records that the interruption
-// was a user cancellation (as opposed to a timeout or a agent shutdown).
+// was a user cancellation (as opposed to a timeout or an agent shutdown).
 type jobRun struct {
 	cancel     context.CancelFunc
 	userCancel bool
@@ -361,7 +361,7 @@ func (w *Agent) execute(ctx context.Context, job *apipb.Job, token string) {
 	// name (so a fan-out job's outcome is recorded against this agent's
 	// execution), the job's token, the agent's step metrics (F-20), and the
 	// agent's step barrier (when the job has the step-barrier flag set and
-	// targets a agent group).
+	// targets an agent group).
 	tc := &target.Context{
 		API:        w.deps.API,
 		AgentName: w.name,

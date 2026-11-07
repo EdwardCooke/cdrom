@@ -2,7 +2,7 @@
 #
 # 04-approval.sh — F-13: approval gates.
 #
-# Boots the stack (with a agent) and verifies:
+# Boots the stack (with an agent) and verifies:
 #   1. a job whose second step is an approval gate (type "approval") pauses in
 #      the awaiting_approval state (status 8) until an authorized user
 #      approves it via the HTTP API. The gate's message is a template rendered

@@ -39,8 +39,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AgentGroup != "default" {
 		t.Errorf("AgentGroup = %q, want %q", cfg.AgentGroup, "default")
 	}
-	if cfg.AgentJobID != "" {
-		t.Errorf("AgentJobID = %q, want empty", cfg.AgentJobID)
+	if cfg.WorkerJobID != "" {
+		t.Errorf("WorkerJobID = %q, want empty", cfg.WorkerJobID)
 	}
 	if cfg.DB.Backend != "sqlite" {
 		t.Errorf("DB.Backend = %q, want sqlite", cfg.DB.Backend)
@@ -150,7 +150,7 @@ db_address: 127.0.0.1:7201
 artifacts_root: /var/cdrom/artifacts
 agent_name: agent-9
 agent_group: batch
-agent_job_id: "42"
+worker_job_id: "42"
 db:
   backend: postgres
   postgres_dsn: "host=db user=u dbname=d"
@@ -185,8 +185,8 @@ db:
 	if cfg.AgentGroup != "batch" {
 		t.Errorf("AgentGroup = %q, want batch", cfg.AgentGroup)
 	}
-	if cfg.AgentJobID != "42" {
-		t.Errorf("AgentJobID = %q, want 42", cfg.AgentJobID)
+	if cfg.WorkerJobID != "42" {
+		t.Errorf("WorkerJobID = %q, want 42", cfg.WorkerJobID)
 	}
 	if cfg.DB.Backend != "postgres" {
 		t.Errorf("DB.Backend = %q, want postgres", cfg.DB.Backend)
@@ -287,27 +287,27 @@ func TestEnvOverridesFile(t *testing.T) {
 	}
 }
 
-func TestAgentNameDefaultAndOverride(t *testing.T) {
-	// The default agent name is the host name the agent runs on.
+func TestWorkerNameDefaultAndOverride(t *testing.T) {
+	// The default worker name is the host name the worker runs on.
 	host, err := os.Hostname()
 	if err != nil || host == "" {
-		t.Skip("hostname unavailable; cannot assert the default agent name")
+		t.Skip("hostname unavailable; cannot assert the default worker name")
 	}
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AgentName != host {
-		t.Errorf("AgentName = %q, want the host name %q", cfg.AgentName, host)
+	if cfg.WorkerName != host {
+		t.Errorf("WorkerName = %q, want the host name %q", cfg.WorkerName, host)
 	}
 
 	// An environment variable overrides the default.
-	t.Setenv("CDROM_WORKER_NAME", "agent-from-env")
+	t.Setenv("CDROM_WORKER_NAME", "worker-from-env")
 	cfg, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AgentName != "agent-from-env" {
+	if cfg.WorkerName != "worker-from-env" {
 		t.Errorf("AgentName = %q, want agent-from-env (env must override the default)", cfg.AgentName)
 	}
 }

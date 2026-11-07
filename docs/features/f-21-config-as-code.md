@@ -725,7 +725,7 @@ file stable under reordering and what makes it reviewable:
   is optional — a job with no `needs` has no dependencies. The compiler
   resolves names to the run's job instance ids at run creation (the existing
   F-08 behavior).
-- **Agents / groups** are referenced by name (a agent group's name, or a
+- **Agents / groups** are referenced by name (an agent group's name, or a
   agent's host name). The pipeline's default group is `spec.agentGroup`; a
   job's `agentGroup` names the agent group it runs on and overrides the
   default. The compiler stores the resolved name on the job's `target_group`;
@@ -1252,7 +1252,7 @@ itself.
 
 ---
 
-## Design decisions (folded into WORKER.md / Architecture.md)
+## Design decisions (folded into AGENT.md / Architecture.md)
 
 - **The file is a Kubernetes-style manifest.** Every definition has an
   `apiVersion` (currently `cdrom/alphav1`), a `kind` (`Pipeline` /

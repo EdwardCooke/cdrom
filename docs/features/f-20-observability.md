@@ -181,7 +181,7 @@ histograms; gauges are point-in-time.)
 - `cdrom_db_concurrency_slots{kind,resource}` — gauge, durable slots held
   per concurrency resource (kind: `global` / `group` / `key`; F-16).
 - `cdrom_db_duplicate_starts_declined_total` — counter, `StartJobExecution`
-  calls declined by the duplicate-delivery guard (a agent already owning an
+  calls declined by the duplicate-delivery guard (an agent already owning an
   execution of the same job+attempt in a non-pending episode; F-23,
   flake 2026-11-07). Rising trend ⇒ a delivery pathology (nudge storms,
   stream flaps, lease anomalies).
@@ -202,20 +202,20 @@ histograms; gauges are point-in-time.)
 - `cdrom_idp_users` — gauge, user directory size.
 
 *Agent / agent (execution targets):*
-- `cdrom_worker_jobs_total{status}` — jobs this target completed, by
+- `cdrom_agent_jobs_total{status}` — jobs this target completed, by
   terminal status.
-- `cdrom_worker_job_duration_seconds{status}`.
-- `cdrom_worker_steps_total{step_type,status}` — per step handler
+- `cdrom_agent_job_duration_seconds{status}`.
+- `cdrom_agent_steps_total{step_type,status}` — per step handler
   (`shell` / `token_exchange` / `approval` / `email` / `webhook` / …).
-- `cdrom_worker_step_duration_seconds{step_type}`.
-- `cdrom_worker_inflight` — gauge, jobs currently running on this target
+- `cdrom_agent_step_duration_seconds{step_type}`.
+- `cdrom_agent_inflight` — gauge, jobs currently running on this target
   (utilization: in-flight vs. the target's limit of one).
-- `cdrom_worker_watch_state` — gauge, `WatchJobs` stream state
+- `cdrom_agent_watch_state` — gauge, `WatchJobs` stream state
   (`connected` / `reconnecting`) — the target's link to the control plane.
-- `cdrom_worker_polls_total{outcome}` — the 1 s pending poll (F-23;
+- `cdrom_agent_polls_total{outcome}` — the 1 s pending poll (F-23;
   outcome: `idle` / `claimed`).
-- `cdrom_worker_heartbeat_failures_total`.
-- `cdrom_worker_log_bytes_total` — log bytes streamed to the API (F-02).
+- `cdrom_agent_heartbeat_failures_total`.
+- `cdrom_agent_log_bytes_total` — log bytes streamed to the API (F-02).
 
 **Deployment reporting (DORA-style indicators).** The run/job metrics above
 are enough to compute the standard delivery-performance indicators per
@@ -273,10 +273,10 @@ environment (F-17), either as Grafana queries or in the UI dashboard:
       `cdrom_grpc_server_handled_total{method,code}` (including streaming
       RPCs such as `WatchJobs`) for the gRPC surface.
 - [x] A job that runs to completion increments `cdrom_api_job_status_total`
-      and `cdrom_worker_jobs_total` (matching statuses) and is observed in
+      and `cdrom_agent_jobs_total` (matching statuses) and is observed in
       both `cdrom_api_job_duration_seconds` and
-      `cdrom_worker_job_duration_seconds`; a step of each built-in type is
-      counted in `cdrom_worker_steps_total{step_type}`.
+      `cdrom_agent_job_duration_seconds`; a step of each built-in type is
+      counted in `cdrom_agent_steps_total{step_type}`.
 - [x] A run that completes increments `cdrom_scheduler_runs_total{status,trigger,environment}`
       and is observed in `cdrom_scheduler_run_duration_seconds` and
       `cdrom_scheduler_run_lead_time_seconds`; a cron-fired run is labeled

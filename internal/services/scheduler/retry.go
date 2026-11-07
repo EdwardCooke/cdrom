@@ -152,7 +152,7 @@ func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, publishe
 // dispatchForRetry appends an "assignment" event for a retried job to the
 // shared event log (F-23), which every API pod tails and fans out to its
 // local agents in the job's target group. A job with an empty target group
-// is for an ephemeral agent and is not nudged. The job is dispatched only
+// is for an ephemeral worker and is not nudged. The job is dispatched only
 // when it is admitted (F-16): it fits within every limit it is subject to;
 // when a resource is at its limit the job is left pending and the background
 // admission loop dispatches it once a slot frees.

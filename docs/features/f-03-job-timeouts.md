@@ -26,7 +26,7 @@ expires first terminates the job.
       (a target that stops reporting is still reaped).
 - [x] A job with no timeout runs unbounded.
 
-**Design decisions (folded into WORKER.md / Architecture.md).**
+**Design decisions (folded into AGENT.md / Architecture.md).**
 - **Two levels of timeout.** A job declares a job-level `timeout` on its
   `JobSpec` (the sum of all steps) and each step may declare its own `timeout`
   (an individual step). The executor derives a context for the job-level
@@ -37,7 +37,7 @@ expires first terminates the job.
 - **`timed_out` is a distinct terminal status.** A new `JOB_STATUS_TIMED_OUT`
   (proto) / `JobStatusTimedOut` (model) status is added alongside the existing
   terminal states. The executor returns a sentinel `executor.ErrTimeout` (wrapped
-  with the context) when a deadline expires; the agent and agent check
+  with the context) when a deadline expires; the agent and worker check
   `errors.Is(err, executor.ErrTimeout)` and report `timed_out` rather than
   `failed`, so the UI can tell a hung job apart from one that ran and errored.
   The shell handler wraps `executor.ErrTimeout` with a clear message (the

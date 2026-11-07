@@ -209,7 +209,7 @@ const (
 	// rollback step handler's API mediation, actor "job:<id>").
 	ActionRunRestore = "run.restore"
 	// ActionAgentGroup* are the agent-group management actions (F-29):
-	// creating, updating, or deleting a agent group (a named group of
+	// creating, updating, or deleting an agent group (a named group of
 	// long-lived agents that carries tags).
 	ActionAgentGroupCreate = "agent-group.create"
 	ActionAgentGroupUpdate = "agent-group.update"
@@ -272,7 +272,7 @@ const (
 	// TargetEnvironment is the target kind of an environment (F-17): a named
 	// deployment target that carries approval + automation policy.
 	TargetEnvironment = "environment"
-	// TargetAgentGroup is the target kind of a agent group (F-29): a named
+	// TargetAgentGroup is the target kind of an agent group (F-29): a named
 	// group of long-lived agents that carries tags.
 	TargetAgentGroup = "agent-group"
 	// TargetSSHKnownHost is the target kind of a runtime-managed SSH host key

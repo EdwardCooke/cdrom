@@ -2,7 +2,7 @@
 #
 # 09-concurrency.sh — F-16: concurrency keys serialize jobs that share a key.
 #
-# Boots the stack (with a agent) and submits two jobs that both carry the
+# Boots the stack (with an agent) and submits two jobs that both carry the
 # concurrency key "e2e-key". A key with no configured limit defaults to a
 # limit of 1 — a lock — so the two jobs serialize on it:
 #
@@ -27,7 +27,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-# Boot the stack (with a agent). The key "e2e-key" is a lock by default (a
+# Boot the stack (with an agent). The key "e2e-key" is a lock by default (a
 # key with no configured limit defaults to a limit of 1), so the two jobs
 # that carry it serialize on it.
 e2e_boot_stack with-agent

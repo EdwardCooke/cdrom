@@ -36,7 +36,7 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
 **Scope.**
 - `internal/models` / proto — an `Environment` entity (name, description,
   approval policy, automation policy, target group / agent pool) and a
-  agent↔environment membership (a agent's environment list); registered in
+  agent↔environment membership (an agent's environment list); registered in
   `models.All()`.
 - `internal/services/database` — environment CRUD + agent-environment
   membership RPCs; environment policy resolution used by the scheduler.
@@ -47,7 +47,7 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
 - `internal/api` — environment CRUD endpoints; a **proceed** endpoint that
   releases a run held by a manual environment; agent registration that
   carries the agent's environment list; RBAC gating (F-14).
-- `internal/agent` + `cmd/agent` + `internal/config` — a agent declares
+- `internal/agent` + `cmd/agent` + `internal/config` — an agent declares
   the environments it belongs to (configurable, multiple) and sends them on
   registration.
 - UI — an environments view (policy + member agents) and a "proceed" action
@@ -61,12 +61,12 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
   ephemeral workers), `requires_approval` (bool), and `automation`
   (`automatic` / `manual`). The approval and automation policies are the
   environment's **default** gates; a job may override them (see below).
-- **Agent membership** — a agent declares the set of environments it
+- **Agent membership** — an agent declares the set of environments it
   belongs to. Membership is **many-to-many**: one agent can serve several
   environments (a `prod-auto` agent can also serve `staging`), and an
   environment can be served by many agents. A job targeting environment
   `E` is dispatched to the **live agents that registered `E`** (intersected
-  with the environment's `target_group` when one is set). A agent that
+  with the environment's `target_group` when one is set). An agent that
   belongs to no environment is reachable only by its raw `target_group`
   (the pre-F-17 behavior).
 - **Policy precedence.** For a job targeting an environment, the effective
@@ -115,9 +115,9 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
 
 **Agent environment membership (configurable, multiple).**
 
-- A agent declares the environments it belongs to at registration. This is
+- An agent declares the environments it belongs to at registration. This is
   **configurable** (via `CDROM_AGENT_ENVIRONMENTS`, a comma-separated list,
-  or the config file's `agent_environments`) and a agent may list **multiple**
+  or the config file's `agent_environments`) and an agent may list **multiple**
   environments. The agent sends the list on `RegisterAgent`; the API
   persists it (via the Database service) and uses it to route environment
   jobs. Re-registering (e.g. after a restart) updates the membership.
@@ -150,9 +150,9 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
 **Acceptance criteria.**
 - [x] A job targeting an environment is dispatched to the live agents that
       registered that environment (intersected with the environment's
-      `target_group` when set); a agent belonging to several environments
+      `target_group` when set); an agent belonging to several environments
       receives jobs for each of them.
-- [x] A agent can declare multiple environments (configurable via
+- [x] An agent can declare multiple environments (configurable via
       `CDROM_AGENT_ENVIRONMENTS` / config), and re-registration updates its
       membership.
 - [x] An environment with `requires_approval` inserts an F-13 approval gate
@@ -182,7 +182,7 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
       (not `succeeded`) by the run-status loop (F-07), and reaches a terminal
       status only when the job is proceeded (and completes) or is reaped /
       cancelled.
-- [x] The authoritative routing gate: a agent that does not serve the job's
+- [x] The authoritative routing gate: an agent that does not serve the job's
       environment (it is not a member of the environment, or it is outside the
       environment's `target_group` when set) is rejected when it starts the
       job (`StartJobExecution`), so a best-effort push to the wrong agent
@@ -190,7 +190,7 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
 - [x] Proceeding a held run / job records an audit event (F-15) with the actor
       and the number of jobs proceeded.
 
-**Design decisions (fold into WORKER.md / Architecture.md when implemented).**
+**Design decisions (fold into AGENT.md / Architecture.md when implemented).**
 - **An environment is a policy-bearing target, not just a label.** It names a
   set of agents (via membership + optional `target_group`) *and* carries the
   two gates that govern a deploy to it: `requires_approval` (an F-13 gate)
@@ -200,7 +200,7 @@ never automatic, but `prod-auto` is" as data rather than as a pipeline edit.
   `E` is dispatched to the live agents that registered `E` (∩ `E.target_group`
   when set). Membership is many-to-many and declared by the agent at
   registration (`CDROM_AGENT_ENVIRONMENTS`), so the topology is shaped by
-  agent configuration, not by pipeline edits. A agent in no environment is
+  agent configuration, not by pipeline edits. An agent in no environment is
   reachable only by its raw `target_group` (pre-F-17 behavior preserved).
 - **Automation precedence: environment policy is authoritative when set.**
   The environment's `automation` policy wins over a job's setting and over the
