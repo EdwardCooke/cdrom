@@ -10,14 +10,14 @@ terminated. A job-level timeout bounds the whole job (all steps combined); a
 per-step timeout bounds an individual step. When both are set, whichever
 expires first terminates the job.
 
-**Why.** Hung jobs hold workers forever; timeouts are a basic safety valve.
+**Why.** Hung jobs hold agents forever; timeouts are a basic safety valve.
 
 **Scope.**
 - `internal/models` / proto — `timeout` on the job spec (and per step).
-- `internal/worker`, `internal/agent` — enforce the deadline, cancel the
+- `internal/agent`, `internal/agent` — enforce the deadline, cancel the
   running command, report the terminal status.
 - `internal/services/scheduler` — a watchdog that reaps jobs that exceed their
-  timeout even if the target goes silent (covers a dead worker).
+  timeout even if the target goes silent (covers a dead agent).
 
 **Acceptance criteria.**
 - [x] A job whose command sleeps past its timeout is terminated and marked
@@ -26,7 +26,7 @@ expires first terminates the job.
       (a target that stops reporting is still reaped).
 - [x] A job with no timeout runs unbounded.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **Two levels of timeout.** A job declares a job-level `timeout` on its
   `JobSpec` (the sum of all steps) and each step may declare its own `timeout`
   (an individual step). The executor derives a context for the job-level
@@ -37,7 +37,7 @@ expires first terminates the job.
 - **`timed_out` is a distinct terminal status.** A new `JOB_STATUS_TIMED_OUT`
   (proto) / `JobStatusTimedOut` (model) status is added alongside the existing
   terminal states. The executor returns a sentinel `executor.ErrTimeout` (wrapped
-  with the context) when a deadline expires; the worker and agent check
+  with the context) when a deadline expires; the agent and agent check
   `errors.Is(err, executor.ErrTimeout)` and report `timed_out` rather than
   `failed`, so the UI can tell a hung job apart from one that ran and errored.
   The shell handler wraps `executor.ErrTimeout` with a clear message (the

@@ -321,8 +321,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/jobs/{id}/approve", s.approveJob)
 	mux.HandleFunc("POST /api/jobs/{id}/reject", s.rejectJob)
 
-	// Workers (via the scheduler service).
-	mux.HandleFunc("GET /api/workers", s.listWorkers)
+	// Agents (via the scheduler service).
+	mux.HandleFunc("GET /api/agents", s.listAgents)
 
 	// Pending queue (F-16): the jobs waiting to run (with the resource(s)
 	// blocking each), the per-group and global load, and the per-key load,
@@ -350,16 +350,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/environments/{name}", s.getEnvironment)
 	mux.HandleFunc("PUT /api/environments/{name}", s.updateEnvironment)
 	mux.HandleFunc("DELETE /api/environments/{name}", s.deleteEnvironment)
-	// Worker groups (F-29): named groups of long-lived workers that carry
+	// Agent groups (F-29): named groups of long-lived agents that carry
 	// labels. They are stored in the database and managed here, so the UI can
 	// label a group at runtime without a redeployment. Viewing requires
-	// worker-groups.can-view; create/update/delete require
-	// worker-groups.can-manage.
-	mux.HandleFunc("GET /api/worker-groups", s.listWorkerGroups)
-	mux.HandleFunc("POST /api/worker-groups", s.createWorkerGroup)
-	mux.HandleFunc("GET /api/worker-groups/{name}", s.getWorkerGroup)
-	mux.HandleFunc("PUT /api/worker-groups/{name}", s.updateWorkerGroup)
-	mux.HandleFunc("DELETE /api/worker-groups/{name}", s.deleteWorkerGroup)
+	// agent-groups.can-view; create/update/delete require
+	// agent-groups.can-manage.
+	mux.HandleFunc("GET /api/agent-groups", s.listAgentGroups)
+	mux.HandleFunc("POST /api/agent-groups", s.createAgentGroup)
+	mux.HandleFunc("GET /api/agent-groups/{name}", s.getAgentGroup)
+	mux.HandleFunc("PUT /api/agent-groups/{name}", s.updateAgentGroup)
+	mux.HandleFunc("DELETE /api/agent-groups/{name}", s.deleteAgentGroup)
 	// SSH known hosts (F-21.2.4.1): runtime-managed SSH host keys the
 	// source-fetcher uses to verify a git-ssh server's host key. They are
 	// stored in the database and managed here, so the UI can add a key for a
@@ -568,7 +568,7 @@ type pipelineRequest struct {
 	ConcurrencyKeys []string `json:"concurrencyKeys,omitempty"`
 	// Labels are the pipeline's labels (F-29): a set of key/value pairs that label
 	// the pipeline. They are combined with the labels of a run's other resources
-	// (job, environment, worker group, worker) onto the run's job instances.
+	// (job, environment, agent group, agent) onto the run's job instances.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations are the pipeline's free-form key/value pairs (F-21.7,
 	// metadata.annotations): used only for UI searchability — they never
@@ -741,13 +741,13 @@ type pipelineJobRequest struct {
 	TargetGroup string          `json:"target_group,omitempty"`
 	Needs       []string        `json:"needs,omitempty"`
 	Spec        *jobSpecRequest `json:"spec,omitempty"`
-	// WorkerGroup is the worker group the job runs on (F-17); empty means the
+	// AgentGroup is the agent group the job runs on (F-17); empty means the
 	// job runs on an ephemeral Kubernetes agent (or, for a file-imported job,
-	// the pipeline's spec.workerGroup). It is carried to the database service
+	// the pipeline's spec.agentGroup). It is carried to the database service
 	// as the job's target group.
-	WorkerGroup string `json:"workerGroup,omitempty"`
+	AgentGroup string `json:"agentGroup,omitempty"`
 	// Environment is the environment the job targets (F-17); empty means the
-	// job targets its raw worker group.
+	// job targets its raw agent group.
 	Environment string `json:"environment,omitempty"`
 	// Automation is the job's own automation setting (F-17): "automatic" or
 	// "manual"; empty means the job defers to its environment's policy.
@@ -771,7 +771,7 @@ type pipelineJobRequest struct {
 	VaultImports []*dbpb.VaultImport `json:"-"`
 	// Labels are the job's labels (F-29): a set of key/value pairs that label the
 	// job. They are combined with the labels of the run's other resources
-	// (pipeline, environment, worker group, worker) onto the run's job
+	// (pipeline, environment, agent group, agent) onto the run's job
 	// instances.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -1119,12 +1119,12 @@ func pipelineJobsToProto(jobs []pipelineJobRequest) ([]*dbpb.JobDefinition, erro
 		if err != nil {
 			return nil, fmt.Errorf("job %q: %w", job.Key, err)
 		}
-		// The job's worker group (F-17): the file's workerGroup (defaulting to
-		// the pipeline's spec.workerGroup) takes precedence over the JSON
+		// The job's agent group (F-17): the file's agentGroup (defaulting to
+		// the pipeline's spec.agentGroup) takes precedence over the JSON
 		// target_group; a job with neither runs on an ephemeral agent.
 		targetGroup := job.TargetGroup
-		if job.WorkerGroup != "" {
-			targetGroup = job.WorkerGroup
+		if job.AgentGroup != "" {
+			targetGroup = job.AgentGroup
 		}
 		defs = append(defs, &dbpb.JobDefinition{
 			Key:          job.Key,
@@ -1644,7 +1644,7 @@ type jobStepRequest struct {
 	Condition    string            `json:"condition,omitempty"`
 	IgnoreFailed bool              `json:"ignore_failed,omitempty"`
 	// Once (F-01) marks the step to run on at most one target of a job that
-	// fans out to a worker group: the first target to claim the step's slot
+	// fans out to a agent group: the first target to claim the step's slot
 	// runs it, the others skip it.
 	Once   bool                          `json:"once,omitempty"`
 	Params map[string]*paramValueRequest `json:"params,omitempty"`
@@ -1683,8 +1683,8 @@ type jobSpecRequest struct {
 	// FailureMode is the job's failure mode (F-01): "all" (default),
 	// "best_effort", or "any"; empty means the job inherits the pipeline's.
 	FailureMode string `json:"failure_mode,omitempty"`
-	// StepBarrier, when true, makes a job that fans out to a worker group
-	// synchronize its workers at each step boundary (F-01).
+	// StepBarrier, when true, makes a job that fans out to a agent group
+	// synchronize its agents at each step boundary (F-01).
 	StepBarrier bool `json:"step_barrier,omitempty"`
 	// ConcurrencyKeys are the job's concurrency keys (F-16): named, global
 	// locks that serialize this job against other jobs that share a key.
@@ -2289,21 +2289,21 @@ func containsString(ss []string, x string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Workers
+// Agents
 // ---------------------------------------------------------------------------
 
-func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request) {
-	if !s.requirePermission(w, r, authz.PermWorkersView, authz.Resource{}) {
+func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePermission(w, r, authz.PermAgentsView, authz.Resource{}) {
 		return
 	}
-	response, err := s.clients.Database.ListWorkers(r.Context(), &dbpb.ListWorkersRequest{
+	response, err := s.clients.Database.ListAgents(r.Context(), &dbpb.ListAgentsRequest{
 		Group: r.URL.Query().Get("group"),
 	})
 	if err != nil {
 		grpcError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, nonNil(response.GetWorkers()))
+	writeJSON(w, http.StatusOK, nonNil(response.GetAgents()))
 }
 
 // ---------------------------------------------------------------------------

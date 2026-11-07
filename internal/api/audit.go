@@ -1,7 +1,7 @@
 // Package api — audit log wiring (F-15).
 //
 // The API records each audited action (a pipeline/run/job/secret/role/user
-// mutation, an approval decision, a login, a worker lifecycle change) to the
+// mutation, an approval decision, a login, a agent lifecycle change) to the
 // audit Recorder, which fans it out to the local audit log file (or stdout)
 // and to the shared audit log in the database (via the Database service's
 // AppendAuditEvent RPC). The database's audit log is the queryable,
@@ -157,7 +157,7 @@ func clientIP(r *http.Request) string {
 }
 
 // SetAudit attaches the audit Recorder to the gRPC server. When set, the gRPC
-// surface records an audit event for each audited action it handles (worker
+// surface records an audit event for each audited action it handles (agent
 // lifecycle, job status reports, token exchanges). When left nil no audit
 // events are recorded on the gRPC surface.
 func (s *GRPCServer) SetAudit(r *audit.Recorder) {
@@ -202,7 +202,7 @@ func (s *GRPCServer) SetRollbackConfig(rc config.RollbackConfig) {
 
 // recordAuditGRPC records an audit event for a gRPC action. actor and
 // actorKind are supplied by the caller (the gRPC surface has no HTTP request
-// context to derive them from: a worker action's actor is the worker's name, a
+// context to derive them from: a agent action's actor is the agent's name, a
 // job action's actor is the job's identity). sourceIP is the peer's address
 // (empty for a local or non-network caller).
 func (s *GRPCServer) recordAuditGRPC(e audit.Event, actor, actorKind, sourceIP string) {

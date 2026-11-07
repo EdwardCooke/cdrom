@@ -1,6 +1,6 @@
 # Cdrom build automation.
 #
-# Cross-compiles worker and agent for Windows + Linux (cross-platform
+# Cross-compiles agent and agent for Windows + Linux (cross-platform
 # requirement). The API server and the gRPC service servers (db, scheduler,
 # artifacts, logs) are control-plane binaries and are built for the host
 # platform only.
@@ -8,7 +8,7 @@
 # Control-plane binaries (host platform only).
 CONTROL_BINS := api db scheduler artifacts idp pipelinesource
 # Execution-layer binaries (shipped for Windows + Linux).
-EXEC_BINS    := worker agent
+EXEC_BINS    := agent agent
 
 GOOS_LINUX := linux
 GOOS_WIN   := windows
@@ -77,8 +77,8 @@ build-fetchclient:
 	go build -o bin/fetchclient ./scripts/e2e/fetchclient
 
 # Execution-layer binaries.
-build-worker:
-	go build -o bin/worker ./cmd/worker
+build-agent:
+	go build -o bin/agent ./cmd/agent
 
 build-agent:
 	go build -o bin/agent ./cmd/agent

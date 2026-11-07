@@ -68,7 +68,7 @@ func shortenRollbackPoll(t *testing.T) {
 // TestRollbackInitiatesDetachedByDefault verifies the DEFAULT SAFETY POSTURE
 // (F-22): the handler initiates the resumption and RETURNS WITHOUT POLLING —
 // the default is wait: false, because a waiting rollback step holds its
-// worker's execution slot and can STARVE the resumption it monitors (the
+// agent's execution slot and can STARVE the resumption it monitors (the
 // deadlock hazard). The resumption's health lives in the run timeline.
 func TestRollbackInitiatesDetachedByDefault(t *testing.T) {
 	fr := &fakeRestorer{statusSeq: []string{"pending", "running", "succeeded"}}

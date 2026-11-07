@@ -77,7 +77,7 @@ fi
 
 # WITH A WORKER (standalone): the run-half needs a target to execute the job
 # on. (The shared stack already runs one.)
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 if [ -z "${E2E_STACK_READY:-}" ]; then
   # Standalone: our own fetcher's file root.
@@ -97,10 +97,10 @@ metadata:
   name: fs-demo
   description: externally sourced demo
 spec:
-  # Default worker group (F-17): the job targets the resident "default" group
+  # Default agent group (F-17): the job targets the resident "default" group
   # (an EMPTY target group would await an ephemeral agent, which the e2e
   # stack has none of).
-  workerGroup: default
+  agentGroup: default
   periodicRefresh:
     interval: 5m
     schedule: "0 3 * * *"

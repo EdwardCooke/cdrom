@@ -1,9 +1,9 @@
 // Command api is the Cdrom API/controller service.
 //
 // It is the single control plane. It exposes the HTTP API consumed by the UI
-// and a gRPC API consumed by execution targets (workers, agents) and the
+// and a gRPC API consumed by execution targets (agents, workers) and the
 // scheduler. It routes requests to the service layer (database, scheduler,
-// artifacts) and holds the workers' WatchJobs streams. No business logic
+// artifacts) and holds the agents' WatchJobs streams. No business logic
 // belongs here.
 package main
 
@@ -48,7 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The API's own gRPC listen address (dial target for workers, agents,
+	// The API's own gRPC listen address (dial target for agents, workers,
 	// and the scheduler).
 	grpcAddr := cfg.ListenAddress
 	if grpcAddr == "" {
@@ -350,7 +350,7 @@ func main() {
 		}
 	}()
 
-	// Job-token auth for the gRPC surface (workers, agents). Disabled by
+	// Job-token auth for the gRPC surface (agents, workers). Disabled by
 	// default; when enabled the API mints job tokens via the IdP (the only
 	// caller of its job-token endpoint, authenticated with its mTLS client
 	// certificate) and verifies them on job-scoped calls. It performs OIDC
@@ -364,7 +364,7 @@ func main() {
 		}
 	}
 
-	// gRPC server (workers, agents, scheduler).
+	// gRPC server (agents, workers, scheduler).
 	creds, err := grpcutil.ServerCreds(cfg.TLS)
 	if err != nil {
 		logger.Error("tls: server creds", "err", err)
@@ -389,7 +389,7 @@ func main() {
 	}
 	// Attach the API's Prometheus metric set (F-20) so the gRPC surface
 	// records job status, log bytes, token minting, secret decryption,
-	// notifications, artifact bytes, the worker hub, and the event-log lag.
+	// notifications, artifact bytes, the agent hub, and the event-log lag.
 	grpcServer.SetMetrics(apiMetrics)
 
 	// Notifications (F-18): the API is the only component that sends an email
@@ -422,7 +422,7 @@ func main() {
 	// the process's default log; stdout when the configured path is "-") and
 	// to the shared audit log in the database (the queryable, cross-replica
 	// store the UI reads via GET /api/audit). The same recorder is attached to
-	// both the HTTP server (UI-facing actions) and the gRPC server (worker
+	// both the HTTP server (UI-facing actions) and the gRPC server (agent
 	// lifecycle, job status reports, token exchanges). Old database entries
 	// are pruned by age on a schedule (audit.retention / audit.prune_interval).
 	auditRecorder, err := api.NewAuditRecorder(cfg.Audit, clients.Database, logger)
@@ -447,8 +447,8 @@ func main() {
 	apipb.RegisterAPIServer(grpcSrv, grpcServer)
 
 	// Event-log tail loop (F-23): tails the shared event log and fans new
-	// events out to this pod's local workers and UI clients, so a job
-	// published by any pod reaches the workers this pod holds streams for. It
+	// events out to this pod's local agents and UI clients, so a job
+	// published by any pod reaches the agents this pod holds streams for. It
 	// also flushes this pod's coalesced job_log_updated events to the shared
 	// log. It runs until the gRPC server shuts down (signal received).
 	tailCtx, stopTail := context.WithCancel(ctx)

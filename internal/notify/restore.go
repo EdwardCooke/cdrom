@@ -10,10 +10,10 @@
 // cut point. The target never chooses the anchor. While the step waits on
 // the resumption's verdict it polls the API's GetRun RPC.
 //
-// The long-lived worker and the ephemeral agent both use this: the shared
+// The long-lived agent and the ephemeral agent both use this: the shared
 // target path (internal/target) sets it in the executor's context (via
 // executor.ContextWithRestorer) before running a job's spec. It is the
-// single shared implementation, so the worker and agent do not each carry a
+// single shared implementation, so the agent and agent do not each carry a
 // copy.
 package notify
 

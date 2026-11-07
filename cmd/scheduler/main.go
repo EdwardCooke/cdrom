@@ -3,8 +3,8 @@
 // It manages job lifecycle and dispatch. For high availability (F-23) it
 // writes to the shared Database service only: it persists the job and appends
 // an "assignment" event to the shared event log, which every API pod tails and
-// fans out to its local workers. It no longer dials a specific API pod, so a
-// job is delivered to whichever pod a worker happens to be connected to. Jobs
+// fans out to its local agents. It no longer dials a specific API pod, so a
+// job is delivered to whichever pod a agent happens to be connected to. Jobs
 // with an empty target group are queued for ephemeral Kubernetes agents. All
 // durable state is persisted through the Database service.
 //

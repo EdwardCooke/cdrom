@@ -20,14 +20,14 @@ execution targets. Everything except the React frontend is Go.
 
 Four layers, top to bottom: **UI** (React) → **API/control plane** (Go, one or
 more replicas) → **services** (standalone gRPC servers) → **execution targets**
-(workers/agents). Details, diagrams, and the RPC inventory are in
+(agents/agents). Details, diagrams, and the RPC inventory are in
 `docs/Architecture.md`.
 
 - **API / control plane** (`cmd/api`) — the only component execution targets
   talk to. Serves the HTTP API to the UI (:8080, incl. `/api/ws` live events)
-  and a gRPC API to workers/agents/the scheduler (:7105). Holds workers'
+  and a gRPC API to agents/agents/the scheduler (:7105). Holds agents'
   `WatchJobs` streams, tails the shared event log (F-23) to fan assignments /
-  cancellations / status out to local workers and UI clients, proxies artifact
+  cancellations / status out to local agents and UI clients, proxies artifact
   traffic, and is the only component that can decrypt secrets (F-12). No
   business logic lives here.
 - **Services** (one gRPC server each; protos in `proto/`, generated code in
@@ -37,7 +37,7 @@ more replicas) → **services** (standalone gRPC servers) → **execution target
     gRPC API.
   - **Scheduler** (`cmd/scheduler`, :7102) — job lifecycle + dispatch. Talks
     **only** to the Database service: it appends "assignment" events to the
-    shared event log that every API pod tails and fans out to live workers
+    shared event log that every API pod tails and fans out to live agents
     (hybrid push+pull, F-23). Background loops (watchdog F-03, retry F-04,
     dependency resolver F-06/F-08, run-status F-07, job-status fan-out,
     cron + event triggers F-09, concurrency admission F-16) run on exactly one
@@ -57,9 +57,9 @@ more replicas) → **services** (standalone gRPC servers) → **execution target
     service (F-21.2): fetches pipeline-definition files from `git`/`http`/`file`
     references, keeps a shallow bare-object-store git cache (go-git, no external
     `git` binary), pins SSH host keys, and serves fetched bytes to the API.
-- **Execution layer** — long-lived **workers** (resident, targetable by group
+- **Execution layer** — long-lived **agents** (resident, targetable by group
   and environment; hold a `WatchJobs` stream *and* poll as the authoritative
-  delivery path, F-23) and ephemeral **agents** (spun up in Kubernetes for a
+  delivery path, F-23) and ephemeral **workers** (spun up in Kubernetes for a
   one-off job; `GetJob` → run → report). Both run on Windows and Linux.
 
 **Topology rule:** execution targets talk **only** to the API. The API talks
@@ -107,7 +107,7 @@ std-lib only, magic-byte detection, path-slip + symlink refusals), and
 vendored, patched `filepathx`, `-`-negated exclusions — zipped with structure
 preserved, entry names sanitized for Windows compatibility with
 collision-counter disambiguation, uploaded into the job's own namespace).
-New types register via `executor.RegisterStepType(name, handler)`; worker and
+New types register via `executor.RegisterStepType(name, handler)`; agent and
 agent blank-import `internal/stephandlers` so built-ins register first — the
 future plugin seam.
 
@@ -142,20 +142,20 @@ declared value.
 
 **Cross-cutting execution concepts** (specs in `docs/features/`):
 
-- **Fan-out (worker groups).** A job targeting a group runs on **every** worker
-  in it; each worker's run is a separate `JobExecution`. The job row's status
-  is *derived* by the scheduler job-status loop from alive workers' outcomes,
+- **Fan-out (agent groups).** A job targeting a group runs on **every** agent
+  in it; each agent's run is a separate `JobExecution`. The job row's status
+  is *derived* by the scheduler job-status loop from alive agents' outcomes,
   per the job's `failure_mode` (`all` default / `best_effort` / `any`).
-- **Step barrier.** A group job with `step_barrier` synchronizes workers at
+- **Step barrier.** A group job with `step_barrier` synchronizes agents at
   each step boundary (`ReportStepCompletion` / `CheckStepBarrier`); a dead
-  worker is dropped.
+  agent is dropped.
 - **`once` step field (F-01).** Runs on at most one target of a fan-out job
   (first to claim a durable slot in the Database service); others record
-  `skipped`. Keeps a notification step from firing once per worker.
+  `skipped`. Keeps a notification step from firing once per agent.
 - **Approval gate (F-13).** An `approval` step pauses the job
   (`awaiting_approval`), renders its `message` against the condition context,
   and polls `CheckApproval`; decided via `POST /api/jobs/{id}/approve|reject`.
-  Gate is job-level: one approval unblocks every worker of a fan-out job.
+  Gate is job-level: one approval unblocks every agent of a fan-out job.
 - **Concurrency admission (F-16).** Before dispatch the scheduler admits the
   job durably (`AcquireJobSlots`): one slot per concurrency key (keys are
   OR'd — blocked while any is held), the target group's cap, and the global
@@ -172,17 +172,17 @@ declared value.
   overriding any trigger and the job's own setting. Managed via
   `GET/POST/PUT/DELETE /api/environments[/{name}]`.
 - **Labeling (F-29).** Normalized key/value labels (a `Label` table, indexed
-  on `(key,value)`) on pipelines, jobs, environments, worker groups, and
-  workers. A run snapshots the combined labels of its context
-  (`worker > worker group > environment > job > pipeline` on collisions).
-  Workers declare theirs via `CDROM_WORKER_LABELS` (config `worker_labels`).
+  on `(key,value)`) on pipelines, jobs, environments, agent groups, and
+  agents. A run snapshots the combined labels of its context
+  (`agent > agent group > environment > job > pipeline` on collisions).
+  Agents declare theirs via `CDROM_AGENT_LABELS` (config `agent_labels`).
   Pipelines and runs are searchable by label with the repeated
   `label=key=value` query param (`GET /api/pipelines?label=k=v`,
   `GET /api/pipelines/{id}/runs?label=k=v`). The file format's
   `metadata.annotations` (F-21.7) are free-form key/value pairs stored on the
-  pipeline for UI searchability only — they never affect behavior. Worker
+  pipeline for UI searchability only — they never affect behavior. Agent
   groups are first-class rows managed via
-  `GET/POST/PUT/DELETE /api/worker-groups[/{name}]`.
+  `GET/POST/PUT/DELETE /api/agent-groups[/{name}]`.
 
 ### Logging & metrics
 
@@ -252,7 +252,7 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 
 ## Cross-Platform Requirements
 
-- Both workers **and** agents must run on **Windows and Linux**.
+- Both agents **and** workers must run on **Windows and Linux**.
 - Portable Go only (`filepath`, `os` env handling); no hard-coded path
   separators, Unix-only syscalls, or shell assumptions without a Windows
   equivalent. Windows path/line-ending handling is a known failure mode.
@@ -263,9 +263,9 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 Standard Go layout; the frontend lives outside the Go module.
 
 ```
-cmd/            thin mains: api, db, scheduler, artifacts, idp, pipelinesource, worker, agent
+cmd/            thin mains: api, db, scheduler, artifacts, idp, pipelinesource, agent, agent
 internal/
-  api/          API/controller: HTTP routing + gRPC control plane (worker hub,
+  api/          API/controller: HTTP routing + gRPC control plane (agent hub,
                 artifact proxy, StreamJobLogs persistence + job_log fan-out,
                 event hub + /api/ws, job-token auth)
   auth/         OIDC/Bearer verification (JWKS, discovery ad, middleware)
@@ -278,11 +278,11 @@ internal/
                 bearer presentation)
   logging/      centralized logging (stdout or CDROM_LOG_FILE)
   metrics/      Prometheus plumbing (F-20) + per-component metric sets
-  logstream/    streams a job's step output to the API (worker + agent)
+  logstream/    streams a job's step output to the API (agent + agent)
   tokenexchange/ executor.TokenExchange via the API's ExchangeJobToken
   approval/     approval gate (F-13): report awaiting_approval + poll CheckApproval
-  target/       shared execution layer for worker + agent (run context, status
-                reporting, post-run decision; worker supplies the StepBarrier)
+  target/       shared execution layer for agent + agent (run context, status
+                reporting, post-run decision; agent supplies the StepBarrier)
   executor/     shared job-step executor: dispatch engine (handler by type,
                 job/step timeouts, LogSink, StepStatusReporter, StepBarrier,
                 TokenExchange; spec interpolation F-10, step condition F-06,
@@ -309,7 +309,7 @@ internal/
     pipelinesource/ source-fetcher service (F-21.2): git/http/file fetch
                 clients, shallow bare-object-store git cache, strict SSH
                 host-key pinning
-  worker/       long-lived worker (registration, WatchJobs + poll, StepBarrier)
+  agent/       long-lived agent (registration, WatchJobs + poll, StepBarrier)
   agent/        ephemeral agent (GetJob → run → report; unbarriered)
   idp/          local OIDC IdP (JWT issuer, auto key rotation; users, keys,
                 codes via the Database service)
@@ -342,7 +342,7 @@ Rules:
   `./certs`), `make clean`.
 - Verify with `go vet ./...`; build with `go build ./...`.
 - **Cross-compile check:** `GOOS=windows GOARCH=amd64 go build ./cmd/...` must
-  stay green — worker and agent ship for Windows.
+  stay green — agent and agent ship for Windows.
 - Regenerate `internal/gen/` after editing any `.proto` (`make proto`).
 
 ## Running Locally
@@ -361,13 +361,13 @@ env vars; every binary accepts `--config-file <path>`, see
 | idp (gRPC)      | 127.0.0.1:7106  | `CDROM_IDP_GRPC_ADDR` |
 | pipelinesource  | 127.0.0.1:7107  | `CDROM_LISTEN_ADDR`   |
 | api (HTTP)      | 127.0.0.1:8080  | `CDROM_API_HTTP_ADDR` |
-| worker/agent    | —               | `CDROM_API_ADDR`      |
+| agent/agent    | —               | `CDROM_API_ADDR`      |
 | metrics         | 127.0.0.1:91xx  | `CDROM_METRICS_ADDR`  |
 
 Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 (`sqlite`|`postgres`), `CDROM_DB_SQLITE_PATH` / `CDROM_DB_POSTGRES_DSN`,
-`CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_WORKER_{NAME,GROUP,ENVIRONMENTS,LABELS}`,
-`CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_WORKER_ROOT` (worker/agent staged-working-area
+`CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_AGENT_{NAME,GROUP,ENVIRONMENTS,LABELS}`,
+`CDROM_WORKER_{JOB_ID,NAME}`, `CDROM_AGENT_ROOT` (agent/agent staged-working-area
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
 resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
 (OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping,
@@ -389,7 +389,7 @@ make build
 ./bin/scheduler   # dials db; loops run only while it holds the leader lease
 ./bin/artifacts   # stores files under ./artifacts
 ./bin/api         # gRPC :7105 + HTTP :8080
-./bin/worker      # registers with the api, watches for jobs
+./bin/agent      # registers with the api, watches for jobs
 ```
 
 For auth also run `./bin/idp` and point the API's `auth.issuer` at
@@ -451,8 +451,8 @@ F-25/F-26 specs):
 
 ## Live Events
 
-`GET /api/ws` (gorilla/websocket). Connect → state snapshot (jobs + workers +
-runs + …); thereafter one message per event: `job_status`, `worker`,
+`GET /api/ws` (gorilla/websocket). Connect → state snapshot (jobs + agents +
+runs + …); thereafter one message per event: `job_status`, `agent`,
 `job_log` (F-02), `run_status` (F-07), `queue`, `environment`,
 `concurrency_limits`, `role_change`, `source_credential`, …. Published from
 the gRPC server and HTTP handlers through a shared `EventHub`

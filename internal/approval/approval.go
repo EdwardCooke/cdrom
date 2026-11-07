@@ -3,10 +3,10 @@
 // (F-13) by reporting the job as awaiting approval (with a message shown to
 // the user) and polling the API for the gate's decision (approved or rejected).
 //
-// Both the long-lived worker and the ephemeral agent use it: each sets it in
+// Both the long-lived agent and the ephemeral agent use it: each sets it in
 // the executor's context (via executor.ContextWithApproval) before running a
 // job's spec, so a step handler (the built-in "approval" handler) can pause the
-// job at a gate. It is the single shared implementation, so the worker and
+// job at a gate. It is the single shared implementation, so the agent and
 // agent do not each carry a copy.
 package approval
 

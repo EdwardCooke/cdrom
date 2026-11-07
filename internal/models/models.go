@@ -212,7 +212,7 @@ type Pipeline struct {
 	Name        string `gorm:"uniqueIndex;not null" json:"name"`
 	Description string `json:"description"`
 	// FailureMode is the pipeline's default failure mode (see FailureMode) for
-	// its jobs that fan out to a worker group. A job that sets its own
+	// its jobs that fan out to a agent group. A job that sets its own
 	// FailureMode overrides the pipeline's; a job that sets none inherits this
 	// value (defaulting to FailureModeAll when the pipeline sets none).
 	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
@@ -256,7 +256,7 @@ type Pipeline struct {
 	// Labels are the pipeline's labels (F-29): a set of key/value pairs that label
 	// the pipeline. They are metadata (they never gate, route, or serialize
 	// work) and are combined with the labels of a run's other resources (job,
-	// environment, worker group, worker) onto the run's job instances. They
+	// environment, agent group, agent) onto the run's job instances. They
 	// are stored normalized in the Label table (one row per key/value pair,
 	// owner_type "pipeline"), not as a column on this row, so they can be
 	// searched by key and/or value. The field is in-memory only (gorm:"-"): the
@@ -481,7 +481,7 @@ type JobDefinitionSnapshot struct {
 	Key string `json:"key"`
 	// Name is the job's display name; empty means the key is used.
 	Name string `json:"name,omitempty"`
-	// TargetGroup selects a group of long-lived workers; empty means the job
+	// TargetGroup selects a group of long-lived agents; empty means the job
 	// runs on an ephemeral Kubernetes agent.
 	TargetGroup string `json:"target_group,omitempty"`
 	// Environment is the environment the job targets (F-17); empty means the
@@ -504,7 +504,7 @@ type JobDefinitionSnapshot struct {
 	Spec JobSpec `json:"spec,omitempty"`
 	// Labels are the job's labels at this version (F-29): a set of key/value pairs
 	// that label the job. They are combined with the labels of the run's other
-	// resources (pipeline, environment, worker group, worker) onto the run's
+	// resources (pipeline, environment, agent group, agent) onto the run's
 	// job instances. Empty means the job has no labels.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Variables are the job's effective variables (F-21.1.3): the union of the
@@ -818,23 +818,23 @@ const (
 	StepStatusTimedOut StepStatus = "timed_out"
 )
 
-// FailureMode controls how a job that runs on several workers (a job targeting
-// a worker group, which runs on every worker in the group) is judged from the
-// per-worker outcomes. It is set at the pipeline level and may be overridden
+// FailureMode controls how a job that runs on several agents (a job targeting
+// a agent group, which runs on every agent in the group) is judged from the
+// per-agent outcomes. It is set at the pipeline level and may be overridden
 // per job; a job that sets no failure mode inherits its pipeline's (defaulting
 // to FailureModeAll). It only affects jobs that fan out to more than one
-// worker; a job on a single target is unaffected.
+// agent; a job on a single target is unaffected.
 type FailureMode string
 
 const (
-	// FailureModeAll: the job succeeds only if every worker's run succeeds;
-	// any worker that fails or times out fails the job.
+	// FailureModeAll: the job succeeds only if every agent's run succeeds;
+	// any agent that fails or times out fails the job.
 	FailureModeAll FailureMode = "all"
-	// FailureModeBestEffort: the job succeeds if every worker's run reaches a
-	// terminal state (a per-worker failure or timeout is recorded but does not
+	// FailureModeBestEffort: the job succeeds if every agent's run reaches a
+	// terminal state (a per-agent failure or timeout is recorded but does not
 	// fail the job).
 	FailureModeBestEffort FailureMode = "best_effort"
-	// FailureModeAny: the job succeeds as soon as one worker's run succeeds.
+	// FailureModeAny: the job succeeds as soon as one agent's run succeeds.
 	FailureModeAny FailureMode = "any"
 )
 
@@ -933,7 +933,7 @@ type JobStep struct {
 	// IgnoreFailed stops the job.
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
 	// Once (F-01), when true, means the step runs on at most one target of a
-	// job that fans out to a worker group: the first target to claim the
+	// job that fans out to a agent group: the first target to claim the
 	// step's slot runs it, the others skip it (recorded skipped, not failed).
 	// A retry (a new attempt) may run it again.
 	Once bool `json:"once,omitempty"`
@@ -973,17 +973,17 @@ type JobSpec struct {
 	// does not change the job's own status or stop a failed step from failing
 	// the job (that is a step's IgnoreFailed).
 	IgnoreFailed bool `json:"ignore_failed,omitempty"`
-	// FailureMode controls how a job that fans out to a worker group is judged
-	// from the per-worker outcomes (see FailureMode). An empty value means the
+	// FailureMode controls how a job that fans out to a agent group is judged
+	// from the per-agent outcomes (see FailureMode). An empty value means the
 	// job inherits its pipeline's failure mode (defaulting to FailureModeAll).
 	FailureMode FailureMode `json:"failure_mode,omitempty"`
-	// StepBarrier, when true, makes a job that fans out to a worker group
-	// synchronize its workers at each step boundary: after a worker completes
-	// a step it waits until every worker alive at the step's start has
-	// completed it before starting the next step. A worker that dies mid-step
-	// is dropped from the barrier (it is no longer alive), so a dead worker
+	// StepBarrier, when true, makes a job that fans out to a agent group
+	// synchronize its agents at each step boundary: after a agent completes
+	// a step it waits until every agent alive at the step's start has
+	// completed it before starting the next step. A agent that dies mid-step
+	// is dropped from the barrier (it is no longer alive), so a dead agent
 	// cannot wedge the job. It only affects jobs that fan out to more than
-	// one worker; a job on a single target runs its steps unbarriered.
+	// one agent; a job on a single target runs its steps unbarriered.
 	StepBarrier bool `json:"step_barrier,omitempty"`
 	// ConcurrencyKeys are the job's concurrency keys (F-16): named, global
 	// locks that serialize this job against other jobs (in any pipeline or
@@ -1030,7 +1030,7 @@ type DependencyObservation struct {
 
 // Job is a single unit of work belonging to a pipeline.
 //
-// TargetGroup selects a group of long-lived workers; an empty value means
+// TargetGroup selects a group of long-lived agents; an empty value means
 // the job runs on an ephemeral Kubernetes agent.
 //
 // Spec is a snapshot of the execution spec taken when the job was created,
@@ -1106,12 +1106,12 @@ type Job struct {
 	// FailureMode is the job's failure mode (see FailureMode), denormalized
 	// from the spec (or the pipeline's default) when the job was created. The
 	// scheduler's job-status loop uses it to derive the job's overall status
-	// from the per-worker outcomes of a job that fanned out to a worker group.
+	// from the per-agent outcomes of a job that fanned out to a agent group.
 	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
 	// StepBarrier is the job's step-barrier flag (see JobSpec.StepBarrier),
 	// denormalized from the spec when the job was created. It is set on the
 	// job so the execution target can tell from the job alone whether to
-	// synchronize its workers at step boundaries.
+	// synchronize its agents at step boundaries.
 	StepBarrier bool `json:"step_barrier"`
 	// TriggerName is the name of the trigger that started the run this job is
 	// an instance of (F-09); empty for a job not started by a named trigger.
@@ -1277,7 +1277,7 @@ type Job struct {
 	ApprovalVotes []ApprovalVote `gorm:"-" json:"approval_votes,omitempty"`
 	// Environment is the name of the environment this job targets (F-17);
 	// empty means the job targets its raw TargetGroup (the pre-F-17 behavior).
-	// A job targeting an environment is dispatched to the live workers that
+	// A job targeting an environment is dispatched to the live agents that
 	// registered that environment (intersected with the environment's
 	// target_group when set), and is subject to the environment's approval and
 	// automation policies. It is denormalized from the job definition onto the
@@ -1296,7 +1296,7 @@ type Job struct {
 	Approval ApprovalPolicy `json:"approval,omitempty"`
 	// Labels are the job's combined labels (F-29): the union of the labels of every
 	// resource in the job's context — its pipeline, the job itself, the
-	// environment it targets (if any), and the worker group it targets (if
+	// environment it targets (if any), and the agent group it targets (if
 	// any) — with the more specific source winning on a key collision. They
 	// are computed when the job instance is created (a run's job instances are
 	// created by createRunAndInstances) and stored as a snapshot: relabeling a
@@ -1311,7 +1311,7 @@ type Job struct {
 
 // ConcurrencyResource is the durable, atomic slot accounting for one
 // concurrency resource (F-16). A resource is a concurrency key, or the
-// synthetic "group:<name>" resource (a worker group's cap) or "global"
+// synthetic "group:<name>" resource (a agent group's cap) or "global"
 // resource (the system-wide cap). Held is the number of jobs currently
 // holding a slot on the resource. The Database service enforces the resource's
 // limit by atomically incrementing Held (only while Held is below the limit)
@@ -1332,8 +1332,8 @@ type ConcurrencyResource struct {
 // ConcurrencyLimit is a concurrency limit rule (F-16): a named, regex-based
 // cap on how many jobs may run concurrently against one dimension. A rule has
 // a Kind (which dimension it bounds: "global" the system-wide cap, "group" a
-// worker group's cap, or "key" a concurrency key's cap), a Pattern (a regular
-// expression matched against the dimension's name — a worker group's name or a
+// agent group's cap, or "key" a concurrency key's cap), a Pattern (a regular
+// expression matched against the dimension's name — a agent group's name or a
 // concurrency key's name; empty for the single "global" resource), and a Limit
 // (the cap on concurrent jobs; 0 means unlimited).
 //
@@ -1349,7 +1349,7 @@ type ConcurrencyLimit struct {
 	// Kind is the dimension the rule bounds: "global", "group", or "key".
 	Kind string `gorm:"size:16;not null;index" json:"kind"`
 	// Pattern is a regular expression matched against the dimension's name (a
-	// worker group's name or a concurrency key's name). It is empty for the
+	// agent group's name or a concurrency key's name). It is empty for the
 	// single "global" resource. It is validated (compiled) when the rule is
 	// saved, so a rule can never be stored that could not match.
 	Pattern string `gorm:"size:255;not null" json:"pattern"`
@@ -1452,19 +1452,19 @@ type SourceCredential struct {
 	Headers []HTTPHeader `gorm:"type:text;serializer:json" json:"headers,omitempty"`
 }
 
-// StepCompletion records that one worker completed one step of a job's
-// current attempt (the cross-worker step barrier). A job that fans out to a
-// worker group with the step barrier enabled waits, after each step, until
-// every worker alive at the step's start has a StepCompletion row for that
-// step; the barrier is satisfied when that is the case. A worker that dies
+// StepCompletion records that one agent completed one step of a job's
+// current attempt (the cross-agent step barrier). A job that fans out to a
+// agent group with the step barrier enabled waits, after each step, until
+// every agent alive at the step's start has a StepCompletion row for that
+// step; the barrier is satisfied when that is the case. A agent that dies
 // mid-step is dropped from the barrier (it is no longer alive), so a dead
-// worker cannot wedge the job.
+// agent cannot wedge the job.
 type StepCompletion struct {
 	gorm.Model
 	// JobID is the job the step belongs to.
 	JobID uint `gorm:"uniqueIndex:idx_step_completion_unique,priority:1;not null" json:"job_id"`
-	// WorkerName is the worker that completed the step.
-	WorkerName string `gorm:"uniqueIndex:idx_step_completion_unique,priority:2;not null" json:"worker_name"`
+	// AgentName is the agent that completed the step.
+	AgentName string `gorm:"uniqueIndex:idx_step_completion_unique,priority:2;not null" json:"agent_name"`
 	// StepName is the step's name (the step that was completed).
 	StepName string `gorm:"size:255;uniqueIndex:idx_step_completion_unique,priority:3;not null" json:"step_name"`
 	// Attempt is the job attempt this completion belongs to (F-04); a retry
@@ -1473,14 +1473,14 @@ type StepCompletion struct {
 }
 
 // StepOnceClaim is the durable "run this step" slot for a step of a job that
-// fans out to a worker group (F-01). A step with `once` set runs on at most
+// fans out to a agent group (F-01). A step with `once` set runs on at most
 // one target: the first target to claim (job id + step name + attempt) creates
 // this row and runs the step; every other target that reaches the same step in
 // the same attempt finds the row already claimed and skips the step. A retry
 // (F-04) is a new attempt, so it claims a fresh slot. The unique index on
 // (job_id, step_name, attempt) is what makes the claim atomic: at most one
 // concurrent caller can create the row, so the dedup is correct across every
-// API replica and worker process.
+// API replica and agent process.
 type StepOnceClaim struct {
 	gorm.Model
 	// JobID is the job the step belongs to.
@@ -1492,81 +1492,81 @@ type StepOnceClaim struct {
 	Attempt int `gorm:"uniqueIndex:idx_step_once_claim_unique,priority:3" json:"attempt"`
 }
 
-// JobExecution is one worker's run of a job (fan-out). A job that targets a
-// worker group runs on every worker in the group; each worker's run is a
+// JobExecution is one agent's run of a job (fan-out). A job that targets a
+// agent group runs on every agent in the group; each agent's run is a
 // separate JobExecution, tracked independently so the job's overall status can
-// be derived from the per-worker outcomes (see FailureMode). A job that runs
-// on a single target (an ephemeral agent, or a group with one worker) has a
+// be derived from the per-agent outcomes (see FailureMode). A job that runs
+// on a single target (an ephemeral agent, or a group with one agent) has a
 // single execution.
 //
 // The Job row's status is the *derived* overall status (maintained by the
-// scheduler's job-status loop); each JobExecution's status is that worker's
-// own outcome, reported by the worker.
+// scheduler's job-status loop); each JobExecution's status is that agent's
+// own outcome, reported by the agent.
 type JobExecution struct {
 	gorm.Model
 	// JobID is the job this execution runs.
 	JobID uint `gorm:"index:idx_job_execution_job_attempt,priority:1;not null" json:"job_id"`
-	// WorkerName is the worker that runs (or ran) this execution.
-	WorkerName string `gorm:"index;not null" json:"worker_name"`
+	// AgentName is the agent that runs (or ran) this execution.
+	AgentName string `gorm:"index;not null" json:"agent_name"`
 	// Attempt is the job attempt this execution belongs to (F-04); a retry
 	// creates a fresh set of executions.
 	Attempt int `gorm:"index:idx_job_execution_job_attempt,priority:2" json:"attempt"`
-	// Status is this execution's state: running while the worker is executing
+	// Status is this execution's state: running while the agent is executing
 	// the job, and a terminal status (succeeded, failed, cancelled, or
-	// timed_out) once the worker reports its outcome.
+	// timed_out) once the agent reports its outcome.
 	Status JobStatus `gorm:"default:running;index" json:"status"`
-	// StartedAt is when the worker started the execution.
+	// StartedAt is when the agent started the execution.
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// FinishedAt is when the execution reached a terminal status; nil while
 	// it is still running.
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	// StepResults is the terminal outcome of each step that ran (or was
-	// skipped by its condition) during this worker's run of the job (F-06),
-	// reported by the worker alongside the execution's final status.
+	// skipped by its condition) during this agent's run of the job (F-06),
+	// reported by the agent alongside the execution's final status.
 	StepResults []StepResult `gorm:"type:text;serializer:json" json:"step_results,omitempty"`
-	// Outputs are the named values this worker's run produced (F-06).
+	// Outputs are the named values this agent's run produced (F-06).
 	Outputs map[string]string `gorm:"type:text;serializer:json" json:"outputs,omitempty"`
-	// Labels are this worker's execution's combined labels (F-29): the job
-	// instance's base label set (pipeline + job + environment + worker group)
-	// merged with the labels of the worker that ran this execution (the worker's
-	// labels win on a key collision). They are set when the worker starts the
-	// execution (StartJobExecution), so a fan-out job's each-worker execution
-	// carries that worker's own labels. They are metadata and are stored
+	// Labels are this agent's execution's combined labels (F-29): the job
+	// instance's base label set (pipeline + job + environment + agent group)
+	// merged with the labels of the agent that ran this execution (the agent's
+	// labels win on a key collision). They are set when the agent starts the
+	// execution (StartJobExecution), so a fan-out job's each-agent execution
+	// carries that agent's own labels. They are metadata and are stored
 	// normalized in the Label table (owner_type "job_execution", owner_id the
 	// execution's id), not as a column on this row. The field is in-memory
 	// only (gorm:"-"). Empty means the execution has no labels.
 	Labels map[string]string `gorm:"-" json:"labels,omitempty"`
 }
 
-// Worker is a long-lived worker process registered on a deployment target.
+// Agent is a long-lived agent process registered on a deployment target.
 //
-// Workers are targetable by group: a job may be dispatched to all (or a
-// selection of) workers sharing a Group value.
-type Worker struct {
+// Agents are targetable by group: a job may be dispatched to all (or a
+// selection of) agents sharing a Group value.
+type Agent struct {
 	gorm.Model
 	Name string `gorm:"uniqueIndex;not null" json:"name"`
-	// Group is the worker's group. The column is named worker_group because
+	// Group is the agent's group. The column is named agent_group because
 	// "group" is a reserved SQL keyword (notably in SQLite).
-	Group      string     `gorm:"column:worker_group;index;not null" json:"group"`
+	Group      string     `gorm:"column:agent_group;index;not null" json:"group"`
 	Address    string     `json:"address"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
-	// Environments are the names of the environments this worker belongs to
-	// (F-17). Membership is many-to-many: a worker may list several
-	// environments (a `prod-auto` worker can also serve `staging`), and an
-	// environment can be served by many workers. A job targeting environment
-	// E is dispatched to the live workers that registered E. A worker that
+	// Environments are the names of the environments this agent belongs to
+	// (F-17). Membership is many-to-many: a agent may list several
+	// environments (a `prod-auto` agent can also serve `staging`), and an
+	// environment can be served by many agents. A job targeting environment
+	// E is dispatched to the live agents that registered E. A agent that
 	// belongs to no environment is reachable only by its raw Group (the
 	// pre-F-17 behavior). It is stored as a JSON document in a text column
 	// (portable across SQLite and PostgreSQL), like the other list fields.
 	Environments []string `gorm:"type:text;serializer:json" json:"environments,omitempty"`
-	// Labels are the worker's labels (F-29): a set of key/value pairs that label
-	// the worker. A worker declares them at registration (configurable, like
+	// Labels are the agent's labels (F-29): a set of key/value pairs that label
+	// the agent. A agent declares them at registration (configurable, like
 	// its environments, F-17); re-registration updates them. When a job is
-	// dispatched to the worker, the worker's labels are merged into the job's
-	// execution's label set (the worker's labels win on a key collision). They
+	// dispatched to the agent, the agent's labels are merged into the job's
+	// execution's label set (the agent's labels win on a key collision). They
 	// are metadata (they never gate, route, or serialize work) and are stored
-	// normalized in the Label table (owner_type "worker"), not as a column on
-	// this row. The field is in-memory only (gorm:"-"). Empty means the worker
+	// normalized in the Label table (owner_type "agent"), not as a column on
+	// this row. The field is in-memory only (gorm:"-"). Empty means the agent
 	// has no labels.
 	Labels map[string]string `gorm:"-" json:"labels,omitempty"`
 }
@@ -1574,7 +1574,7 @@ type Worker struct {
 // Environment is a named deployment target that groups execution targets and
 // carries the deployment policy that governs how work reaches it (F-17). An
 // environment is the unit of "where does this run, and how strictly is it
-// gated": it names the workers that serve it (via worker membership and an
+// gated": it names the agents that serve it (via agent membership and an
 // optional target group) and carries two gates — an approval policy
 // (RequiresApproval, an F-13 approval gate) and an automation policy
 // (Automation, automatic/manual) that decides whether a run proceeds on its
@@ -1582,7 +1582,7 @@ type Worker struct {
 //
 // Environments are stored in the database (owned by the Database service) and
 // managed through the API (CRUD), so an admin can create `prod-auto`, flip
-// `prod` to manual, or add a worker to an environment at runtime without a
+// `prod` to manual, or add a agent to an environment at runtime without a
 // redeployment.
 type Environment struct {
 	gorm.Model
@@ -1591,10 +1591,10 @@ type Environment struct {
 	Name string `gorm:"uniqueIndex;not null" json:"name"`
 	// Description is a human-readable description of the environment.
 	Description string `json:"description"`
-	// TargetGroup is the worker group that serves the environment; empty means
-	// the environment is served by ephemeral agents (or, when a worker
-	// declares the environment, by the workers that registered it). A job
-	// targeting the environment is dispatched to the live workers that
+	// TargetGroup is the agent group that serves the environment; empty means
+	// the environment is served by ephemeral workers (or, when a agent
+	// declares the environment, by the agents that registered it). A job
+	// targeting the environment is dispatched to the live agents that
 	// registered it, intersected with this group when one is set.
 	TargetGroup string `gorm:"column:target_group;index" json:"target_group"`
 	// RequiresApproval, when true, inserts an F-13 approval gate before a job
@@ -1937,7 +1937,7 @@ type ScimKey struct {
 // Event is a row in the shared, append-only event log (F-23, high
 // availability). The event log is the coordination bus that makes the control
 // plane horizontally scalable: every API pod tails it and fans the events out
-// to its local workers and UI clients, and the scheduler's background loops
+// to its local agents and UI clients, and the scheduler's background loops
 // publish state changes to it instead of pushing to a specific API pod.
 //
 // An event is a *pointer*, not the data: the payload is a small JSON object
@@ -1949,19 +1949,19 @@ type ScimKey struct {
 //
 // The table is partitioned by CreatedAt (PostgreSQL) so old events can be
 // dropped as whole partitions (O(1), no bloat). The log is a *recent buffer*;
-// the database state (jobs, runs, workers) is the source of truth. A consumer
+// the database state (jobs, runs, agents) is the source of truth. A consumer
 // whose cursor has fallen out of the retained window resyncs from a state
 // snapshot rather than replaying the log.
 type Event struct {
 	gorm.Model
 	// Name is the event kind: "assignment", "cancel", "job_status",
-	// "run_status", "worker", or "job_log_updated".
+	// "run_status", "agent", or "job_log_updated".
 	Name string `gorm:"index;not null" json:"name"`
-	// WorkerGroup is the group the event is relevant to (for group-scoped
+	// AgentGroup is the group the event is relevant to (for group-scoped
 	// events like assignment); empty for events that are not group-scoped
 	// (status, run status, log updates). An API pod filters events by this
-	// against the groups of the workers it holds streams for.
-	WorkerGroup string `gorm:"column:worker_group;index" json:"worker_group"`
+	// against the groups of the agents it holds streams for.
+	AgentGroup string `gorm:"column:agent_group;index" json:"agent_group"`
 	// Payload is the small JSON object that carries the event's data (e.g.
 	// {"job_id": 42} or {"job_id": 42, "log": "job.log", "size": 183422}).
 	// It is stored as a JSON document in a text column (portable across
@@ -1969,7 +1969,7 @@ type Event struct {
 	Payload string `gorm:"type:text" json:"payload"`
 	// Environment is the environment the event is relevant to (F-17); set for
 	// assignment events of a job that targets an environment, so an API pod can
-	// nudge its local workers that belong to it. Empty otherwise.
+	// nudge its local agents that belong to it. Empty otherwise.
 	Environment string `gorm:"index" json:"environment"`
 }
 
@@ -2237,7 +2237,7 @@ type AuditEvent struct {
 	Action string `gorm:"index;not null" json:"action"`
 	// TargetKind is the kind of resource the action acted on (e.g.
 	// "pipeline", "run", "job", "role", "role-binding", "user", "secret",
-	// "worker", "login").
+	// "agent", "login").
 	TargetKind string `gorm:"index" json:"target_kind,omitempty"`
 	// TargetID is the id (or name, for name-keyed resources such as roles) of
 	// the resource the action acted on; empty when the action has no single
@@ -2275,30 +2275,30 @@ type AuditEvent struct {
 	Details string `gorm:"type:text" json:"details,omitempty"`
 }
 
-// WorkerGroup is a named group of long-lived workers (F-29). A worker group
+// AgentGroup is a named group of long-lived agents (F-29). A agent group
 // is the unit a job targets (a job's TargetGroup names it) and the unit a
-// worker belongs to (a worker's Group names it). Before F-29 a group was only
-// an implicit string (a worker's Group value); F-29 makes it a first-class,
+// agent belongs to (a agent's Group names it). Before F-29 a group was only
+// an implicit string (a agent's Group value); F-29 makes it a first-class,
 // labelable row so a group can carry labels (F-29) that are combined onto the
 // runs of the jobs that target it. The row is metadata-only: it does not
-// change dispatch (which still keys off the worker's declared Group string),
+// change dispatch (which still keys off the agent's declared Group string),
 // so a group that has no row simply contributes no labels and jobs targeting it
-// still run on its workers.
-type WorkerGroup struct {
+// still run on its agents.
+type AgentGroup struct {
 	gorm.Model
 	// Name is the group's unique name (e.g. "build", "prod-fleet"); it is
-	// the value a worker's Group field and a job's TargetGroup reference.
+	// the value a agent's Group field and a job's TargetGroup reference.
 	Name string `gorm:"uniqueIndex;not null" json:"name"`
 	// Description is a human-readable description of the group.
 	Description string `json:"description"`
 	// Labels are the group's labels (F-29): a set of key/value pairs that label
 	// the group. They are managed through the API (the
-	// PUT /api/worker-groups/{name} body) and stored in the database, so the
+	// PUT /api/agent-groups/{name} body) and stored in the database, so the
 	// UI can label a group without a redeployment. When a job targets the
 	// group, the group's labels are combined with the labels of the run's other
 	// resources onto the run's job instances. They are metadata (they never
 	// gate, route, or serialize work) and are stored normalized in the Tag
-	// table (owner_type "worker_group"), not as a column on this row. The
+	// table (owner_type "agent_group"), not as a column on this row. The
 	// field is in-memory only (gorm:"-"). Empty means the group has no labels.
 	Labels map[string]string `gorm:"-" json:"labels,omitempty"`
 }
@@ -2347,8 +2347,8 @@ const (
 	LabelOwnerJob             = "job"
 	LabelOwnerJobExecution    = "job_execution"
 	LabelOwnerEnvironment     = "environment"
-	LabelOwnerWorker          = "worker"
-	LabelOwnerWorkerGroup     = "worker_group"
+	LabelOwnerAgent          = "agent"
+	LabelOwnerAgentGroup     = "agent_group"
 )
 
 // StorageObject is the database's record of a file held by the artifacts
@@ -2454,8 +2454,8 @@ func All() []any {
 		&JobExecution{},
 		&StepCompletion{},
 		&StepOnceClaim{},
-		&Worker{},
-		&WorkerGroup{},
+		&Agent{},
+		&AgentGroup{},
 		&IDPSigningKey{},
 		&IDPAuthCode{},
 		&IDPUser{},

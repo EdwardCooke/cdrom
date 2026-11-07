@@ -33,11 +33,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ArtifactsRoot != "artifacts" {
 		t.Errorf("ArtifactsRoot = %q, want %q", cfg.ArtifactsRoot, "artifacts")
 	}
-	if cfg.WorkerName != "worker-1" {
-		t.Errorf("WorkerName = %q, want %q", cfg.WorkerName, "worker-1")
+	if cfg.AgentName != "agent-1" {
+		t.Errorf("AgentName = %q, want %q", cfg.AgentName, "agent-1")
 	}
-	if cfg.WorkerGroup != "default" {
-		t.Errorf("WorkerGroup = %q, want %q", cfg.WorkerGroup, "default")
+	if cfg.AgentGroup != "default" {
+		t.Errorf("AgentGroup = %q, want %q", cfg.AgentGroup, "default")
 	}
 	if cfg.AgentJobID != "" {
 		t.Errorf("AgentJobID = %q, want empty", cfg.AgentJobID)
@@ -148,8 +148,8 @@ func TestLoadWithFile(t *testing.T) {
 listen_address: 127.0.0.1:9999
 db_address: 127.0.0.1:7201
 artifacts_root: /var/cdrom/artifacts
-worker_name: worker-9
-worker_group: batch
+agent_name: agent-9
+agent_group: batch
 agent_job_id: "42"
 db:
   backend: postgres
@@ -179,11 +179,11 @@ db:
 	if cfg.ArtifactsRoot != "/var/cdrom/artifacts" {
 		t.Errorf("ArtifactsRoot = %q, want /var/cdrom/artifacts", cfg.ArtifactsRoot)
 	}
-	if cfg.WorkerName != "worker-9" {
-		t.Errorf("WorkerName = %q, want worker-9", cfg.WorkerName)
+	if cfg.AgentName != "agent-9" {
+		t.Errorf("AgentName = %q, want agent-9", cfg.AgentName)
 	}
-	if cfg.WorkerGroup != "batch" {
-		t.Errorf("WorkerGroup = %q, want batch", cfg.WorkerGroup)
+	if cfg.AgentGroup != "batch" {
+		t.Errorf("AgentGroup = %q, want batch", cfg.AgentGroup)
 	}
 	if cfg.AgentJobID != "42" {
 		t.Errorf("AgentJobID = %q, want 42", cfg.AgentJobID)
@@ -272,18 +272,18 @@ pipeline_source:
 
 func TestEnvOverridesFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "worker_name: from-file\n"
+	content := "agent_name: from-file\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	t.Setenv("CDROM_WORKER_NAME", "from-env")
+	t.Setenv("CDROM_AGENT_NAME", "from-env")
 
 	cfg, err := LoadWithFile(path)
 	if err != nil {
 		t.Fatalf("LoadWithFile: %v", err)
 	}
-	if cfg.WorkerName != "from-env" {
-		t.Errorf("WorkerName = %q, want from-env (env must override file)", cfg.WorkerName)
+	if cfg.AgentName != "from-env" {
+		t.Errorf("AgentName = %q, want from-env (env must override file)", cfg.AgentName)
 	}
 }
 
@@ -302,7 +302,7 @@ func TestAgentNameDefaultAndOverride(t *testing.T) {
 	}
 
 	// An environment variable overrides the default.
-	t.Setenv("CDROM_AGENT_NAME", "agent-from-env")
+	t.Setenv("CDROM_WORKER_NAME", "agent-from-env")
 	cfg, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -312,29 +312,29 @@ func TestAgentNameDefaultAndOverride(t *testing.T) {
 	}
 }
 
-func TestWorkerRootDefaultAndOverride(t *testing.T) {
-	// The default worker root is empty (the target uses the OS temp dir).
+func TestAgentRootDefaultAndOverride(t *testing.T) {
+	// The default agent root is empty (the target uses the OS temp dir).
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.WorkerRoot != "" {
-		t.Errorf("WorkerRoot = %q, want empty (default)", cfg.WorkerRoot)
+	if cfg.AgentRoot != "" {
+		t.Errorf("AgentRoot = %q, want empty (default)", cfg.AgentRoot)
 	}
 
 	// An environment variable overrides the default.
-	t.Setenv("CDROM_WORKER_ROOT", "/scratch/disks")
+	t.Setenv("CDROM_AGENT_ROOT", "/scratch/disks")
 	cfg, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.WorkerRoot != "/scratch/disks" {
-		t.Errorf("WorkerRoot = %q, want /scratch/disks (env must override the default)", cfg.WorkerRoot)
+	if cfg.AgentRoot != "/scratch/disks" {
+		t.Errorf("AgentRoot = %q, want /scratch/disks (env must override the default)", cfg.AgentRoot)
 	}
 
 	// A config file sets it; the env var (higher precedence) still wins.
 	path := filepath.Join(t.TempDir(), "cfg.yaml")
-	yamlDoc := "worker_root: /file/root\n"
+	yamlDoc := "agent_root: /file/root\n"
 	if err := os.WriteFile(path, []byte(yamlDoc), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -342,17 +342,17 @@ func TestWorkerRootDefaultAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadWithFile: %v", err)
 	}
-	if cfg.WorkerRoot != "/scratch/disks" {
-		t.Errorf("WorkerRoot = %q, want /scratch/disks (env must override file)", cfg.WorkerRoot)
+	if cfg.AgentRoot != "/scratch/disks" {
+		t.Errorf("AgentRoot = %q, want /scratch/disks (env must override file)", cfg.AgentRoot)
 	}
 	// Without the env var, the file value applies.
-	t.Setenv("CDROM_WORKER_ROOT", "")
+	t.Setenv("CDROM_AGENT_ROOT", "")
 	cfg, err = LoadWithFile(path)
 	if err != nil {
 		t.Fatalf("LoadWithFile: %v", err)
 	}
-	if cfg.WorkerRoot != "/file/root" {
-		t.Errorf("WorkerRoot = %q, want /file/root (file must override the default)", cfg.WorkerRoot)
+	if cfg.AgentRoot != "/file/root" {
+		t.Errorf("AgentRoot = %q, want /file/root (file must override the default)", cfg.AgentRoot)
 	}
 }
 
@@ -364,7 +364,7 @@ func TestLoadWithFileMissing(t *testing.T) {
 
 func TestLoadWithFileInvalidYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("worker_name: [unclosed"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("agent_name: [unclosed"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	if _, err := LoadWithFile(path); err == nil {

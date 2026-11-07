@@ -30,7 +30,7 @@ type DatabaseMetrics struct {
 	// (kind: global / group / key; resource: the resource's name), (F-16).
 	ConcurrencySlots *prometheus.GaugeVec
 	// DuplicateStartsDeclined counts StartJobExecution calls DECLINED by the
-	// duplicate-delivery guard (a worker already owning an execution of the
+	// duplicate-delivery guard (a agent already owning an execution of the
 	// same job+attempt in a non-pending episode). Rare by construction — a
 	// rising trend signals a delivery pathology (nudge storms, stream flaps,
 	// lease anomalies) rather than steady state.

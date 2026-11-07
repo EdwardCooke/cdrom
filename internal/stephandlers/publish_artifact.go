@@ -55,7 +55,7 @@ func init() {
 //     the uncontested name goes to the file that needed no rewriting).
 //  3. Zips them (structure preserved relative to root, entries sorted,
 //     mtimes kept) into the stage area under a UNIQUE name (random suffix —
-//     fan-out workers share the OS temp dir and must never contend), and
+//     fan-out agents share the OS temp dir and must never contend), and
 //  4. Streams the zip to the job's own (job-id) artifact namespace through
 //     the execution target's ArtifactTransfer.
 //
@@ -117,7 +117,7 @@ func runPublishArtifactStep(ctx context.Context, step *dbpb.JobStep, logger *slo
 	}
 
 	// Assemble the zip in the stage area under a UNIQUE name (a random
-	// suffix): fan-out workers of the same job share the OS temp dir, and a
+	// suffix): fan-out agents of the same job share the OS temp dir, and a
 	// deterministic name would make concurrent attempts contend.
 	host := stageDir
 	if host == "" {

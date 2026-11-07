@@ -4,17 +4,17 @@ Cdrom — continuous delivery runtime, orchestrator and manager. A pipeline
 tool: defines, schedules, and executes pipeline jobs across distributed
 execution targets.
 
-See [AGENTS.md](AGENTS.md) for the full architectural context.
+See [WORKER.md](WORKER.md) for the full architectural context.
 
 ## Repository Layout
 
 ```
 cmd/
-  api/        API/controller service entrypoint (HTTP for UI + gRPC for workers/agents/scheduler)
+  api/        API/controller service entrypoint (HTTP for UI + gRPC for agents/agents/scheduler)
   db/         database service entrypoint
   scheduler/  scheduler service entrypoint
   artifacts/  artifacts service entrypoint
-  worker/     long-lived worker entrypoint
+  agent/     long-lived agent entrypoint
   agent/      ephemeral Kubernetes agent entrypoint
 internal/
   api/        API/controller layer: HTTP routing + gRPC control-plane server
@@ -25,7 +25,7 @@ internal/
     artifacts/ job artifact storage & retrieval
     scheduler/ job lifecycle + dispatch
     database/ storage backend abstraction (SQLite / PostgreSQL)
-  worker/     long-lived worker implementation
+  agent/     long-lived agent implementation
   agent/      ephemeral agent implementation
 ui/           React frontend
   tests/      UI tests
@@ -46,5 +46,5 @@ make vet     # run go vet
 | Binary | Purpose | Platforms |
 |--------|---------|-----------|
 | `api`    | API/controller serving the UI | host |
-| `worker` | long-lived, group-targetable worker | Windows, Linux |
+| `agent` | long-lived, group-targetable agent | Windows, Linux |
 | `agent`  | ephemeral, one-off job execution in Kubernetes | Windows, Linux |

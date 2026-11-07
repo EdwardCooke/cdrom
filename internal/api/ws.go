@@ -33,7 +33,7 @@ type wsMessage struct {
 // resynchronize without replaying history.
 type wsSnapshot struct {
 	Jobs    []wsJob    `json:"jobs"`
-	Workers []wsWorker `json:"workers"`
+	Agents []wsAgent `json:"agents"`
 	Runs    []wsRun    `json:"runs"`
 	// Queue is the pending-queue state (F-16): the pending jobs (with the
 	// resource(s) blocking each), the per-group and global load, and the
@@ -59,7 +59,7 @@ type wsJob struct {
 	MaxAttempts int32 `json:"max_attempts,omitempty"`
 }
 
-type wsWorker struct {
+type wsAgent struct {
 	Name  string `json:"name"`
 	Group string `json:"group"`
 }
@@ -145,12 +145,12 @@ func (s *Server) updateWSClients() {
 	s.metrics.SetWSClients(int(s.wsClients.Load()))
 }
 
-// snapshot builds the current jobs and workers for a WebSocket subscriber.
+// snapshot builds the current jobs and agents for a WebSocket subscriber.
 // Clients that are nil are skipped, so the endpoint works even when only a
 // subset of the services is wired up.
 func (s *Server) snapshot() (*wsSnapshot, error) {
 	ctx := context.Background()
-	snap := &wsSnapshot{Jobs: []wsJob{}, Workers: []wsWorker{}, Runs: []wsRun{}}
+	snap := &wsSnapshot{Jobs: []wsJob{}, Agents: []wsAgent{}, Runs: []wsRun{}}
 
 	if s.clients.Scheduler != nil {
 		jobsResp, err := s.clients.Scheduler.ListJobs(ctx, &schedpb.ListJobsRequest{})
@@ -171,14 +171,14 @@ func (s *Server) snapshot() (*wsSnapshot, error) {
 	}
 
 	if s.clients.Database != nil {
-		workersResp, err := s.clients.Database.ListWorkers(ctx, &dbpb.ListWorkersRequest{})
+		agentsResp, err := s.clients.Database.ListAgents(ctx, &dbpb.ListAgentsRequest{})
 		if err != nil {
 			return nil, err
 		}
-		for _, worker := range workersResp.GetWorkers() {
-			snap.Workers = append(snap.Workers, wsWorker{
-				Name:  worker.GetName(),
-				Group: worker.GetGroup(),
+		for _, agent := range agentsResp.GetAgents() {
+			snap.Agents = append(snap.Agents, wsAgent{
+				Name:  agent.GetName(),
+				Group: agent.GetGroup(),
 			})
 		}
 
@@ -199,7 +199,7 @@ func (s *Server) snapshot() (*wsSnapshot, error) {
 		// The pending queue (F-16): the pending jobs (with the resource(s)
 		// blocking each), the per-group and global load, and the per-key load.
 		// A failure to read the queue is not fatal to the snapshot: the client
-		// still gets the jobs, workers, and runs, and resynchronizes the queue
+		// still gets the jobs, agents, and runs, and resynchronizes the queue
 		// from the next queue event.
 		if queue, err := s.clients.Database.GetQueueStatus(ctx, &dbpb.GetQueueStatusRequest{}); err == nil {
 			snap.Queue = queue

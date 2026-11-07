@@ -241,7 +241,7 @@ type canonicalPipeline struct {
 
 // canonicalizePipeline reduces a pipeline's compiled definition to a
 // comparable form: slices are sorted, and the fields the file format cannot
-// express (id, version, timestamps, the pipeline-level worker group) are
+// express (id, version, timestamps, the pipeline-level agent group) are
 // dropped.
 func canonicalizePipeline(p *dbpb.Pipeline) canonicalPipeline {
 	out := canonicalPipeline{

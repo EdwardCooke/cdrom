@@ -1045,7 +1045,7 @@ type runDefinition struct {
 	// pipelineLabels are the pipeline's labels (F-29): the pipeline's Labels for the
 	// current version, or the snapshot's Labels for a specific version. They are
 	// combined with each job's own labels and the labels of the job's environment
-	// and worker group onto every job instance (see runBaseLabels).
+	// and agent group onto every job instance (see runBaseLabels).
 	pipelineLabels map[string]string
 	// variableSets are the pipeline's named variable sets (F-21.1.3): the
 	// pipeline's VariableSets for the current version, or the snapshot's for a
@@ -1253,11 +1253,11 @@ func (s *Server) createRunAndInstances(ctx context.Context, tx *gorm.DB, pipelin
 		job.TriggerType = run.Trigger
 		job.UpstreamClaims = run.UpstreamClaims
 		// The instance's combined labels (F-29) are the union of the labels of the
-		// pipeline, the job, the environment it targets (if any), and the worker
+		// pipeline, the job, the environment it targets (if any), and the agent
 		// group it targets (if any), with the more specific source winning on a
 		// key collision. They are stored as a snapshot: relabeling a resource
 		// later does not change the labels recorded on this run. The assigned
-		// worker's labels are merged in at dispatch (StartJobExecution) onto the
+		// agent's labels are merged in at dispatch (StartJobExecution) onto the
 		// job's execution.
 		job.Labels = s.runBaseLabels(tx, def.pipelineLabels, jobDef.Labels, jobDef.Environment, jobDef.TargetGroup)
 		if err := tx.Create(job).Error; err != nil {
@@ -1754,7 +1754,7 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 	job.Branch = spec.Branch
 	// The job's step-barrier flag is denormalized from the spec so the
 	// execution target can tell from the job alone whether to synchronize its
-	// workers at step boundaries.
+	// agents at step boundaries.
 	job.StepBarrier = spec.StepBarrier
 	// The job's failure mode is denormalized from the spec; when the spec sets
 	// none it inherits the pipeline's default (defaulting to FailureModeAll).
@@ -2246,8 +2246,8 @@ func (s *Server) ResolveApproval(ctx context.Context, req *dbpb.ResolveApprovalR
 
 // ClaimJob atomically claims a pending job for execution (F-23): it sets the
 // status to running (and the started timestamp) only if the job is still
-// pending. It returns whether the job was claimed. This is how a worker (or
-// the API on a worker's behalf) takes ownership of a job it picked up via the
+// pending. It returns whether the job was claimed. This is how a agent (or
+// the API on a agent's behalf) takes ownership of a job it picked up via the
 // pull path or a push nudge: the conditional update is atomic, so a job
 // delivered by both push and pull is claimed exactly once and the duplicate is
 // a no-op.
@@ -2273,21 +2273,21 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 	return &dbpb.ClaimJobResponse{Claimed: result.RowsAffected > 0}, nil
 }
 
-// ListPendingByGroup returns the pending jobs that target the given worker
+// ListPendingByGroup returns the pending jobs that target the given agent
 // group (F-23), or — when the caller names environments (F-17) — that target
-// one of them. This is the pull path: a worker (or the API on its behalf)
+// one of them. This is the pull path: a agent (or the API on its behalf)
 // polls it to pick up jobs that were published while it was unreachable, so
 // no job is stranded pending. Filtering in the database keeps the poll from
 // pulling every pending job over the wire as the system grows. A job that
-// targets an environment the worker belongs to is returned even when its
-// target group differs from the worker's group; the authoritative target-group
-// intersection is enforced when the worker starts the job (StartJobExecution).
+// targets an environment the agent belongs to is returned even when its
+// target group differs from the agent's group; the authoritative target-group
+// intersection is enforced when the agent starts the job (StartJobExecution).
 func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingByGroupRequest) (*dbpb.ListJobsResponse, error) {
 	db := s.db.WithContext(ctx).Model(&models.Job{}).Where("status = ?", models.JobStatusPending)
 	// A pending job is relevant to the caller when it targets the caller's
 	// group (pre-F-17) or one of the caller's environments (F-17). The two
-	// are OR'd: a worker that serves an environment picks up its jobs even
-	// when the environment's target group differs from the worker's own group.
+	// are OR'd: a agent that serves an environment picks up its jobs even
+	// when the environment's target group differs from the agent's own group.
 	var conds []string
 	var args []any
 	if group := req.GetGroup(); group != "" {
@@ -2314,25 +2314,25 @@ func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingBy
 	return response, nil
 }
 
-// StartJobExecution records that the calling worker has started running a job
-// (fan-out): it creates the worker's JobExecution for the job's current
-// attempt and marks the job running. A job that targets a worker group runs on
-// every worker in the group; each worker's run is a separate execution, so the
+// StartJobExecution records that the calling agent has started running a job
+// (fan-out): it creates the agent's JobExecution for the job's current
+// attempt and marks the job running. A job that targets a agent group runs on
+// every agent in the group; each agent's run is a separate execution, so the
 // start is not exclusive (unlike the old single-claim work queue).
 //
 // The start is rejected (started=false) when the job is no longer pending — it
-// reached a terminal state, or it is not targeted at the worker's group — so a
-// job that finished before a slow worker started it is not run. The execution
+// reached a terminal state, or it is not targeted at the agent's group — so a
+// job that finished before a slow agent started it is not run. The execution
 // row is created only when the job is still pending and the job is marked
-// running, so a job that is already running (started by another worker) still
-// gets a fresh execution row for this worker (fan-out), but a job that is
+// running, so a job that is already running (started by another agent) still
+// gets a fresh execution row for this agent (fan-out), but a job that is
 // terminal does not.
 func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecutionRequest) (*dbpb.StartJobExecutionResponse, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	if req.GetWorkerName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
 	db := s.db.WithContext(ctx)
 	var job models.Job
@@ -2340,23 +2340,23 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		return nil, grpcErr(err)
 	}
 	// Hydrate the job's labels (F-29) from the Label table: the execution's tag
-	// set is the job's base label set merged with the worker's labels.
+	// set is the job's base label set merged with the agent's labels.
 	job.Labels = loadLabels(db, models.LabelOwnerJob, job.ID)
 	// A job that has reached a terminal state is not started. A job that is
-	// still pending or running is started: for fan-out, several workers in the
+	// still pending or running is started: for fan-out, several agents in the
 	// group each start their own execution, so the start is allowed even after
-	// the first worker has marked the job running.
+	// the first agent has marked the job running.
 	if isTerminalJobStatus(job.Status) {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// A worker that has ALREADY STARTED this (job, worker, attempt) in the
+	// A agent that has ALREADY STARTED this (job, agent, attempt) in the
 	// current EPISODE is declined a second start. The job row's status is
 	// DERIVED (the scheduler's job-status loop reconciles it from the
 	// executions), so a FAST job can still read as running LONG AFTER ITS
 	// FIRST EXECUTION FINISHED — the terminal-state check above is blind to
 	// that window. Without this guard a duplicate delivery (queued push
 	// nudges overtaking the first start; the poll re-listing) spawns a
-	// SECOND execution of the same (job, worker, attempt): the job runs
+	// SECOND execution of the same (job, agent, attempt): the job runs
 	// TWICE, and side-effecting steps (publish_artifact's immutable
 	// filenames) fail with AlreadyExists.
 	//
@@ -2372,8 +2372,8 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	// the first execution.
 	var existingExecs int64
 	if err := db.Model(&models.JobExecution{}).
-		Where("job_id = ? AND worker_name = ? AND attempt = ?",
-			req.GetJobId(), req.GetWorkerName(), job.Attempt).
+		Where("job_id = ? AND agent_name = ? AND attempt = ?",
+			req.GetJobId(), req.GetAgentName(), job.Attempt).
 		Count(&existingExecs).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -2384,7 +2384,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		// turns archaeological again. The metric (nil-safe) is the
 		// dashboards' version of the same breadcrumb.
 		s.log().Info("database: declined duplicate job start (episode already underway)",
-			"job", req.GetJobId(), "worker", req.GetWorkerName(),
+			"job", req.GetJobId(), "agent", req.GetAgentName(),
 			"attempt", job.Attempt, "job_status", job.Status)
 		s.metrics.IncDuplicateStartsDeclined()
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
@@ -2393,10 +2393,10 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	// scheduler's dependency resolver (F-06/F-08), not by the pull path: the
 	// resolver releases it (clearing depends_on and, for a branch job,
 	// capturing the dependencies' terminal observations, F-22) exactly once,
-	// and only then may a worker start it. Rejecting the start here is the
-	// AUTHORITATIVE guard against a worker stealing a held job from the pull
+	// and only then may a agent start it. Rejecting the start here is the
+	// AUTHORITATIVE guard against a agent stealing a held job from the pull
 	// path (ListPendingByGroup offers every pending job in the group; without
-	// this gate a worker could start a job whose dependencies have not been
+	// this gate a agent could start a job whose dependencies have not been
 	// adjudicated — running it with stale/absent upstream data).
 	if len(job.DependsOn) > 0 {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
@@ -2410,18 +2410,18 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
 	if job.Environment != "" {
-		// The job targets an environment (F-17): only a worker that belongs to
+		// The job targets an environment (F-17): only a agent that belongs to
 		// the environment (intersected with the environment's target group when
-		// one is set) may start it. A worker that does not serve the
-		// environment is rejected, so a job delivered to the wrong worker is
+		// one is set) may start it. A agent that does not serve the
+		// environment is rejected, so a job delivered to the wrong agent is
 		// not run. This is the authoritative routing gate for environment
 		// jobs.
-		if !s.workerServesEnvironment(ctx, req.GetWorkerName(), job.Environment) {
+		if !s.agentServesEnvironment(ctx, req.GetAgentName(), job.Environment) {
 			return &dbpb.StartJobExecutionResponse{Started: false}, nil
 		}
 	} else if job.TargetGroup == "" {
 		// A job with an empty target group and no environment runs on an
-		// ephemeral agent, not on a long-lived worker; a worker starting it is
+		// ephemeral agent, not on a long-lived agent; a agent starting it is
 		// a no-op.
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
@@ -2430,17 +2430,17 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		startedAt = timestamp.AsTime()
 	}
 	// The execution's combined labels (F-29) are the job instance's base label set
-	// (pipeline + job + environment + worker group) merged with the labels of the
-	// worker that runs this execution (the worker's labels win on a key
-	// collision). A fan-out job's each-worker execution thus carries that
-	// worker's own labels. A worker with no labels contributes nothing.
+	// (pipeline + job + environment + agent group) merged with the labels of the
+	// agent that runs this execution (the agent's labels win on a key
+	// collision). A fan-out job's each-agent execution thus carries that
+	// agent's own labels. A agent with no labels contributes nothing.
 	executionLabels := job.Labels
-	if workerLabels := s.workerLabels(ctx, req.GetWorkerName()); len(workerLabels) > 0 {
-		executionLabels = combineLabels(job.Labels, workerLabels)
+	if agentLabels := s.agentLabels(ctx, req.GetAgentName()); len(agentLabels) > 0 {
+		executionLabels = combineLabels(job.Labels, agentLabels)
 	}
 	execution := &models.JobExecution{
 		JobID:      uint(req.GetJobId()),
-		WorkerName: req.GetWorkerName(),
+		AgentName: req.GetAgentName(),
 		Attempt:    job.Attempt,
 		Status:     models.JobStatusRunning,
 		StartedAt:  &startedAt,
@@ -2455,7 +2455,7 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		return nil, grpcErr(err)
 	}
 	// Mark the job running (best-effort: it is already running if another
-	// worker started it first; the conditional update is a no-op then).
+	// agent started it first; the conditional update is a no-op then).
 	now := time.Now().UTC()
 	db.Model(&models.Job{}).
 		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusPending).
@@ -2467,33 +2467,33 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	return &dbpb.StartJobExecutionResponse{Started: true, Execution: toProtoJobExecution(execution)}, nil
 }
 
-// workerServesEnvironment reports whether the named worker is a valid target
-// for a job that targets the named environment (F-17): the worker must belong
+// agentServesEnvironment reports whether the named agent is a valid target
+// for a job that targets the named environment (F-17): the agent must belong
 // to the environment (its declared membership), and, when the environment
-// names a target group, the worker must also be in that group. A missing
-// worker or environment is not a valid target.
-func (s *Server) workerServesEnvironment(ctx context.Context, workerName, environment string) bool {
+// names a target group, the agent must also be in that group. A missing
+// agent or environment is not a valid target.
+func (s *Server) agentServesEnvironment(ctx context.Context, agentName, environment string) bool {
 	db := s.db.WithContext(ctx)
-	var worker models.Worker
-	if err := db.Where("name = ?", workerName).First(&worker).Error; err != nil {
+	var agent models.Agent
+	if err := db.Where("name = ?", agentName).First(&agent).Error; err != nil {
 		return false
 	}
-	if !slices.Contains(worker.Environments, environment) {
+	if !slices.Contains(agent.Environments, environment) {
 		return false
 	}
 	var env models.Environment
 	if err := db.Where("name = ?", environment).First(&env).Error; err != nil {
 		return false
 	}
-	if env.TargetGroup != "" && worker.Group != env.TargetGroup {
+	if env.TargetGroup != "" && agent.Group != env.TargetGroup {
 		return false
 	}
 	return true
 }
 
-// ListJobExecutions returns a job's executions (one per worker that started
+// ListJobExecutions returns a job's executions (one per agent that started
 // it, for its current attempt). The scheduler's job-status loop uses them to
-// derive the job's overall status from the per-worker outcomes (fan-out).
+// derive the job's overall status from the per-agent outcomes (fan-out).
 func (s *Server) ListJobExecutions(ctx context.Context, req *dbpb.ListJobExecutionsRequest) (*dbpb.ListJobExecutionsResponse, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
@@ -2519,20 +2519,20 @@ func (s *Server) ListJobExecutions(ctx context.Context, req *dbpb.ListJobExecuti
 	return response, nil
 }
 
-// UpdateJobExecution records a worker's outcome for its execution of a job
+// UpdateJobExecution records a agent's outcome for its execution of a job
 // (fan-out): it sets the execution's status (and finished timestamp, step
-// results, and outputs) for the worker's execution of the job's current
+// results, and outputs) for the agent's execution of the job's current
 // attempt. The job row's overall status is not touched here — it is derived
 // from the executions by the scheduler's job-status loop. A late report for an
 // execution that already reached a terminal status is a no-op (the conditional
-// update only applies while the execution is running), so a worker that
+// update only applies while the execution is running), so a agent that
 // finished just as its job was cancelled cannot clobber the terminal status.
 func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExecutionRequest) (*dbpb.JobExecution, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	if req.GetWorkerName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
 	if req.GetStatus() == dbpb.JobStatus_JOB_STATUS_UNSPECIFIED {
 		return nil, status.Error(codes.InvalidArgument, "status is required")
@@ -2558,19 +2558,19 @@ func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExec
 	// late report for an execution that already reached a terminal status is a
 	// no-op (mirroring the job-level terminal-status guard, F-05).
 	result := db.Model(&models.JobExecution{}).
-		Where("job_id = ? AND worker_name = ? AND attempt = ? AND status = ?",
-			req.GetJobId(), req.GetWorkerName(), job.Attempt, models.JobStatusRunning).
+		Where("job_id = ? AND agent_name = ? AND attempt = ? AND status = ?",
+			req.GetJobId(), req.GetAgentName(), job.Attempt, models.JobStatusRunning).
 		Updates(updates)
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
 	}
 	// step_results and outputs (F-06) are informational per-step outcomes, not
-	// part of the terminal-status guard: they are persisted whenever the worker
+	// part of the terminal-status guard: they are persisted whenever the agent
 	// reports them (even on the execution's final report). Like the job-level
 	// equivalents, they use an explicit Select so the JSON serializer runs.
 	if results := req.GetStepResults(); len(results) > 0 {
 		if err := db.Model(&models.JobExecution{}).
-			Where("job_id = ? AND worker_name = ? AND attempt = ?", req.GetJobId(), req.GetWorkerName(), job.Attempt).
+			Where("job_id = ? AND agent_name = ? AND attempt = ?", req.GetJobId(), req.GetAgentName(), job.Attempt).
 			Select("StepResults").
 			Updates(&models.JobExecution{StepResults: stepResultsFromProto(results)}).Error; err != nil {
 			return nil, grpcErr(err)
@@ -2578,34 +2578,34 @@ func (s *Server) UpdateJobExecution(ctx context.Context, req *dbpb.UpdateJobExec
 	}
 	if outputs := req.GetOutputs(); len(outputs) > 0 {
 		if err := db.Model(&models.JobExecution{}).
-			Where("job_id = ? AND worker_name = ? AND attempt = ?", req.GetJobId(), req.GetWorkerName(), job.Attempt).
+			Where("job_id = ? AND agent_name = ? AND attempt = ?", req.GetJobId(), req.GetAgentName(), job.Attempt).
 			Select("Outputs").
 			Updates(&models.JobExecution{Outputs: outputs}).Error; err != nil {
 			return nil, grpcErr(err)
 		}
 	}
 	var execution models.JobExecution
-	if err := db.Where("job_id = ? AND worker_name = ? AND attempt = ?", req.GetJobId(), req.GetWorkerName(), job.Attempt).
+	if err := db.Where("job_id = ? AND agent_name = ? AND attempt = ?", req.GetJobId(), req.GetAgentName(), job.Attempt).
 		First(&execution).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	return toProtoJobExecution(&execution), nil
 }
 
-// AbandonWorkerExecutions marks all of a worker's running executions as failed
-// (fan-out). It is called when a worker re-registers after a restart: the
-// worker's in-progress executions from before the restart are abandoned (the
-// worker will not resume them) so they do not block the job's overall status.
+// AbandonAgentExecutions marks all of a agent's running executions as failed
+// (fan-out). It is called when a agent re-registers after a restart: the
+// agent's in-progress executions from before the restart are abandoned (the
+// agent will not resume them) so they do not block the job's overall status.
 // The job row's overall status is re-derived by the scheduler's job-status
 // loop.
-func (s *Server) AbandonWorkerExecutions(ctx context.Context, req *dbpb.AbandonWorkerExecutionsRequest) (*emptypb.Empty, error) {
-	if req.GetWorkerName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+func (s *Server) AbandonAgentExecutions(ctx context.Context, req *dbpb.AbandonAgentExecutionsRequest) (*emptypb.Empty, error) {
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
 	now := time.Now().UTC()
 	result := s.db.WithContext(ctx).
 		Model(&models.JobExecution{}).
-		Where("worker_name = ? AND status = ?", req.GetWorkerName(), models.JobStatusRunning).
+		Where("agent_name = ? AND status = ?", req.GetAgentName(), models.JobStatusRunning).
 		Updates(map[string]any{
 			"status":      models.JobStatusFailed,
 			"finished_at": &now,
@@ -2617,17 +2617,17 @@ func (s *Server) AbandonWorkerExecutions(ctx context.Context, req *dbpb.AbandonW
 	return &emptypb.Empty{}, nil
 }
 
-// ReportStepCompletion records that a worker completed a step of a job (the
-// cross-worker step barrier). It upserts a StepCompletion row for the job's
-// current attempt: a worker that reports the same step twice (e.g. after a
+// ReportStepCompletion records that a agent completed a step of a job (the
+// cross-agent step barrier). It upserts a StepCompletion row for the job's
+// current attempt: a agent that reports the same step twice (e.g. after a
 // retry of the same attempt) updates the existing row rather than inserting a
-// duplicate. The row is keyed by (job, worker, step, attempt).
+// duplicate. The row is keyed by (job, agent, step, attempt).
 func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepCompletionRequest) (*emptypb.Empty, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	if req.GetWorkerName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
 	db := s.db.WithContext(ctx)
 	var job models.Job
@@ -2636,7 +2636,7 @@ func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepC
 	}
 	completion := &models.StepCompletion{
 		JobID:      uint(req.GetJobId()),
-		WorkerName: req.GetWorkerName(),
+		AgentName: req.GetAgentName(),
 		StepName:   req.GetStepName(),
 		Attempt:    job.Attempt,
 	}
@@ -2644,7 +2644,7 @@ func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepC
 	// refresh its timestamp (the completion is idempotent).
 	if err := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
-			{Name: "job_id"}, {Name: "worker_name"}, {Name: "step_name"}, {Name: "attempt"},
+			{Name: "job_id"}, {Name: "agent_name"}, {Name: "step_name"}, {Name: "attempt"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{"updated_at"}),
 	}).Create(completion).Error; err != nil {
@@ -2654,11 +2654,11 @@ func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepC
 }
 
 // CheckStepBarrier reports whether the barrier for a job's step is satisfied
-// (every worker alive at the step's start has completed it) or whether the job
-// has been cancelled. A worker that is not alive (it has not heartbeated
-// within the liveness window) is dropped from the barrier, so a worker that
+// (every agent alive at the step's start has completed it) or whether the job
+// has been cancelled. A agent that is not alive (it has not heartbeated
+// within the liveness window) is dropped from the barrier, so a agent that
 // dies mid-step cannot wedge the job. The barrier is satisfied when every
-// alive worker in the job's group has a StepCompletion row for the job's
+// alive agent in the job's group has a StepCompletion row for the job's
 // current attempt and the step in question.
 func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrierRequest) (*dbpb.CheckStepBarrierResponse, error) {
 	if req.GetJobId() == 0 {
@@ -2669,39 +2669,39 @@ func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrie
 	if err := db.First(&job, req.GetJobId()).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// A cancelled job releases the barrier: a waiting worker should stop and
+	// A cancelled job releases the barrier: a waiting agent should stop and
 	// report the job cancelled.
 	if job.Status == models.JobStatusCancelled {
 		return &dbpb.CheckStepBarrierResponse{Cancelled: true}, nil
 	}
-	// The barrier only applies to a job that fans out to a worker group; a job
+	// The barrier only applies to a job that fans out to a agent group; a job
 	// on a single target (an ephemeral agent) has no barrier to wait on.
 	if job.TargetGroup == "" {
 		return &dbpb.CheckStepBarrierResponse{Satisfied: true}, nil
 	}
-	var workers []models.Worker
-	if err := db.Where("worker_group = ?", job.TargetGroup).Find(&workers).Error; err != nil {
+	var agents []models.Agent
+	if err := db.Where("agent_group = ?", job.TargetGroup).Find(&agents).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// A worker is alive when its last_seen_at is within the liveness window.
+	// A agent is alive when its last_seen_at is within the liveness window.
 	now := time.Now().UTC()
-	alive := make([]string, 0, len(workers))
-	for i := range workers {
-		lastSeen := workers[i].LastSeenAt
+	alive := make([]string, 0, len(agents))
+	for i := range agents {
+		lastSeen := agents[i].LastSeenAt
 		if lastSeen == nil {
 			continue
 		}
-		if now.Sub(*lastSeen) <= workerAliveThreshold {
-			alive = append(alive, workers[i].Name)
+		if now.Sub(*lastSeen) <= agentAliveThreshold {
+			alive = append(alive, agents[i].Name)
 		}
 	}
 	if len(alive) == 0 {
-		// No alive worker in the group (e.g. every worker is down). The
+		// No alive agent in the group (e.g. every agent is down). The
 		// barrier is vacuously satisfied; the job-status loop and watchdog
 		// handle the job's overall status.
 		return &dbpb.CheckStepBarrierResponse{Satisfied: true}, nil
 	}
-	// Collect the set of workers that have completed this step for the job's
+	// Collect the set of agents that have completed this step for the job's
 	// current attempt.
 	var completions []models.StepCompletion
 	if err := db.Where("job_id = ? AND step_name = ? AND attempt = ?",
@@ -2710,9 +2710,9 @@ func (s *Server) CheckStepBarrier(ctx context.Context, req *dbpb.CheckStepBarrie
 	}
 	completed := make(map[string]bool, len(completions))
 	for i := range completions {
-		completed[completions[i].WorkerName] = true
+		completed[completions[i].AgentName] = true
 	}
-	// The barrier is satisfied when every alive worker has completed the step.
+	// The barrier is satisfied when every alive agent has completed the step.
 	for _, name := range alive {
 		if !completed[name] {
 			return &dbpb.CheckStepBarrierResponse{Satisfied: false}, nil
@@ -2841,97 +2841,97 @@ func (s *Server) DeleteJob(ctx context.Context, req *dbpb.DeleteJobRequest) (*em
 }
 
 // ---------------------------------------------------------------------------
-// Workers
+// Agents
 // ---------------------------------------------------------------------------
 
-// RegisterWorker upserts a worker by name: an unknown name creates the
-// worker, a known name updates its group and address.
-func (s *Server) RegisterWorker(ctx context.Context, req *dbpb.RegisterWorkerRequest) (*dbpb.Worker, error) {
+// RegisterAgent upserts a agent by name: an unknown name creates the
+// agent, a known name updates its group and address.
+func (s *Server) RegisterAgent(ctx context.Context, req *dbpb.RegisterAgentRequest) (*dbpb.Agent, error) {
 	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker name is required")
+		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
-	worker := &models.Worker{}
-	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).FirstOrCreate(worker, models.Worker{Name: req.GetName()}).Error; err != nil {
+	agent := &models.Agent{}
+	if err := s.db.WithContext(ctx).Where("name = ?", req.GetName()).FirstOrCreate(agent, models.Agent{Name: req.GetName()}).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	worker.Group = req.GetGroup()
-	worker.Address = req.GetAddress()
-	// The worker's environment membership (F-17) is declared at registration
+	agent.Group = req.GetGroup()
+	agent.Address = req.GetAddress()
+	// The agent's environment membership (F-17) is declared at registration
 	// (configurable, multiple). Re-registration (e.g. after a restart) updates
-	// it: the worker's declared environments replace its stored list.
-	worker.Environments = req.GetEnvironments()
+	// it: the agent's declared environments replace its stored list.
+	agent.Environments = req.GetEnvironments()
 	now := time.Now().UTC()
-	worker.LastSeenAt = &now
-	if err := s.db.WithContext(ctx).Save(worker).Error; err != nil {
+	agent.LastSeenAt = &now
+	if err := s.db.WithContext(ctx).Save(agent).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// The worker's labels (F-29) are declared at registration (configurable, like
+	// The agent's labels (F-29) are declared at registration (configurable, like
 	// its environments, F-17). Re-registration (e.g. after a restart) updates
-	// them: the worker's declared labels replace its stored set in the Label table
-	// (owner_type "worker").
-	if err := replaceLabels(s.db.WithContext(ctx), models.LabelOwnerWorker, worker.ID, req.GetLabels()); err != nil {
+	// them: the agent's declared labels replace its stored set in the Label table
+	// (owner_type "agent").
+	if err := replaceLabels(s.db.WithContext(ctx), models.LabelOwnerAgent, agent.ID, req.GetLabels()); err != nil {
 		return nil, grpcErr(err)
 	}
-	worker.Labels = req.GetLabels()
-	return toProtoWorker(worker), nil
+	agent.Labels = req.GetLabels()
+	return toProtoAgent(agent), nil
 }
 
-func (s *Server) GetWorker(ctx context.Context, req *dbpb.GetWorkerRequest) (*dbpb.Worker, error) {
+func (s *Server) GetAgent(ctx context.Context, req *dbpb.GetAgentRequest) (*dbpb.Agent, error) {
 	db := s.db.WithContext(ctx)
-	var worker models.Worker
-	if err := db.Where("name = ?", req.GetName()).First(&worker).Error; err != nil {
+	var agent models.Agent
+	if err := db.Where("name = ?", req.GetName()).First(&agent).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// Hydrate the worker's labels (F-29) from the Label table.
-	worker.Labels = loadLabels(db, models.LabelOwnerWorker, worker.ID)
-	return toProtoWorker(&worker), nil
+	// Hydrate the agent's labels (F-29) from the Label table.
+	agent.Labels = loadLabels(db, models.LabelOwnerAgent, agent.ID)
+	return toProtoAgent(&agent), nil
 }
 
-func (s *Server) ListWorkers(ctx context.Context, req *dbpb.ListWorkersRequest) (*dbpb.ListWorkersResponse, error) {
-	query := s.db.WithContext(ctx).Model(&models.Worker{})
+func (s *Server) ListAgents(ctx context.Context, req *dbpb.ListAgentsRequest) (*dbpb.ListAgentsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.Agent{})
 	if req.GetGroup() != "" {
-		// worker_group: the column name (group is a reserved SQL keyword).
-		query = query.Where("worker_group = ?", req.GetGroup())
+		// agent_group: the column name (group is a reserved SQL keyword).
+		query = query.Where("agent_group = ?", req.GetGroup())
 	}
-	var workers []models.Worker
-	if err := query.Order("id").Find(&workers).Error; err != nil {
+	var agents []models.Agent
+	if err := query.Order("id").Find(&agents).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// Hydrate the workers' labels (F-29) from the Label table.
-	s.hydrateWorkerLabels(ctx, workers)
-	response := &dbpb.ListWorkersResponse{}
-	for i := range workers {
-		response.Workers = append(response.Workers, toProtoWorker(&workers[i]))
+	// Hydrate the agents' labels (F-29) from the Label table.
+	s.hydrateAgentLabels(ctx, agents)
+	response := &dbpb.ListAgentsResponse{}
+	for i := range agents {
+		response.Agents = append(response.Agents, toProtoAgent(&agents[i]))
 	}
 	return response, nil
 }
 
-func (s *Server) HeartbeatWorker(ctx context.Context, req *dbpb.HeartbeatWorkerRequest) (*dbpb.Worker, error) {
+func (s *Server) HeartbeatAgent(ctx context.Context, req *dbpb.HeartbeatAgentRequest) (*dbpb.Agent, error) {
 	now := time.Now().UTC()
-	result := s.db.WithContext(ctx).Model(&models.Worker{}).Where("name = ?", req.GetName()).Update("last_seen_at", now)
+	result := s.db.WithContext(ctx).Model(&models.Agent{}).Where("name = ?", req.GetName()).Update("last_seen_at", now)
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return nil, status.Error(codes.NotFound, "worker not found")
+		return nil, status.Error(codes.NotFound, "agent not found")
 	}
 	db := s.db.WithContext(ctx)
-	var worker models.Worker
-	if err := db.Where("name = ?", req.GetName()).First(&worker).Error; err != nil {
+	var agent models.Agent
+	if err := db.Where("name = ?", req.GetName()).First(&agent).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// Hydrate the worker's labels (F-29) from the Label table.
-	worker.Labels = loadLabels(db, models.LabelOwnerWorker, worker.ID)
-	return toProtoWorker(&worker), nil
+	// Hydrate the agent's labels (F-29) from the Label table.
+	agent.Labels = loadLabels(db, models.LabelOwnerAgent, agent.ID)
+	return toProtoAgent(&agent), nil
 }
 
-func (s *Server) DeleteWorker(ctx context.Context, req *dbpb.DeleteWorkerRequest) (*emptypb.Empty, error) {
-	result := s.db.WithContext(ctx).Where("name = ?", req.GetName()).Delete(&models.Worker{})
+func (s *Server) DeleteAgent(ctx context.Context, req *dbpb.DeleteAgentRequest) (*emptypb.Empty, error) {
+	result := s.db.WithContext(ctx).Where("name = ?", req.GetName()).Delete(&models.Agent{})
 	if result.Error != nil {
 		return nil, grpcErr(result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return nil, status.Error(codes.NotFound, "worker not found")
+		return nil, status.Error(codes.NotFound, "agent not found")
 	}
 	return &emptypb.Empty{}, nil
 }
@@ -3056,24 +3056,24 @@ func (s *Server) DeleteEnvironment(ctx context.Context, req *dbpb.DeleteEnvironm
 	return &emptypb.Empty{}, nil
 }
 
-// ListWorkersByEnvironment returns the workers that belong to the named
-// environment (F-17): the workers whose declared environment list includes it.
-// This is how the API resolves an environment to its target workers when it
+// ListAgentsByEnvironment returns the agents that belong to the named
+// environment (F-17): the agents whose declared environment list includes it.
+// This is how the API resolves an environment to its target agents when it
 // dispatches a job targeting the environment.
-func (s *Server) ListWorkersByEnvironment(ctx context.Context, req *dbpb.ListWorkersByEnvironmentRequest) (*dbpb.ListWorkersResponse, error) {
+func (s *Server) ListAgentsByEnvironment(ctx context.Context, req *dbpb.ListAgentsByEnvironmentRequest) (*dbpb.ListAgentsResponse, error) {
 	if req.GetEnvironment() == "" {
 		return nil, status.Error(codes.InvalidArgument, "environment is required")
 	}
-	var workers []models.Worker
-	if err := s.db.WithContext(ctx).Order("id").Find(&workers).Error; err != nil {
+	var agents []models.Agent
+	if err := s.db.WithContext(ctx).Order("id").Find(&agents).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	// Hydrate the workers' labels (F-29) from the Label table.
-	s.hydrateWorkerLabels(ctx, workers)
-	response := &dbpb.ListWorkersResponse{}
-	for i := range workers {
-		if workerInEnvironment(&workers[i], req.GetEnvironment()) {
-			response.Workers = append(response.Workers, toProtoWorker(&workers[i]))
+	// Hydrate the agents' labels (F-29) from the Label table.
+	s.hydrateAgentLabels(ctx, agents)
+	response := &dbpb.ListAgentsResponse{}
+	for i := range agents {
+		if agentInEnvironment(&agents[i], req.GetEnvironment()) {
+			response.Agents = append(response.Agents, toProtoAgent(&agents[i]))
 		}
 	}
 	return response, nil
@@ -3101,10 +3101,10 @@ func (s *Server) ProceedJob(ctx context.Context, req *dbpb.ProceedJobRequest) (*
 	return &dbpb.ProceedJobResponse{Proceeded: result.RowsAffected > 0}, nil
 }
 
-// workerInEnvironment reports whether the worker belongs to the named
+// agentInEnvironment reports whether the agent belongs to the named
 // environment (its declared environment list includes it).
-func workerInEnvironment(worker *models.Worker, environment string) bool {
-	for _, env := range worker.Environments {
+func agentInEnvironment(agent *models.Agent, environment string) bool {
+	for _, env := range agent.Environments {
 		if env == environment {
 			return true
 		}
@@ -4925,14 +4925,14 @@ func (s *Server) NextSecretNonce(ctx context.Context, _ *dbpb.NextSecretNonceReq
 }
 
 // ClaimStepOnce atomically claims the "run this step" slot for a step of a job
-// that fans out to a worker group (F-01): the first target to claim
+// that fans out to a agent group (F-01): the first target to claim
 // (job id + step name + attempt) wins and runs the step; every other target
 // that reaches the same step in the same attempt sees the slot already claimed
 // and skips the step. A retry (F-04) is a new attempt, so it may claim again.
 //
 // The claim is a single atomic `FirstOrCreate` on the unique (job_id,
 // step_name, attempt) index: at most one concurrent caller can create the row,
-// so the dedup is correct across every API replica and worker process. The
+// so the dedup is correct across every API replica and agent process. The
 // created flag (RowsAffected == 1) reports whether this call won the claim.
 //
 // ERROR SEMANTICS MATTER HERE, in BOTH directions:
@@ -5050,7 +5050,7 @@ func (s *Server) stepOnceExists(ctx context.Context, req *dbpb.ClaimStepOnceRequ
 //
 // The event log is the shared, append-only coordination bus. The scheduler's
 // background loops and the API publish state changes to it; every API pod
-// tails it (TailEvents) and fans the events out to its local workers and UI
+// tails it (TailEvents) and fans the events out to its local agents and UI
 // clients. An event is a pointer, not the data: the payload is a small JSON
 // object with just enough to handle the event, never the job spec, the log
 // bytes, or a token.
@@ -5077,27 +5077,27 @@ const defaultLeaseTTL = 10 * time.Second
 // heartbeat is older than this, even if the TTL backstop has not lapsed.
 const defaultLeaseHeartbeatTTL = 30 * time.Second
 
-// workerAliveThreshold is how recent a worker's last_seen_at must be for it to
-// be considered alive. A worker that has not heartbeated within this window is
+// agentAliveThreshold is how recent a agent's last_seen_at must be for it to
+// be considered alive. A agent that has not heartbeated within this window is
 // considered dead and is dropped from a job's step barrier (its missing step
-// completion does not block the job). The worker heartbeats every ~10s, so the
+// completion does not block the job). The agent heartbeats every ~10s, so the
 // threshold is a few missed heartbeats. It mirrors the scheduler's
-// workerAliveThreshold so the step barrier and the job-status loop agree on
-// which workers are alive. It is a variable (not a constant) so tests can
+// agentAliveThreshold so the step barrier and the job-status loop agree on
+// which agents are alive. It is a variable (not a constant) so tests can
 // shorten it.
-var workerAliveThreshold = 30 * time.Second
+var agentAliveThreshold = 30 * time.Second
 
-// appendEvent inserts a single event row and returns its id. workerGroup and
+// appendEvent inserts a single event row and returns its id. agentGroup and
 // environment are the group- and environment-scoped routing hints (F-17); both
 // are empty for events that are not scoped to a group or environment.
-func (s *Server) appendEvent(ctx context.Context, name, workerGroup, environment string, payload any) (int64, error) {
+func (s *Server) appendEvent(ctx context.Context, name, agentGroup, environment string, payload any) (int64, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return 0, fmt.Errorf("database: marshal event payload: %w", err)
 	}
 	event := &models.Event{
 		Name:        name,
-		WorkerGroup: workerGroup,
+		AgentGroup: agentGroup,
 		Environment: environment,
 		Payload:     string(data),
 	}
@@ -5172,12 +5172,12 @@ func (s *Server) PublishRunStatus(ctx context.Context, req *dbpb.PublishRunStatu
 	return &dbpb.PublishEventResponse{Id: id}, nil
 }
 
-// PublishWorkerEvent appends a "worker" event for a worker lifecycle change.
-func (s *Server) PublishWorkerEvent(ctx context.Context, req *dbpb.PublishWorkerEventRequest) (*dbpb.PublishEventResponse, error) {
+// PublishAgentEvent appends a "agent" event for a agent lifecycle change.
+func (s *Server) PublishAgentEvent(ctx context.Context, req *dbpb.PublishAgentEventRequest) (*dbpb.PublishEventResponse, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
-	id, err := s.appendEvent(ctx, "worker", req.GetGroup(), "", map[string]any{
+	id, err := s.appendEvent(ctx, "agent", req.GetGroup(), "", map[string]any{
 		"name":   req.GetName(),
 		"action": req.GetAction(),
 	})
@@ -5371,7 +5371,7 @@ func toProtoEvent(event *models.Event) *dbpb.Event {
 	return &dbpb.Event{
 		Id:          int64(event.ID),
 		Name:        event.Name,
-		WorkerGroup: event.WorkerGroup,
+		AgentGroup: event.AgentGroup,
 		Payload:     event.Payload,
 		CreatedAt:   timestamppb.New(event.CreatedAt),
 		Environment: event.Environment,
@@ -6693,10 +6693,10 @@ func paramsToProto(in map[string]*models.ParamValue) map[string]*dbpb.ParamValue
 	return out
 }
 
-func toProtoWorker(worker *models.Worker) *dbpb.Worker {
-	proto := &dbpb.Worker{Id: int64(worker.ID), Name: worker.Name, Group: worker.Group, Address: worker.Address, Environments: worker.Environments, Labels: worker.Labels}
-	if worker.LastSeenAt != nil {
-		proto.LastSeenAt = timestamppb.New(*worker.LastSeenAt)
+func toProtoAgent(agent *models.Agent) *dbpb.Agent {
+	proto := &dbpb.Agent{Id: int64(agent.ID), Name: agent.Name, Group: agent.Group, Address: agent.Address, Environments: agent.Environments, Labels: agent.Labels}
+	if agent.LastSeenAt != nil {
+		proto.LastSeenAt = timestamppb.New(*agent.LastSeenAt)
 	}
 	return proto
 }
@@ -6759,7 +6759,7 @@ func toProtoJobExecution(execution *models.JobExecution) *dbpb.JobExecution {
 	proto := &dbpb.JobExecution{
 		Id:          int64(execution.ID),
 		JobId:       int64(execution.JobID),
-		WorkerName:  execution.WorkerName,
+		AgentName:  execution.AgentName,
 		Attempt:     int32(execution.Attempt),
 		Status:      jobStatusToProto(execution.Status),
 		StepResults: stepResultsToProto(execution.StepResults),
@@ -7113,15 +7113,15 @@ var builtinRolePermissions = map[string][]string{
 		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
 		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
-		"api-keys.can-manage-all", "audit.can-view", "workers.can-view",
+		"api-keys.can-manage-all", "audit.can-view", "agents.can-view",
 		"service-accounts.can-view", "service-accounts.can-create",
 		"service-accounts.can-edit", "service-accounts.can-rotate-keys",
 		"service-accounts.can-disable", "service-accounts.can-enable",
 		"service-accounts.can-delete", "service-accounts.can-assign-roles",
 		"service-accounts.can-remove-roles", "concurrency-limits.can-view",
 		"concurrency-limits.can-manage", "environments.can-view",
-		"environments.can-manage", "worker-groups.can-view",
-		"worker-groups.can-manage", "ssh-known-hosts.can-view",
+		"environments.can-manage", "agent-groups.can-view",
+		"agent-groups.can-manage", "ssh-known-hosts.can-view",
 		"ssh-known-hosts.can-manage", "source-credentials.can-view",
 		"source-credentials.can-manage", "packages.can-view",
 		"packages.can-publish", "packages.can-promote",
@@ -7131,15 +7131,15 @@ var builtinRolePermissions = map[string][]string{
 	},
 	"operator": {
 		"pipelines.can-view", "runs.can-trigger", "runs.can-cancel",
-		"jobs.can-approve", "jobs.can-reject", "workers.can-view",
+		"jobs.can-approve", "jobs.can-reject", "agents.can-view",
 		"concurrency-limits.can-view",
 	},
 	"viewer": {
-		"pipelines.can-view", "secrets.can-view", "workers.can-view",
+		"pipelines.can-view", "secrets.can-view", "agents.can-view",
 		"concurrency-limits.can-view",
 	},
 	"user": {
-		"pipelines.can-view", "secrets.can-view", "workers.can-view",
+		"pipelines.can-view", "secrets.can-view", "agents.can-view",
 		"api-keys.can-manage", "concurrency-limits.can-view",
 	},
 }
@@ -7207,7 +7207,7 @@ func builtinRoleDescription(name string) string {
 	case "operator":
 		return "Runs a platform: view, trigger and cancel runs, approve/reject gated jobs."
 	case "viewer":
-		return "Read-only access to pipelines, runs, jobs, logs, artifacts, and workers."
+		return "Read-only access to pipelines, runs, jobs, logs, artifacts, and agents."
 	case "user":
 		return "Default role of a registered user: viewer plus self-service (own API keys)."
 	default:
@@ -7237,15 +7237,15 @@ func knownPermission(p string) bool {
 		"jobs.can-approve", "jobs.can-reject", "secrets.can-view",
 		"secrets.can-manage", "roles.can-manage", "roles.can-assign",
 		"users.can-manage", "api-keys.can-manage", "api-keys.can-list-all",
-		"api-keys.can-manage-all", "audit.can-view", "workers.can-view",
+		"api-keys.can-manage-all", "audit.can-view", "agents.can-view",
 		"service-accounts.can-view", "service-accounts.can-create",
 		"service-accounts.can-edit", "service-accounts.can-rotate-keys",
 		"service-accounts.can-disable", "service-accounts.can-enable",
 		"service-accounts.can-delete", "service-accounts.can-assign-roles",
 		"service-accounts.can-remove-roles", "concurrency-limits.can-view",
 		"concurrency-limits.can-manage", "environments.can-view",
-		"environments.can-manage", "worker-groups.can-view",
-		"worker-groups.can-manage", "ssh-known-hosts.can-view",
+		"environments.can-manage", "agent-groups.can-view",
+		"agent-groups.can-manage", "ssh-known-hosts.can-view",
 		"ssh-known-hosts.can-manage", "source-credentials.can-view",
 		"source-credentials.can-manage", "packages.can-view",
 		"packages.can-publish", "packages.can-promote",

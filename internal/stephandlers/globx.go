@@ -28,7 +28,7 @@
 // docs/features/f-21.6-artifact-package-references.md, "Glob portability"):
 //
 //   - Rooted evaluation (ours): the pattern is evaluated relative to root
-//     (never to the process's working directory — a worker runs many jobs
+//     (never to the process's working directory — a agent runs many jobs
 //     concurrently, so a global Chdir is unsafe).
 //   - Separator normalization (ours): on Windows a "/" in a pattern is
 //     treated as a path separator (translated to "\" before matching); on

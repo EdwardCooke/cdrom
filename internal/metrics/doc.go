@@ -12,12 +12,12 @@
 //     cdrom_grpc_server_started_total / handled_total / handling_seconds on
 //     every service server, including streaming RPCs;
 //   - one file per component (api.go, scheduler.go, database.go, artifacts.go,
-//     idp.go, worker.go) that declares that component's metric set.
+//     idp.go, agent.go) that declares that component's metric set.
 //
 // Naming: every metric is prefixed cdrom_. Domain labels are low-cardinality
 // by construction (status, trigger, environment, group, step_type, method,
 // code, route, kind, resource, op, outcome). A metric never labels by job id,
-// run id, user, worker name, or secret name — those are unbounded and would
+// run id, user, agent name, or secret name — those are unbounded and would
 // blow up the series count.
 //
 // Each binary uses its own prometheus.Registry (via a Collector) so a

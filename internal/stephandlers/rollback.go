@@ -62,8 +62,8 @@ const (
 // (publishing its run id as an output); the resumption's health is tracked in
 // the run timeline, not by blocking the step. Blocking (wait: true) is OPT-IN
 // because it carries a DEADLOCK HAZARD: a rollback step that waits holds its
-// worker's execution slot, and the resumption it waits on may need THAT SLOT
-// to run its own jobs (especially on a single-worker group, or a saturated
+// agent's execution slot, and the resumption it waits on may need THAT SLOT
+// to run its own jobs (especially on a single-agent group, or a saturated
 // pool). Such a waiter starves the very resumption it is monitoring. Choose
 // wait: true only when you can guarantee the resumption has OTHER capacity to
 // run on.

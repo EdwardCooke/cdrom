@@ -28,7 +28,7 @@ import (
 //     written under (default "token").
 //
 // The handler obtains the exchanged token from the execution target through
-// the executor's TokenExchange (set in the context by the worker or agent,
+// the executor's TokenExchange (set in the context by the agent or agent,
 // which calls the API's ExchangeJobToken RPC). The executor gives every step a
 // per-step output directory (carried in the step's env as
 // executor.StepOutputDirEnv), so the handler always writes the token into it

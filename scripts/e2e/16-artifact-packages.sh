@@ -44,7 +44,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # Preserve the stack's WORK dir on FAILURE (instead of the lib's cleanup
 # destroying the crime scene): the service logs are the fastest way to a
@@ -221,7 +221,7 @@ EOF
     || { echo ">> [$flavor] extract line missing from log: $LOG" >&2; exit 1; }
   printf '%s' "$LOG" | grep -qF "packaged-ok-$flavor" \
     || { echo ">> [$flavor] verify line missing from log: $LOG" >&2; exit 1; }
-  # Worker-group results belong to each JobExecution; the job endpoint only
+  # Agent-group results belong to each JobExecution; the job endpoint only
   # exposes the derived job row. The shell verification above exercises the
   # download and extraction outputs through their actual destinations.
   log "   [$flavor] OK (magic-byte detection + structure)"
@@ -263,8 +263,8 @@ EOF
   wait_job_final "$JOB_ID"
   ST=$(api_curl "$BASE/api/jobs/$JOB_ID" | jq -r '.status')
   [ "$ST" = "4" ] || { echo ">> negative $arch: status $ST, want 4 (failed)" >&2; exit 1; }
-  grep -qF "${NEG_CASES[$arch]}" "$WORK/worker.log" \
-    || { echo ">> negative $arch: worker log lacks '${NEG_CASES[$arch]}':" >&2; tail -n 10 "$WORK/worker.log" >&2; exit 1; }
+  grep -qF "${NEG_CASES[$arch]}" "$WORK/agent.log" \
+    || { echo ">> negative $arch: agent log lacks '${NEG_CASES[$arch]}':" >&2; tail -n 10 "$WORK/agent.log" >&2; exit 1; }
   log "   $arch → failed (${NEG_CASES[$arch]})"
 done
 # The escaping member must NOT have materialized anywhere under WORK.
@@ -280,7 +280,7 @@ kind: Pipeline
 metadata:
   name: pkg-runner
 spec:
-  workerGroup: default
+  agentGroup: default
   artifacts:
     - name: lang
       package:
@@ -326,7 +326,7 @@ kind: Pipeline
 metadata:
   name: pkg-latest
 spec:
-  workerGroup: default
+  agentGroup: default
   artifacts:
     - name: lang
       package:
@@ -467,7 +467,7 @@ EMPT_JOB_BODY='{
 EMPT_JOB=$(e2e_submit_job "$EMPT_JOB_BODY")
 wait_job_final "$EMPT_JOB"
 [ "$(api_curl "$BASE/api/jobs/$EMPT_JOB" | jq -r '.status')" = "4" ] || { echo ">> empty publish did not fail" >&2; exit 1; }
-grep -qF "no files matched the given patterns" "$WORK/worker.log" \
+grep -qF "no files matched the given patterns" "$WORK/agent.log" \
   || { echo ">> empty publish lacked the diagnostic" >&2; exit 1; }
 log "   emptiness negative OK"
 

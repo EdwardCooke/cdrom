@@ -1,3 +1,4 @@
-// Package worker implements the long-lived worker: a resident process on a
-// deployment target, targetable by group. Must run on both Windows and Linux.
-package worker
+// Package agent implements the ephemeral agent: a short-lived process
+// spawned in Kubernetes to execute a one-off job, then terminate. Must run
+// on both Windows and Linux.
+package agent

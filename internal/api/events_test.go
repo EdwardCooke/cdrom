@@ -35,13 +35,13 @@ func TestEventHubFanOut(t *testing.T) {
 	ch2, cancel2 := hub.Subscribe()
 	defer cancel2()
 
-	hub.Publish(Event{Type: EventWorker, Worker: "w1", Action: WorkerRegistered})
+	hub.Publish(Event{Type: EventAgent, Agent: "w1", Action: AgentRegistered})
 
 	for _, ch := range []<-chan Event{ch1, ch2} {
 		select {
 		case ev := <-ch:
-			if ev.Worker != "w1" {
-				t.Errorf("worker = %q, want w1", ev.Worker)
+			if ev.Agent != "w1" {
+				t.Errorf("agent = %q, want w1", ev.Agent)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for a fan-out event")
@@ -55,7 +55,7 @@ func TestEventHubCancelStopsDelivery(t *testing.T) {
 	cancel()
 
 	// Publishing after cancel must not panic or deliver.
-	hub.Publish(Event{Type: EventWorker, Worker: "w"})
+	hub.Publish(Event{Type: EventAgent, Agent: "w"})
 	select {
 	case _, ok := <-ch:
 		if ok {

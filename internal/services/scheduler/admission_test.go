@@ -92,8 +92,8 @@ func TestRunAdmissionDispatchesAdmittedJobs(t *testing.T) {
 }
 
 // TestRunAdmissionDispatchesAgentJobs verifies that the admission loop also
-// admits jobs that target no worker group (ephemeral agents, F-16): they are
-// admitted (acquiring their slots) but not nudged to a live worker group.
+// admits jobs that target no agent group (ephemeral workers, F-16): they are
+// admitted (acquiring their slots) but not nudged to a live agent group.
 func TestRunAdmissionDispatchesAgentJobs(t *testing.T) {
 	db := &fakeAdmissionDB{
 		jobs: []*dbpb.Job{
@@ -106,7 +106,7 @@ func TestRunAdmissionDispatchesAgentJobs(t *testing.T) {
 
 	s.runAdmission(context.Background(), db)
 
-	// The agent job is admitted but not dispatched to a worker group.
+	// The agent job is admitted but not dispatched to a agent group.
 	if got := db.assignments; len(got) != 0 {
 		t.Errorf("assignments = %v, want none (an agent job is not nudged to a group)", got)
 	}

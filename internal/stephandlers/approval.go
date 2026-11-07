@@ -37,7 +37,7 @@ import (
 // Cancelling the job while it waits at the gate reports it cancelled.
 //
 // The handler obtains the approval gate from the execution target through the
-// executor's Approval (set in the context by the worker or agent, which calls
+// executor's Approval (set in the context by the agent or agent, which calls
 // the API's ReportJobStatus to report awaiting_approval and CheckApproval to
 // poll for the decision).
 const TypeApproval = executor.TypeApproval

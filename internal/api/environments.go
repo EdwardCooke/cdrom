@@ -22,7 +22,7 @@ import (
 // policy (requires_approval, an F-13 gate) and an automation policy
 // (automatic / manual). They are stored in the database (the Environment
 // table, owned by the Database service) and managed through these endpoints,
-// so an admin can create `prod-auto`, flip `prod` to manual, or add a worker
+// so an admin can create `prod-auto`, flip `prod` to manual, or add a agent
 // to an environment at runtime without a redeployment. A change publishes an
 // environment event so the UI's environments view stays in sync across
 // replicas.
@@ -44,7 +44,7 @@ type environmentRequest struct {
 	Automation string `json:"automation,omitempty"`
 	// Labels are the environment's labels (F-29): a set of key/value pairs that
 	// label the environment. They are combined with the labels of a run's other
-	// resources (pipeline, job, worker group, worker) onto the run's job
+	// resources (pipeline, job, agent group, agent) onto the run's job
 	// instances.
 	Labels map[string]string `json:"labels,omitempty"`
 }

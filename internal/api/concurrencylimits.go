@@ -16,7 +16,7 @@ import (
 // ---------------------------------------------------------------------------
 //
 // The concurrency limits that bound how much runs in parallel (the system-wide
-// cap, per-worker-group caps, and per-concurrency-key caps) are stored as
+// cap, per-agent-group caps, and per-concurrency-key caps) are stored as
 // regex-based rules in the database (the ConcurrencyLimit table), not in
 // configuration, so they can be edited at runtime via these endpoints without a
 // redeployment. A rule has a kind (global / group / key), a regex pattern

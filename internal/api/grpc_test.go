@@ -85,7 +85,7 @@ func startDBServer(t *testing.T) dbpb.DatabaseClient {
 // startAPIServer boots a real API gRPC server on an in-process bufconn
 // listener and returns a connected client. The optional trailing db client
 // supplies the record ledger (required for the translated artifact/log
-// paths; omitted for tests that exercise only the worker-control surface).
+// paths; omitted for tests that exercise only the agent-control surface).
 func startAPIServer(t *testing.T, artifacts artifactspb.ArtifactsClient, hub *EventHub, db ...dbpb.DatabaseClient) apipb.APIClient {
 	t.Helper()
 	var dbc dbpb.DatabaseClient
@@ -314,23 +314,23 @@ func TestNotifyRunStatusValidation(t *testing.T) {
 	}
 }
 
-// TestCancelJobDeliversToWorker verifies that the API's CancelJob RPC (F-05)
-// delivers a JobCancellation down a watching worker's WatchJobs stream, so the
-// worker can interrupt the running job.
-func TestCancelJobDeliversToWorker(t *testing.T) {
+// TestCancelJobDeliversToAgent verifies that the API's CancelJob RPC (F-05)
+// delivers a JobCancellation down a watching agent's WatchJobs stream, so the
+// agent can interrupt the running job.
+func TestCancelJobDeliversToAgent(t *testing.T) {
 	client := startAPIServer(t, startArtifactsServer(t), nil)
 	ctx := context.Background()
 
-	// A worker opens a WatchJobs stream.
-	stream, err := client.WatchJobs(ctx, &apipb.WatchJobsRequest{WorkerName: "w1", Group: "pool-a"})
+	// A agent opens a WatchJobs stream.
+	stream, err := client.WatchJobs(ctx, &apipb.WatchJobsRequest{AgentName: "w1", Group: "pool-a"})
 	if err != nil {
 		t.Fatalf("WatchJobs: %v", err)
 	}
 
-	// The server registers the worker's stream asynchronously as the
+	// The server registers the agent's stream asynchronously as the
 	// WatchJobs RPC is established, so the first CancelJob may land before the
-	// worker is registered (and be dropped). Retry the cancel until the
-	// cancellation is delivered to the worker's stream.
+	// agent is registered (and be dropped). Retry the cancel until the
+	// cancellation is delivered to the agent's stream.
 	type recvResult struct {
 		message *apipb.WatchMessage
 		err     error
@@ -360,10 +360,10 @@ func TestCancelJobDeliversToWorker(t *testing.T) {
 			}
 			return
 		case <-time.After(50 * time.Millisecond):
-			// No cancellation yet (the worker may not be registered); retry.
+			// No cancellation yet (the agent may not be registered); retry.
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("no cancellation delivered to the worker's stream")
+			t.Fatal("no cancellation delivered to the agent's stream")
 		}
 	}
 }

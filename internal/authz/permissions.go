@@ -37,7 +37,7 @@ const (
 	PermAPIKeysListAll   = "api-keys.can-list-all"
 	PermAPIKeysManageAll = "api-keys.can-manage-all"
 	PermAuditView        = "audit.can-view"
-	PermWorkersView      = "workers.can-view"
+	PermAgentsView      = "agents.can-view"
 	// Service-account management permissions (F-26). Roles contain granular
 	// permissions; these are permission names, not hard-coded roles.
 	PermServiceAccountsView    = "service-accounts.can-view"
@@ -61,12 +61,12 @@ const (
 	PermEnvironmentsView   = "environments.can-view"
 	PermEnvironmentsManage = "environments.can-manage"
 	PermRunsProceed        = "runs.can-proceed"
-	// Worker-group management permissions (F-29). Worker groups (named groups
-	// of long-lived workers that carry labels) are platform-wide: can-view reads
+	// Agent-group management permissions (F-29). Agent groups (named groups
+	// of long-lived agents that carry labels) are platform-wide: can-view reads
 	// a group and its labels, can-manage creates/updates/deletes a group and its
 	// labels.
-	PermWorkerGroupsView   = "worker-groups.can-view"
-	PermWorkerGroupsManage = "worker-groups.can-manage"
+	PermAgentGroupsView   = "agent-groups.can-view"
+	PermAgentGroupsManage = "agent-groups.can-manage"
 	// SSH known-host management permissions (F-21.2.4.1). The runtime-managed
 	// SSH host keys the source-fetcher uses to verify a git-ssh server's host
 	// key are platform-wide: can-view reads them, can-manage adds/removes them.
@@ -136,7 +136,7 @@ var AllPermissions = []string{
 	PermAPIKeysListAll,
 	PermAPIKeysManageAll,
 	PermAuditView,
-	PermWorkersView,
+	PermAgentsView,
 	PermServiceAccountsView,
 	PermServiceAccountsCreate,
 	PermServiceAccountsEdit,
@@ -151,8 +151,8 @@ var AllPermissions = []string{
 	PermEnvironmentsView,
 	PermEnvironmentsManage,
 	PermRunsProceed,
-	PermWorkerGroupsView,
-	PermWorkerGroupsManage,
+	PermAgentGroupsView,
+	PermAgentGroupsManage,
 	PermSSHKnownHostsView,
 	PermSSHKnownHostsManage,
 	PermSourceCredentialsView,
@@ -190,7 +190,7 @@ func IsKnownPermission(p string) bool {
 // pipeline resource (and so can be granted via a pipeline-scoped binding).
 // Resource-scoped permissions are the ones that act on a pipeline and its
 // runs, jobs, and secrets. Platform-wide permissions (pipeline creation,
-// role/user management, API keys, audit, workers) are only granted by
+// role/user management, API keys, audit, agents) are only granted by
 // unscoped bindings.
 func isResourceScoped(p string) bool {
 	switch p {
@@ -252,18 +252,18 @@ func BuiltinRoles() map[string]RoleDefinition {
 				PermRunsCancel,
 				PermJobsApprove,
 				PermJobsReject,
-				PermWorkersView,
+				PermAgentsView,
 				PermConcurrencyLimitsView,
 			},
 		},
 		RoleViewer: {
 			Name:        RoleViewer,
-			Description: "Read-only access to pipelines, runs, jobs, logs, artifacts, and workers.",
+			Description: "Read-only access to pipelines, runs, jobs, logs, artifacts, and agents.",
 			BuiltIn:     true,
 			Permissions: []string{
 				PermPipelinesView,
 				PermSecretsView,
-				PermWorkersView,
+				PermAgentsView,
 				PermConcurrencyLimitsView,
 			},
 		},
@@ -274,7 +274,7 @@ func BuiltinRoles() map[string]RoleDefinition {
 			Permissions: []string{
 				PermPipelinesView,
 				PermSecretsView,
-				PermWorkersView,
+				PermAgentsView,
 				PermAPIKeysManage,
 				PermConcurrencyLimitsView,
 			},

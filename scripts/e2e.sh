@@ -2,7 +2,7 @@
 #
 # e2e.sh — end-to-end smoke test for the cdrom pipeline (main script).
 #
-# Boots a full local stack (db, scheduler, artifacts, idp, api, worker)
+# Boots a full local stack (db, scheduler, artifacts, idp, api, agent)
 # against a throwaway SQLite database once, then runs the single-purpose
 # test scripts in scripts/e2e/ against it, in order:
 #
@@ -106,7 +106,7 @@ e2e_setup_tls
 e2e_start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db?_pragma=busy_timeout=5000&_pragma=journal_mode=wal" CDROM_LOG_FORMAT=text -- "$BIN/db"
 e2e_start scheduler "$WORK/scheduler.log" 'serving'    CDROM_LOG_FORMAT=text -- "$BIN/scheduler"
 e2e_start artifacts "$WORK/artifacts.log" 'serving'    CDROM_ARTIFACTS_ROOT="$WORK/artifacts" CDROM_LOG_FORMAT=text -- "$BIN/artifacts"
-# The IdP mints the job tokens the API hands to the worker (and the exchanged
+# The IdP mints the job tokens the API hands to the agent (and the exchanged
 # tokens a token_exchange step requests). It is started before the API so the
 # API's job-token auth (OIDC discovery against the IdP) can initialize.
 # CDROM_IDP_ISSUER=https://… is REQUIRED under mTLS: the IdP's OIDC surface
@@ -146,8 +146,8 @@ done
 curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1 \
   || { echo ">> IdP did not start serving" >&2; exit 1; }
 # Enable job-token auth on the API's gRPC surface: the API mints a job token
-# for the worker (audience cdrom-api, the IdP's default) and verifies it on
-# the worker's job-scoped calls, including the token_exchange step's
+# for the agent (audience cdrom-api, the IdP's default) and verifies it on
+# the agent's job-scoped calls, including the token_exchange step's
 # ExchangeJobToken RPC.
 # The audit log (F-15) is written to a file separate from the process's
 # default log (CDROM_AUDIT_FILE), in JSON (CDROM_AUDIT_FORMAT). Each audited
@@ -158,10 +158,10 @@ curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1
 # job-token auth performs OIDC discovery + mint against the IdP's HTTPS
 # surface (a bare address would be coerced to http:// by normalizeIDPURL).
 e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_PIPELINE_SOURCE_ADDR=127.0.0.1:7109 CDROM_LOG_FORMAT=text -- "$BIN/api"
-e2e_start worker    "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
+e2e_start agent    "$WORK/agent.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/agent"
 
-# Gate on the API having the worker's WatchJobs stream open before dispatching.
-e2e_wait_for "$WORK/api.log" 'worker watching' 'worker watch stream on the api'
+# Gate on the API having the agent's WatchJobs stream open before dispatching.
+e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'
 
 # --- run the test scripts against the shared stack ---------------------------
 # E2E_STACK_READY tells each test script (via lib.sh) that the stack is

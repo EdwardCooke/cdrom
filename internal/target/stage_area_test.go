@@ -86,20 +86,20 @@ func TestUnmountKernelEscapes(t *testing.T) {
 	}
 }
 
-// TestWorkerRootIsTmpfsRealProcMounts: the LIVE check against this host's
+// TestAgentRootIsTmpfsRealProcMounts: the LIVE check against this host's
 // /proc/mounts — / must classify as SOME definite answer (whatever it is),
 // and a nonsense path must not blow up. (Asserting a specific answer would
 // couple the test to the host's mount layout.)
-func TestWorkerRootIsTmpfsRealProcMounts(t *testing.T) {
-	_ = workerRootIsTmpfs("/")
-	_ = workerRootIsTmpfs("")
-	_ = workerRootIsTmpfs("/definitely/not/a/path")
+func TestAgentRootIsTmpfsRealProcMounts(t *testing.T) {
+	_ = agentRootIsTmpfs("/")
+	_ = agentRootIsTmpfs("")
+	_ = agentRootIsTmpfs("/definitely/not/a/path")
 }
 
-// TestStageAreaUsesWorkerRoot: the stage dir is created UNDER the configured
-// worker root (and the root is CREATED when absent).
-func TestStageAreaUsesWorkerRoot(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "custom-worker-root")
+// TestStageAreaUsesAgentRoot: the stage dir is created UNDER the configured
+// agent root (and the root is CREATED when absent).
+func TestStageAreaUsesAgentRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "custom-agent-root")
 	sa := newStageArea(root, nil)
 	dir, err := sa.Dir()
 	if err != nil {
@@ -109,7 +109,7 @@ func TestStageAreaUsesWorkerRoot(t *testing.T) {
 		t.Fatalf("stage dir %q is not under root %q", dir, root)
 	}
 	if _, err := os.Stat(root); err != nil {
-		t.Fatalf("worker root was not created: %v", err)
+		t.Fatalf("agent root was not created: %v", err)
 	}
 	// Memoized: a second call returns the same dir.
 	again, err := sa.Dir()
@@ -123,7 +123,7 @@ func TestStageAreaUsesWorkerRoot(t *testing.T) {
 	}
 }
 
-// TestStageAreaDefaultRoot: an EMPTY worker root falls back to the OS temp dir.
+// TestStageAreaDefaultRoot: an EMPTY agent root falls back to the OS temp dir.
 func TestStageAreaDefaultRoot(t *testing.T) {
 	sa := newStageArea("", nil)
 	dir, err := sa.Dir()

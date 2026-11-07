@@ -4,7 +4,7 @@
 # API; slice 3: the IdP caller-auth guard).
 #
 # Exercises the six /api/scim/keys endpoints end to end against a real stack
-# (Db + IdP + API, no worker needed — the pool never runs jobs):
+# (Db + IdP + API, no agent needed — the pool never runs jobs):
 #   - deny-by-default: a regular user (no scim-keys.* permission) gets 403;
 #   - create: the admin mints a key; the 32-char plaintext is returned exactly
 #     once (the 201) and appears NOWHERE else (lists carry only the 8-char

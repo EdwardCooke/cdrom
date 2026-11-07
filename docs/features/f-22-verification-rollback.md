@@ -286,7 +286,7 @@ Two dispositions deserve emphasis:
   published today) plus the standard `run_status`/`assignment` traffic for the
   suffix.
 - **Missing-group hazard** — if the anchor's target group ceased to exist,
-  suffix jobs linger `pending` (assigned to a group no worker serves). This is
+  suffix jobs linger `pending` (assigned to a group no agent serves). This is
   the pre-existing exposure for orphaned groups, not new; the resumption
   inherits it and the UI surfaces it via the stalled-run affordances.
 
@@ -371,7 +371,7 @@ the mechanics are shared.
 ### The `probe` step handler (verification)
 
 A new built-in handler, `type: probe` — a readiness poll executed **by the
-execution target** (worker/agent), stdlib `net/http` only, portable
+execution target** (agent/agent), stdlib `net/http` only, portable
 Win/Linux. Deliberately target-side (contrast F-18's API-side sends): the
 probe's value is network adjacency to the workload that was just deployed —
 cluster-internal VIPs/LBs that the API cannot reach. Trust parity is the
@@ -418,7 +418,7 @@ covers the readiness-poll majority.
 Mirrors the F-18 handler anatomy: render params, call the API, report. New
 typed capability on the executor context (obtained via
 `RestorerFromContext`, implemented in `internal/notify` alongside `Notifier`
-— same api-client/job-ID/token triple; wired into worker and agent contexts):
+— same api-client/job-ID/token triple; wired into agent and agent contexts):
 
 ```go
 type Restorer interface {
@@ -545,7 +545,7 @@ Errors map 1:1 from the guarded path (cooldown, no-anchor, bad cut point).
 
 ### Doc debt (landing obligation)
 
-Update `AGENTS.md` (feature index: F-22 done; step-handler roster gains
+Update `WORKER.md` (feature index: F-22 done; step-handler roster gains
 `probe`/`rollback`), `docs/Architecture.md` (REST + RPC inventories, config
 reference), `docs/Features.md` (checkboxes), `docs/Monitoring.md` (new
 series).
@@ -611,7 +611,7 @@ Slice C (drafted above; acceptance):
       _(`stephandlers.rollback_test.go` + `api.restoration_test.go`; e2e: the
       armed step fires, the API mediates, and the step publishes
       `restore_run_id`. Note: `wait` defaults to `false` — a `wait=true`
-      rollback on a single-slot worker group self-starves the resumption it
+      rollback on a single-slot agent group self-starves the resumption it
       awaits; opt in deliberately.)_
 - [x] Armed initiation refuses rollback-origin callers (depth ≤ 1) and
       cools-down flapping pipelines; the manual endpoint

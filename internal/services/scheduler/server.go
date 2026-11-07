@@ -4,13 +4,13 @@
 // The API/controller layer calls SubmitJob to create a job. For high
 // availability (F-23) the scheduler writes to the shared Database service
 // only: it persists the job and appends an "assignment" event to the shared
-// event log, which every API pod tails and fans out to its local workers. The
+// event log, which every API pod tails and fans out to its local agents. The
 // scheduler no longer dials a specific API pod, so a job is delivered to
-// whichever pod a worker happens to be connected to. Jobs with an empty
+// whichever pod a agent happens to be connected to. Jobs with an empty
 // target group are left pending for ephemeral Kubernetes agents.
 //
 // The scheduler holds no durable state of its own: all pipelines, jobs, and
-// the event log are owned by the Database service. Worker registration,
+// the event log are owned by the Database service. Agent registration,
 // WatchJobs streams, and job status reporting live on the API service.
 package scheduler
 
@@ -59,7 +59,7 @@ func (s *Server) SetMetrics(m *metrics.SchedulerMetrics) {
 
 // SubmitJob creates the job (persisted via the Database service) and, when a
 // target group is set, appends an "assignment" event to the shared event log
-// (F-23). Every API pod tails the log and nudges its local workers in the
+// (F-23). Every API pod tails the log and nudges its local agents in the
 // group, which fetch the job and claim it atomically. Jobs with an empty
 // target group are left pending for an ephemeral agent.
 //
@@ -98,10 +98,10 @@ func (s *Server) SubmitJob(ctx context.Context, req *schedpb.SubmitJobRequest) (
 }
 
 // publishAssignment appends an "assignment" event to the shared event log
-// (F-23) so every API pod can nudge its local workers in the group (or, for a
-// job that targets an environment, F-17, its local workers that belong to the
+// (F-23) so every API pod can nudge its local agents in the group (or, for a
+// job that targets an environment, F-17, its local agents that belong to the
 // environment). It is best-effort: a failure to append does not fail the
-// submit (the worker's periodic poll is the authoritative path).
+// submit (the agent's periodic poll is the authoritative path).
 func (s *Server) publishAssignment(ctx context.Context, jobID int64, group, environment string) {
 	if s.db == nil {
 		return
@@ -139,14 +139,14 @@ func (s *Server) ListJobs(ctx context.Context, req *schedpb.ListJobsRequest) (*s
 // CancelJob cancels a job (F-05): it marks the job cancelled (persisted via
 // the Database service) and appends a "cancel" event to the shared event log
 // (F-23). Every API pod tails the log and delivers a JobCancellation down its
-// local workers' WatchJobs streams (for a long-lived worker) so the worker
+// local agents' WatchJobs streams (for a long-lived agent) so the agent
 // running the job interrupts it; an ephemeral agent observes the cancellation
 // on its next GetJob. Only pending or running jobs can be cancelled;
 // cancelling an already-finished job is a no-op (idempotent).
 //
 // The cancellation is persisted with a conditional update (Database.CancelJob)
 // so a job that already reported a terminal status is left untouched. The
-// cancel event is best-effort: if no pod can deliver it (no live worker, or a
+// cancel event is best-effort: if no pod can deliver it (no live agent, or a
 // pod is down) the job is still marked cancelled in the database, and the
 // target's next status report (or the scheduler's watchdog) reconciles it.
 func (s *Server) CancelJob(ctx context.Context, req *schedpb.CancelJobRequest) (*schedpb.Job, error) {
@@ -167,7 +167,7 @@ func (s *Server) CancelJob(ctx context.Context, req *schedpb.CancelJobRequest) (
 		return toProtoJob(job), nil
 	}
 	// Append a cancel event to the shared event log (F-23) so every API pod
-	// can deliver the cancellation to its local workers. Best-effort: a
+	// can deliver the cancellation to its local agents. Best-effort: a
 	// failure to append does not undo the cancellation already persisted above.
 	s.publishCancel(ctx, req.GetId())
 	updated, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
@@ -178,7 +178,7 @@ func (s *Server) CancelJob(ctx context.Context, req *schedpb.CancelJobRequest) (
 }
 
 // publishCancel appends a "cancel" event to the shared event log (F-23) so
-// every API pod can deliver the cancellation to its local workers.
+// every API pod can deliver the cancellation to its local agents.
 func (s *Server) publishCancel(ctx context.Context, jobID int64) {
 	if s.db == nil {
 		return
@@ -385,7 +385,7 @@ func (s *Server) withApprovalVotes(ctx context.Context, job *dbpb.Job) *schedpb.
 //     resolver (dependencies.go) dispatches it once its dependencies succeed,
 //     or marks it skipped if any of them does not;
 //   - an instance with a target group is dispatched to the API, which fans it
-//     out to the live workers in that group;
+//     out to the live agents in that group;
 //   - an instance with an empty target group is left pending for an ephemeral
 //     Kubernetes agent.
 //
@@ -513,7 +513,7 @@ func triggerTypeKind(t dbpb.TriggerType) string {
 // SubmitJob's dispatch logic: an instance with dependencies (needs, F-08, or
 // depends_on, F-06) is left pending for the dependency resolver; an instance
 // with a target group has an "assignment" event appended to the shared event
-// log (F-23), which every API pod tails and fans out to its local workers; an
+// log (F-23), which every API pod tails and fans out to its local agents; an
 // instance with an empty target group is left pending for an ephemeral agent.
 func (s *Server) dispatchRunInstance(ctx context.Context, job *dbpb.Job) {
 	s.dispatchJob(ctx, job)

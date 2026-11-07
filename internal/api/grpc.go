@@ -40,10 +40,10 @@ import (
 	"cdrom/internal/secrets"
 )
 
-// heartbeatInterval is the recommended worker heartbeat cadence.
+// heartbeatInterval is the recommended agent heartbeat cadence.
 const heartbeatInterval = 10 * time.Second
 
-// assignmentQueueSize bounds how many assignments can be queued for a worker
+// assignmentQueueSize bounds how many assignments can be queued for a agent
 // between deliveries.
 const assignmentQueueSize = 64
 
@@ -69,16 +69,16 @@ var (
 )
 
 // GRPCServer implements the cdrom.api.v1.API gRPC service. It is the
-// control-plane hub that long-lived workers and ephemeral agents talk to: it
-// holds the workers' WatchJobs streams, relays job assignments pushed by the
+// control-plane hub that long-lived agents and ephemeral workers talk to: it
+// holds the agents' WatchJobs streams, relays job assignments pushed by the
 // scheduler (DispatchJob), and proxies artifact traffic to the artifacts
 // service. Execution targets never talk to the scheduler, database, or
 // artifacts services directly.
 //
 // For high availability (F-23) the server also runs an event-log tail loop
 // (StartEventLogTail): it tails the shared event log and fans events out to
-// its local workers and UI clients, so a job published by any pod reaches the
-// workers this pod holds streams for. The fields below back that loop.
+// its local agents and UI clients, so a job published by any pod reaches the
+// agents this pod holds streams for. The fields below back that loop.
 type GRPCServer struct {
 	apipb.UnimplementedAPIServer
 	db        dbpb.DatabaseClient
@@ -106,12 +106,12 @@ type GRPCServer struct {
 	authz *authz.Engine
 
 	mu       sync.Mutex
-	live     map[string]*liveWorker // worker name -> live worker
+	live     map[string]*liveAgent // agent name -> live agent
 	watchers map[string]chan *apipb.WatchMessage
 
 	// tailCursor is this pod's position in the shared event log (the last
 	// event id it has fanned out). It is per-pod: each pod tails independently
-	// and fans out to its own local workers/UI.
+	// and fans out to its own local agents/UI.
 	tailCursor atomic.Int64
 	// logCursors tracks, per (jobID|log), the byte offset this pod has already
 	// range-read for cross-pod near-live logs (F-23).
@@ -126,7 +126,7 @@ type GRPCServer struct {
 	published   map[int64]struct{}
 
 	// audit records an audit event (F-15) for each audited action the gRPC
-	// surface handles (worker lifecycle, job status reports, token exchanges).
+	// surface handles (agent lifecycle, job status reports, token exchanges).
 	// It is nil when the audit log is not configured (or in tests), in which
 	// case no audit events are recorded on the gRPC surface.
 	audit *audit.Recorder
@@ -141,7 +141,7 @@ type GRPCServer struct {
 	logUids   map[string]string
 	// metrics records the API's Prometheus metrics (F-20) at the gRPC surface's
 	// hot spots (job status, log bytes, token minting, secret decryption,
-	// notifications, artifact bytes, worker hub, event-log lag). It is nil
+	// notifications, artifact bytes, agent hub, event-log lag). It is nil
 	// when metrics are disabled, in which case all recording is a no-op.
 	metrics *metrics.APIMetrics
 
@@ -167,15 +167,15 @@ type GRPCServer struct {
 	rollbackCfg config.RollbackConfig
 }
 
-// liveWorker is a worker with an open WatchJobs stream.
-type liveWorker struct {
+// liveAgent is a agent with an open WatchJobs stream.
+type liveAgent struct {
 	name  string
 	group string
-	// environments are the environments the worker belongs to (F-17); a job
-	// that targets an environment is dispatched to the live workers that
+	// environments are the environments the agent belongs to (F-17); a job
+	// that targets an environment is dispatched to the live agents that
 	// registered it.
 	environments []string
-	// labels are the worker's labels (F-29); a job dispatched to the worker merges
+	// labels are the agent's labels (F-29); a job dispatched to the agent merges
 	// them into the job's execution's label set.
 	labels   map[string]string
 	address  string
@@ -202,7 +202,7 @@ func NewGRPCServer(db dbpb.DatabaseClient, artifacts artifactspb.ArtifactsClient
 		jobAuth:     jobAuth,
 		secretStore: secretStore,
 		logger:      logger,
-		live:        make(map[string]*liveWorker),
+		live:        make(map[string]*liveAgent),
 		watchers:    make(map[string]chan *apipb.WatchMessage),
 		logCursors:  make(map[string]int64),
 		coalescer:   newLogCoalescer(logCoalesceWindow),
@@ -239,16 +239,16 @@ func (s *GRPCServer) SetMetrics(m *metrics.APIMetrics) {
 }
 
 // ---------------------------------------------------------------------------
-// Worker lifecycle
+// Agent lifecycle
 // ---------------------------------------------------------------------------
 
-// RegisterWorker persists the worker via the Database service and marks it
+// RegisterAgent persists the agent via the Database service and marks it
 // live in memory.
-func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWorkerRequest) (*apipb.Worker, error) {
+func (s *GRPCServer) RegisterAgent(ctx context.Context, req *apipb.RegisterAgentRequest) (*apipb.Agent, error) {
 	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker name is required")
+		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
-	registered, err := s.db.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{
+	registered, err := s.db.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{
 		Name:         req.GetName(),
 		Group:        req.GetGroup(),
 		Address:      req.GetAddress(),
@@ -258,16 +258,16 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	if err != nil {
 		return nil, err
 	}
-	// A worker that re-registers after a restart will not resume the jobs it
+	// A agent that re-registers after a restart will not resume the jobs it
 	// was running before the restart. Abandon its stale running executions
 	// (fan-out) so they do not block the jobs' overall status. Best-effort: a
 	// failure here does not fail the registration (the scheduler's job-status
 	// loop re-derives the jobs' status from the executions).
-	if _, err := s.db.AbandonWorkerExecutions(ctx, &dbpb.AbandonWorkerExecutionsRequest{WorkerName: registered.GetName()}); err != nil {
-		s.logger.Warn("api: abandon worker executions", "worker", registered.GetName(), "err", err)
+	if _, err := s.db.AbandonAgentExecutions(ctx, &dbpb.AbandonAgentExecutionsRequest{AgentName: registered.GetName()}); err != nil {
+		s.logger.Warn("api: abandon agent executions", "agent", registered.GetName(), "err", err)
 	}
 	s.mu.Lock()
-	s.live[registered.GetName()] = &liveWorker{
+	s.live[registered.GetName()] = &liveAgent{
 		name:         registered.GetName(),
 		group:        registered.GetGroup(),
 		environments: registered.GetEnvironments(),
@@ -276,19 +276,19 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 		lastSeen:     time.Now(),
 	}
 	s.mu.Unlock()
-	s.logger.Info("api: worker registered", "worker", registered.GetName(), "group", registered.GetGroup())
+	s.logger.Info("api: agent registered", "agent", registered.GetName(), "group", registered.GetGroup())
 	s.recordAuditGRPC(audit.Event{
-		Action:     audit.ActionWorkerRegister,
-		TargetKind: audit.TargetWorker,
+		Action:     audit.ActionAgentRegister,
+		TargetKind: audit.TargetAgent,
 		TargetID:   registered.GetName(),
 		TargetName: registered.GetName(),
 		Outcome:    audit.OutcomeSuccess,
 		NewValue:   auditJSON(map[string]any{"group": registered.GetGroup(), "address": registered.GetAddress()}),
-	}, registered.GetName(), audit.ActorKindWorker, auditPeerAddr(ctx))
-	s.publish(Event{Type: EventWorker, Worker: registered.GetName(), Group: registered.GetGroup(), Action: WorkerRegistered})
-	s.publishWorkerEvent(ctx, registered.GetName(), registered.GetGroup(), WorkerRegistered)
-	s.updateWorkerMetrics()
-	return &apipb.Worker{
+	}, registered.GetName(), audit.ActorKindAgent, auditPeerAddr(ctx))
+	s.publish(Event{Type: EventAgent, Agent: registered.GetName(), Group: registered.GetGroup(), Action: AgentRegistered})
+	s.publishAgentEvent(ctx, registered.GetName(), registered.GetGroup(), AgentRegistered)
+	s.updateAgentMetrics()
+	return &apipb.Agent{
 		Name:         registered.GetName(),
 		Group:        registered.GetGroup(),
 		Address:      registered.GetAddress(),
@@ -298,41 +298,41 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *apipb.RegisterWork
 	}, nil
 }
 
-// DeregisterWorker removes the worker from the live registry and deletes its
+// DeregisterAgent removes the agent from the live registry and deletes its
 // persistent record.
-func (s *GRPCServer) DeregisterWorker(ctx context.Context, req *apipb.DeregisterWorkerRequest) (*emptypb.Empty, error) {
+func (s *GRPCServer) DeregisterAgent(ctx context.Context, req *apipb.DeregisterAgentRequest) (*emptypb.Empty, error) {
 	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker name is required")
+		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
-	if _, err := s.db.DeleteWorker(ctx, &dbpb.DeleteWorkerRequest{Name: req.GetName()}); err != nil {
+	if _, err := s.db.DeleteAgent(ctx, &dbpb.DeleteAgentRequest{Name: req.GetName()}); err != nil {
 		return nil, err
 	}
 	s.removeLive(req.GetName())
-	s.updateWorkerMetrics()
-	s.logger.Info("api: worker deregistered", "worker", req.GetName())
+	s.updateAgentMetrics()
+	s.logger.Info("api: agent deregistered", "agent", req.GetName())
 	s.recordAuditGRPC(audit.Event{
-		Action:     audit.ActionWorkerDeregister,
-		TargetKind: audit.TargetWorker,
+		Action:     audit.ActionAgentDeregister,
+		TargetKind: audit.TargetAgent,
 		TargetID:   req.GetName(),
 		TargetName: req.GetName(),
 		Outcome:    audit.OutcomeSuccess,
-	}, req.GetName(), audit.ActorKindWorker, auditPeerAddr(ctx))
-	s.publish(Event{Type: EventWorker, Worker: req.GetName(), Action: WorkerDeregistered})
-	s.publishWorkerEvent(ctx, req.GetName(), "", WorkerDeregistered)
+	}, req.GetName(), audit.ActorKindAgent, auditPeerAddr(ctx))
+	s.publish(Event{Type: EventAgent, Agent: req.GetName(), Action: AgentDeregistered})
+	s.publishAgentEvent(ctx, req.GetName(), "", AgentDeregistered)
 	return &emptypb.Empty{}, nil
 }
 
-// Heartbeat refreshes the worker's last-seen timestamp.
+// Heartbeat refreshes the agent's last-seen timestamp.
 func (s *GRPCServer) Heartbeat(ctx context.Context, req *apipb.HeartbeatRequest) (*apipb.HeartbeatResponse, error) {
 	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker name is required")
+		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
-	if _, err := s.db.HeartbeatWorker(ctx, &dbpb.HeartbeatWorkerRequest{Name: req.GetName()}); err != nil {
+	if _, err := s.db.HeartbeatAgent(ctx, &dbpb.HeartbeatAgentRequest{Name: req.GetName()}); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	if worker, ok := s.live[req.GetName()]; ok {
-		worker.lastSeen = time.Now()
+	if agent, ok := s.live[req.GetName()]; ok {
+		agent.lastSeen = time.Now()
 	}
 	s.mu.Unlock()
 	return &apipb.HeartbeatResponse{PollIntervalSeconds: int32(heartbeatInterval.Seconds())}, nil
@@ -342,24 +342,24 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *apipb.HeartbeatRequest)
 // Execution side
 // ---------------------------------------------------------------------------
 
-// WatchJobs is a server stream: the worker identifies itself and receives a
+// WatchJobs is a server stream: the agent identifies itself and receives a
 // WatchMessage for every job dispatched to its group (a JobAssignment) and
 // for every cancellation of a job it is running (a JobCancellation, F-05)
 // until the stream closes.
 func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerStreamingServer[apipb.WatchMessage]) error {
-	if req.GetWorkerName() == "" {
-		return status.Error(codes.InvalidArgument, "worker_name is required")
+	if req.GetAgentName() == "" {
+		return status.Error(codes.InvalidArgument, "agent_name is required")
 	}
-	name := req.GetWorkerName()
+	name := req.GetAgentName()
 	assignmentChannel := make(chan *apipb.WatchMessage, assignmentQueueSize)
 
 	s.mu.Lock()
 	if existing, ok := s.watchers[name]; ok {
-		// A worker should have at most one stream; replace the stale one.
+		// A agent should have at most one stream; replace the stale one.
 		close(existing)
 	}
 	s.watchers[name] = assignmentChannel
-	s.live[name] = &liveWorker{name: name, group: req.GetGroup(), environments: req.GetEnvironments(), lastSeen: time.Now()}
+	s.live[name] = &liveAgent{name: name, group: req.GetGroup(), environments: req.GetEnvironments(), lastSeen: time.Now()}
 	s.mu.Unlock()
 
 	defer func() {
@@ -371,20 +371,20 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 		s.mu.Unlock()
 	}()
 
-	s.logger.Info("api: worker watching", "worker", name, "group", req.GetGroup())
-	s.publish(Event{Type: EventWorker, Worker: name, Group: req.GetGroup(), Action: WorkerWatching})
-	s.publishWorkerEvent(stream.Context(), name, req.GetGroup(), WorkerWatching)
-	s.updateWorkerMetrics()
+	s.logger.Info("api: agent watching", "agent", name, "group", req.GetGroup())
+	s.publish(Event{Type: EventAgent, Agent: name, Group: req.GetGroup(), Action: AgentWatching})
+	s.publishAgentEvent(stream.Context(), name, req.GetGroup(), AgentWatching)
+	s.updateAgentMetrics()
 	for {
 		select {
 		case <-stream.Context().Done():
-			s.logger.Info("api: worker stream closed", "worker", name)
-			s.updateWorkerMetrics()
+			s.logger.Info("api: agent stream closed", "agent", name)
+			s.updateAgentMetrics()
 			return nil
 		case message := <-assignmentChannel:
 			if err := stream.Send(message); err != nil {
-				s.logger.Warn("api: failed to send watch message", "worker", name, "err", err)
-				s.updateWorkerMetrics()
+				s.logger.Warn("api: failed to send watch message", "agent", name, "err", err)
+				s.updateAgentMetrics()
 				return nil
 			}
 		}
@@ -418,39 +418,39 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 	return apiJob, nil
 }
 
-// StartJobExecution records that the calling worker has started running a job
-// (fan-out). It creates the worker's JobExecution for the job's current
+// StartJobExecution records that the calling agent has started running a job
+// (fan-out). It creates the agent's JobExecution for the job's current
 // attempt via the Database service and, on success, returns the job with its
-// spec, upstream jobs, and a fresh job token. A job that targets a worker
-// group runs on every worker in the group, so the start is not exclusive:
-// every worker in the group starts its own execution. Starting an execution
+// spec, upstream jobs, and a fresh job token. A job that targets a agent
+// group runs on every agent in the group, so the start is not exclusive:
+// every agent in the group starts its own execution. Starting an execution
 // for a job that is no longer pending (it reached a terminal state, or it is
-// not targeted at a worker group) is rejected, so a job that finished before a
-// slow worker started it is not run.
+// not targeted at a agent group) is rejected, so a job that finished before a
+// slow agent started it is not run.
 func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobExecutionRequest) (*apipb.StartJobExecutionResponse, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	if req.GetWorkerName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
 	if s.db == nil {
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
 	resp, err := s.db.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{
 		JobId:      req.GetJobId(),
-		WorkerName: req.GetWorkerName(),
+		AgentName: req.GetAgentName(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	if !resp.GetStarted() {
 		// The job was no longer pending (it reached a terminal state, or it is
-		// not targeted at a worker group); the caller skips it.
+		// not targeted at a agent group); the caller skips it.
 		return &apipb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// The job is now running on this worker. Fetch it fresh (it now carries the
-	// running status and started_at) and hand the worker its spec, upstream
+	// The job is now running on this agent. Fetch it fresh (it now carries the
+	// running status and started_at) and hand the agent its spec, upstream
 	// jobs, and a job token.
 	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
 	if err != nil {
@@ -458,7 +458,7 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	}
 	apiJob := toAPIJob(job)
 	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
-	// Hand the worker the pipeline's secrets as plaintext (F-12), decrypted
+	// Hand the agent the pipeline's secrets as plaintext (F-12), decrypted
 	// from the job's stored ciphertexts, so a step's spec can reference them.
 	s.resolveSecrets(ctx, apiJob, job)
 	// Resolve the job's variables (F-21.1.3) into the run's parameters, so a
@@ -470,12 +470,12 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	if token := s.mintJobToken(ctx, apiJob); token != "" {
 		apiJob.Token = token
 	}
-	s.logger.Info("api: job execution started", "job", req.GetJobId(), "worker", req.GetWorkerName())
+	s.logger.Info("api: job execution started", "job", req.GetJobId(), "agent", req.GetAgentName())
 	return &apipb.StartJobExecutionResponse{Started: true, Job: apiJob}, nil
 }
 
-// ListPendingJobs returns the pending jobs that target the caller's worker
-// group (F-23). This is the worker's pull path: it polls it on a short
+// ListPendingJobs returns the pending jobs that target the caller's agent
+// group (F-23). This is the agent's pull path: it polls it on a short
 // interval to pick up jobs that were published while it was unreachable, so
 // no job is stranded pending. It wraps the Database service's
 // ListPendingByGroup.
@@ -511,8 +511,8 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		return nil, err
 	}
 	// A report of awaiting_approval (F-13) is a job-level pause: the approval
-	// gate is job-level (one approval unblocks every worker of a fan-out job),
-	// so it is recorded on the job row — not a worker's execution — with the
+	// gate is job-level (one approval unblocks every agent of a fan-out job),
+	// so it is recorded on the job row — not a agent's execution — with the
 	// message shown to the user. This applies to both group and single-target
 	// jobs. The job row is updated directly (not via the execution), and the
 	// status is published so the UI sees the gate and its message.
@@ -538,7 +538,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			TargetID:   strconv.FormatInt(req.GetJobId(), 10),
 			Outcome:    audit.OutcomeSuccess,
 			Details:    auditJSON(map[string]any{"status": jobStatusName(updated.GetStatus()), "approval_message": req.GetApprovalMessage()}),
-		}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
+		}, s.reportActor(req.GetAgentName(), req.GetJobId()), audit.ActorKindAgent, auditPeerAddr(ctx))
 		s.publish(Event{
 			Type:        EventJobStatus,
 			JobID:       req.GetJobId(),
@@ -550,12 +550,12 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		s.recordJobStatusMetrics(ctx, updated)
 		return toAPIJob(updated), nil
 	}
-	// A report from a named worker for a job that targets a worker group is a
-	// fan-out report: it is recorded against the worker's execution of the job
-	// (one per worker), not the job row. The job's overall status is derived
+	// A report from a named agent for a job that targets a agent group is a
+	// fan-out report: it is recorded against the agent's execution of the job
+	// (one per agent), not the job row. The job's overall status is derived
 	// from the executions by the scheduler's job-status loop, so the job row
 	// and the job_status event are left for that loop.
-	if req.GetWorkerName() != "" && s.db != nil {
+	if req.GetAgentName() != "" && s.db != nil {
 		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
 		if err != nil {
 			return nil, err
@@ -563,7 +563,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		if job.GetTargetGroup() != "" {
 			if _, err := s.db.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
 				JobId:       req.GetJobId(),
-				WorkerName:  req.GetWorkerName(),
+				AgentName:  req.GetAgentName(),
 				Status:      req.GetStatus(),
 				FinishedAt:  req.GetFinishedAt(),
 				StepResults: req.GetStepResults(),
@@ -571,22 +571,22 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 			}); err != nil {
 				return nil, err
 			}
-			s.logger.Info("api: job execution status reported", "job", req.GetJobId(), "worker", req.GetWorkerName(), "status", req.GetStatus())
+			s.logger.Info("api: job execution status reported", "job", req.GetJobId(), "agent", req.GetAgentName(), "status", req.GetStatus())
 			s.recordAuditGRPC(audit.Event{
 				Action:     audit.ActionJobStatus,
 				TargetKind: audit.TargetJob,
 				TargetID:   strconv.FormatInt(req.GetJobId(), 10),
 				Outcome:    audit.OutcomeSuccess,
-				Details:    auditJSON(map[string]any{"status": jobStatusName(req.GetStatus()), "worker": req.GetWorkerName()}),
-			}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
+				Details:    auditJSON(map[string]any{"status": jobStatusName(req.GetStatus()), "agent": req.GetAgentName()}),
+			}, s.reportActor(req.GetAgentName(), req.GetJobId()), audit.ActorKindAgent, auditPeerAddr(ctx))
 			if s.metrics != nil {
 				s.metrics.RecordJobStatus(jobStatusName(req.GetStatus()))
 			}
 			return toAPIJob(job), nil
 		}
 	}
-	// A report from an ephemeral agent (no worker name) — or a job that does
-	// not target a worker group — updates the job row directly.
+	// A report from an ephemeral agent (no agent name) — or a job that does
+	// not target a agent group — updates the job row directly.
 	updated, err := s.db.UpdateJob(ctx, &dbpb.UpdateJobRequest{
 		Id:          req.GetJobId(),
 		Status:      req.GetStatus(),
@@ -609,7 +609,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		TargetID:   strconv.FormatInt(req.GetJobId(), 10),
 		Outcome:    audit.OutcomeSuccess,
 		Details:    auditJSON(map[string]any{"status": jobStatusName(updated.GetStatus())}),
-	}, s.reportActor(req.GetWorkerName(), req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
+	}, s.reportActor(req.GetAgentName(), req.GetJobId()), audit.ActorKindAgent, auditPeerAddr(ctx))
 	s.publish(Event{
 		Type:        EventJobStatus,
 		JobID:       req.GetJobId(),
@@ -624,17 +624,17 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 	return toAPIJob(updated), nil
 }
 
-// ReportStepCompletion records that the calling worker completed a step of a
-// job (the cross-worker step barrier). It forwards the report to the Database
-// service, which upserts the worker's StepCompletion row for the job's current
+// ReportStepCompletion records that the calling agent completed a step of a
+// job (the cross-agent step barrier). It forwards the report to the Database
+// service, which upserts the agent's StepCompletion row for the job's current
 // attempt. When job-token auth is enabled the caller must present a valid job
 // token scoped to this job.
 func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.ReportStepCompletionRequest) (*emptypb.Empty, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
-	if req.GetWorkerName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker_name is required")
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
 	if err := s.checkJobToken(ctx, req.GetJobId(), false); err != nil {
 		return nil, err
@@ -644,7 +644,7 @@ func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.Report
 	}
 	if _, err := s.db.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{
 		JobId:      req.GetJobId(),
-		WorkerName: req.GetWorkerName(),
+		AgentName: req.GetAgentName(),
 		StepName:   req.GetStepName(),
 	}); err != nil {
 		return nil, err
@@ -653,9 +653,9 @@ func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.Report
 }
 
 // CheckStepBarrier reports whether the barrier for a job's step is satisfied
-// (every worker alive at the step's start has completed it) or whether the job
-// has been cancelled. It forwards the check to the Database service. A worker
-// that is not alive is dropped from the barrier, so a worker that dies
+// (every agent alive at the step's start has completed it) or whether the job
+// has been cancelled. It forwards the check to the Database service. A agent
+// that is not alive is dropped from the barrier, so a agent that dies
 // mid-step cannot wedge the job. When job-token auth is enabled the caller
 // must present a valid job token scoped to this job.
 func (s *GRPCServer) CheckStepBarrier(ctx context.Context, req *apipb.CheckStepBarrierRequest) (*apipb.CheckStepBarrierResponse, error) {
@@ -691,7 +691,7 @@ func (s *GRPCServer) CheckApproval(ctx context.Context, req *apipb.CheckApproval
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
 	}
 	// allowTerminal: a rejection moves the job to failed (terminal), which
-	// would otherwise invalidate the worker's token and make this poll fail
+	// would otherwise invalidate the agent's token and make this poll fail
 	// before it can observe the rejection. The poll is read-only, so it is
 	// safe to keep serving it for a finished job.
 	if err := s.checkJobToken(ctx, req.GetJobId(), true); err != nil {
@@ -711,7 +711,7 @@ func (s *GRPCServer) CheckApproval(ctx context.Context, req *apipb.CheckApproval
 	}, nil
 }
 
-// StreamJobLogs is a client stream: an execution target (worker or agent)
+// StreamJobLogs is a client stream: an execution target (agent or agent)
 // opens it at the start of a job and sends a JobLogChunk for each chunk of
 // step output (stdout/stderr). The first chunk of each step's output carries
 // metadata (job_id, step_name, stream); subsequent chunks carry data. The
@@ -810,7 +810,7 @@ func (s *GRPCServer) handleLogChunk(ctx context.Context, jobID int64, metadata *
 	//
 	// DURABILITY DECOUPLEMENT (critical): persistence runs on a DETACHED
 	// context (context.Background), NOT the stream's. A job that finishes in
-	// milliseconds makes the worker CLOSE the stream almost immediately; the
+	// milliseconds makes the agent CLOSE the stream almost immediately; the
 	// stream's context then cancels, and any persistence still in flight
 	// (establishing the log's record, appending the blob) abandons the
 	// BUFFERED chunks — losing exactly the lines a consumer (the UI, an e2e
@@ -1054,17 +1054,17 @@ func (s *GRPCServer) ExchangeJobToken(ctx context.Context, req *apipb.ExchangeJo
 		TargetID:   strconv.FormatInt(req.GetJobId(), 10),
 		Outcome:    audit.OutcomeSuccess,
 		Details:    auditJSON(map[string]any{"audience": req.GetAudience(), "expires_in": expiresIn.String()}),
-	}, s.reportActor("", req.GetJobId()), audit.ActorKindWorker, auditPeerAddr(ctx))
+	}, s.reportActor("", req.GetJobId()), audit.ActorKindAgent, auditPeerAddr(ctx))
 	return &apipb.ExchangeJobTokenResponse{Token: token}, nil
 }
 
 // reportActor returns the actor identity for a job status report or token
-// exchange from an execution target: the worker's name when the report names
-// a worker (a long-lived worker), or the job's identity ("job:<id>") when it
+// exchange from an execution target: the agent's name when the report names
+// a agent (a long-lived agent), or the job's identity ("job:<id>") when it
 // does not (an ephemeral agent reports against the job row directly).
-func (s *GRPCServer) reportActor(workerName string, jobID int64) string {
-	if workerName != "" {
-		return workerName
+func (s *GRPCServer) reportActor(agentName string, jobID int64) string {
+	if agentName != "" {
+		return agentName
 	}
 	return "job:" + strconv.FormatInt(jobID, 10)
 }
@@ -1506,12 +1506,12 @@ func renderMarkdown(md string) []byte {
 // Dispatch (called by the scheduler)
 // ---------------------------------------------------------------------------
 
-// DispatchJob fans a job out to the live workers that serve it. A job that
-// targets an environment (F-17) is dispatched to the live workers that belong
+// DispatchJob fans a job out to the live agents that serve it. A job that
+// targets an environment (F-17) is dispatched to the live agents that belong
 // to it; a job that targets a raw group (and no environment) is dispatched to
-// the live workers in that group. A job with neither an environment nor a
+// the live agents in that group. A job with neither an environment nor a
 // target group is for an ephemeral agent and is not dispatched to live
-// workers.
+// agents.
 func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequest) (*apipb.DispatchJobResponse, error) {
 	job := req.GetJob()
 	if job == nil {
@@ -1522,30 +1522,30 @@ func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequ
 	if group == "" && environment == "" {
 		return &apipb.DispatchJobResponse{Dispatched: 0}, nil
 	}
-	// Hand the workers the status/outputs of the jobs this job depends on
+	// Hand the agents the status/outputs of the jobs this job depends on
 	// (F-06) so a step's condition can reference them.
 	job.UpstreamJobs = s.upstreamJobsFor(ctx, job)
-	// Mint a job token so the workers can authenticate their status reports
+	// Mint a job token so the agents can authenticate their status reports
 	// and any outside-resource calls for this job.
 	token := s.mintJobToken(ctx, job)
 	dispatched := s.dispatch(group, environment, job, token)
 	if dispatched == 0 {
-		s.logger.Warn("api: no live workers for job; job left pending",
+		s.logger.Warn("api: no live agents for job; job left pending",
 			"job", job.GetId(), "group", group, "environment", environment)
 	} else {
-		s.logger.Info("api: job dispatched", "job", job.GetId(), "group", group, "environment", environment, "workers", dispatched)
+		s.logger.Info("api: job dispatched", "job", job.GetId(), "group", group, "environment", environment, "agents", dispatched)
 	}
 	// Append an assignment event to the shared event log (F-23) so other API
-	// pods can nudge their local workers in the group (or, for an environment
+	// pods can nudge their local agents in the group (or, for an environment
 	// job, that belong to the environment). This pod already pushed directly
-	// to its local workers above; the event log is the cross-pod path.
+	// to its local agents above; the event log is the cross-pod path.
 	s.publishAssignment(ctx, job.GetId(), group, environment)
 	return &apipb.DispatchJobResponse{Dispatched: int32(dispatched)}, nil
 }
 
 // publishAssignment appends an "assignment" event to the shared event log
 // (F-23). It is best-effort: a failure to append does not fail the dispatch
-// (the worker's periodic poll is the authoritative path).
+// (the agent's periodic poll is the authoritative path).
 func (s *GRPCServer) publishAssignment(ctx context.Context, jobID int64, group, environment string) {
 	if s.db == nil {
 		return
@@ -1604,10 +1604,10 @@ func (s *GRPCServer) NotifyRunStatus(ctx context.Context, req *apipb.NotifyRunSt
 }
 
 // CancelJob is called by the scheduler to signal the execution target running
-// a job to stop the work (F-05). For a long-lived worker it delivers a
-// JobCancellation down the worker's WatchJobs stream; the worker interrupts
+// a job to stop the work (F-05). For a long-lived agent it delivers a
+// JobCancellation down the agent's WatchJobs stream; the agent interrupts
 // the running step and reports the job as cancelled. For an ephemeral agent
-// (no live worker stream) there is nothing to signal — the agent observes the
+// (no live agent stream) there is nothing to signal — the agent observes the
 // cancellation on its next GetJob and stops on its own. It is a no-op when the
 // job is not running on a live target.
 func (s *GRPCServer) CancelJob(ctx context.Context, req *apipb.CancelJobRequest) (*emptypb.Empty, error) {
@@ -1623,19 +1623,19 @@ func (s *GRPCServer) CancelJob(ctx context.Context, req *apipb.CancelJobRequest)
 		}:
 			delivered++
 		default:
-			s.logger.Warn("api: cancel queue full; worker will observe the status on its next report",
-				"worker", name, "job", req.GetJobId())
+			s.logger.Warn("api: cancel queue full; agent will observe the status on its next report",
+				"agent", name, "job", req.GetJobId())
 		}
 	}
 	s.mu.Unlock()
 	if delivered > 0 {
-		s.logger.Info("api: job cancellation delivered", "job", req.GetJobId(), "workers", delivered)
+		s.logger.Info("api: job cancellation delivered", "job", req.GetJobId(), "agents", delivered)
 	} else {
-		s.logger.Info("api: no live worker to signal for job cancellation", "job", req.GetJobId())
+		s.logger.Info("api: no live agent to signal for job cancellation", "job", req.GetJobId())
 	}
 	// Append a cancel event to the shared event log (F-23) so other API pods
-	// can deliver the cancellation to their local workers. This pod already
-	// pushed directly to its local workers above.
+	// can deliver the cancellation to their local agents. This pod already
+	// pushed directly to its local agents above.
 	s.publishCancel(ctx, req.GetJobId())
 	return &emptypb.Empty{}, nil
 }
@@ -1688,19 +1688,19 @@ func (s *GRPCServer) publishRunStatus(ctx context.Context, runID int64, status d
 	s.markPublished(resp.GetId())
 }
 
-// publishWorkerEvent appends a "worker" event to the shared event log so every
-// API pod can fan the worker lifecycle change out to its UI clients (F-23).
-func (s *GRPCServer) publishWorkerEvent(ctx context.Context, name, group, action string) {
+// publishAgentEvent appends a "agent" event to the shared event log so every
+// API pod can fan the agent lifecycle change out to its UI clients (F-23).
+func (s *GRPCServer) publishAgentEvent(ctx context.Context, name, group, action string) {
 	if s.db == nil {
 		return
 	}
-	resp, err := s.db.PublishWorkerEvent(ctx, &dbpb.PublishWorkerEventRequest{
+	resp, err := s.db.PublishAgentEvent(ctx, &dbpb.PublishAgentEventRequest{
 		Name:   name,
 		Group:  group,
 		Action: action,
 	})
 	if err != nil {
-		s.logger.Warn("failed to publish worker event", "worker", name, "error", err)
+		s.logger.Warn("failed to publish agent event", "agent", name, "error", err)
 		return
 	}
 	s.markPublished(resp.GetId())
@@ -1729,11 +1729,11 @@ func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log str
 	s.markPublished(resp.GetId())
 }
 
-// dispatch pushes an assignment (with the job token) to every live worker that
-// serves the job and returns how many workers received it. A job that targets
-// an environment (F-17) is pushed to the live workers that belong to it; a job
-// that targets a raw group (and no environment) is pushed to the live workers
-// in that group. The push is best-effort: a worker that receives it but does
+// dispatch pushes an assignment (with the job token) to every live agent that
+// serves the job and returns how many agents received it. A job that targets
+// an environment (F-17) is pushed to the live agents that belong to it; a job
+// that targets a raw group (and no environment) is pushed to the live agents
+// in that group. The push is best-effort: a agent that receives it but does
 // not actually serve the job (e.g. it is not in the environment's target
 // group) is rejected when it starts the job (StartJobExecution is the
 // authoritative routing gate).
@@ -1741,12 +1741,12 @@ func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job, token s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var dispatchedCount int
-	for name, worker := range s.live {
+	for name, agent := range s.live {
 		if environment != "" {
-			if !slices.Contains(worker.environments, environment) {
+			if !slices.Contains(agent.environments, environment) {
 				continue
 			}
-		} else if worker.group != group {
+		} else if agent.group != group {
 			continue
 		}
 		assignmentChannel, ok := s.watchers[name]
@@ -1755,14 +1755,14 @@ func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job, token s
 		}
 		assignment := &apipb.WatchMessage{
 			Message: &apipb.WatchMessage_Assignment{
-				Assignment: &apipb.JobAssignment{Job: job, WorkerName: name, Token: token},
+				Assignment: &apipb.JobAssignment{Job: job, AgentName: name, Token: token},
 			},
 		}
 		select {
 		case assignmentChannel <- assignment:
 			dispatchedCount++
 		default:
-			s.logger.Warn("api: assignment queue full; job left for retry", "worker", name, "job", job.GetId())
+			s.logger.Warn("api: assignment queue full; job left for retry", "agent", name, "job", job.GetId())
 		}
 	}
 	return dispatchedCount
@@ -2137,19 +2137,19 @@ func (s *GRPCServer) removeLive(name string) {
 	}
 }
 
-// workerStates snapshots the live workers' identity and state for the workers
-// gauge (F-20): a worker that holds an open WatchJobs stream is "watching",
+// agentStates snapshots the live agents' identity and state for the agents
+// gauge (F-20): a agent that holds an open WatchJobs stream is "watching",
 // otherwise it is "registered".
-func (s *GRPCServer) workerStates() []metrics.WorkerState {
+func (s *GRPCServer) agentStates() []metrics.AgentState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	states := make([]metrics.WorkerState, 0, len(s.live))
+	states := make([]metrics.AgentState, 0, len(s.live))
 	for name, w := range s.live {
 		state := "registered"
 		if _, ok := s.watchers[name]; ok {
 			state = "watching"
 		}
-		states = append(states, metrics.WorkerState{
+		states = append(states, metrics.AgentState{
 			Group:        w.group,
 			Environments: w.environments,
 			State:        state,
@@ -2158,13 +2158,13 @@ func (s *GRPCServer) workerStates() []metrics.WorkerState {
 	return states
 }
 
-// updateWorkerMetrics refreshes the workers gauge from the live registry. It
+// updateAgentMetrics refreshes the agents gauge from the live registry. It
 // is a no-op when metrics are disabled.
-func (s *GRPCServer) updateWorkerMetrics() {
+func (s *GRPCServer) updateAgentMetrics() {
 	if s.metrics == nil {
 		return
 	}
-	s.metrics.UpdateWorkers(s.workerStates())
+	s.metrics.UpdateAgents(s.agentStates())
 }
 
 // recordJobStatusMetrics records a job status transition (F-20) and, when the

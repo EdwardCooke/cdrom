@@ -11,7 +11,7 @@
 //
 // The gate applies to every dispatch path (SubmitJob, CreateRun/TriggerRun,
 // the dependency resolver's release, the retry loop, and RerunJob) and to
-// both worker-group jobs and ephemeral-agent jobs. The Database service owns
+// both agent-group jobs and ephemeral-agent jobs. The Database service owns
 // the durable, atomic slot accounting, so multiple scheduler replicas can
 // never double-allocate the last free slot, and a restart re-derives held
 // slots from the live job rows.

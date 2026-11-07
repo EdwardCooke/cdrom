@@ -936,7 +936,7 @@ metadata:
   name: deploy
   description: a file-defined pipeline
 spec:
-  workerGroup: linux-pool
+  agentGroup: linux-pool
   failureMode: best_effort
   variableSets:
     common:
@@ -993,8 +993,8 @@ spec:
 	if src := req.GetSecretSources()[0]; src.GetName() != "vault" || src.GetKind() != "vault" || src.GetPath() != "secret/data/app" {
 		t.Errorf("secret source = %+v, want vault/vault/secret/data/app", src)
 	}
-	// The single job: its worker group defaults to the pipeline's
-	// spec.workerGroup, and its effective variables are the inline variables
+	// The single job: its agent group defaults to the pipeline's
+	// spec.agentGroup, and its effective variables are the inline variables
 	// merged with the referenced set's variables (inline wins on a collision).
 	if got := len(req.GetJobs()); got != 1 {
 		t.Fatalf("jobs = %d, want 1", got)
@@ -1004,7 +1004,7 @@ spec:
 		t.Errorf("job key = %q, want build", job.GetKey())
 	}
 	if job.GetTargetGroup() != "linux-pool" {
-		t.Errorf("job target group = %q, want linux-pool (the pipeline's workerGroup)", job.GetTargetGroup())
+		t.Errorf("job target group = %q, want linux-pool (the pipeline's agentGroup)", job.GetTargetGroup())
 	}
 	if job.GetSpec() == nil || len(job.GetSpec().GetSteps()) != 1 {
 		t.Errorf("job spec = %+v, want one step", job.GetSpec())
@@ -1093,8 +1093,8 @@ func TestExportPipelineEndpoint(t *testing.T) {
 		t.Fatalf("re-imported jobs = %d, want 1", got)
 	}
 	job := req.Jobs[0]
-	if job.Key != "build" || job.WorkerGroup != "linux-pool" {
-		t.Errorf("re-imported job = key %q group %q, want build/linux-pool", job.Key, job.WorkerGroup)
+	if job.Key != "build" || job.AgentGroup != "linux-pool" {
+		t.Errorf("re-imported job = key %q group %q, want build/linux-pool", job.Key, job.AgentGroup)
 	}
 	if job.Spec == nil || len(job.Spec.Steps) != 1 || job.Spec.Steps[0].Name != "compile" {
 		t.Errorf("re-imported steps = %+v, want one step named compile", job.Spec)

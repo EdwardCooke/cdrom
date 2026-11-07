@@ -28,7 +28,7 @@ tools always offer retry and "run again".
 - [x] Re-running a finished job produces a new execution with a fresh status.
 - [x] Attempts are visible (UI shows attempt N of M).
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **A retry is a new attempt on the same `Job` row** (not a new `Job`), so the
   pipeline run stays coherent. The job's `attempt` counter (1-based) is
   incremented by the scheduler each time it re-dispatches a failed job, and the
@@ -47,7 +47,7 @@ tools always offer retry and "run again".
   `attempt < max_attempts + 1`, filtered in the database so the loop never
   pulls every failed job over the wire) and, for each, atomically claims the
   next attempt (`Database.ClaimJobRetry`) and re-dispatches the job to the API
-  (which fans it out to the live workers) after the policy's backoff. A job
+  (which fans it out to the live agents) after the policy's backoff. A job
   with no retry policy or one that has exhausted its retries is never
   re-dispatched.
 - **New RPCs.** `Database.ListRetriableJobs` (returns the failed jobs that

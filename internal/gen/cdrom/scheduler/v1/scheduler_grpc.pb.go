@@ -45,7 +45,7 @@ const (
 // which the control plane spawns.
 //
 // The scheduler persists all state through the Database service, so it holds
-// no data of its own. Worker registration, WatchJobs streams, and job status
+// no data of its own. Agent registration, WatchJobs streams, and job status
 // reporting live on the API service, which is the single control plane that
 // execution targets talk to.
 type SchedulerClient interface {
@@ -72,7 +72,7 @@ type SchedulerClient interface {
 	// environment (F-17): for each of the run's jobs that is awaiting_proceed
 	// it releases the hold (Database.ProceedJob, conditionally — only if the job
 	// is still awaiting_proceed) and dispatches it (an assignment event for a
-	// worker-group job, or a re-queue for an ephemeral agent). A job that is no
+	// agent-group job, or a re-queue for an ephemeral agent). A job that is no
 	// longer awaiting_proceed (it was cancelled, or it was already proceeded) is
 	// left untouched, so a late proceed is a no-op. It returns the run and the
 	// number of jobs it proceeded.
@@ -238,7 +238,7 @@ func (c *schedulerClient) RestartRun(ctx context.Context, in *RestartRunRequest,
 // which the control plane spawns.
 //
 // The scheduler persists all state through the Database service, so it holds
-// no data of its own. Worker registration, WatchJobs streams, and job status
+// no data of its own. Agent registration, WatchJobs streams, and job status
 // reporting live on the API service, which is the single control plane that
 // execution targets talk to.
 type SchedulerServer interface {
@@ -265,7 +265,7 @@ type SchedulerServer interface {
 	// environment (F-17): for each of the run's jobs that is awaiting_proceed
 	// it releases the hold (Database.ProceedJob, conditionally — only if the job
 	// is still awaiting_proceed) and dispatches it (an assignment event for a
-	// worker-group job, or a re-queue for an ephemeral agent). A job that is no
+	// agent-group job, or a re-queue for an ephemeral agent). A job that is no
 	// longer awaiting_proceed (it was cancelled, or it was already proceeded) is
 	// left untouched, so a late proceed is a no-op. It returns the run and the
 	// number of jobs it proceeded.

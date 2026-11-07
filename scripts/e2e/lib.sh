@@ -73,7 +73,7 @@ E2E_OWN_STACK=0
 # never depends on committed/stale certs; ruled 2026-11-06) and EXPORTS the
 # CDROM_TLS_* triple that every service launched afterwards inherits: e2e_start
 # execs `env … cmd` in the CURRENT environment, so one export turns the ENTIRE
-# gRPC mesh (db, scheduler, artifacts, idp, api, pipelinesource, worker, agent,
+# gRPC mesh (db, scheduler, artifacts, idp, api, pipelinesource, agent, agent,
 # and every per-scenario replica) into mutual TLS with zero per-launch edits.
 # CURL_CA_BUNDLE makes every curl in the suite trust OUR CA, so https:// probes
 # to the IdP's OIDC/SCIM surfaces verify instead of failing.
@@ -156,10 +156,10 @@ e2e_cleanup() {
   fi
 }
 
-# e2e_boot_stack [with-worker]
+# e2e_boot_stack [with-agent]
 # Boots the full local stack (db, scheduler, artifacts, idp, api) against a
 # throwaway SQLite database in a fresh temp directory, and installs the
-# cleanup trap. With "with-worker" it also starts a worker in the "default"
+# cleanup trap. With "with-agent" it also starts a agent in the "default"
 # group and waits for its WatchJobs stream to be open on the API.
 #
 # The API runs with job-token auth enabled (the IdP mints the job tokens the
@@ -172,7 +172,7 @@ e2e_cleanup() {
 # trap (which then tears down only the processes this script itself starts,
 # e.g. the RBAC API).
 e2e_boot_stack() {
-  local with_worker="${1:-}"
+  local with_agent="${1:-}"
   if [ -n "${E2E_STACK_READY:-}" ]; then
     [ -n "$WORK" ] || { echo ">> E2E_STACK_READY is set but WORK is not"; exit 1; }
     E2E_OWN_STACK=0
@@ -196,7 +196,7 @@ e2e_boot_stack() {
   #     proceed CONCURRENTLY with writers (the legacy rollback journal blocks
   #     all readers for the whole write transaction). The local stack funnels
   #     many concurrent connections onto one file (the db service's own pool,
-  #     the API's event-log tail, worker heartbeats, telemetry), so WAL is the
+  #     the API's event-log tail, agent heartbeats, telemetry), so WAL is the
   #     difference between smooth concurrency and lock storms.
   #   busy_timeout=10000 — when a statement DOES meet a lock, WAIT up to 10 s
   #     for the holder to release it instead of failing immediately with
@@ -206,7 +206,7 @@ e2e_boot_stack() {
   #     burst of rapid job submits + approvals + audit writes, 5 s still
   #     exhausted and the API surfaced a 500.
   # Needed together: at peak e2e load the unlocked default surfaced SQLITE_BUSY
-  # on the API's event tail and worker heartbeats, stretching the scheduler's
+  # on the API's event tail and agent heartbeats, stretching the scheduler's
   # 5 s ticks and starving the test waits (the 17-restoration flake). Belt-and-
   # braces with the request-level locked-retry in __e2e_retry_locked below.
   e2e_start db        "$WORK/db.log"        'serving'    CDROM_DB_BACKEND=sqlite CDROM_DB_SQLITE_PATH="$WORK/cdrom.db?_pragma=busy_timeout=10000&_pragma=journal_mode=wal" CDROM_LOG_FORMAT=text -- "$BIN/db"
@@ -244,8 +244,8 @@ e2e_boot_stack() {
   # STARTTLS disabled); a webhook step's url points at the webhook sink.
   e2e_start_sinks
   # Enable job-token auth on the API's gRPC surface: the API mints a job token
-  # for the worker (audience cdrom-api, the IdP's default) and verifies it on
-  # the worker's job-scoped calls, including the token_exchange step's
+  # for the agent (audience cdrom-api, the IdP's default) and verifies it on
+  # the agent's job-scoped calls, including the token_exchange step's
   # ExchangeJobToken RPC. The email config points the API's SMTP sender at the
   # fake SMTP sink (F-18).
   # CDROM_GRPC_AUTH_IDP_ADDR is a full https:// URL (not a bare host:port):
@@ -254,11 +254,11 @@ e2e_boot_stack() {
   # normalizeIDPURL and fail handshake). The gRPC DIAL address is separate
   # (CDROM_IDP_GRPC_ADDR, inherited default 127.0.0.1:7106).
   e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
-  if [ "$with_worker" = "with-worker" ]; then
-    e2e_start worker  "$WORK/worker.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/worker"
-    # Gate on the API having the worker's WatchJobs stream open before
+  if [ "$with_agent" = "with-agent" ]; then
+    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/agent"
+    # Gate on the API having the agent's WatchJobs stream open before
     # dispatching.
-    e2e_wait_for "$WORK/api.log" 'worker watching' 'worker watch stream on the api'
+    e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'
   fi
 }
 

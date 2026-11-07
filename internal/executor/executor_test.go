@@ -578,7 +578,7 @@ func TestExecuteStepBarrierNoBarrierWhenUnset(t *testing.T) {
 
 // TestExecuteStepBarrierCancelledStopsJob verifies that a barrier that reports
 // the job was cancelled (ErrCancelled) stops the job with that error, so the
-// worker can report the job cancelled (distinct from a failure).
+// agent can report the job cancelled (distinct from a failure).
 func TestExecuteStepBarrierCancelledStopsJob(t *testing.T) {
 	RegisterStepType("barrier-step3", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
 		return nil

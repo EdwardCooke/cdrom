@@ -18,7 +18,7 @@ import (
 // sets overriding earlier ones on a key collision. The result is a new map; a
 // nil or empty result is returned as nil. This is the F-29 combining rule:
 // callers pass the sets from least to most specific (e.g. pipeline, job,
-// environment, worker group) so the most specific source wins on a collision.
+// environment, agent group) so the most specific source wins on a collision.
 func combineLabels(sets ...map[string]string) map[string]string {
 	out := make(map[string]string)
 	for _, set := range sets {
@@ -203,20 +203,20 @@ func (s *Server) hydrateJobLabels(ctx context.Context, jobs []models.Job) {
 	}
 }
 
-// hydrateWorkerLabels loads the labels of the given workers (F-29) from the Tag
+// hydrateAgentLabels loads the labels of the given agents (F-29) from the Tag
 // table into their in-memory fields.
-func (s *Server) hydrateWorkerLabels(ctx context.Context, workers []models.Worker) {
-	if len(workers) == 0 {
+func (s *Server) hydrateAgentLabels(ctx context.Context, agents []models.Agent) {
+	if len(agents) == 0 {
 		return
 	}
 	db := s.db.WithContext(ctx)
-	ids := make([]uint, len(workers))
-	for i := range workers {
-		ids[i] = workers[i].ID
+	ids := make([]uint, len(agents))
+	for i := range agents {
+		ids[i] = agents[i].ID
 	}
-	byOwner := loadLabelsByOwner(db, models.LabelOwnerWorker, ids)
-	for i := range workers {
-		workers[i].Labels = byOwner[workers[i].ID]
+	byOwner := loadLabelsByOwner(db, models.LabelOwnerAgent, ids)
+	for i := range agents {
+		agents[i].Labels = byOwner[agents[i].ID]
 	}
 }
 
@@ -284,11 +284,11 @@ func (s *Server) hydratePipelineLabels(ctx context.Context, pipeline *models.Pip
 
 // runBaseLabels computes a job instance's base label set (F-29): the union of the
 // labels of the pipeline, the job, the environment it targets (if any), and the
-// worker group it targets (if any), with the more specific source winning on a
-// key collision (worker group > environment > job > pipeline). The environment
-// and worker-group labels are looked up by name inside the caller's transaction
+// agent group it targets (if any), with the more specific source winning on a
+// key collision (agent group > environment > job > pipeline). The environment
+// and agent-group labels are looked up by name inside the caller's transaction
 // (and read from the Label table); a missing environment or group contributes no
-// labels (a job that targets a group that has no WorkerGroup row still runs —
+// labels (a job that targets a group that has no AgentGroup row still runs —
 // the row only adds metadata).
 func (s *Server) runBaseLabels(tx *gorm.DB, pipelineLabels, jobLabels map[string]string, environment, targetGroup string) map[string]string {
 	var envLabels, groupLabels map[string]string
@@ -299,77 +299,77 @@ func (s *Server) runBaseLabels(tx *gorm.DB, pipelineLabels, jobLabels map[string
 		}
 	}
 	if targetGroup != "" {
-		var group models.WorkerGroup
+		var group models.AgentGroup
 		if err := tx.Where("name = ?", targetGroup).First(&group).Error; err == nil {
-			groupLabels = loadLabels(tx, models.LabelOwnerWorkerGroup, group.ID)
+			groupLabels = loadLabels(tx, models.LabelOwnerAgentGroup, group.ID)
 		}
 	}
 	return combineLabels(pipelineLabels, jobLabels, envLabels, groupLabels)
 }
 
 // ---------------------------------------------------------------------------
-// Worker groups (F-29)
+// Agent groups (F-29)
 // ---------------------------------------------------------------------------
 //
-// A worker group is a named group of long-lived workers (a job's target_group
-// names it; a worker's group names it). It is a first-class, labelable row: its
+// A agent group is a named group of long-lived agents (a job's target_group
+// names it; a agent's group names it). It is a first-class, labelable row: its
 // labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
-// worker's declared group string) — so a group that has no row simply
-// contributes no labels and jobs targeting it still run on its workers.
+// agent's declared group string) — so a group that has no row simply
+// contributes no labels and jobs targeting it still run on its agents.
 
-// CreateWorkerGroup adds a worker group (F-29). It is idempotent on name: a
+// CreateAgentGroup adds a agent group (F-29). It is idempotent on name: a
 // create for an existing group is a no-op that returns the existing row (its
 // description and labels are left unchanged).
-func (s *Server) CreateWorkerGroup(ctx context.Context, req *dbpb.CreateWorkerGroupRequest) (*dbpb.WorkerGroup, error) {
+func (s *Server) CreateAgentGroup(ctx context.Context, req *dbpb.CreateAgentGroupRequest) (*dbpb.AgentGroup, error) {
 	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker group name is required")
+		return nil, status.Error(codes.InvalidArgument, "agent group name is required")
 	}
 	db := s.db.WithContext(ctx)
-	var group models.WorkerGroup
+	var group models.AgentGroup
 	err := db.Where("name = ?", req.GetName()).First(&group).Error
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, grpcErr(err)
 		}
 		// A new group: create it with the supplied description, then write its
-		// labels (F-29) to the Label table (owner_type "worker_group").
-		group = models.WorkerGroup{Name: req.GetName(), Description: req.GetDescription()}
+		// labels (F-29) to the Label table (owner_type "agent_group").
+		group = models.AgentGroup{Name: req.GetName(), Description: req.GetDescription()}
 		if err := db.Create(&group).Error; err != nil {
 			return nil, grpcErr(err)
 		}
-		if err := replaceLabels(db, models.LabelOwnerWorkerGroup, group.ID, req.GetLabels()); err != nil {
+		if err := replaceLabels(db, models.LabelOwnerAgentGroup, group.ID, req.GetLabels()); err != nil {
 			return nil, grpcErr(err)
 		}
 		group.Labels = req.GetLabels()
-		return toProtoWorkerGroup(&group), nil
+		return toProtoAgentGroup(&group), nil
 	}
 	// An existing group: a create is a no-op (the existing row is returned
 	// unchanged). Its labels are loaded from the Label table.
-	group.Labels = loadLabels(db, models.LabelOwnerWorkerGroup, group.ID)
-	return toProtoWorkerGroup(&group), nil
+	group.Labels = loadLabels(db, models.LabelOwnerAgentGroup, group.ID)
+	return toProtoAgentGroup(&group), nil
 }
 
-// GetWorkerGroup returns the named worker group. A missing group returns
+// GetAgentGroup returns the named agent group. A missing group returns
 // NotFound.
-func (s *Server) GetWorkerGroup(ctx context.Context, req *dbpb.GetWorkerGroupRequest) (*dbpb.WorkerGroup, error) {
+func (s *Server) GetAgentGroup(ctx context.Context, req *dbpb.GetAgentGroupRequest) (*dbpb.AgentGroup, error) {
 	db := s.db.WithContext(ctx)
-	var group models.WorkerGroup
+	var group models.AgentGroup
 	if err := db.Where("name = ?", req.GetName()).First(&group).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	group.Labels = loadLabels(db, models.LabelOwnerWorkerGroup, group.ID)
-	return toProtoWorkerGroup(&group), nil
+	group.Labels = loadLabels(db, models.LabelOwnerAgentGroup, group.ID)
+	return toProtoAgentGroup(&group), nil
 }
 
-// ListWorkerGroups returns every worker group, optionally filtered by name
+// ListAgentGroups returns every agent group, optionally filtered by name
 // prefix.
-func (s *Server) ListWorkerGroups(ctx context.Context, req *dbpb.ListWorkerGroupsRequest) (*dbpb.ListWorkerGroupsResponse, error) {
-	query := s.db.WithContext(ctx).Model(&models.WorkerGroup{})
+func (s *Server) ListAgentGroups(ctx context.Context, req *dbpb.ListAgentGroupsRequest) (*dbpb.ListAgentGroupsResponse, error) {
+	query := s.db.WithContext(ctx).Model(&models.AgentGroup{})
 	if req.GetNamePrefix() != "" {
 		query = query.Where("name LIKE ?", req.GetNamePrefix()+"%")
 	}
-	var groups []models.WorkerGroup
+	var groups []models.AgentGroup
 	if err := query.Order("name").Find(&groups).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -378,23 +378,23 @@ func (s *Server) ListWorkerGroups(ctx context.Context, req *dbpb.ListWorkerGroup
 	for i := range groups {
 		ids[i] = groups[i].ID
 	}
-	byOwner := loadLabelsByOwner(query, models.LabelOwnerWorkerGroup, ids)
-	response := &dbpb.ListWorkerGroupsResponse{}
+	byOwner := loadLabelsByOwner(query, models.LabelOwnerAgentGroup, ids)
+	response := &dbpb.ListAgentGroupsResponse{}
 	for i := range groups {
 		groups[i].Labels = byOwner[groups[i].ID]
-		response.Groups = append(response.Groups, toProtoWorkerGroup(&groups[i]))
+		response.Groups = append(response.Groups, toProtoAgentGroup(&groups[i]))
 	}
 	return response, nil
 }
 
-// UpdateWorkerGroup edits a worker group's description and/or labels. A missing
+// UpdateAgentGroup edits a agent group's description and/or labels. A missing
 // group returns NotFound.
-func (s *Server) UpdateWorkerGroup(ctx context.Context, req *dbpb.UpdateWorkerGroupRequest) (*dbpb.WorkerGroup, error) {
+func (s *Server) UpdateAgentGroup(ctx context.Context, req *dbpb.UpdateAgentGroupRequest) (*dbpb.AgentGroup, error) {
 	if req.GetName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "worker group name is required")
+		return nil, status.Error(codes.InvalidArgument, "agent group name is required")
 	}
 	db := s.db.WithContext(ctx)
-	var group models.WorkerGroup
+	var group models.AgentGroup
 	if err := db.Where("name = ?", req.GetName()).First(&group).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -403,34 +403,34 @@ func (s *Server) UpdateWorkerGroup(ctx context.Context, req *dbpb.UpdateWorkerGr
 	// the Label table; when none are supplied the group's labels are left
 	// unchanged.
 	if req.GetLabels() != nil {
-		if err := replaceLabels(db, models.LabelOwnerWorkerGroup, group.ID, req.GetLabels()); err != nil {
+		if err := replaceLabels(db, models.LabelOwnerAgentGroup, group.ID, req.GetLabels()); err != nil {
 			return nil, grpcErr(err)
 		}
 		group.Labels = req.GetLabels()
 	} else {
-		group.Labels = loadLabels(db, models.LabelOwnerWorkerGroup, group.ID)
+		group.Labels = loadLabels(db, models.LabelOwnerAgentGroup, group.ID)
 	}
 	if err := db.Save(&group).Error; err != nil {
 		return nil, grpcErr(err)
 	}
-	return toProtoWorkerGroup(&group), nil
+	return toProtoAgentGroup(&group), nil
 }
 
-// DeleteWorkerGroup removes a worker group. A missing group returns NotFound.
-// Deleting a group does not affect the workers that belong to it (they keep
+// DeleteAgentGroup removes a agent group. A missing group returns NotFound.
+// Deleting a group does not affect the agents that belong to it (they keep
 // their group string) or the jobs that target it (they still dispatch to the
-// group's workers); it only removes the group's labels.
-func (s *Server) DeleteWorkerGroup(ctx context.Context, req *dbpb.DeleteWorkerGroupRequest) (*emptypb.Empty, error) {
+// group's agents); it only removes the group's labels.
+func (s *Server) DeleteAgentGroup(ctx context.Context, req *dbpb.DeleteAgentGroupRequest) (*emptypb.Empty, error) {
 	db := s.db.WithContext(ctx)
-	var group models.WorkerGroup
+	var group models.AgentGroup
 	if err := db.Where("name = ?", req.GetName()).First(&group).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.NotFound, "worker group not found")
+			return nil, status.Error(codes.NotFound, "agent group not found")
 		}
 		return nil, grpcErr(err)
 	}
 	// Remove the group's labels (F-29) along with the group row.
-	if err := db.Where("owner_type = ? AND owner_id = ?", models.LabelOwnerWorkerGroup, group.ID).Delete(&models.Label{}).Error; err != nil {
+	if err := db.Where("owner_type = ? AND owner_id = ?", models.LabelOwnerAgentGroup, group.ID).Delete(&models.Label{}).Error; err != nil {
 		return nil, grpcErr(err)
 	}
 	if err := db.Delete(&group).Error; err != nil {
@@ -439,9 +439,9 @@ func (s *Server) DeleteWorkerGroup(ctx context.Context, req *dbpb.DeleteWorkerGr
 	return &emptypb.Empty{}, nil
 }
 
-// toProtoWorkerGroup converts a worker group model into its proto form (F-29).
-func toProtoWorkerGroup(group *models.WorkerGroup) *dbpb.WorkerGroup {
-	return &dbpb.WorkerGroup{
+// toProtoAgentGroup converts a agent group model into its proto form (F-29).
+func toProtoAgentGroup(group *models.AgentGroup) *dbpb.AgentGroup {
+	return &dbpb.AgentGroup{
 		Id:          int64(group.ID),
 		Name:        group.Name,
 		Description: group.Description,
@@ -451,14 +451,14 @@ func toProtoWorkerGroup(group *models.WorkerGroup) *dbpb.WorkerGroup {
 	}
 }
 
-// workerLabels returns the named worker's labels (F-29), or nil when the worker is
+// agentLabels returns the named agent's labels (F-29), or nil when the agent is
 // missing or has no labels. It is used at dispatch (StartJobExecution) to merge
-// the assigned worker's labels into the job's execution's label set.
-func (s *Server) workerLabels(ctx context.Context, workerName string) map[string]string {
+// the assigned agent's labels into the job's execution's label set.
+func (s *Server) agentLabels(ctx context.Context, agentName string) map[string]string {
 	db := s.db.WithContext(ctx)
-	var worker models.Worker
-	if err := db.Where("name = ?", workerName).First(&worker).Error; err != nil {
+	var agent models.Agent
+	if err := db.Where("name = ?", agentName).First(&agent).Error; err != nil {
 		return nil
 	}
-	return loadLabels(db, models.LabelOwnerWorker, worker.ID)
+	return loadLabels(db, models.LabelOwnerAgent, agent.ID)
 }

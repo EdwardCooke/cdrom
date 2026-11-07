@@ -14,7 +14,7 @@ The response is well-formed (HTTP/1.1, an explicit Content-Length, and
 Connection: close) so the API's webhook client — which has no global timeout,
 so a per-request timeout is honored — reads the body to its declared length and
 completes instead of waiting for the connection to close. A threaded server
-handles the concurrent requests a fan-out job (one per worker) makes.
+handles the concurrent requests a fan-out job (one per agent) makes.
 """
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

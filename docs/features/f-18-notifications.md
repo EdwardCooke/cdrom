@@ -20,9 +20,9 @@ The execution target only renders the templates and hands the result to the
 API; the **API performs the actual send** (SMTP for email, HTTP for webhook)
 using its own configuration — the email server (SMTP) settings and the webhook
 response timeout live on the API, not on the target. A notification step may
-set the standard `once` step field (F-01) so a job that fans out to a worker
-group (one execution per worker) sends the notification at most once per job
-attempt instead of once per worker.
+set the standard `once` step field (F-01) so a job that fans out to a agent
+group (one execution per agent) sends the notification at most once per job
+attempt instead of once per agent.
 
 **Why.** Teams live in email and chat/issue trackers, not the CD UI. A
 pipeline should be able to notify a person (email) or an external system
@@ -37,18 +37,18 @@ without the target needing SMTP credentials or outbound egress.
 - `internal/notify` (new package) — the API-backed `Notifier` implementation:
   it calls the API's `SendEmail` / `SendWebhook` gRPC RPCs, presenting the
   job's own token (like `internal/approval` and `internal/tokenexchange`).
-  Shared by the worker and the agent.
+  Shared by the agent and the agent.
 - `internal/stephandlers` — two new built-in handlers registered at package
   init: `email` (`email.go`) and `webhook` (`webhook.go`). Each renders its
   params against the step's condition context and calls the `Notifier`.
 - `internal/target` — wire the `Notifier` into the executor context in
-  `RunJob` (worker + agent).
+  `RunJob` (agent + agent).
 - `proto/cdrom/api/v1/api.proto` — `SendEmail` / `SendWebhook` RPCs (called by
   the target, job-token-authenticated like `ExchangeJobToken` /
   `CheckApproval`).
 - A notification step uses the standard `once` step field (F-01) to send at
-  most once per job attempt: the executor runs the step on a single worker of
-  a fan-out group, so the job does not notify once per worker.
+  most once per job attempt: the executor runs the step on a single agent of
+  a fan-out group, so the job does not notify once per agent.
 - `internal/api` — implement the RPCs: build and send the SMTP message (email)
   and perform the HTTP request (webhook); render markdown→HTML for a `markdown`
   email or webhook body; enforce the webhook response timeout.
@@ -82,14 +82,14 @@ without the target needing SMTP credentials or outbound egress.
       fails the step (and thus the job), unless the step sets `ignore_failed`
       (F-06).
 - [x] A notification step with the standard `once` field (F-01) set sends at
-      most once per job attempt: in a fan-out job (one execution per worker)
-      only the first worker to reach the step runs it (and sends), the others
+      most once per job attempt: in a fan-out job (one execution per agent)
+      only the first agent to reach the step runs it (and sends), the others
       skip it, and a retry (a new attempt) may send again.
 - [x] The target never opens an SMTP or outbound HTTP connection itself: it
       only renders templates and calls the API.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **Notifications are step handlers, sent by the API.** `email` and `webhook`
   are built-in step types (registered in `internal/stephandlers` under `email`
   and `webhook`), so a notification is just another step in a job's spec — it
@@ -100,7 +100,7 @@ without the target needing SMTP credentials or outbound egress.
   `SendWebhook` gRPC RPC, presenting the job's token; the API does the SMTP
   send or the HTTP request. This keeps SMTP credentials and outbound egress on
   the control plane, and a notification behaves identically whether the job
-  ran on a worker or an ephemeral agent.
+  ran on a agent or an ephemeral agent.
 - **Templates render against the condition context.** Every user-facing field
   of both handlers — the email's `to`/`cc`/`bcc`/`subject`/`body` and the
   webhook's `url`/`headers`/`body` — is a Go template rendered against the
@@ -171,12 +171,12 @@ without the target needing SMTP credentials or outbound egress.
   "webhook … → 200" line so it is visible in the job log.
 - **`once` — at most one notification per job attempt.** A notification step
   uses the standard `once` step field (F-01) to send at most once per job
-  attempt. A job that targets a worker group runs on every worker, so without
-  it a person would be emailed once per worker; with `once` set, the executor
-  runs the step on a single worker of the group (the first to claim the
-  durable slot, job id + step name + attempt) and the other workers skip it,
+  attempt. A job that targets a agent group runs on every agent, so without
+  it a person would be emailed once per agent; with `once` set, the executor
+  runs the step on a single agent of the group (the first to claim the
+  durable slot, job id + step name + attempt) and the other agents skip it,
   so the notification goes out exactly once. A retry (F-04) is a new attempt,
-  so it may send again. When `once` is not set (the default), every worker
+  so it may send again. When `once` is not set (the default), every agent
   that runs the step sends its own notification.
 - **Job-token auth.** Like `ExchangeJobToken` and `CheckApproval`,
   `SendEmail` / `SendWebhook` are on the API's gRPC surface and, when

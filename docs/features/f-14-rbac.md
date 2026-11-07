@@ -57,7 +57,7 @@ from its existing IdP groups instead of re-managing membership in Cdrom.
   | `users.can-manage` | Manage users and their roles (F-24) |
   | `api-keys.can-manage` | Create/edit/rotate API keys (F-25) |
   | `audit.can-view` | Query the audit log (F-15) |
-  | `workers.can-view` | View worker/agent status and the pending queue (F-16) |
+  | `agents.can-view` | View agent/agent status and the pending queue (F-16) |
 
 - **Roles** are named sets of permissions. **Built-in roles** ship with the
   platform and cannot be deleted or have their permission sets edited:
@@ -191,7 +191,7 @@ service-account (F-26) binding mechanisms are not wired in yet; the
 authentication is disabled, requests act as a synthetic admin (the RBAC
 engine is still wired in but bypassed).
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **Deny-by-default, union of bindings.** A principal's effective permission
   set is the union of the permissions of every role bound to it (via token
   claim, claim mapping, or stored binding), expanded through role
@@ -215,7 +215,7 @@ engine is still wired in but bypassed).
   points Cdrom at its IdP's group claim without per-group database rows; the
   mapping is static and reviewed with the rest of the config.
 - **Scoping is per-pipeline only in v1.** The resource dimension is the
-  pipeline (which subsumes its runs, jobs, and secrets); worker groups and
+  pipeline (which subsumes its runs, jobs, and secrets); agent groups and
   environments (F-17) can be added as further scope dimensions later.
   Platform-wide permissions (role/user management, audit) ignore scope.
 - **API keys and service accounts plug in without new machinery.** A key's

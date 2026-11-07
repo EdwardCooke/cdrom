@@ -1,9 +1,9 @@
 // Package scheduler — watchdog (F-03).
 //
 // The watchdog is the scheduler-side safety valve for job timeouts. The
-// execution target (worker or agent) enforces a job's timeout by cancelling
+// execution target (agent or agent) enforces a job's timeout by cancelling
 // the running step and reporting timed_out; but if the target goes silent
-// (a dead worker, a crashed agent, a lost stream) it never reports, and the
+// (a dead agent, a crashed agent, a lost stream) it never reports, and the
 // job would sit "running" forever. The watchdog closes that gap: it
 // periodically reaps running jobs that have exceeded their declared timeout,
 // even when the target is unreachable.
@@ -110,13 +110,13 @@ func (s *Server) reapTimedOutJobs(ctx context.Context, db jobReaper, publisher j
 	now := time.Now()
 	for _, job := range jobs {
 		if job.GetTargetGroup() != "" {
-			// A job that targets a worker group runs on every worker in the
-			// group (fan-out). Each worker enforces its own execution's timeout
+			// A job that targets a agent group runs on every agent in the
+			// group (fan-out). Each agent enforces its own execution's timeout
 			// and reports it to its execution; the job's overall status is
 			// derived from the executions by the job-status loop, which drops a
-			// worker that has gone quiet (a dead worker's in-progress execution
+			// agent that has gone quiet (a dead agent's in-progress execution
 			// does not block the job). The job-level watchdog would wrongly reap
-			// the whole job as timed_out while other workers are still running,
+			// the whole job as timed_out while other agents are still running,
 			// so group jobs are not reaped here.
 			continue
 		}

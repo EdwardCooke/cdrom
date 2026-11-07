@@ -277,7 +277,7 @@ func TestCreateRunDrivesInstances(t *testing.T) {
 	}
 	// Only the dependency-free, group-targeted instance (build) is dispatched.
 	// The dependent instance (test) is held pending and the agent instance
-	// (agent-job) is not dispatched to live workers.
+	// (agent-job) is not dispatched to live agents.
 	if len(db.dispatched) != 1 {
 		t.Fatalf("assignment events = %v, want one (build)", db.dispatched)
 	}

@@ -93,7 +93,7 @@ type Event struct {
 	// Actor is the identity of the principal that performed the action (the
 	// user's subject, or a synthetic identity such as "system:scheduler").
 	Actor string
-	// ActorKind is the kind of actor: "user", "service-account", "worker", or
+	// ActorKind is the kind of actor: "user", "service-account", "agent", or
 	// "system".
 	ActorKind string
 	// Action is the action that was performed (see the Action* constants).
@@ -208,12 +208,12 @@ const (
 	// (a user's POST /api/pipelines/{id}/restart) and the ARMed door (a
 	// rollback step handler's API mediation, actor "job:<id>").
 	ActionRunRestore = "run.restore"
-	// ActionWorkerGroup* are the worker-group management actions (F-29):
-	// creating, updating, or deleting a worker group (a named group of
-	// long-lived workers that carries tags).
-	ActionWorkerGroupCreate = "worker-group.create"
-	ActionWorkerGroupUpdate = "worker-group.update"
-	ActionWorkerGroupDelete = "worker-group.delete"
+	// ActionAgentGroup* are the agent-group management actions (F-29):
+	// creating, updating, or deleting a agent group (a named group of
+	// long-lived agents that carries tags).
+	ActionAgentGroupCreate = "agent-group.create"
+	ActionAgentGroupUpdate = "agent-group.update"
+	ActionAgentGroupDelete = "agent-group.delete"
 	// ActionSSHKnownHost* are the SSH known-host management actions
 	// (F-21.2.4.1): adding or removing a runtime-managed SSH host key the
 	// source-fetcher uses to verify a git-ssh server's host key.
@@ -239,10 +239,10 @@ const (
 	ActionApprovalGroupRemoveMember = "approval-group.remove-member"
 	ActionLogin                     = "auth.login"
 	ActionRegister                  = "auth.register"
-	ActionWorkerRegister            = "worker.register"
-	ActionWorkerDeregister          = "worker.deregister"
+	ActionAgentRegister            = "agent.register"
+	ActionAgentDeregister          = "agent.deregister"
 	// ActionJobStatus is a job status report from an execution target (a
-	// worker or agent) to the API: the target's account of the job's progress
+	// agent or agent) to the API: the target's account of the job's progress
 	// (its status, step results, and outputs).
 	ActionJobStatus = "job.status"
 	// ActionTokenExchange is an execution target's request for a new job token
@@ -260,7 +260,7 @@ const (
 	TargetRoleBinding    = "role-binding"
 	TargetUser           = "user"
 	TargetSecret         = "secret"
-	TargetWorker         = "worker"
+	TargetAgent         = "agent"
 	TargetLogin          = "login"
 	TargetAPIKey         = "api-key"
 	TargetServiceAccount = "service-account"
@@ -272,9 +272,9 @@ const (
 	// TargetEnvironment is the target kind of an environment (F-17): a named
 	// deployment target that carries approval + automation policy.
 	TargetEnvironment = "environment"
-	// TargetWorkerGroup is the target kind of a worker group (F-29): a named
-	// group of long-lived workers that carries tags.
-	TargetWorkerGroup = "worker-group"
+	// TargetAgentGroup is the target kind of a agent group (F-29): a named
+	// group of long-lived agents that carries tags.
+	TargetAgentGroup = "agent-group"
 	// TargetSSHKnownHost is the target kind of a runtime-managed SSH host key
 	// (F-21.2.4.1).
 	TargetSSHKnownHost = "ssh-known-host"
@@ -304,7 +304,7 @@ const (
 const (
 	ActorKindUser           = "user"
 	ActorKindServiceAccount = "service-account"
-	ActorKindWorker         = "worker"
+	ActorKindAgent         = "agent"
 	ActorKindSystem         = "system"
 )
 

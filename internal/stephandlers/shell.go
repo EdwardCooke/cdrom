@@ -6,7 +6,7 @@
 //
 // A target (or a plugin) adds more step types by calling
 // executor.RegisterStepType with a new handler — the same mechanism a future
-// plugin architecture will use. The worker and agent blank-import this
+// plugin architecture will use. The agent and agent blank-import this
 // package so the built-in handlers are registered before any job runs.
 package stephandlers
 
@@ -177,7 +177,7 @@ func runShellStep(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) 
 		// per-step timeout or the job-level timeout inherited from the parent
 		// context (F-03). A parent cancellation (e.g. a job cancel) surfaces
 		// as context.Canceled instead. Wrapping executor.ErrTimeout lets the
-		// worker/agent report the job as timed_out rather than failed.
+		// agent/agent report the job as timed_out rather than failed.
 		if ctx.Err() == context.DeadlineExceeded {
 			if timeout := step.GetTimeout().AsDuration(); timeout > 0 {
 				return fmt.Errorf("%w: %q timed out after %s", executor.ErrTimeout, command, timeout)

@@ -177,7 +177,7 @@ func TestSinkStreamsToAPI(t *testing.T) {
 	sink.WriteStepOutput("step0", "stderr", []byte("step0 err\n"))
 	sink.WriteStepOutput("step1", "stdout", []byte("step1 out\n"))
 	sink.Close()
-	// Match the worker lifecycle: the job context is cancelled after Close.
+	// Match the agent lifecycle: the job context is cancelled after Close.
 	cancel()
 
 	waitForLog(t, apiClient, "7", "step0.log", "step0 out\nstep0 err\n")

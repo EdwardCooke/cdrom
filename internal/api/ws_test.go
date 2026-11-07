@@ -34,8 +34,8 @@ func TestWebSocketSnapshotAndEvent(t *testing.T) {
 	if first.Snapshot == nil {
 		t.Fatal("expected the first message to be a snapshot")
 	}
-	if first.Snapshot.Jobs == nil || first.Snapshot.Workers == nil {
-		t.Error("expected non-nil jobs and workers slices in the snapshot")
+	if first.Snapshot.Jobs == nil || first.Snapshot.Agents == nil {
+		t.Error("expected non-nil jobs and agents slices in the snapshot")
 	}
 
 	// Give the server a moment to register its subscription, then publish.

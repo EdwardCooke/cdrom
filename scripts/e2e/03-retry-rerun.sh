@@ -2,7 +2,7 @@
 #
 # 03-retry-rerun.sh — F-04: retry policy and re-run of a finished job.
 #
-# Boots the stack (with a worker) and verifies:
+# Boots the stack (with a agent) and verifies:
 #   1. a job whose single step always fails, with a retry policy of
 #      max_attempts 2 (so it runs at most 3 times: 1 initial + 2 retries)
 #      and a 1s backoff, is re-dispatched by the scheduler's retry loop
@@ -10,7 +10,7 @@
 #      failed with attempt 3;
 #   2. a finished job (the successful shell job submitted first) can be
 #      re-run for a fresh execution: it is reset to pending with a fresh
-#      attempt (attempt back to 1) and re-dispatched, so the worker runs it
+#      attempt (attempt back to 1) and re-dispatched, so the agent runs it
 #      again.
 #
 # Usage: scripts/e2e/03-retry-rerun.sh
@@ -22,7 +22,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # --- a successful job to re-run later ---------------------------------------
 log ">> submitting a shell job to re-run later"
@@ -40,7 +40,7 @@ EOF
 )
 SHELL_JOB_ID=$(e2e_submit_job "$SHELL_BODY")
 log ">> shell job id: $SHELL_JOB_ID"
-e2e_wait_for "$WORK/worker.log" 'job succeeded' 'job success'
+e2e_wait_for "$WORK/agent.log" 'job succeeded' 'job success'
 
 # --- verify a job with a retry policy is re-dispatched up to its limit (F-04) ---
 # A job whose single step always fails, with a retry policy of max_attempts 2
@@ -87,7 +87,7 @@ log "   $RETRY_FINAL"
 
 # --- verify a finished job can be re-run for a fresh execution (F-04) -------
 # Re-run the successful shell job: it is reset to pending with a fresh attempt
-# (attempt back to 1) and re-dispatched, so the worker runs it again. Count
+# (attempt back to 1) and re-dispatched, so the agent runs it again. Count
 # the step-1 output lines in the job's persisted log (over the API — the
 # store's on-disk layout is an implementation detail) before and after to
 # prove a second execution happened.
@@ -97,7 +97,7 @@ RERUN_RESPONSE=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$SHELL_JOB_ID/r
 log "   $RERUN_RESPONSE"
 RERUN_JOB_ID=$(printf '%s' "$RERUN_RESPONSE" | jq -r '.id')
 
-# Wait for the worker to execute the job a second time (one more step-1 line).
+# Wait for the agent to execute the job a second time (one more step-1 line).
 log ">> waiting for the re-run to execute"
 for i in $(seq 1 100); do
   STEP1_NOW=$(curl -s "http://127.0.0.1:8080/api/jobs/$RERUN_JOB_ID/logs/job.log" | grep -c 'step1: plain command' || true)

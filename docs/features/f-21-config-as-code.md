@@ -59,9 +59,9 @@ is a database concept (a `PipelineSource` row) configured through the API, so
 the same file can be checked into git, served over HTTP, or mounted on the
 filesystem. The file format is deliberately **not** the database schema: it is
 human-authored and references everything **by name** (step name, job name,
-variable, vault, worker group) rather than by ordinal, and a **compiler** maps
+variable, vault, agent group) rather than by ordinal, and a **compiler** maps
 those names onto the database schema (storing step names on the `JobStep`, job
-names as the stable `key`, and worker names as groups) when it stores the
+names as the stable `key`, and agent names as groups) when it stores the
 definition. The executor's condition context is keyed by name, so a step's
 outputs are referenced by that step's name with no rewrite. The
 file follows the **Kubernetes manifest convention**: an `apiVersion` (currently
@@ -83,7 +83,7 @@ variable is **masked** when its value is not a plain string — an `encrypted`
 variable is referenced exactly like any other variable
 (`{{ .params.<name> }}`). A variable set can import a vault's values with
 `import: [{vault: <name>}]`. A job names the environment it targets and the
-worker group it runs on (`workerGroup`, defaulting to `spec.workerGroup`). A
+agent group it runs on (`agentGroup`, defaulting to `spec.agentGroup`). A
 pipeline can also declare the packages it consumes in `spec.artifacts` — a list
 of named artifact references (a `name` plus a `package` block with a `tag`,
 `useLatest`, and pre-release options) that the platform resolves to a concrete
@@ -215,7 +215,7 @@ and source credentials out of the API and scheduler.
       fields set on the local job override the imported job's (like a step's
       `importFrom`).
 - [ ] A job names the environment it targets (`environment`, F-17) and the
-      worker group it runs on (`workerGroup`, defaulting to `spec.workerGroup`).
+      agent group it runs on (`agentGroup`, defaulting to `spec.agentGroup`).
 - [x] Variable sets are either inline `variables` maps or `import` from
       external files or vaults; a job references sets by name in its
       `variableSets` list.
@@ -282,8 +282,8 @@ A `Pipeline` document's `spec` has these fields (all optional except `jobs`):
 | `steps` | Shared, reusable step definitions (a name → step-spec map) | a job's `steps` (via `ref`) |
 | `variableSets` | Named variable sets — inline `variables` maps and/or `import` from external files or vaults (F-10) | a job's `variableSets` list (by name) |
 | `secretSources` | Named secret sources (F-12) | a variable's `secretSource` + `key`, or a variable set's `import: [{vault}]` |
-| `jobs` | The jobs (a name → job-spec map: `steps`, `needs`, `variables`, `variableSets`, `environment`, `workerGroup`, deployment options) | the pipeline's DAG (`needs`) |
-| `workerGroup` | The pipeline's default worker group (F-17); a job's `workerGroup` overrides it | dispatch |
+| `jobs` | The jobs (a name → job-spec map: `steps`, `needs`, `variables`, `variableSets`, `environment`, `agentGroup`, deployment options) | the pipeline's DAG (`needs`) |
+| `agentGroup` | The pipeline's default agent group (F-17); a job's `agentGroup` overrides it | dispatch |
 | `failureMode` | Pipeline-level failure mode (F-01) | — |
 | `concurrencyKeys` | Pipeline-level concurrency keys (F-16, templatable) | — |
 | `params` | Pipeline-level parameters (F-10) | `{{ .params.<name> }}` |
@@ -296,7 +296,7 @@ else" shape is used for every kind of reusable resource. `steps` is the
 canonical example; `variableSets`, `secretSources`, and `jobs` follow it.
 Pipeline-level config (`failureMode`, `concurrencyKeys`, `params`, `triggers`,
 `artifacts`) lives in the `spec` alongside the jobs, and the pipeline's default
-worker group is a `spec.workerGroup`. Mapping keys are camelCase.
+agent group is a `spec.agentGroup`. Mapping keys are camelCase.
 
 **The source is not in the file.** Where a pipeline is pulled from (a `git` /
 `http` / `file` source, its schedule, and its credential) is a **database**
@@ -366,9 +366,9 @@ metadata:
     owner: platform-team
     review: required
 spec:
-  # The pipeline's default worker group (F-17). A job's `workerGroup`
+  # The pipeline's default agent group (F-17). A job's `agentGroup`
   # overrides it for that job.
-  workerGroup: webapp-workers
+  agentGroup: webapp-agents
 
   # Shared, reusable steps (a name -> step-spec map). A step spec is inline, a
   # `ref` to a shared step, or an `importFrom` pull from another file. The
@@ -530,8 +530,8 @@ spec:
   # optional — a job with no `needs` has no dependencies. `variables` is a map
   # of inline variables (a plain value, or a masked value via `encrypted` /
   # `secretSource` + `key`); `variableSets` is a list of named sets to merge in.
-  # `environment` names the environment the job targets (F-17); `workerGroup`
-  # names the worker group it runs on (defaulting to `spec.workerGroup`).
+  # `environment` names the environment the job targets (F-17); `agentGroup`
+  # names the agent group it runs on (defaulting to `spec.agentGroup`).
   jobs:
     build-test:
       # No `needs`: this job has no dependencies.
@@ -552,7 +552,7 @@ spec:
     deploy-dev:
       needs: [build-test]
       environment: dev
-      workerGroup: webapp-workers
+      agentGroup: webapp-agents
       variables:
         canary: "true"
         deploy_token:
@@ -576,7 +576,7 @@ spec:
     deploy-prod:
       needs: [deploy-dev]
       environment: prod
-      workerGroup: prod-workers
+      agentGroup: prod-agents
       variables: {}
       variableSets:
         - global
@@ -589,7 +589,7 @@ spec:
       needs: [deploy-prod]
       environment: prod
       # The whole job is pulled from another file; the local fields above
-      # (needs, environment, workerGroup) override the imported job's.
+      # (needs, environment, agentGroup) override the imported job's.
       importFrom: git:https://github.com/blah/blah.git@main[/somesuperjob.yaml]
 
   # Pipeline-level config lives in the spec alongside the jobs.
@@ -670,7 +670,7 @@ spec:
 
 **A job file** (`kind: Job`) — one job per file; its `spec` is the job spec
 itself, shaped exactly like an entry under the pipeline's `spec.jobs` (its
-`steps`, `needs`, `variables`, `variableSets`, `environment`, `workerGroup`,
+`steps`, `needs`, `variables`, `variableSets`, `environment`, `agentGroup`,
 and deployment options):
 
 ```yaml
@@ -725,11 +725,11 @@ file stable under reordering and what makes it reviewable:
   is optional — a job with no `needs` has no dependencies. The compiler
   resolves names to the run's job instance ids at run creation (the existing
   F-08 behavior).
-- **Workers / groups** are referenced by name (a worker group's name, or a
-  worker's host name). The pipeline's default group is `spec.workerGroup`; a
-  job's `workerGroup` names the worker group it runs on and overrides the
+- **Agents / groups** are referenced by name (a agent group's name, or a
+  agent's host name). The pipeline's default group is `spec.agentGroup`; a
+  job's `agentGroup` names the agent group it runs on and overrides the
   default. The compiler stores the resolved name on the job's `target_group`;
-  dispatch resolves it to the live workers (F-17).
+  dispatch resolves it to the live agents (F-17).
 - **Environments** are referenced by name (F-17); a job's `environment` names
   the environment it targets.
 - **Variables** are referenced by name (`{{ .params.<name> }}`, F-10) — and
@@ -758,7 +758,7 @@ mapping is:
 | `metadata.name` | the pipeline's name (required) |
 | `metadata.labels` / per-resource `labels` | `Label` rows (F-29, renamed from `tags` as part of F-21) |
 | `metadata.annotations` | free-form key/value pairs for UI searchability only (never affect behavior) |
-| `spec.workerGroup` | the pipeline's default worker group (F-17); a job's `workerGroup` overrides it |
+| `spec.agentGroup` | the pipeline's default agent group (F-17); a job's `agentGroup` overrides it |
 | `spec.failureMode` | `Pipeline.FailureMode` (F-01) |
 | `spec.concurrencyKeys` | `Pipeline.ConcurrencyKeys` (F-16, templatable) |
 | `spec.params` | `Pipeline.Params` (F-10) |
@@ -767,7 +767,7 @@ mapping is:
 | `spec.jobs.<name>` | `Job.Key` (the name is the key, F-08) |
 | `spec.jobs.<name>.needs` (optional) | `Job` `needs` → `DependsOn` (F-08); empty means no dependencies |
 | `spec.jobs.<name>.environment` | `Job.Environment` (F-17) |
-| `spec.jobs.<name>.workerGroup` | `Job.TargetGroup` (dispatch; the worker group the job runs on, overriding `spec.workerGroup`) |
+| `spec.jobs.<name>.agentGroup` | `Job.TargetGroup` (dispatch; the agent group the job runs on, overriding `spec.agentGroup`) |
 | `spec.jobs.<name>.variables` | a map of inline variables for that job (F-10); a value is a plain string or a masked value (`{encrypted}` / `{secretSource, key}`, F-12); masked variables are referenced like any other variable (`{{ .params.<name> }}`) |
 | `spec.jobs.<name>.variableSets` | a list of named variable sets (declared under `spec.variableSets`) to merge into the job's variables (F-10) |
 | `spec.jobs.<name>.importFrom` | pull the whole job from another file; local fields override the imported job's (a local `steps` map overrides the imported job's steps by name) |
@@ -880,7 +880,7 @@ and **jobs**.
   override the imported steps by name (the imported steps are the base).
 - **Jobs** are named job specs under `spec.jobs` (a `steps` map, an optional
   `needs` list, a `variables` map, a `variableSets` list, an `environment`, a
-  `workerGroup`, and the standard deployment options). A job can be pulled in
+  `agentGroup`, and the standard deployment options). A job can be pulled in
   from another file with `importFrom` (any fields set on the local job override
   the imported job's, including its `steps` — a local `steps` map overrides the
   imported job's steps by name).
@@ -909,7 +909,7 @@ in the file):
   job's `steps`, it pulls the steps from the referenced file as the base; any
   steps the job defines locally override the imported steps by name (the job's
   other fields — `needs`, `variables`, `variableSets`, `environment`,
-  `workerGroup`, … — stay local). On a job, it pulls the whole job spec; any
+  `agentGroup`, … — stay local). On a job, it pulls the whole job spec; any
   fields set on the local job override the imported job's, including its
   `steps` (a local `steps` map overrides the imported job's steps by name).
   Example:
@@ -1252,7 +1252,7 @@ itself.
 
 ---
 
-## Design decisions (folded into AGENTS.md / Architecture.md)
+## Design decisions (folded into WORKER.md / Architecture.md)
 
 - **The file is a Kubernetes-style manifest.** Every definition has an
   `apiVersion` (currently `cdrom/alphav1`), a `kind` (`Pipeline` /
@@ -1265,13 +1265,13 @@ itself.
   the project's lifecycle. `metadata.annotations` is free-form key/value data
   used only for UI searchability (it never affects behavior). As part of F-21
   the project's `tags` are renamed to `labels` (the F-29 concept) across the
-  platform — pipelines, jobs, environments, worker groups, and workers — so the
+  platform — pipelines, jobs, environments, agent groups, and agents — so the
   manifest's `metadata.labels` is the same `Label` set the rest of the platform
   uses.
 - **The file is not the schema; the compiler is the bridge.** The YAML is a
   human-authored, name-based format. A dedicated compiler (`internal/pipelinefile`)
   validates a definition and maps it onto the database schema — storing step
-  names on the `JobStep`, job keys as the stable `key`, worker/group names as
+  names on the `JobStep`, job keys as the stable `key`, agent/group names as
   groups, and named sources/variables to their stored forms — producing the
   canonical `JobSpec` / `JobDefinitionSnapshot` the executor runs. The executor's
   condition context is keyed by name, so the file's names reach the execution
@@ -1279,7 +1279,7 @@ itself.
   shared with F-08 (the job DAG: unique keys, known `needs`, no cycle) and F-10
   (parameters: declared, unique, and resolvable).
 - **Everything is referenced by name, never by ordinal.** Steps by their id,
-  jobs by their key, workers by group/host name, environments by name, and
+  jobs by their key, agents by group/host name, environments by name, and
   variables (masked or not) by name. The compiler stores those names on the
   stored definition, and the executor's condition context is keyed by name, so
   a name never becomes an ordinal or id. This is what makes the file stable under reordering
@@ -1390,8 +1390,8 @@ itself.
   File-format fields that are new to the
   schema: the Kubernetes-style manifest envelope (`apiVersion` / `kind` /
   `metadata` / `spec`, with `metadata.labels` and `metadata.annotations`),
-  camelCase mapping keys, a `spec.workerGroup` (the default group a job's
-  `workerGroup` overrides), a `spec.secretSources` section (renamed from
+  camelCase mapping keys, a `spec.agentGroup` (the default group a job's
+  `agentGroup` overrides), a `spec.secretSources` section (renamed from
   `secretVaults`), a `spec.artifacts` list (named package references, resolved
   to a concrete version and fetched into the artifacts store for a run), masked
   variables (`{encrypted}` / `{secretSource, key}`
@@ -1400,7 +1400,7 @@ itself.
   job's `steps`, or a whole job,
   and a plain-string `shell` value (shorthand for `{command: <string>}`, run
   through the OS's default shell); the rest of the file's fields
-  (`environment`, `concurrencyKeys`, `workerGroup`, `needs`, `variables`,
+  (`environment`, `concurrencyKeys`, `agentGroup`, `needs`, `variables`,
   `variableSets`, …) map onto existing `Pipeline` / `Job` / `JobSpec` fields.
   F-21 also renames the platform's `tags` to `labels` (the F-29 concept)
   across the docs.

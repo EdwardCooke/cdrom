@@ -15,7 +15,7 @@ type Event struct {
 	// the field is unset.
 	RunID  int64  `json:"run_id,omitempty"`
 	Status string `json:"status,omitempty"`
-	Worker string `json:"worker,omitempty"`
+	Agent string `json:"agent,omitempty"`
 	Group  string `json:"group,omitempty"`
 	Action string `json:"action,omitempty"`
 	// StepName is the step's name a job_log event belongs to.
@@ -62,7 +62,7 @@ type Event struct {
 // Event type constants.
 const (
 	EventJobStatus = "job_status"
-	EventWorker    = "worker"
+	EventAgent    = "agent"
 	EventJobLog    = "job_log"
 	// EventRunStatus is a pipeline run status change (F-07); the event carries
 	// the run's id and its derived status.
@@ -100,11 +100,11 @@ const (
 	JobLogStreamStderr = "stderr"
 )
 
-// Worker action constants.
+// Agent action constants.
 const (
-	WorkerRegistered   = "registered"
-	WorkerDeregistered = "deregistered"
-	WorkerWatching     = "watching"
+	AgentRegistered   = "registered"
+	AgentDeregistered = "deregistered"
+	AgentWatching     = "watching"
 )
 
 // EventHub is a fan-out of change events to WebSocket subscribers. Each

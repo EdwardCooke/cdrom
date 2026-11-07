@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# 11-labeling.sh — F-29: labels on pipelines, jobs, environments, worker
-# groups, and workers are combined onto a run's job instances and are
+# 11-labeling.sh — F-29: labels on pipelines, jobs, environments, agent
+# groups, and agents are combined onto a run's job instances and are
 # searchable by label key/value.
 #
-# Boots the stack (with a worker in the "default" group) and:
+# Boots the stack (with a agent in the "default" group) and:
 #
-#   1. creates a worker group ("default") carrying a label (rack=1);
+#   1. creates a agent group ("default") carrying a label (rack=1);
 #   2. creates a pipeline carrying a label (team=backend) with a single job
 #      that targets the "default" group;
 #   3. triggers a run of the pipeline and waits for it to run to succeeded;
 #   4. verifies the run's job instance carries the combined labels (the
-#      pipeline's team label + the worker group's rack label);
+#      pipeline's team label + the agent group's rack label);
 #   5. searches for the pipeline by its label (GET /api/pipelines?label=team=backend)
 #      and verifies it is the only match;
 #   6. searches for the run by its combined labels (GET
@@ -21,9 +21,9 @@
 #      not returned (the filter is real, not a no-op).
 #
 # This exercises the full path: the API parses the labels from the pipeline
-# and worker-group bodies, the Database service stores them normalized in the
+# and agent-group bodies, the Database service stores them normalized in the
 # Label table (one row per key/value pair), createRunAndInstances combines the
-# pipeline + job + environment + worker-group labels onto the run's job
+# pipeline + job + environment + agent-group labels onto the run's job
 # instances, and the list endpoints filter by label with an indexed query on
 # the Label table (a JSON column could not be searched this way).
 #
@@ -36,19 +36,19 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 API=http://127.0.0.1:8080
 
-# --- create a worker group carrying a label (F-29) --------------------------
-# The e2e worker registers in the "default" group; giving that group a row
-# with a label exercises the worker-group label source of the run's combined
+# --- create a agent group carrying a label (F-29) --------------------------
+# The e2e agent registers in the "default" group; giving that group a row
+# with a label exercises the agent-group label source of the run's combined
 # set.
-log ">> creating the 'default' worker group with a label"
-curl -s -X POST "$API/api/worker-groups" \
+log ">> creating the 'default' agent group with a label"
+curl -s -X POST "$API/api/agent-groups" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"default","description":"e2e worker group","labels":{"rack":"1"}}' >/dev/null \
-  || { echo ">> could not create the worker group" >&2; exit 1; }
+  -d '{"name":"default","description":"e2e agent group","labels":{"rack":"1"}}' >/dev/null \
+  || { echo ">> could not create the agent group" >&2; exit 1; }
 
 # --- create a labeled pipeline with a job targeting the group --------------
 log ">> creating a labeled pipeline with a job targeting the 'default' group"
@@ -107,7 +107,7 @@ done
 
 # --- verify the run's job instance carries the combined labels -------------
 # The job instance's labels are the union of the pipeline's labels
-# (team=backend) and the worker group's labels (rack=1). Poll the run's job
+# (team=backend) and the agent group's labels (rack=1). Poll the run's job
 # until its combined labels are present (they are stored when the instance is
 # created).
 log ">> verifying the run's job instance carries the combined labels"
@@ -128,7 +128,7 @@ done
 [ "$(printf '%s' "$JOB" | jq -r '.labels.team // empty')" = "backend" ] \
   || { echo ">> job instance missing the pipeline's team label: $JOB" >&2; exit 1; }
 [ "$(printf '%s' "$JOB" | jq -r '.labels.rack // empty')" = "1" ] \
-  || { echo ">> job instance missing the worker group's rack label: $JOB" >&2; exit 1; }
+  || { echo ">> job instance missing the agent group's rack label: $JOB" >&2; exit 1; }
 log "   job instance combined labels: $(printf '%s' "$JOB" | jq -c '.labels')"
 
 # --- search for the pipeline by its label ----------------------------------
@@ -165,4 +165,4 @@ RUN_NOMATCH=$(curl -s "$API/api/pipelines/$PIPELINE_ID/runs?label=team=frontend"
   || { echo ">> run label search matched a run that lacks the label: $RUN_NOMATCH" >&2; exit 1; }
 log "   run label search negative case OK (no match for team=frontend)"
 
-log ">> labeling e2e PASSED: a labeled pipeline + worker group combine their labels onto the run's job instance, and both the pipeline and the run are searchable by label (with a real negative case)"
+log ">> labeling e2e PASSED: a labeled pipeline + agent group combine their labels onto the run's job instance, and both the pipeline and the run are searchable by label (with a real negative case)"

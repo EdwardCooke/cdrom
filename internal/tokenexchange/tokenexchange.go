@@ -4,11 +4,11 @@
 // call) by calling the API's ExchangeJobToken RPC, presenting the job's own
 // token.
 //
-// Both the long-lived worker and the ephemeral agent use it: each sets it in
+// Both the long-lived agent and the ephemeral agent use it: each sets it in
 // the executor's context (via executor.ContextWithTokenExchange) before running
 // a job's spec, so a step handler (the built-in "token_exchange" handler) can
 // obtain an exchanged token. It is the single shared implementation, so the
-// worker and agent do not each carry a copy.
+// agent and agent do not each carry a copy.
 package tokenexchange
 
 import (

@@ -39,7 +39,7 @@ func (f *fakeCancelDB) PublishCancel(ctx context.Context, in *dbpb.PublishCancel
 // TestCancelJobSignalsTarget verifies that the scheduler's CancelJob RPC
 // (F-05) persists the cancellation (Database.CancelJob) and appends a "cancel"
 // event to the shared event log (F-23), which every API pod tails and delivers
-// to its local workers.
+// to its local agents.
 func TestCancelJobSignalsTarget(t *testing.T) {
 	db := &fakeCancelDB{cancelResult: true, job: &dbpb.Job{Id: 42, Status: dbpb.JobStatus_JOB_STATUS_CANCELLED}}
 	s := &Server{db: db, logger: testLogger()}

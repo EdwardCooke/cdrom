@@ -73,11 +73,11 @@ func (f *fakeTargetAPI) StreamJobLogs(ctx context.Context, opts ...grpc.CallOpti
 // reporter, the upstream jobs and the job's identity (for a step's
 // condition), the run's parameters and identity (for spec interpolation), and
 // the token exchanger are all set, and the step barrier is set only when the
-// job has the step-barrier flag set and targets a worker group.
+// job has the step-barrier flag set and targets a agent group.
 func TestRunJobBuildsRunContext(t *testing.T) {
 	captured := captureContext()
 	api := &fakeTargetAPI{}
-	tc := &Context{API: api, WorkerName: "w1", Token: "tok", Logger: testLogger()}
+	tc := &Context{API: api, AgentName: "w1", Token: "tok", Logger: testLogger()}
 	job := &apipb.Job{
 		Id:          7,
 		Name:        "j",
@@ -123,7 +123,7 @@ func TestRunJobBuildsRunContext(t *testing.T) {
 }
 
 // TestRunJobNoBarrierForAgent verifies that a job that does not target a
-// worker group (an ephemeral agent) runs its steps unbarriered: the step
+// agent group (an ephemeral agent) runs its steps unbarriered: the step
 // barrier is not set in the run context even when the job has the flag set.
 func TestRunJobNoBarrierForAgent(t *testing.T) {
 	captured := captureContext()
@@ -152,7 +152,7 @@ func TestRunJobNoBarrierForAgent(t *testing.T) {
 // results and the target's name.
 func TestReportStatus(t *testing.T) {
 	api := &fakeTargetAPI{}
-	tc := &Context{API: api, WorkerName: "w1", Token: "tok", Logger: testLogger()}
+	tc := &Context{API: api, AgentName: "w1", Token: "tok", Logger: testLogger()}
 	collector := &executor.StepResultCollector{}
 	collector.ReportStepStatus("step0", executor.StepStatusSucceeded, "", nil)
 	ReportStatus(context.Background(), tc, 7, dbpb.JobStatus_JOB_STATUS_SUCCEEDED, collector)
@@ -164,8 +164,8 @@ func TestReportStatus(t *testing.T) {
 	if api.lastReport.GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
 		t.Errorf("status = %v, want SUCCEEDED", api.lastReport.GetStatus())
 	}
-	if api.lastReport.GetWorkerName() != "w1" {
-		t.Errorf("worker name = %q, want w1", api.lastReport.GetWorkerName())
+	if api.lastReport.GetAgentName() != "w1" {
+		t.Errorf("agent name = %q, want w1", api.lastReport.GetAgentName())
 	}
 	if got := api.lastReport.GetStepResults(); len(got) != 1 || got[0].GetName() != "step0" {
 		t.Errorf("step results = %v, want one step named step0", got)
@@ -223,7 +223,7 @@ func TestFinishJob(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &fakeTargetAPI{}
-			ctx := &Context{API: api, WorkerName: "w1", Token: "tok", Logger: testLogger()}
+			ctx := &Context{API: api, AgentName: "w1", Token: "tok", Logger: testLogger()}
 			got := FinishJob(context.Background(), ctx, 7, &executor.StepResultCollector{}, tc.err, tc.cancelled)
 			if got != tc.want {
 				t.Errorf("FinishJob = %v, want %v", got, tc.want)

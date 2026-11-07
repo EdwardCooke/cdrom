@@ -21,8 +21,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	API_RegisterWorker_FullMethodName       = "/cdrom.api.v1.API/RegisterWorker"
-	API_DeregisterWorker_FullMethodName     = "/cdrom.api.v1.API/DeregisterWorker"
+	API_RegisterAgent_FullMethodName       = "/cdrom.api.v1.API/RegisterAgent"
+	API_DeregisterAgent_FullMethodName     = "/cdrom.api.v1.API/DeregisterAgent"
 	API_Heartbeat_FullMethodName            = "/cdrom.api.v1.API/Heartbeat"
 	API_WatchJobs_FullMethodName            = "/cdrom.api.v1.API/WatchJobs"
 	API_GetJob_FullMethodName               = "/cdrom.api.v1.API/GetJob"
@@ -57,14 +57,14 @@ const (
 // API is the gRPC surface the API/controller service exposes to execution
 // targets (long-lived workers and ephemeral agents) and to the scheduler.
 //
-// Workers and agents talk ONLY to the API. The API is the single control
+// Agents and agents talk ONLY to the API. The API is the single control
 // plane: it holds the workers' WatchJobs streams, relays job assignments
 // pushed by the scheduler (DispatchJob), and proxies artifact
 // uploads/downloads to the artifacts service.
 type APIClient interface {
-	// Worker lifecycle (called by long-lived workers).
-	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
-	DeregisterWorker(ctx context.Context, in *DeregisterWorkerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Agent lifecycle (called by long-lived workers).
+	RegisterAgent(ctx context.Context, in *RegisterAgentRequest, opts ...grpc.CallOption) (*Agent, error)
+	DeregisterAgent(ctx context.Context, in *DeregisterAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// Execution side (called by workers and agents).
 	//
@@ -92,7 +92,7 @@ type APIClient interface {
 	ListPendingJobs(ctx context.Context, in *ListPendingJobsRequest, opts ...grpc.CallOption) (*ListPendingJobsResponse, error)
 	ReportJobStatus(ctx context.Context, in *ReportJobStatusRequest, opts ...grpc.CallOption) (*Job, error)
 	// ReportStepCompletion records that the calling worker has completed a step
-	// of a job (the cross-worker step barrier). A worker that runs a job with a
+	// of a job (the cross-agent step barrier). A worker that runs a job with a
 	// step barrier reports each step it finishes; the barrier for a step is
 	// satisfied once every worker that is alive has completed it. The API
 	// forwards the completion to the Database service. When job-token auth is
@@ -214,20 +214,20 @@ func NewAPIClient(cc grpc.ClientConnInterface) APIClient {
 	return &aPIClient{cc}
 }
 
-func (c *aPIClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
+func (c *aPIClient) RegisterAgent(ctx context.Context, in *RegisterAgentRequest, opts ...grpc.CallOption) (*Agent, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Worker)
-	err := c.cc.Invoke(ctx, API_RegisterWorker_FullMethodName, in, out, cOpts...)
+	out := new(Agent)
+	err := c.cc.Invoke(ctx, API_RegisterAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *aPIClient) DeregisterWorker(ctx context.Context, in *DeregisterWorkerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *aPIClient) DeregisterAgent(ctx context.Context, in *DeregisterAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, API_DeregisterWorker_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, API_DeregisterAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -515,14 +515,14 @@ func (c *aPIClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.
 // API is the gRPC surface the API/controller service exposes to execution
 // targets (long-lived workers and ephemeral agents) and to the scheduler.
 //
-// Workers and agents talk ONLY to the API. The API is the single control
+// Agents and agents talk ONLY to the API. The API is the single control
 // plane: it holds the workers' WatchJobs streams, relays job assignments
 // pushed by the scheduler (DispatchJob), and proxies artifact
 // uploads/downloads to the artifacts service.
 type APIServer interface {
-	// Worker lifecycle (called by long-lived workers).
-	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
-	DeregisterWorker(context.Context, *DeregisterWorkerRequest) (*emptypb.Empty, error)
+	// Agent lifecycle (called by long-lived workers).
+	RegisterAgent(context.Context, *RegisterAgentRequest) (*Agent, error)
+	DeregisterAgent(context.Context, *DeregisterAgentRequest) (*emptypb.Empty, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// Execution side (called by workers and agents).
 	//
@@ -550,7 +550,7 @@ type APIServer interface {
 	ListPendingJobs(context.Context, *ListPendingJobsRequest) (*ListPendingJobsResponse, error)
 	ReportJobStatus(context.Context, *ReportJobStatusRequest) (*Job, error)
 	// ReportStepCompletion records that the calling worker has completed a step
-	// of a job (the cross-worker step barrier). A worker that runs a job with a
+	// of a job (the cross-agent step barrier). A worker that runs a job with a
 	// step barrier reports each step it finishes; the barrier for a step is
 	// satisfied once every worker that is alive has completed it. The API
 	// forwards the completion to the Database service. When job-token auth is
@@ -672,11 +672,11 @@ type APIServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAPIServer struct{}
 
-func (UnimplementedAPIServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
-	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
+func (UnimplementedAPIServer) RegisterAgent(context.Context, *RegisterAgentRequest) (*Agent, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterAgent not implemented")
 }
-func (UnimplementedAPIServer) DeregisterWorker(context.Context, *DeregisterWorkerRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeregisterWorker not implemented")
+func (UnimplementedAPIServer) DeregisterAgent(context.Context, *DeregisterAgentRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeregisterAgent not implemented")
 }
 func (UnimplementedAPIServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
@@ -774,38 +774,38 @@ func RegisterAPIServer(s grpc.ServiceRegistrar, srv APIServer) {
 	s.RegisterService(&API_ServiceDesc, srv)
 }
 
-func _API_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RegisterWorkerRequest)
+func _API_RegisterAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterAgentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(APIServer).RegisterWorker(ctx, in)
+		return srv.(APIServer).RegisterAgent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: API_RegisterWorker_FullMethodName,
+		FullMethod: API_RegisterAgent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(APIServer).RegisterWorker(ctx, req.(*RegisterWorkerRequest))
+		return srv.(APIServer).RegisterAgent(ctx, req.(*RegisterAgentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _API_DeregisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeregisterWorkerRequest)
+func _API_DeregisterAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeregisterAgentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(APIServer).DeregisterWorker(ctx, in)
+		return srv.(APIServer).DeregisterAgent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: API_DeregisterWorker_FullMethodName,
+		FullMethod: API_DeregisterAgent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(APIServer).DeregisterWorker(ctx, req.(*DeregisterWorkerRequest))
+		return srv.(APIServer).DeregisterAgent(ctx, req.(*DeregisterAgentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1232,12 +1232,12 @@ var API_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*APIServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "RegisterWorker",
-			Handler:    _API_RegisterWorker_Handler,
+			MethodName: "RegisterAgent",
+			Handler:    _API_RegisterAgent_Handler,
 		},
 		{
-			MethodName: "DeregisterWorker",
-			Handler:    _API_DeregisterWorker_Handler,
+			MethodName: "DeregisterAgent",
+			Handler:    _API_DeregisterAgent_Handler,
 		},
 		{
 			MethodName: "Heartbeat",

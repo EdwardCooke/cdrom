@@ -133,42 +133,42 @@ func TestPipelineAndJobLifecycle(t *testing.T) {
 	}
 }
 
-func TestWorkerRegistration(t *testing.T) {
+func TestAgentRegistration(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 
-	worker, err := client.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{Name: "w1", Group: "pool-a", Address: "10.0.0.1"})
+	agent, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{Name: "w1", Group: "pool-a", Address: "10.0.0.1"})
 	if err != nil {
-		t.Fatalf("RegisterWorker: %v", err)
+		t.Fatalf("RegisterAgent: %v", err)
 	}
-	if worker.GetGroup() != "pool-a" {
-		t.Fatalf("group = %q, want pool-a", worker.GetGroup())
+	if agent.GetGroup() != "pool-a" {
+		t.Fatalf("group = %q, want pool-a", agent.GetGroup())
 	}
 
 	// Re-registering updates the group.
-	if _, err := client.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{Name: "w1", Group: "pool-b"}); err != nil {
+	if _, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{Name: "w1", Group: "pool-b"}); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
-	fetched, err := client.GetWorker(ctx, &dbpb.GetWorkerRequest{Name: "w1"})
+	fetched, err := client.GetAgent(ctx, &dbpb.GetAgentRequest{Name: "w1"})
 	if err != nil {
-		t.Fatalf("GetWorker: %v", err)
+		t.Fatalf("GetAgent: %v", err)
 	}
 	if fetched.GetGroup() != "pool-b" {
 		t.Fatalf("group after re-register = %q, want pool-b", fetched.GetGroup())
 	}
 
 	// Heartbeat refreshes last-seen.
-	if _, err := client.HeartbeatWorker(ctx, &dbpb.HeartbeatWorkerRequest{Name: "w1"}); err != nil {
-		t.Fatalf("HeartbeatWorker: %v", err)
+	if _, err := client.HeartbeatAgent(ctx, &dbpb.HeartbeatAgentRequest{Name: "w1"}); err != nil {
+		t.Fatalf("HeartbeatAgent: %v", err)
 	}
 
 	// List by group.
-	response, err := client.ListWorkers(ctx, &dbpb.ListWorkersRequest{Group: "pool-b"})
+	response, err := client.ListAgents(ctx, &dbpb.ListAgentsRequest{Group: "pool-b"})
 	if err != nil {
-		t.Fatalf("ListWorkers: %v", err)
+		t.Fatalf("ListAgents: %v", err)
 	}
-	if got := len(response.GetWorkers()); got != 1 {
-		t.Fatalf("workers in pool-b = %d, want 1", got)
+	if got := len(response.GetAgents()); got != 1 {
+		t.Fatalf("agents in pool-b = %d, want 1", got)
 	}
 }
 
@@ -1903,7 +1903,7 @@ func TestUpdateRun(t *testing.T) {
 // Job executions (fan-out)
 // ---------------------------------------------------------------------------
 
-// newGroupJob creates a pipeline with a single job targeting a worker group,
+// newGroupJob creates a pipeline with a single job targeting a agent group,
 // materializes a manual run, and returns the run's job INSTANCE — a startable
 // work item. It deliberately does NOT return the pipeline DEFINITION row:
 // StartJobExecution refuses definition rows (a job with a pipeline but no run
@@ -1938,24 +1938,24 @@ func newGroupJob(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, 
 	return instance
 }
 
-// TestStartJobExecution verifies that a worker starting a pending group job
+// TestStartJobExecution verifies that a agent starting a pending group job
 // records its execution and marks the job running (fan-out).
 func TestStartJobExecution(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
 
-	// Two workers each start their own execution of the same job.
-	for _, worker := range []string{"w1", "w2"} {
-		resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: worker})
+	// Two agents each start their own execution of the same job.
+	for _, agent := range []string{"w1", "w2"} {
+		resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), AgentName: agent})
 		if err != nil {
-			t.Fatalf("StartJobExecution(%s): %v", worker, err)
+			t.Fatalf("StartJobExecution(%s): %v", agent, err)
 		}
 		if !resp.GetStarted() {
-			t.Fatalf("StartJobExecution(%s) started = false, want true", worker)
+			t.Fatalf("StartJobExecution(%s) started = false, want true", agent)
 		}
-		if resp.GetExecution().GetWorkerName() != worker {
-			t.Errorf("execution worker = %q, want %q", resp.GetExecution().GetWorkerName(), worker)
+		if resp.GetExecution().GetAgentName() != agent {
+			t.Errorf("execution agent = %q, want %q", resp.GetExecution().GetAgentName(), agent)
 		}
 		if resp.GetExecution().GetStatus() != dbpb.JobStatus_JOB_STATUS_RUNNING {
 			t.Errorf("execution status = %v, want RUNNING", resp.GetExecution().GetStatus())
@@ -1971,7 +1971,7 @@ func TestStartJobExecution(t *testing.T) {
 		t.Errorf("job status = %v, want RUNNING", fetched.GetStatus())
 	}
 
-	// Both workers' executions are listed.
+	// Both agents' executions are listed.
 	list, err := client.ListJobExecutions(ctx, &dbpb.ListJobExecutionsRequest{JobId: job.GetId()})
 	if err != nil {
 		t.Fatalf("ListJobExecutions: %v", err)
@@ -1983,14 +1983,14 @@ func TestStartJobExecution(t *testing.T) {
 
 // TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution
 // verifies the DOUBLE-DELIVERY GUARD (flaky e2e 2026-11-07, scenario 16):
-// once a worker has started a (job, worker, attempt) episode, a duplicate
+// once a agent has started a (job, agent, attempt) episode, a duplicate
 // delivery is DECLINED — in BOTH phases of the episode: while the first
 // execution is still running, AND after it has finished while the job row
 // still reads running (the derived status lags the executions — the exact
 // window that caused the flake: a 28 ms job succeeded, its duplicate pickup
 // arrived 8 ms later, and the old unconditional create spun up a SECOND
 // execution that failed on publish_artifact's AlreadyExists). Legitimate
-// re-openings are carved out: fan-out (a different worker is a different
+// re-openings are carved out: fan-out (a different agent is a different
 // coordinate) proceeds, and a RERUN (which resets the job to pending)
 // proceeds. Previously the guard was unconditional execution creation.
 func TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution(t *testing.T) {
@@ -1998,11 +1998,11 @@ func TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution(t *testi
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "dup-guard", "pool-a")
 
-	start := func(worker string) (started bool, execID int64) {
+	start := func(agent string) (started bool, execID int64) {
 		t.Helper()
-		resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: worker})
+		resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), AgentName: agent})
 		if err != nil {
-			t.Fatalf("StartJobExecution(%s): %v", worker, err)
+			t.Fatalf("StartJobExecution(%s): %v", agent, err)
 		}
 		return resp.GetStarted(), resp.GetExecution().GetId()
 	}
@@ -2018,16 +2018,16 @@ func TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution(t *testi
 		t.Error("duplicate while RUNNING started a second execution (want declined)")
 	}
 
-	// Fan-out is ALLOWED: a different worker starts its own execution.
+	// Fan-out is ALLOWED: a different agent starts its own execution.
 	if started, _ := start("w2"); !started {
-		t.Error("fan-out start = false, want true (different worker is a different coordinate)")
+		t.Error("fan-out start = false, want true (different agent is a different coordinate)")
 	}
 
 	// PHASE 2 (the FLAKE WINDOW): w1's execution FINISHES, but the job row
 	// still reads running (the derived status hasn't reconciled). A
 	// duplicate pickup arriving now must STILL be declined.
 	if _, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
-		JobId: job.GetId(), WorkerName: "w1", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		JobId: job.GetId(), AgentName: "w1", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
 	}); err != nil {
 		t.Fatalf("terminate w1's execution: %v", err)
 	}
@@ -2041,7 +2041,7 @@ func TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution(t *testi
 	// pending (the ONLY lawful reopening of a used coordinate) — w1 may
 	// start the episode afresh.
 	if _, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
-		JobId: job.GetId(), WorkerName: "w2", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+		JobId: job.GetId(), AgentName: "w2", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
 	}); err != nil {
 		t.Fatalf("terminate w2's execution: %v", err)
 	}
@@ -2074,7 +2074,7 @@ func TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution(t *testi
 }
 
 // TestStartJobExecutionRejectsTerminalJob verifies that a job that has reached
-// a terminal state is not started (a late worker start is a no-op).
+// a terminal state is not started (a late agent start is a no-op).
 func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
@@ -2085,7 +2085,7 @@ func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
 		t.Fatalf("UpdateJob: %v", err)
 	}
 
-	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"})
+	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), AgentName: "w1"})
 	if err != nil {
 		t.Fatalf("StartJobExecution: %v", err)
 	}
@@ -2095,7 +2095,7 @@ func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
 }
 
 // TestStartJobExecutionRejectsAgentJob verifies that a job with an empty
-// target group (an ephemeral agent) is not started by a worker.
+// target group (an ephemeral agent) is not started by a agent.
 func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
@@ -2108,7 +2108,7 @@ func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
 		t.Fatalf("CreateJob: %v", err)
 	}
 
-	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"})
+	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), AgentName: "w1"})
 	if err != nil {
 		t.Fatalf("StartJobExecution: %v", err)
 	}
@@ -2117,7 +2117,7 @@ func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
 	}
 }
 
-// TestUpdateJobExecution verifies that a worker's outcome is recorded on its
+// TestUpdateJobExecution verifies that a agent's outcome is recorded on its
 // execution, and that a late report for an execution that already reached a
 // terminal status is a no-op (it cannot clobber the terminal status).
 func TestUpdateJobExecution(t *testing.T) {
@@ -2125,15 +2125,15 @@ func TestUpdateJobExecution(t *testing.T) {
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
 
-	if _, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"}); err != nil {
+	if _, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), AgentName: "w1"}); err != nil {
 		t.Fatalf("StartJobExecution: %v", err)
 	}
 
-	// The worker reports its execution succeeded (its final report carries the
+	// The agent reports its execution succeeded (its final report carries the
 	// finish time).
 	updated, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
 		JobId:      job.GetId(),
-		WorkerName: "w1",
+		AgentName: "w1",
 		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
 		FinishedAt: timestamppb.Now(),
 	})
@@ -2151,7 +2151,7 @@ func TestUpdateJobExecution(t *testing.T) {
 	// not clobbered.
 	again, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
 		JobId:      job.GetId(),
-		WorkerName: "w1",
+		AgentName: "w1",
 		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
 		FinishedAt: timestamppb.Now(),
 	})
@@ -2163,21 +2163,21 @@ func TestUpdateJobExecution(t *testing.T) {
 	}
 }
 
-// TestAbandonWorkerExecutions verifies that a worker's running executions are
-// marked failed when the worker re-registers after a restart (fan-out): the
+// TestAbandonAgentExecutions verifies that a agent's running executions are
+// marked failed when the agent re-registers after a restart (fan-out): the
 // stale in-progress executions do not block the job's overall status.
-func TestAbandonWorkerExecutions(t *testing.T) {
+func TestAbandonAgentExecutions(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
 
-	if _, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: "w1"}); err != nil {
+	if _, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), AgentName: "w1"}); err != nil {
 		t.Fatalf("StartJobExecution: %v", err)
 	}
 
-	// The worker restarts: its running execution is abandoned (marked failed).
-	if _, err := client.AbandonWorkerExecutions(ctx, &dbpb.AbandonWorkerExecutionsRequest{WorkerName: "w1"}); err != nil {
-		t.Fatalf("AbandonWorkerExecutions: %v", err)
+	// The agent restarts: its running execution is abandoned (marked failed).
+	if _, err := client.AbandonAgentExecutions(ctx, &dbpb.AbandonAgentExecutionsRequest{AgentName: "w1"}); err != nil {
+		t.Fatalf("AbandonAgentExecutions: %v", err)
 	}
 
 	list, err := client.ListJobExecutions(ctx, &dbpb.ListJobExecutionsRequest{JobId: job.GetId()})
@@ -2381,23 +2381,23 @@ func TestGetLeaseNotFound(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-worker step barrier
+// Cross-agent step barrier
 // ---------------------------------------------------------------------------
 
-// registerWorker registers (or refreshes) a worker in the group, which sets
+// registerAgent registers (or refreshes) a agent in the group, which sets
 // its last_seen_at to now (so it is alive).
-func registerWorker(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, group string) {
+func registerAgent(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name, group string) {
 	t.Helper()
-	if _, err := client.RegisterWorker(ctx, &dbpb.RegisterWorkerRequest{Name: name, Group: group}); err != nil {
-		t.Fatalf("RegisterWorker(%s): %v", name, err)
+	if _, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{Name: name, Group: group}); err != nil {
+		t.Fatalf("RegisterAgent(%s): %v", name, err)
 	}
 }
 
-// reportStepCompletion reports that a worker completed a step of a job.
-func reportStepCompletion(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, worker, stepName string) {
+// reportStepCompletion reports that a agent completed a step of a job.
+func reportStepCompletion(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, jobID int64, agent, stepName string) {
 	t.Helper()
-	if _, err := client.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{JobId: jobID, WorkerName: worker, StepName: stepName}); err != nil {
-		t.Fatalf("ReportStepCompletion(%s, step %s): %v", worker, stepName, err)
+	if _, err := client.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{JobId: jobID, AgentName: agent, StepName: stepName}); err != nil {
+		t.Fatalf("ReportStepCompletion(%s, step %s): %v", agent, stepName, err)
 	}
 }
 
@@ -2445,27 +2445,27 @@ func TestStepBarrierDenormalized(t *testing.T) {
 }
 
 // TestCheckStepBarrierSatisfied verifies that the barrier is satisfied once
-// every alive worker in the group has completed the step.
+// every alive agent in the group has completed the step.
 func TestCheckStepBarrierSatisfied(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
-	registerWorker(t, client, ctx, "w1", "pool-a")
-	registerWorker(t, client, ctx, "w2", "pool-a")
+	registerAgent(t, client, ctx, "w1", "pool-a")
+	registerAgent(t, client, ctx, "w2", "pool-a")
 
-	// Neither worker has completed the step yet: not satisfied.
+	// Neither agent has completed the step yet: not satisfied.
 	if resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0"); resp.GetSatisfied() || resp.GetCancelled() {
 		t.Fatalf("before completions: satisfied=%v cancelled=%v, want both false", resp.GetSatisfied(), resp.GetCancelled())
 	}
 
-	// One worker completes: still not satisfied (the other is alive and
+	// One agent completes: still not satisfied (the other is alive and
 	// outstanding).
 	reportStepCompletion(t, client, ctx, job.GetId(), "w1", "step0")
 	if resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0"); resp.GetSatisfied() {
 		t.Fatalf("after one completion: satisfied=true, want false")
 	}
 
-	// Both workers complete: satisfied.
+	// Both agents complete: satisfied.
 	reportStepCompletion(t, client, ctx, job.GetId(), "w2", "step0")
 	if resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0"); !resp.GetSatisfied() {
 		t.Fatalf("after both completions: satisfied=false, want true")
@@ -2473,12 +2473,12 @@ func TestCheckStepBarrierSatisfied(t *testing.T) {
 }
 
 // TestCheckStepBarrierCancelled verifies that a cancelled job releases the
-// barrier (a waiting worker should stop and report the job cancelled).
+// barrier (a waiting agent should stop and report the job cancelled).
 func TestCheckStepBarrierCancelled(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
-	registerWorker(t, client, ctx, "w1", "pool-a")
+	registerAgent(t, client, ctx, "w1", "pool-a")
 
 	// Cancel the job (it is pending, so the conditional cancel applies).
 	if _, err := client.CancelJob(ctx, &dbpb.CancelJobRequest{Id: job.GetId()}); err != nil {
@@ -2515,60 +2515,60 @@ func TestCheckStepBarrierAgentJob(t *testing.T) {
 	}
 }
 
-// TestCheckStepBarrierDeadWorkerDropped verifies that a worker that is not
+// TestCheckStepBarrierDeadAgentDropped verifies that a agent that is not
 // alive (it has not heartbeated within the liveness window) is dropped from
 // the barrier: its missing step completion does not block the job. This is
-// what lets a job complete when a worker in the group dies mid-step.
-func TestCheckStepBarrierDeadWorkerDropped(t *testing.T) {
+// what lets a job complete when a agent in the group dies mid-step.
+func TestCheckStepBarrierDeadAgentDropped(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
 
-	// Shorten the liveness window so a worker that is not refreshed goes stale
+	// Shorten the liveness window so a agent that is not refreshed goes stale
 	// quickly; restore it afterwards.
-	original := workerAliveThreshold
-	workerAliveThreshold = 30 * time.Millisecond
-	t.Cleanup(func() { workerAliveThreshold = original })
+	original := agentAliveThreshold
+	agentAliveThreshold = 30 * time.Millisecond
+	t.Cleanup(func() { agentAliveThreshold = original })
 
-	// Register both workers (both alive, last_seen_at = now).
-	registerWorker(t, client, ctx, "w1", "pool-a")
-	registerWorker(t, client, ctx, "w2", "pool-a")
+	// Register both agents (both alive, last_seen_at = now).
+	registerAgent(t, client, ctx, "w1", "pool-a")
+	registerAgent(t, client, ctx, "w2", "pool-a")
 
 	// w1 completes the step. w2 does not (it will be made dead below).
 	reportStepCompletion(t, client, ctx, job.GetId(), "w1", "step0")
 
-	// Let both workers go stale, then refresh only w1: w1 is now alive and w2
+	// Let both agents go stale, then refresh only w1: w1 is now alive and w2
 	// is dead.
 	time.Sleep(100 * time.Millisecond)
-	registerWorker(t, client, ctx, "w1", "pool-a")
+	registerAgent(t, client, ctx, "w1", "pool-a")
 
 	// The barrier is satisfied: w1 (alive) has completed the step, and w2
 	// (dead) is dropped from the barrier.
 	resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0")
 	if !resp.GetSatisfied() {
-		t.Errorf("dead worker dropped: satisfied=false, want true (w2 is dead and dropped)")
+		t.Errorf("dead agent dropped: satisfied=false, want true (w2 is dead and dropped)")
 	}
 	if resp.GetCancelled() {
-		t.Errorf("dead worker dropped: cancelled=true, want false")
+		t.Errorf("dead agent dropped: cancelled=true, want false")
 	}
 }
 
-// TestCheckStepBarrierMissingAliveWorkerBlocks verifies that an alive worker
-// that has not completed the step blocks the barrier (a dead worker is
+// TestCheckStepBarrierMissingAliveAgentBlocks verifies that an alive agent
+// that has not completed the step blocks the barrier (a dead agent is
 // dropped, but a live one is not).
-func TestCheckStepBarrierMissingAliveWorkerBlocks(t *testing.T) {
+func TestCheckStepBarrierMissingAliveAgentBlocks(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
 	job := newGroupJob(t, client, ctx, "build", "pool-a")
-	registerWorker(t, client, ctx, "w1", "pool-a")
-	registerWorker(t, client, ctx, "w2", "pool-a")
+	registerAgent(t, client, ctx, "w1", "pool-a")
+	registerAgent(t, client, ctx, "w2", "pool-a")
 
 	// Only w1 completes; w2 is alive and outstanding, so the barrier is not
 	// satisfied.
 	reportStepCompletion(t, client, ctx, job.GetId(), "w1", "step0")
 	resp := checkStepBarrier(t, client, ctx, job.GetId(), "step0")
 	if resp.GetSatisfied() {
-		t.Errorf("alive worker outstanding: satisfied=true, want false")
+		t.Errorf("alive agent outstanding: satisfied=true, want false")
 	}
 }
 

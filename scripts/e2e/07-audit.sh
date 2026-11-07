@@ -2,9 +2,9 @@
 #
 # 07-audit.sh — F-15: the audit log.
 #
-# Boots the stack (with a worker) and generates a spread of audited actions,
+# Boots the stack (with a agent) and generates a spread of audited actions,
 # then verifies that every audited action (a job trigger, an approval
-# decision, a login, a pipeline mutation, a worker lifecycle change, a token
+# decision, a login, a pipeline mutation, a agent lifecycle change, a token
 # exchange, a job status report) is recorded both to a local audit log file
 # (separate from the process's default log) and to the shared audit log in
 # the database (queryable via GET /api/audit). The main API runs with auth
@@ -26,7 +26,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # --- generate the audited actions this script asserts on --------------------
 # Register + log in a user (auth.register, auth.login).
@@ -41,7 +41,7 @@ e2e_http_request POST http://127.0.0.1:8080/api/login \
 [ "$HTTP_CODE" = "200" ] || { echo ">> login returned $HTTP_CODE, want 200 ($HTTP_BODY)" >&2; exit 1; }
 
 # Submit a job with a token_exchange step (run.trigger, job.status,
-# token.exchange). The worker's registration (worker.register) was recorded
+# token.exchange). The agent's registration (agent.register) was recorded
 # when the stack booted.
 log ">> submitting a job to generate audited job events"
 BODY=$(cat <<EOF
@@ -58,7 +58,7 @@ BODY=$(cat <<EOF
 EOF
 )
 JOB_ID=$(e2e_submit_job "$BODY")
-e2e_wait_for "$WORK/worker.log" 'job succeeded' 'job success'
+e2e_wait_for "$WORK/agent.log" 'job succeeded' 'job success'
 
 # Generate an approval decision (job.approve) and a rejection (job.reject).
 log ">> generating approval + rejection audit events"
@@ -129,10 +129,10 @@ printf '%s' "$AUDIT_ALL" | jq -e ".[] | select(.action==\"auth.login\") | select
 # A run trigger (a standalone job submit) is recorded.
 printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="run.trigger")' >/dev/null \
   || { echo ">> no run.trigger audit event recorded" >&2; exit 1; }
-# A worker registration is recorded (the worker registered with the API).
-printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="worker.register")' >/dev/null \
-  || { echo ">> no worker.register audit event recorded" >&2; exit 1; }
-# A job status report from the worker is recorded.
+# A agent registration is recorded (the agent registered with the API).
+printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="agent.register")' >/dev/null \
+  || { echo ">> no agent.register audit event recorded" >&2; exit 1; }
+# A job status report from the agent is recorded.
 printf '%s' "$AUDIT_ALL" | jq -e '.[] | select(.action=="job.status")' >/dev/null \
   || { echo ">> no job.status audit event recorded" >&2; exit 1; }
 

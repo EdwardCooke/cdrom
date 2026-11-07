@@ -63,7 +63,7 @@ pretty-prints across lines.
 | `prune_interval` | `CDROM_AUDIT_PRUNE_INTERVAL` | `24h` | How often the database's audit log is pruned of entries older than `retention`. |
 
 **Audited actions.** Each records the actor (the authenticated user's subject,
-a synthetic `system:*` identity, or the worker's name), the action, the
+a synthetic `system:*` identity, or the agent's name), the action, the
 target, the outcome, the source IP, and — where the action changes a resource
 — the old and new value documents:
 
@@ -72,13 +72,13 @@ target, the outcome, the source IP, and — where the action changes a resource
 - `run.trigger` (a manual run, a standalone job submit, a webhook, or a
   cron/event trigger fired by the scheduler)
 - `job.cancel`, `job.rerun`, `job.approve`, `job.reject`
-- `job.status` (a status report from a worker/agent), `token.exchange`
+- `job.status` (a status report from a agent/agent), `token.exchange`
 - `secret.encrypt` (the value is recorded as `[REDACTED]`)
 - `role.create` / `role.update` / `role.delete`, `binding.add` /
   `binding.delete`
 - `user.create` / `user.update` / `user.delete`
 - `auth.login` (success and failure), `auth.register`
-- `worker.register` / `worker.deregister`
+- `agent.register` / `agent.deregister`
 
 **Secrets.** A secret's value is never stored or displayed in the audit log:
 a secret is represented by its name only, and any secret plaintext that

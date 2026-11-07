@@ -20,12 +20,12 @@ import (
 	"cdrom/internal/models"
 )
 
-// Concurrency resource names. A concurrency key is its own name; the worker
+// Concurrency resource names. A concurrency key is its own name; the agent
 // group's cap and the system-wide cap are synthetic resources.
 const (
 	// globalResourceKey is the synthetic resource for the system-wide cap.
 	globalResourceKey = "global"
-	// groupResourcePrefix prefixes a worker group's synthetic resource name.
+	// groupResourcePrefix prefixes a agent group's synthetic resource name.
 	groupResourcePrefix = "group:"
 )
 
@@ -80,7 +80,7 @@ func (r *limitRules) globalLimit() int {
 	return 0
 }
 
-// groupLimit returns the cap for a worker group: the limit of the most
+// groupLimit returns the cap for a agent group: the limit of the most
 // specific (longest) matching group rule, or 0 (unlimited) when no rule
 // matches.
 func (r *limitRules) groupLimit(group string) int {
@@ -509,7 +509,7 @@ func (s *Server) GetQueueStatus(ctx context.Context, req *dbpb.GetQueueStatusReq
 	resp.GlobalRunning = int32(globalRunning)
 	resp.GlobalLimit = int32(rules.globalLimit())
 
-	// Per-group load: one per worker group that has a running job, with the
+	// Per-group load: one per agent group that has a running job, with the
 	// group's effective limit (resolved from the group limit rules; 0 =
 	// unlimited). The selected columns map onto the struct's exported fields
 	// (target_group -> TargetGroup, the count alias -> Running); "group" is

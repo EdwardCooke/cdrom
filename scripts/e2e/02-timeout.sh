@@ -2,8 +2,8 @@
 #
 # 02-timeout.sh — F-03: a job-level timeout terminates the job as timed_out.
 #
-# Boots the stack (with a worker) and submits a job whose single step sleeps
-# well past the job's declared timeout. The worker terminates the sleeping
+# Boots the stack (with a agent) and submits a job whose single step sleeps
+# well past the job's declared timeout. The agent terminates the sleeping
 # step at the job's deadline and reports the job as timed_out (status 6), not
 # failed. The step declares no per-step timeout, so only the job-level
 # timeout applies.
@@ -17,7 +17,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # --- submit a job that exceeds its job-level timeout ------------------------
 log ">> submitting a job that exceeds its job-level timeout"
@@ -37,9 +37,9 @@ EOF
 JOB_ID=$(e2e_submit_job "$BODY")
 log ">> timeout job id: $JOB_ID"
 
-# The worker terminates the sleeping step at the job's 2s deadline and reports
-# timed_out. Wait for the worker to log the timeout.
-e2e_wait_for "$WORK/worker.log" 'job timed out' 'worker reports the job timed out'
+# The agent terminates the sleeping step at the job's 2s deadline and reports
+# timed_out. Wait for the agent to log the timeout.
+e2e_wait_for "$WORK/agent.log" 'job timed out' 'agent reports the job timed out'
 
 # Verify the API persisted the job as timed_out (status 6).
 FINAL=""

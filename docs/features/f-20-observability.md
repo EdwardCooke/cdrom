@@ -14,13 +14,13 @@ the UI HTTP, the IdP's OIDC surface) can sit behind a firewall while only
 the metrics port is exposed to a scraper. The metric catalog covers what
 operators report on for a deployment
 platform: job and run throughput and duration, success/failure rates, queue
-depth and queue wait, worker utilization, artifact volume, and control-plane
+depth and queue wait, agent utilization, artifact volume, and control-plane
 health (event-log tail lag, leader state, background-loop health). Derived
 from the run metrics are the standard **deployment-reporting (DORA-style)
 indicators** per environment (F-17): deployment frequency, lead time for
 changes, change failure rate, and MTTR. The UI additionally shows
 dashboards fed from the database (per-pipeline run history with durations
-and outcomes, failure trends, worker load, queue depth); Prometheus is the
+and outcomes, failure trends, agent load, queue depth); Prometheus is the
 external interface for Grafana dashboards and alerting.
 
 **Why.** Operators need to see the health and throughput of the platform,
@@ -47,11 +47,11 @@ day-to-day visibility without a separate monitoring stack.
   `promhttp` handler + `/healthz` handler), the label conventions, the
   histogram bucket presets, and a small gRPC server-side `stats.Handler` —
   plus one file per component (`api.go`, `scheduler.go`, `database.go`,
-  `artifacts.go`, `idp.go`, `worker.go`) that declares that component's
+  `artifacts.go`, `idp.go`, `agent.go`) that declares that component's
   metrics. A component constructs its metric set at startup and records
   into it at the hot spots.
 - **Where `/metrics` is served — a dedicated port on every component.**
-  Every binary (API, IdP, scheduler, database, artifacts, worker, agent)
+  Every binary (API, IdP, scheduler, database, artifacts, agent, agent)
   starts a small HTTP server on `metrics.addr` serving **only** `/metrics`
   and `/healthz`. The port is separate from the component's service ports,
   so a deployment can firewall the service ports (gRPC, the UI HTTP, the
@@ -59,7 +59,7 @@ day-to-day visibility without a separate monitoring stack.
   metrics port is not behind the auth middleware — a scraper needs no
   token — which is safe precisely because it is a separate, low-trust
   surface. Defaults (one per component, `127.0.0.1` for local dev):
-  worker/agent `:9100`, database `:9101`, scheduler `:9102`, artifacts
+  agent/agent `:9100`, database `:9101`, scheduler `:9102`, artifacts
   `:9103`, API `:9104`, IdP `:9105`. In a cluster deployment each pod
   exposes its metrics port to the scraper; an agent is ephemeral, so its
   metrics are best-effort (scraped only while it lives).
@@ -71,8 +71,8 @@ day-to-day visibility without a separate monitoring stack.
 - **Naming & labels.** All metrics are prefixed `cdrom_`. Domain labels are
   low-cardinality by construction: `status`, `trigger`, `environment`,
   `group`, `step_type`, `method`, `code`, `route`, `kind`, `resource` (a
-  concurrency key's or worker group's name), `op`, `outcome`. **Never**
-  label by job id, run id, user, worker name, or secret name — those are
+  concurrency key's or agent group's name), `op`, `outcome`. **Never**
+  label by job id, run id, user, agent name, or secret name — those are
   unbounded and would blow up the series count. Per-pipeline breakdowns are
   available through the UI/DB, not through labels.
 - **gRPC instrumentation.** A small server-side `stats.Handler` in
@@ -96,12 +96,12 @@ day-to-day visibility without a separate monitoring stack.
   per-pod series gives the fleet total. Point-in-time *gauges* of global
   state (queue depth, held slots, event-log size) are exposed by the
   component that owns the state (the database service), while per-pod
-  gauges (WS clients, workers on this pod, tail lag, leader flag,
+  gauges (WS clients, agents on this pod, tail lag, leader flag,
   in-flight jobs) are inherently per-pod and are summed by the scraper.
 - **UI dashboards are DB-fed.** The UI's dashboards (run history, failure
-  trends, worker load, queue depth) read from the existing API routes
+  trends, agent load, queue depth) read from the existing API routes
   (`GET /api/pipelines/{id}/runs`, `GET /api/runs/{id}`, `GET /api/queue`,
-  `GET /api/workers`) — the UI has no Prometheus dependency. Prometheus is
+  `GET /api/agents`) — the UI has no Prometheus dependency. Prometheus is
   the interface for external dashboards (Grafana) and alerting.
 
 **Metric catalog.** (Counters are `_total`; durations are `_seconds`
@@ -117,9 +117,9 @@ histograms; gauges are point-in-time.)
 - `cdrom_api_http_requests_total{route,method,code}` /
   `cdrom_api_http_request_duration_seconds{route,method}` — the UI HTTP
   surface.
-- `cdrom_grpc_server_*` (shared) — the worker/agent/scheduler gRPC surface.
+- `cdrom_grpc_server_*` (shared) — the agent/agent/scheduler gRPC surface.
 - `cdrom_api_ws_clients` — gauge, live WebSocket UI clients on this pod.
-- `cdrom_api_workers{group,environment,state}` — gauge, workers registered
+- `cdrom_api_agents{group,environment,state}` — gauge, agents registered
   on this pod (state: `registered` / `watching`).
 - `cdrom_api_event_log_lag` — gauge, how far this pod's tail cursor is
   behind the shared event log head (F-23) — the key HA health signal.
@@ -181,7 +181,7 @@ histograms; gauges are point-in-time.)
 - `cdrom_db_concurrency_slots{kind,resource}` — gauge, durable slots held
   per concurrency resource (kind: `global` / `group` / `key`; F-16).
 - `cdrom_db_duplicate_starts_declined_total` — counter, `StartJobExecution`
-  calls declined by the duplicate-delivery guard (a worker already owning an
+  calls declined by the duplicate-delivery guard (a agent already owning an
   execution of the same job+attempt in a non-pending episode; F-23,
   flake 2026-11-07). Rising trend ⇒ a delivery pathology (nudge storms,
   stream flaps, lease anomalies).
@@ -201,7 +201,7 @@ histograms; gauges are point-in-time.)
 - `cdrom_idp_key_rotations_total`.
 - `cdrom_idp_users` — gauge, user directory size.
 
-*Worker / agent (execution targets):*
+*Agent / agent (execution targets):*
 - `cdrom_worker_jobs_total{status}` — jobs this target completed, by
   terminal status.
 - `cdrom_worker_job_duration_seconds{status}`.
@@ -232,16 +232,16 @@ environment (F-17), either as Grafana queries or in the UI dashboard:
 - `internal/metrics` (new package) — shared plumbing (registry, `promhttp`
   handler, `/healthz`, label conventions, bucket presets, gRPC
   `stats.Handler`) + per-component metric sets (`api.go`, `scheduler.go`,
-  `database.go`, `artifacts.go`, `idp.go`, `worker.go`).
+  `database.go`, `artifacts.go`, `idp.go`, `agent.go`).
 - `internal/config` — `MetricsConfig` (`enabled`, `addr`) +
   `CDROM_METRICS_ENABLED` / `CDROM_METRICS_ADDR`.
 - `cmd/api`, `cmd/idp`, `cmd/scheduler`, `cmd/db`, `cmd/artifacts`,
-  `cmd/worker`, `cmd/agent` — every binary starts the small metrics HTTP
+  `cmd/agent`, `cmd/agent` — every binary starts the small metrics HTTP
   server on `metrics.addr` (serving only `/metrics` + `/healthz`, on a port
   separate from its service ports); the API and IdP additionally construct
   their metric set.
 - `internal/api` — HTTP middleware (requests / durations / auth failures),
-  the gRPC `stats.Handler`, WS-client and worker-hub gauges, event-log tail
+  the gRPC `stats.Handler`, WS-client and agent-hub gauges, event-log tail
   lag, job status + duration recording, artifact-proxy bytes, log-stream
   bytes, token mint/exchange, secret decryption, notification sends.
 - `internal/services/scheduler` — dispatch outcomes, admission loop, queue
@@ -251,7 +251,7 @@ environment (F-17), either as Grafana queries or in the UI dashboard:
   depth + slot gauges.
 - `internal/services/artifacts` — operation counters / bytes / durations.
 - `internal/idp` — token mint, login, key, and user metrics.
-- `internal/worker` + `internal/agent` (with seams in `internal/executor` /
+- `internal/agent` + `internal/agent` (with seams in `internal/executor` /
   `internal/target`) — job/step counters and durations, in-flight, watch
   state, poll/heartbeat, log bytes.
 - `config.example.yaml` — a `metrics:` section.
@@ -259,7 +259,7 @@ environment (F-17), either as Grafana queries or in the UI dashboard:
 - `docs/` — a short "monitoring" note: the scrape targets per component and
   the DORA-style Grafana queries above.
 - UI — dashboards: per-pipeline run history (durations + outcomes), failure
-  trends, worker load (in-flight vs. limit), queue depth (fed from the
+  trends, agent load (in-flight vs. limit), queue depth (fed from the
   existing API routes, not Prometheus).
 
 **Acceptance criteria.**
@@ -293,11 +293,11 @@ environment (F-17), either as Grafana queries or in the UI dashboard:
 - [x] IdP sign-ins and job-token minting are counted in
       `cdrom_idp_logins_total` / `cdrom_idp_tokens_minted_total`.
 - [x] No metric label takes an unbounded value (no job id, run id, user,
-      worker name, or secret name appears in any label).
+      agent name, or secret name appears in any label).
 - [x] `CDROM_METRICS_ENABLED=false` disables the endpoint (and recording)
       on every binary.
 - [x] The UI shows per-pipeline run history with durations and outcomes, a
-      failure-trend view, worker load (in-flight vs. limit), and queue
+      failure-trend view, agent load (in-flight vs. limit), and queue
       depth.
 - [x] The DORA-style indicators (deployment frequency, lead time, change
       failure rate, MTTR) can be computed per environment from the exposed

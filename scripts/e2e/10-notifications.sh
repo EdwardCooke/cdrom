@@ -2,10 +2,10 @@
 #
 # 10-notifications.sh — notifications end-to-end test (F-18).
 #
-# Boots the full local stack (db, scheduler, artifacts, idp, api, worker) plus
+# Boots the full local stack (db, scheduler, artifacts, idp, api, agent) plus
 # the F-18 notification sinks (a fake SMTP server and a fake webhook HTTP
-# server, started by lib.sh's e2e_boot_stack) and a second worker in the
-# "default" group (so a fan-out job runs on two workers, which is what the
+# server, started by lib.sh's e2e_boot_stack) and a second agent in the
+# "default" group (so a fan-out job runs on two agents, which is what the
 # `once` assertion needs). The API is configured to send email to the SMTP
 # sink (plaintext, STARTTLS disabled); a webhook step's url points at the
 # webhook sink.
@@ -22,8 +22,8 @@
 #   3. the webhook's url/headers/body are templated against the step's
 #      condition context (the job's identity).
 #   4. a notification step with the standard `once` field (F-01) sends at most
-#      once per job attempt: a fan-out job (one execution per worker) sends
-#      exactly one email, not one per worker.
+#      once per job attempt: a fan-out job (one execution per agent) sends
+#      exactly one email, not one per agent.
 #   5. a failed send (a webhook non-2xx) fails the job, unless the step sets
 #      ignore_failed (F-06).
 #
@@ -36,13 +36,13 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
-# A second worker in the "default" group, so a fan-out job runs on two workers
+# A second agent in the "default" group, so a fan-out job runs on two agents
 # (the `once` assertion needs more than one target to prove it dedupes). It is
 # started by this script (tracked in PIDS) and torn down on exit.
-e2e_start worker-b "$WORK/worker-b.log" 'registered' CDROM_WORKER_NAME=worker-b CDROM_WORKER_GROUP=default CDROM_LOG_FORMAT=text -- "$BIN/worker"
-e2e_wait_for "$WORK/api.log" 'worker=worker-b' 'second worker watching on the api'
+e2e_start agent-b "$WORK/agent-b.log" 'registered' CDROM_AGENT_NAME=agent-b CDROM_AGENT_GROUP=default CDROM_LOG_FORMAT=text -- "$BIN/agent"
+e2e_wait_for "$WORK/api.log" 'agent=agent-b' 'second agent watching on the api'
 
 # --- 1. email step: markdown (default) rendered to HTML by the API ----------
 log ">> [1/5] email step (markdown -> HTML)"
@@ -148,8 +148,8 @@ grep -q 'plain body e2e-webhook-plain' "$WORK/webhook.log" \
 
 # --- 4. `once` (F-01): a fan-out job sends at most one email ----------------
 log ">> [4/5] once: fan-out job sends exactly one email"
-# Both workers run this job; the email step has `once` set, so only the first
-# worker to reach it claims the slot and sends, the other skips it. Exactly one
+# Both agents run this job; the email step has `once` set, so only the first
+# agent to reach it claims the slot and sends, the other skips it. Exactly one
 # email with this subject must reach the SMTP sink.
 BODY=$(cat <<EOF
 {
@@ -171,7 +171,7 @@ JOB_ID=$(e2e_submit_job "$BODY")
 log ">> job id: $JOB_ID"
 e2e_wait_for_status "$JOB_ID" 3 'once job succeeded' >/dev/null
 e2e_wait_for "$WORK/smtp.log" 'Subject: E2E ONCE' 'smtp sink received the once email'
-# Give both workers a moment to finish (one sends, the other skips), then count
+# Give both agents a moment to finish (one sends, the other skips), then count
 # the messages with this subject: it must be exactly one.
 sleep 1
 ONCE_COUNT=$(grep -c 'Subject: E2E ONCE' "$WORK/smtp.log" || true)

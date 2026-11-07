@@ -6,11 +6,11 @@
 // executor.StageAreaEnv (CDROM_STAGE_DIR), and removed BEST-EFFORT once the
 // job finishes.
 //
-// The area is unique per job INSTANCE AND PER TARGET: fan-out workers each
-// stage their own copy (there is no cross-worker sharing), and the directory
+// The area is unique per job INSTANCE AND PER TARGET: fan-out agents each
+// stage their own copy (there is no cross-agent sharing), and the directory
 // sits under the CONFIGURED WORKER ROOT (MkdirTemp-style) so concurrent jobs
-// never contend. The worker root defaults to the OS temp dir; operators point
-// it at disk-backed storage (config worker_root / CDROM_WORKER_ROOT) when the
+// never contend. The agent root defaults to the OS temp dir; operators point
+// it at disk-backed storage (config agent_root / CDROM_AGENT_ROOT) when the
 // temp dir is RAM-backed.
 package target
 
@@ -25,18 +25,18 @@ import (
 type stageArea struct {
 	mu     sync.Mutex
 	dir    string
-	root   string // the worker root the stage dir is created under ("" = os.TempDir)
+	root   string // the agent root the stage dir is created under ("" = os.TempDir)
 	logger *slog.Logger
 }
 
 // newStageArea builds the lazy provisioner the target hangs on the
-// executor's context (executor.ContextWithStageArea). workerRoot is the base
+// executor's context (executor.ContextWithStageArea). agentRoot is the base
 // directory stage dirs are created under ("" = the OS temp dir).
-func newStageArea(workerRoot string, logger *slog.Logger) *stageArea {
+func newStageArea(agentRoot string, logger *slog.Logger) *stageArea {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &stageArea{root: workerRoot, logger: logger}
+	return &stageArea{root: agentRoot, logger: logger}
 }
 
 // Dir creates (on first call) and returns the stage directory. Safe for
@@ -64,24 +64,24 @@ func (s *stageArea) Dir() (string, error) {
 	return dir, nil
 }
 
-// WarnTmpfsWorkerRoot logs a WARNING when the effective worker root (workerRoot, or
+// WarnTmpfsAgentRoot logs a WARNING when the effective agent root (agentRoot, or
 // the OS temp dir when it is empty) resides on a RAM-backed (tmpfs/ramfs)
 // mount: staged files then consume MEMORY, and a large extraction or
 // download can starve the host. Detection is best-effort and LINUX-ONLY
 // (other platforms report false — see tmpfs_stub.go); a missing or
 // unreadable mounts table is likewise non-alarming. Called ONCE at target
-// startup (worker/agent construction), not per job.
-func WarnTmpfsWorkerRoot(workerRoot string, logger *slog.Logger) {
+// startup (agent/agent construction), not per job.
+func WarnTmpfsAgentRoot(agentRoot string, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	root := workerRoot
+	root := agentRoot
 	if root == "" {
 		root = os.TempDir()
 	}
 	root = filepath.Clean(root)
-	if workerRootIsTmpfs(root) {
-		logger.Warn("target: the staged-working-area root is on a RAM-backed (tmpfs) mount — staged files consume MEMORY and can starve the host; point worker_root / CDROM_WORKER_ROOT at disk-backed storage",
+	if agentRootIsTmpfs(root) {
+		logger.Warn("target: the staged-working-area root is on a RAM-backed (tmpfs) mount — staged files consume MEMORY and can starve the host; point agent_root / CDROM_AGENT_ROOT at disk-backed storage",
 			"root", root)
 	}
 }

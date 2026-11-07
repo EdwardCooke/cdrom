@@ -348,7 +348,7 @@ spec:
 }
 
 // jobFileDeployDev is the deployed job file: its spec has needs /
-// environment / workerGroup / steps (step1, step2) / variables /
+// environment / agentGroup / steps (step1, step2) / variables /
 // variableSets.
 const jobFileDeployDev = `
 apiVersion: cdrom/alphav1
@@ -358,7 +358,7 @@ metadata:
 spec:
   needs: [build]
   environment: dev
-  workerGroup: webapp-workers
+  agentGroup: webapp-agents
   steps:
     step1:
       shell: echo "imported step1"
@@ -417,9 +417,9 @@ spec:
 	if env.String != "staging" {
 		t.Errorf("deploy-dev.environment = %q, want the local override 'staging'", env.String)
 	}
-	wg, _ := dd.Get("workerGroup")
-	if wg.String != "webapp-workers" {
-		t.Errorf("deploy-dev.workerGroup = %q, want the imported 'webapp-workers'", wg.String)
+	wg, _ := dd.Get("agentGroup")
+	if wg.String != "webapp-agents" {
+		t.Errorf("deploy-dev.agentGroup = %q, want the imported 'webapp-agents'", wg.String)
 	}
 	needs, _ := dd.Get("needs")
 	if !(needs.Type == List && len(needs.Items) == 1 && needs.Items[0].String == "build") {

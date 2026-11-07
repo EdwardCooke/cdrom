@@ -136,9 +136,9 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 	}
 	// The pipeline-level deployment options (F-21.1.4): the default failure
 	// mode, the pipeline's concurrency keys, its parameter declarations, and
-	// its triggers. The default worker group is not a pipeline field in the
-	// schema; it is applied to each job that sets no worker group of its own.
-	defaultWorkerGroup, _ := doc.Spec.StringValue("workerGroup")
+	// its triggers. The default agent group is not a pipeline field in the
+	// schema; it is applied to each job that sets no agent group of its own.
+	defaultAgentGroup, _ := doc.Spec.StringValue("agentGroup")
 	if fm, ok := doc.Spec.StringValue("failureMode"); ok {
 		req.FailureMode = fm
 	}
@@ -189,7 +189,7 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 	jobsVal, _ := doc.Spec.Get("jobs")
 	var errs pipelinefile.Errors
 	for _, e := range jobsVal.Entries {
-		job, jobErrs := pipelineFileJob(file, e.Key, e.Value, shared, variableSets, secretSources, defaultWorkerGroup)
+		job, jobErrs := pipelineFileJob(file, e.Key, e.Value, shared, variableSets, secretSources, defaultAgentGroup)
 		if len(jobErrs) > 0 {
 			errs = append(errs, jobErrs...)
 			continue
@@ -212,11 +212,11 @@ func requestFromFile(ctx context.Context, name string, data []byte, root *source
 // compiled against the pipeline's shared steps; its variables are merged with
 // the variables of the variable sets it references (the job's inline
 // variables win on a key collision, F-21.1.3); and its deployment options
-// (needs, environment, workerGroup, timeout, retry, failureMode,
+// (needs, environment, agentGroup, timeout, retry, failureMode,
 // concurrencyKeys, stepBarrier, ignoreFailed, automation, approval, labels)
-// are mapped onto the schema. A job's workerGroup defaults to the pipeline's
-// spec.workerGroup.
-func pipelineFileJob(file, name string, value pipelinefile.Value, shared map[string]*dbpb.JobStep, variableSets map[string]*pipelinefile.VariableSet, secretSources map[string]*pipelinefile.SecretSource, defaultWorkerGroup string) (pipelineJobRequest, pipelinefile.Errors) {
+// are mapped onto the schema. A job's agentGroup defaults to the pipeline's
+// spec.agentGroup.
+func pipelineFileJob(file, name string, value pipelinefile.Value, shared map[string]*dbpb.JobStep, variableSets map[string]*pipelinefile.VariableSet, secretSources map[string]*pipelinefile.SecretSource, defaultAgentGroup string) (pipelineJobRequest, pipelinefile.Errors) {
 	var job pipelineJobRequest
 	var errs pipelinefile.Errors
 	base := pipelinefile.NewPath("spec", "jobs", name)
@@ -231,17 +231,17 @@ func pipelineFileJob(file, name string, value pipelinefile.Value, shared map[str
 	if needs, ok := value.StringSlice("needs"); ok {
 		job.Needs = needs
 	}
-	// The job's environment (F-17) and worker group (defaulting to the
-	// pipeline's spec.workerGroup).
+	// The job's environment (F-17) and agent group (defaulting to the
+	// pipeline's spec.agentGroup).
 	if env, ok := value.StringValue("environment"); ok {
 		job.Environment = env
 	}
-	if wg, ok := value.StringValue("workerGroup"); ok {
-		job.WorkerGroup = wg
+	if wg, ok := value.StringValue("agentGroup"); ok {
+		job.AgentGroup = wg
 	} else if wg, ok := value.StringValue("targetGroup"); ok {
-		job.WorkerGroup = wg
-	} else if defaultWorkerGroup != "" {
-		job.WorkerGroup = defaultWorkerGroup
+		job.AgentGroup = wg
+	} else if defaultAgentGroup != "" {
+		job.AgentGroup = defaultAgentGroup
 	}
 	// The job's automation (F-17) and approval policy (F-17).
 	if a, ok := value.StringValue("automation"); ok {

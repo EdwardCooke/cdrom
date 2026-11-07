@@ -8,12 +8,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// WorkerState is one worker's identity and state, as reported to the API's
-// workers gauge (cdrom_api_workers). Group is the worker's group; Environments
+// AgentState is one agent's identity and state, as reported to the API's
+// agents gauge (cdrom_api_agents). Group is the agent's group; Environments
 // are the environments it belongs to (F-17; empty when it belongs to none);
 // State is "registered" or "watching" (whether it holds an open WatchJobs
 // stream).
-type WorkerState struct {
+type AgentState struct {
 	Group        string
 	Environments []string
 	State        string
@@ -22,7 +22,7 @@ type WorkerState struct {
 // APIMetrics is the API (control plane) metric set (F-20). It is constructed
 // against a Collector's registry (NewAPIMetrics) and recorded into at the
 // control plane's hot spots: the UI HTTP surface, the gRPC surface (via the
-// shared StatsHandler), the WebSocket hub, the worker hub, the event-log tail
+// shared StatsHandler), the WebSocket hub, the agent hub, the event-log tail
 // loop, job status reports, the artifact proxy, log streaming, token
 // minting/exchange, secret decryption, and notification sends.
 //
@@ -40,9 +40,9 @@ type APIMetrics struct {
 	AuthFailures *prometheus.CounterVec
 	// WSClients is the number of live WebSocket UI clients on this pod.
 	WSClients prometheus.Gauge
-	// Workers is the number of workers registered on this pod, by group,
+	// Agents is the number of agents registered on this pod, by group,
 	// environment, and state (registered / watching).
-	Workers *prometheus.GaugeVec
+	Agents *prometheus.GaugeVec
 	// EventLogLag is how far this pod's event-log tail cursor is behind the
 	// shared event log's head (F-23) — the key HA health signal. It is ~0 on a
 	// healthy pod and grows when the tail is stopped.
@@ -118,9 +118,9 @@ func NewAPIMetrics(reg prometheus.Registerer) *APIMetrics {
 			Name: Prefix + "_api_ws_clients",
 			Help: "Live WebSocket UI clients on this pod.",
 		}),
-		Workers: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: Prefix + "_api_workers",
-			Help: "Workers registered on this pod, by group, environment, and state.",
+		Agents: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: Prefix + "_api_agents",
+			Help: "Agents registered on this pod, by group, environment, and state.",
 		}, []string{"group", "environment", "state"}),
 		EventLogLag: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: Prefix + "_api_event_log_lag",
@@ -184,7 +184,7 @@ func NewAPIMetrics(reg prometheus.Registerer) *APIMetrics {
 		}, []string{"verdict"}),
 	}
 	reg.MustRegister(
-		m.HTTPRequests, m.HTTPDuration, m.AuthFailures, m.WSClients, m.Workers,
+		m.HTTPRequests, m.HTTPDuration, m.AuthFailures, m.WSClients, m.Agents,
 		m.EventLogLag, m.JobStatus, m.JobDuration, m.ArtifactBytes,
 		m.LogStreamBytes, m.TokensMinted, m.SecretsDecrypted, m.Notifications,
 		m.SourceSyncs, m.SourceSyncDuration, m.SourceSyncInFlight, m.LeaderState,
@@ -262,11 +262,11 @@ func (m *APIMetrics) SetWSClients(n int) {
 	m.WSClients.Set(float64(n))
 }
 
-// UpdateWorkers recomputes the workers gauge from the given worker states. For
-// each worker it counts the worker under (group, environment, state) for each
+// UpdateAgents recomputes the agents gauge from the given agent states. For
+// each agent it counts the agent under (group, environment, state) for each
 // environment it belongs to (or the empty environment when it belongs to
-// none), so a worker in several environments is counted under each.
-func (m *APIMetrics) UpdateWorkers(states []WorkerState) {
+// none), so a agent in several environments is counted under each.
+func (m *APIMetrics) UpdateAgents(states []AgentState) {
 	if m == nil {
 		return
 	}
@@ -281,14 +281,14 @@ func (m *APIMetrics) UpdateWorkers(states []WorkerState) {
 			counts[key]++
 		}
 	}
-	m.Workers.Reset()
+	m.Agents.Reset()
 	for key, n := range counts {
-		group, env, state := splitWorkerKey(key)
-		m.Workers.WithLabelValues(group, env, state).Set(n)
+		group, env, state := splitAgentKey(key)
+		m.Agents.WithLabelValues(group, env, state).Set(n)
 	}
 }
 
-func splitWorkerKey(key string) (group, env, state string) {
+func splitAgentKey(key string) (group, env, state string) {
 	parts := splitN(key, 3)
 	if len(parts) == 3 {
 		return parts[0], parts[1], parts[2]

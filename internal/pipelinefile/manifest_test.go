@@ -21,7 +21,7 @@ metadata:
     owner: platform-team
     review: required
 spec:
-  workerGroup: webapp-workers
+  agentGroup: webapp-agents
 `
 
 func TestParseValidManifest(t *testing.T) {
@@ -54,8 +54,8 @@ func TestParseValidManifest(t *testing.T) {
 		t.Errorf("Metadata.Annotations[review] = %q, want %q", got, "required")
 	}
 	// Everything else lives under spec.
-	if wg, ok := doc.Spec.StringValue("workerGroup"); !ok || wg != "webapp-workers" {
-		t.Errorf("Spec.workerGroup = %q (ok=%v), want webapp-workers", wg, ok)
+	if wg, ok := doc.Spec.StringValue("agentGroup"); !ok || wg != "webapp-agents" {
+		t.Errorf("Spec.agentGroup = %q (ok=%v), want webapp-agents", wg, ok)
 	}
 }
 
@@ -300,7 +300,7 @@ spec:
 // TestParseCamelCaseKeys verifies the file's mapping keys are camelCase and
 // the compiler reads them as such (acceptance criterion). The complete
 // example's camelCase keys (concurrencyKeys, variableSets, secretSources,
-// workerGroup, failureMode) are recognized.
+// agentGroup, failureMode) are recognized.
 func TestParseCamelCaseKeys(t *testing.T) {
 	doc, err := Parse("doc.yaml", []byte(`
 apiVersion: cdrom/alphav1
@@ -308,7 +308,7 @@ kind: Pipeline
 metadata:
   name: p
 spec:
-  workerGroup: webapp-workers
+  agentGroup: webapp-agents
   failureMode: all
   concurrencyKeys:
     - webapp-prod
@@ -325,8 +325,8 @@ spec:
 	if err != nil {
 		t.Fatalf("Parse returned an error: %v", err)
 	}
-	if wg, ok := doc.Spec.StringValue("workerGroup"); !ok || wg != "webapp-workers" {
-		t.Errorf("spec.workerGroup = %q (ok=%v), want webapp-workers", wg, ok)
+	if wg, ok := doc.Spec.StringValue("agentGroup"); !ok || wg != "webapp-agents" {
+		t.Errorf("spec.agentGroup = %q (ok=%v), want webapp-agents", wg, ok)
 	}
 	if fm, ok := doc.Spec.StringValue("failureMode"); !ok || fm != "all" {
 		t.Errorf("spec.failureMode = %q (ok=%v), want all", fm, ok)
@@ -445,7 +445,7 @@ func TestParseJSONEquivalent(t *testing.T) {
   "apiVersion": "cdrom/alphav1",
   "kind": "Pipeline",
   "metadata": {"name": "p", "labels": {"team": "platform"}},
-  "spec": {"workerGroup": "webapp-workers"}
+  "spec": {"agentGroup": "webapp-agents"}
 }`))
 	if err != nil {
 		t.Fatalf("Parse returned an error for a JSON definition: %v", err)
@@ -456,8 +456,8 @@ func TestParseJSONEquivalent(t *testing.T) {
 	if doc.Metadata.Name != "p" {
 		t.Errorf("Metadata.Name = %q, want p", doc.Metadata.Name)
 	}
-	if wg, ok := doc.Spec.StringValue("workerGroup"); !ok || wg != "webapp-workers" {
-		t.Errorf("Spec.workerGroup = %q (ok=%v), want webapp-workers", wg, ok)
+	if wg, ok := doc.Spec.StringValue("agentGroup"); !ok || wg != "webapp-agents" {
+		t.Errorf("Spec.agentGroup = %q (ok=%v), want webapp-agents", wg, ok)
 	}
 }
 
@@ -516,7 +516,7 @@ func TestPath(t *testing.T) {
 // TestParseCompleteExample verifies the complete example from the format
 // reference (docs/features/f-21.1-file-format-compiler.md) parses: the
 // manifest envelope validates, the kind dispatches to Pipeline, and the spec's
-// camelCase keys (workerGroup, steps, variableSets, secretSources, jobs,
+// camelCase keys (agentGroup, steps, variableSets, secretSources, jobs,
 // failureMode, concurrencyKeys, params, triggers) are all present and in file
 // order.
 func TestParseCompleteExample(t *testing.T) {
@@ -533,7 +533,7 @@ metadata:
     owner: platform-team
     review: required
 spec:
-  workerGroup: webapp-workers
+  agentGroup: webapp-agents
   steps:
     step1:
       shell: echo "Yes"
@@ -636,7 +636,7 @@ spec:
     deploy-dev:
       needs: [build-test]
       environment: dev
-      workerGroup: webapp-workers
+      agentGroup: webapp-agents
       variables:
         canary: "true"
         deploy_token:
@@ -649,7 +649,7 @@ spec:
     deploy-prod:
       needs: [deploy-dev]
       environment: prod
-      workerGroup: prod-workers
+      agentGroup: prod-agents
       variables: {}
       variableSets:
         - global
@@ -686,7 +686,7 @@ spec:
 	for _, e := range doc.Spec.Entries {
 		specKeys = append(specKeys, e.Key)
 	}
-	wantSpec := []string{"workerGroup", "steps", "variableSets", "secretSources", "jobs", "failureMode", "concurrencyKeys", "params", "triggers"}
+	wantSpec := []string{"agentGroup", "steps", "variableSets", "secretSources", "jobs", "failureMode", "concurrencyKeys", "params", "triggers"}
 	if strings.Join(specKeys, ",") != strings.Join(wantSpec, ",") {
 		t.Errorf("spec keys = %v, want %v", specKeys, wantSpec)
 	}
@@ -716,8 +716,8 @@ spec:
 	if env, ok := deployProd.StringValue("environment"); !ok || env != "prod" {
 		t.Errorf("deploy-prod.environment = %q (ok=%v), want prod", env, ok)
 	}
-	if wg, ok := deployProd.StringValue("workerGroup"); !ok || wg != "prod-workers" {
-		t.Errorf("deploy-prod.workerGroup = %q (ok=%v), want prod-workers", wg, ok)
+	if wg, ok := deployProd.StringValue("agentGroup"); !ok || wg != "prod-agents" {
+		t.Errorf("deploy-prod.agentGroup = %q (ok=%v), want prod-agents", wg, ok)
 	}
 	if keys, ok := deployProd.StringSlice("concurrencyKeys"); !ok || len(keys) != 1 || keys[0] != "webapp-prod" {
 		t.Errorf("deploy-prod.concurrencyKeys = %v (ok=%v), want [webapp-prod]", keys, ok)

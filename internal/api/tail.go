@@ -1,16 +1,16 @@
 // Package api — event-log tail loop (F-23, high availability).
 //
 // The tail loop is the API pod's fast path for delivering events to its local
-// workers and UI clients. It periodically tails the shared event log (the
+// agents and UI clients. It periodically tails the shared event log (the
 // Database service's TailEvents RPC) and fans each new event out to the
 // pod's local state:
 //
-//   - an "assignment" event nudges the local workers in the job's target
-//     group (a JobNudge down their WatchJobs streams); the worker then
+//   - an "assignment" event nudges the local agents in the job's target
+//     group (a JobNudge down their WatchJobs streams); the agent then
 //     fetches the job via GetJob and claims it.
-//   - a "cancel" event delivers a JobCancellation down every local worker's
-//     stream (the worker that is running the job interrupts it, F-05).
-//   - a "job_status" / "run_status" / "worker" event is published to the
+//   - a "cancel" event delivers a JobCancellation down every local agent's
+//     stream (the agent that is running the job interrupts it, F-05).
+//   - a "job_status" / "run_status" / "agent" event is published to the
 //     local EventHub (the UI's WebSocket fan-out).
 //   - a "job_log_updated" event triggers a range read of the log delta from
 //     the artifacts store, which is published to the local EventHub as a
@@ -93,7 +93,7 @@ type runStatusPayload struct {
 	Status string `json:"status"`
 }
 
-type workerPayload struct {
+type agentPayload struct {
 	Name   string `json:"name"`
 	Action string `json:"action"`
 }
@@ -211,7 +211,7 @@ func itoa(n int64) string {
 
 // StartEventLogTail runs the event-log tail loop in the background until ctx
 // is cancelled. On each tick it (a) tails the shared event log and fans new
-// events out to the pod's local workers and UI clients, and (b) flushes any
+// events out to the pod's local agents and UI clients, and (b) flushes any
 // due coalesced job_log_updated events to the shared event log (so other pods
 // can range-read the log deltas this pod wrote). It is a no-op when the
 // Database client is nil (e.g. in tests that do not exercise the tail loop).
@@ -251,7 +251,7 @@ func (s *GRPCServer) flushLogCoalescer(ctx context.Context, updates []*logUpdate
 }
 
 // tailEvents fetches new events from the shared event log (since the pod's
-// cursor) and fans them out to the pod's local workers and UI clients.
+// cursor) and fans them out to the pod's local agents and UI clients.
 func (s *GRPCServer) tailEvents(ctx context.Context) {
 	resp, err := s.db.TailEvents(ctx, &dbpb.TailEventsRequest{
 		Cursor: s.tailCursor.Load(),
@@ -293,7 +293,7 @@ func (s *GRPCServer) handleEvent(ctx context.Context, event *dbpb.Event) {
 			s.logger.Warn("api: bad assignment payload", "err", err)
 			return
 		}
-		s.nudgeWorkers(ctx, p.JobID, event.GetWorkerGroup(), event.GetEnvironment())
+		s.nudgeAgents(ctx, p.JobID, event.GetAgentGroup(), event.GetEnvironment())
 	case "cancel":
 		var p cancelPayload
 		if err := json.Unmarshal([]byte(event.GetPayload()), &p); err != nil {
@@ -325,16 +325,16 @@ func (s *GRPCServer) handleEvent(ctx context.Context, event *dbpb.Event) {
 			RunID:  p.RunID,
 			Status: p.Status,
 		})
-	case "worker":
-		var p workerPayload
+	case "agent":
+		var p agentPayload
 		if err := json.Unmarshal([]byte(event.GetPayload()), &p); err != nil {
-			s.logger.Warn("api: bad worker payload", "err", err)
+			s.logger.Warn("api: bad agent payload", "err", err)
 			return
 		}
 		s.publish(Event{
-			Type:   EventWorker,
-			Worker: p.Name,
-			Group:  event.GetWorkerGroup(),
+			Type:   EventAgent,
+			Agent: p.Name,
+			Group:  event.GetAgentGroup(),
 			Action: p.Action,
 		})
 	case "job_log_updated":
@@ -353,19 +353,19 @@ func (s *GRPCServer) handleEvent(ctx context.Context, event *dbpb.Event) {
 	}
 }
 
-// nudgeWorkers delivers a JobNudge to every local worker that serves the job:
-// the workers that belong to the environment (F-17) when one is set, or the
-// workers in the group otherwise. The worker that receives it fetches the job
+// nudgeAgents delivers a JobNudge to every local agent that serves the job:
+// the agents that belong to the environment (F-17) when one is set, or the
+// agents in the group otherwise. The agent that receives it fetches the job
 // via GetJob and claims it (the authoritative routing gate is StartJobExecution).
-func (s *GRPCServer) nudgeWorkers(ctx context.Context, jobID int64, group, environment string) {
+func (s *GRPCServer) nudgeAgents(ctx context.Context, jobID int64, group, environment string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for name, worker := range s.live {
+	for name, agent := range s.live {
 		if environment != "" {
-			if !slices.Contains(worker.environments, environment) {
+			if !slices.Contains(agent.environments, environment) {
 				continue
 			}
-		} else if worker.group != group {
+		} else if agent.group != group {
 			continue
 		}
 		channel, ok := s.watchers[name]
@@ -380,13 +380,13 @@ func (s *GRPCServer) nudgeWorkers(ctx context.Context, jobID int64, group, envir
 		select {
 		case channel <- nudge:
 		default:
-			s.logger.Warn("api: nudge queue full", "worker", name, "job", jobID)
+			s.logger.Warn("api: nudge queue full", "agent", name, "job", jobID)
 		}
 	}
 }
 
-// broadcastCancellation delivers a JobCancellation to every local worker's
-// stream (the worker that is running the job interrupts it, F-05).
+// broadcastCancellation delivers a JobCancellation to every local agent's
+// stream (the agent that is running the job interrupts it, F-05).
 func (s *GRPCServer) broadcastCancellation(jobID int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -398,7 +398,7 @@ func (s *GRPCServer) broadcastCancellation(jobID int64) {
 			},
 		}:
 		default:
-			s.logger.Warn("api: cancel queue full", "worker", name, "job", jobID)
+			s.logger.Warn("api: cancel queue full", "agent", name, "job", jobID)
 		}
 	}
 }

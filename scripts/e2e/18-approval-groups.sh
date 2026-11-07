@@ -2,9 +2,9 @@
 #
 # 18-approval-groups.sh — F-27: approval groups (named approver sets).
 #
-# Boots the stack (with a worker) plus a SECOND, RBAC-enabled API (:8081) that
+# Boots the stack (with a agent) plus a SECOND, RBAC-enabled API (:8081) that
 # shares the stack's IdP + db + scheduler. Approval-gated JOBS are submitted to
-# the OPEN main API (:8080) — the worker runs them and pauses them at the gate
+# the OPEN main API (:8080) — the agent runs them and pauses them at the gate
 # — while the approve/reject decisions and group MANAGEMENT are driven on the
 # ENFORCING API (:8081) as distinct logged-in users. This verifies the F-27
 # authorization model:
@@ -28,7 +28,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 e2e_ensure_users http://127.0.0.1:8080
 e2e_start_rbac_api
 
@@ -96,7 +96,7 @@ want 200 "admin delete group scratch"
 
 # =============================================================================
 # submit_gate_job <suffix> <approvers-json-array> <quorum-int>
-# Submits an approval-gated job to the OPEN API (the worker runs it and pauses
+# Submits an approval-gated job to the OPEN API (the agent runs it and pauses
 # at the gate) and waits for it to reach awaiting_approval (status 8). Prints
 # JUST the job id on stdout (clean for command substitution). Diagnostics go
 # to stderr. The approval step carries the given approvers + quorum params.

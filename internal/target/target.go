@@ -22,27 +22,27 @@ import (
 
 // Context carries what a shared execution needs from a target: the API client
 // (the target talks only to the API), the job's token (presented on the API
-// calls the shared execution makes), the target's name (the worker's name, so
-// a fan-out job's outcome is recorded against the worker's execution; empty
+// calls the shared execution makes), the target's name (the agent's name, so
+// a fan-out job's outcome is recorded against the agent's execution; empty
 // for an ephemeral agent, which reports straight to the job row), and the
-// logger. StepBarrier is the target's cross-worker step barrier (the worker's
+// logger. StepBarrier is the target's cross-agent step barrier (the agent's
 // implementation, when the job has the step-barrier flag set and targets a
-// worker group); it is nil for an agent and for a job that runs unbarriered.
+// agent group); it is nil for an agent and for a job that runs unbarriered.
 type Context struct {
 	API         apipb.APIClient
-	WorkerName  string
+	AgentName  string
 	Token       string
 	StepBarrier executor.StepBarrier
 	// Metrics, when set, is the target's step/job metric set (F-20). RunJob
 	// derives from it the executor's step observer (each step's type and
 	// duration) and wraps the job's log sink so the target counts the log
 	// bytes it streams to the API. Nil when the target records no metrics.
-	Metrics *metrics.WorkerMetrics
+	Metrics *metrics.AgentMetrics
 	Logger  *slog.Logger
-	// WorkerRoot is the base directory the job's staged working area (F-21.6)
-	// is created under; empty means the OS temp dir. Supplied by the worker /
-	// agent from their config (worker_root / CDROM_WORKER_ROOT).
-	WorkerRoot string
+	// AgentRoot is the base directory the job's staged working area (F-21.6)
+	// is created under; empty means the OS temp dir. Supplied by the agent /
+	// agent from their config (agent_root / CDROM_AGENT_ROOT).
+	AgentRoot string
 }
 
 // RunJob executes job's spec through the shared executor, building the
@@ -52,9 +52,9 @@ type Context struct {
 // jobs and the job's identity (for a step's condition, F-06), the run's
 // parameters and identity (for spec interpolation, F-10), and a token
 // exchanger (so a step handler can request a job token for a different
-// audience). When the job has the step-barrier flag set and targets a worker
+// audience). When the job has the step-barrier flag set and targets a agent
 // group, the target's StepBarrier is set in the context so the executor
-// synchronizes the job's workers at each step boundary.
+// synchronizes the job's agents at each step boundary.
 //
 // The provided ctx bounds the job (the target's cancellable job context, so a
 // cancellation or a target shutdown interrupts the running step). Streaming
@@ -134,9 +134,9 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	// attempt) through the API before running it, and a target that does not
 	// claim it skips the step. A retry (a new attempt) may run it again.
 	ctx = executor.ContextWithOnceClaimer(ctx, notify.NewClaimer(tc.API, job.GetId(), tc.Token, job.GetAttempt()))
-	// The cross-worker step barrier: when the job has the step-barrier flag set
-	// and targets a worker group, the workers synchronize at each step boundary
-	// (after a worker completes a step it waits until every worker alive at the
+	// The cross-agent step barrier: when the job has the step-barrier flag set
+	// and targets a agent group, the agents synchronize at each step boundary
+	// (after a agent completes a step it waits until every agent alive at the
 	// step's start has completed it). A job on a single target (an ephemeral
 	// agent) runs its steps unbarriered.
 	if job.GetStepBarrier() && job.GetTargetGroup() != "" && tc.StepBarrier != nil {
@@ -144,10 +144,10 @@ func RunJob(ctx context.Context, tc *Context, job *apipb.Job, collector *executo
 	}
 	// The job's staged working area (F-21.6): lazily created on first use,
 	// exported to every step as CDROM_STAGE_DIR, removed best-effort once the
-	// job finishes. Rooted at the target's WORKER ROOT (config worker_root /
-	// CDROM_WORKER_ROOT; empty = the OS temp dir) so operators can steer staged
+	// job finishes. Rooted at the target's WORKER ROOT (config agent_root /
+	// CDROM_AGENT_ROOT; empty = the OS temp dir) so operators can steer staged
 	// files AWAY from RAM-backed mounts.
-	sa := newStageArea(tc.WorkerRoot, logger)
+	sa := newStageArea(tc.AgentRoot, logger)
 	ctx = executor.ContextWithStageArea(ctx, &executor.StageArea{Func: sa.Dir, Clean: sa.Clean})
 	defer sa.Clean()
 	return executor.Execute(ctx, job.GetSpec(), logger)
@@ -161,7 +161,7 @@ func ReportRunning(ctx context.Context, tc *Context, jobID int64) {
 		JobId:      jobID,
 		Status:     dbpb.JobStatus_JOB_STATUS_RUNNING,
 		StartedAt:  timestamppb.Now(),
-		WorkerName: tc.WorkerName,
+		AgentName: tc.AgentName,
 	}); err != nil {
 		tc.Logger.Error("target: report running", "job", jobID, "err", err)
 	}
@@ -179,7 +179,7 @@ func ReportStatus(ctx context.Context, tc *Context, jobID int64, status dbpb.Job
 		FinishedAt:  timestamppb.Now(),
 		StepResults: collector.ToProto(),
 		Outputs:     collector.JobOutputs(),
-		WorkerName:  tc.WorkerName,
+		AgentName:  tc.AgentName,
 	}); err != nil {
 		tc.Logger.Error("target: report status", "job", jobID, "status", status, "err", err)
 	}
@@ -187,7 +187,7 @@ func ReportStatus(ctx context.Context, tc *Context, jobID int64, status dbpb.Job
 
 // FinishJob reports the job's final status to the API based on the outcome of
 // RunJob and returns it. cancelled reports whether the target observed a user
-// cancellation of the job while it ran (the worker via a cancellation on its
+// cancellation of the job while it ran (the agent via a cancellation on its
 // WatchJobs stream, the agent via its status poller, F-05); it is checked
 // before the error's kind, so a cancellation that interrupted the running
 // step is reported as cancelled rather than failed or timed out. A
@@ -204,7 +204,7 @@ func FinishJob(ctx context.Context, tc *Context, jobID int64, collector *executo
 			return dbpb.JobStatus_JOB_STATUS_CANCELLED
 		}
 		// A cancellation observed at a step barrier (the job was cancelled
-		// while a worker waited for its peers to finish a step) is also
+		// while a agent waited for its peers to finish a step) is also
 		// reported as cancelled, distinct from a failure.
 		if errors.Is(err, executor.ErrCancelled) {
 			tc.Logger.Info("job cancelled (step barrier)", "job", jobID)
@@ -233,7 +233,7 @@ func FinishJob(ctx context.Context, tc *Context, jobID int64, collector *executo
 // step counters and its duration in the target's step-duration histogram. A
 // nil metrics set (metrics disabled) yields a nil observer, so the executor
 // records nothing.
-func stepObserverAdapter(m *metrics.WorkerMetrics) executor.StepObserver {
+func stepObserverAdapter(m *metrics.AgentMetrics) executor.StepObserver {
 	if m == nil {
 		return nil
 	}
@@ -241,7 +241,7 @@ func stepObserverAdapter(m *metrics.WorkerMetrics) executor.StepObserver {
 }
 
 type stepObserver struct {
-	m *metrics.WorkerMetrics
+	m *metrics.AgentMetrics
 }
 
 // StepStarted implements executor.StepObserver.
@@ -270,7 +270,7 @@ func stepStatusName(status executor.StepStatus) string {
 
 // JobStatusName maps a job's terminal status to its metric label value (the
 // same convention the API uses for cdrom_api_job_status_total, so a job's
-// status is labeled identically on both sides). The worker and agent use it
+// status is labeled identically on both sides). The agent and agent use it
 // to label their cdrom_worker_jobs_total / job-duration metrics.
 func JobStatusName(status dbpb.JobStatus) string {
 	switch status {
@@ -295,7 +295,7 @@ func JobStatusName(status dbpb.JobStatus) string {
 // nil (streaming disabled) it is a no-op.
 type countingSink struct {
 	sink *logstream.Sink
-	m    *metrics.WorkerMetrics
+	m    *metrics.AgentMetrics
 }
 
 // WriteStepOutput implements executor.LogSink.

@@ -10,7 +10,7 @@ the existing WebSocket event hub. The UI can tail a running job's logs and
 replay finished logs.
 
 **Why.** "Where is it stuck?" is the #1 question in CD. Today all logging is
-local to the worker/agent and there is no central view.
+local to the agent/agent and there is no central view.
 
 **Scope.**
 - `proto/cdrom/api/v1/api.proto` — a new streaming RPC (e.g.
@@ -20,7 +20,7 @@ local to the worker/agent and there is no central view.
   a new `job_log` event type on the `EventHub`.
 - `internal/models` — a `JobLog`/`JobLogLine` entity (or a blob per job) so
   logs survive past the run.
-- `internal/worker`, `internal/agent` — capture step output and stream it.
+- `internal/agent`, `internal/agent` — capture step output and stream it.
 - `internal/api/ws.go` — new event type; UI consumes it.
 - `proto/cdrom/artifacts/v1/artifacts.proto` - new store, retrieve and append to log
   endpoints.
@@ -34,13 +34,13 @@ local to the worker/agent and there is no central view.
 - [x] While a job runs, its stdout/stderr appears in the UI within ~1s.
 - [x] Logs are attributed to the correct step.
 - [x] After a job finishes, its full log can still be fetched (replay).
-- [x] A slow UI client does not block the worker (backpressure/drop policy
+- [x] A slow UI client does not block the agent (backpressure/drop policy
       defined, consistent with the existing EventHub drop-and-resync behavior).
 - [x] The step logs should be stored via the artifact service and updated as
       the step progresses.
 - [x] Ability to retrieve the logs for a particular step and job from the api server.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **Transport:** a new `StreamJobLogs` client-stream RPC on the API
   (`proto/cdrom/api/v1/api.proto`). The target opens one stream per job and
   sends a `JobLogChunk` per output chunk; the first chunk of a step's output

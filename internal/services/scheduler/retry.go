@@ -1,14 +1,14 @@
 // Package scheduler — retry loop (F-04).
 //
 // The retry loop is the scheduler-side mechanism that re-dispatches a failed
-// job up to its retry budget. The execution target (worker or agent) reports
+// job up to its retry budget. The execution target (agent or agent) reports
 // a job's terminal status to the API, which persists it through the Database
 // service; the retry loop closes the loop by periodically listing failed
 // jobs and, for each that still has retries remaining, atomically claiming
 // the next attempt (Database.ClaimJobRetry) and, after the policy's backoff,
 // appending a "job_status" (reset to pending) and an "assignment" event to
 // the shared event log (F-23), which every API pod tails and fans out to its
-// local workers.
+// local agents.
 //
 // A retry is a new attempt on the same Job row (not a new Job), so the
 // pipeline run stays coherent: the job's attempt counter is incremented and
@@ -42,7 +42,7 @@ type retryClaimer interface {
 // retryPublisher is the subset of the Database client the retry loop uses to
 // append events to the shared event log (F-23): a "job_status" event for the
 // reset to pending (so the UI sees the job is being retried) and an
-// "assignment" event (so the workers in the group are nudged). The concrete
+// "assignment" event (so the agents in the group are nudged). The concrete
 // dbpb.DatabaseClient satisfies it; tests inject a fake.
 type retryPublisher interface {
 	PublishJobStatus(ctx context.Context, in *dbpb.PublishJobStatusRequest, opts ...grpc.CallOption) (*dbpb.PublishEventResponse, error)
@@ -151,7 +151,7 @@ func (s *Server) claimAndDispatch(ctx context.Context, db retryClaimer, publishe
 
 // dispatchForRetry appends an "assignment" event for a retried job to the
 // shared event log (F-23), which every API pod tails and fans out to its
-// local workers in the job's target group. A job with an empty target group
+// local agents in the job's target group. A job with an empty target group
 // is for an ephemeral agent and is not nudged. The job is dispatched only
 // when it is admitted (F-16): it fits within every limit it is subject to;
 // when a resource is at its limit the job is left pending and the background

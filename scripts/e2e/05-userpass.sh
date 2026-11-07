@@ -2,7 +2,7 @@
 #
 # 05-userpass.sh — F-24: username/password authentication.
 #
-# Boots the stack (no worker needed) and verifies that the API proxies the
+# Boots the stack (no agent needed) and verifies that the API proxies the
 # UI's register/login/user-management requests to the IdP, where the real
 # logic lives (password verification, token minting, user storage).
 # Username/password auth is enabled by default, so the stack's IdP serves

@@ -51,7 +51,7 @@ const (
 	Database_StartJobExecution_FullMethodName              = "/cdrom.db.v1.Database/StartJobExecution"
 	Database_ListJobExecutions_FullMethodName              = "/cdrom.db.v1.Database/ListJobExecutions"
 	Database_UpdateJobExecution_FullMethodName             = "/cdrom.db.v1.Database/UpdateJobExecution"
-	Database_AbandonWorkerExecutions_FullMethodName        = "/cdrom.db.v1.Database/AbandonWorkerExecutions"
+	Database_AbandonAgentExecutions_FullMethodName        = "/cdrom.db.v1.Database/AbandonAgentExecutions"
 	Database_ReportStepCompletion_FullMethodName           = "/cdrom.db.v1.Database/ReportStepCompletion"
 	Database_CheckStepBarrier_FullMethodName               = "/cdrom.db.v1.Database/CheckStepBarrier"
 	Database_ResolveApproval_FullMethodName                = "/cdrom.db.v1.Database/ResolveApproval"
@@ -59,17 +59,17 @@ const (
 	Database_PublishCancel_FullMethodName                  = "/cdrom.db.v1.Database/PublishCancel"
 	Database_PublishJobStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishJobStatus"
 	Database_PublishRunStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishRunStatus"
-	Database_PublishWorkerEvent_FullMethodName             = "/cdrom.db.v1.Database/PublishWorkerEvent"
+	Database_PublishAgentEvent_FullMethodName             = "/cdrom.db.v1.Database/PublishAgentEvent"
 	Database_PublishLogUpdated_FullMethodName              = "/cdrom.db.v1.Database/PublishLogUpdated"
 	Database_TailEvents_FullMethodName                     = "/cdrom.db.v1.Database/TailEvents"
 	Database_AcquireLease_FullMethodName                   = "/cdrom.db.v1.Database/AcquireLease"
 	Database_ReleaseLease_FullMethodName                   = "/cdrom.db.v1.Database/ReleaseLease"
 	Database_GetLease_FullMethodName                       = "/cdrom.db.v1.Database/GetLease"
-	Database_RegisterWorker_FullMethodName                 = "/cdrom.db.v1.Database/RegisterWorker"
-	Database_GetWorker_FullMethodName                      = "/cdrom.db.v1.Database/GetWorker"
-	Database_ListWorkers_FullMethodName                    = "/cdrom.db.v1.Database/ListWorkers"
-	Database_HeartbeatWorker_FullMethodName                = "/cdrom.db.v1.Database/HeartbeatWorker"
-	Database_DeleteWorker_FullMethodName                   = "/cdrom.db.v1.Database/DeleteWorker"
+	Database_RegisterAgent_FullMethodName                 = "/cdrom.db.v1.Database/RegisterAgent"
+	Database_GetAgent_FullMethodName                      = "/cdrom.db.v1.Database/GetAgent"
+	Database_ListAgents_FullMethodName                    = "/cdrom.db.v1.Database/ListAgents"
+	Database_HeartbeatAgent_FullMethodName                = "/cdrom.db.v1.Database/HeartbeatAgent"
+	Database_DeleteAgent_FullMethodName                   = "/cdrom.db.v1.Database/DeleteAgent"
 	Database_ListIDPSigningKeys_FullMethodName             = "/cdrom.db.v1.Database/ListIDPSigningKeys"
 	Database_SetIDPSigningKeys_FullMethodName              = "/cdrom.db.v1.Database/SetIDPSigningKeys"
 	Database_StoreIDPAuthCode_FullMethodName               = "/cdrom.db.v1.Database/StoreIDPAuthCode"
@@ -173,13 +173,13 @@ const (
 	Database_ListEnvironments_FullMethodName               = "/cdrom.db.v1.Database/ListEnvironments"
 	Database_UpdateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/UpdateEnvironment"
 	Database_DeleteEnvironment_FullMethodName              = "/cdrom.db.v1.Database/DeleteEnvironment"
-	Database_ListWorkersByEnvironment_FullMethodName       = "/cdrom.db.v1.Database/ListWorkersByEnvironment"
+	Database_ListAgentsByEnvironment_FullMethodName       = "/cdrom.db.v1.Database/ListAgentsByEnvironment"
 	Database_ProceedJob_FullMethodName                     = "/cdrom.db.v1.Database/ProceedJob"
-	Database_CreateWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/CreateWorkerGroup"
-	Database_GetWorkerGroup_FullMethodName                 = "/cdrom.db.v1.Database/GetWorkerGroup"
-	Database_ListWorkerGroups_FullMethodName               = "/cdrom.db.v1.Database/ListWorkerGroups"
-	Database_UpdateWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/UpdateWorkerGroup"
-	Database_DeleteWorkerGroup_FullMethodName              = "/cdrom.db.v1.Database/DeleteWorkerGroup"
+	Database_CreateAgentGroup_FullMethodName              = "/cdrom.db.v1.Database/CreateAgentGroup"
+	Database_GetAgentGroup_FullMethodName                 = "/cdrom.db.v1.Database/GetAgentGroup"
+	Database_ListAgentGroups_FullMethodName               = "/cdrom.db.v1.Database/ListAgentGroups"
+	Database_UpdateAgentGroup_FullMethodName              = "/cdrom.db.v1.Database/UpdateAgentGroup"
+	Database_DeleteAgentGroup_FullMethodName              = "/cdrom.db.v1.Database/DeleteAgentGroup"
 	Database_AllocateStorageObject_FullMethodName          = "/cdrom.db.v1.Database/AllocateStorageObject"
 	Database_ConfirmStorageObject_FullMethodName           = "/cdrom.db.v1.Database/ConfirmStorageObject"
 	Database_GetStorageObject_FullMethodName               = "/cdrom.db.v1.Database/GetStorageObject"
@@ -349,7 +349,7 @@ type DatabaseClient interface {
 	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
 	// ListJobExecutions returns a job's executions (one per worker that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
-	// derive the job's overall status from the per-worker outcomes (fan-out).
+	// derive the job's overall status from the per-agent outcomes (fan-out).
 	ListJobExecutions(ctx context.Context, in *ListJobExecutionsRequest, opts ...grpc.CallOption) (*ListJobExecutionsResponse, error)
 	// UpdateJobExecution records a worker's outcome for its execution of a job
 	// (fan-out): it sets the execution's terminal status (and finished
@@ -357,14 +357,14 @@ type DatabaseClient interface {
 	// job's current attempt. The job row's overall status is not touched here —
 	// it is derived from the executions by the scheduler's job-status loop.
 	UpdateJobExecution(ctx context.Context, in *UpdateJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error)
-	// AbandonWorkerExecutions marks all of a worker's running executions as
+	// AbandonAgentExecutions marks all of a worker's running executions as
 	// failed (fan-out). It is called when a worker re-registers after a
 	// restart: the worker's in-progress executions from before the restart are
 	// abandoned (the worker will not resume them) so they do not block the job's
 	// overall status.
-	AbandonWorkerExecutions(ctx context.Context, in *AbandonWorkerExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	AbandonAgentExecutions(ctx context.Context, in *AbandonAgentExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// ReportStepCompletion records that a worker has completed a step of a job
-	// (the cross-worker step barrier). A worker that runs a job with a step
+	// (the cross-agent step barrier). A worker that runs a job with a step
 	// barrier reports each step it finishes; the barrier for a step is satisfied
 	// once every worker that is alive has reported that step. The completion is
 	// recorded for the job's current attempt.
@@ -404,9 +404,9 @@ type DatabaseClient interface {
 	PublishJobStatus(ctx context.Context, in *PublishJobStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 	// PublishRunStatus appends a "run_status" event for a run's status change.
 	PublishRunStatus(ctx context.Context, in *PublishRunStatusRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
-	// PublishWorkerEvent appends a "worker" event for a worker lifecycle change
+	// PublishAgentEvent appends a "worker" event for a worker lifecycle change
 	// (registered / deregistered / watching).
-	PublishWorkerEvent(ctx context.Context, in *PublishWorkerEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
+	PublishAgentEvent(ctx context.Context, in *PublishAgentEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error)
 	// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
 	// job's log has grown to a given size. The log bytes themselves live in the
 	// artifacts store, never in the event log; a consumer range-reads the delta
@@ -444,12 +444,12 @@ type DatabaseClient interface {
 	// expiry, and last heartbeat) so followers and observers can watch the
 	// leader's liveness. A lease that has never been acquired is NotFound.
 	GetLease(ctx context.Context, in *GetLeaseRequest, opts ...grpc.CallOption) (*Lease, error)
-	// Workers
-	RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
-	GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
-	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
-	HeartbeatWorker(ctx context.Context, in *HeartbeatWorkerRequest, opts ...grpc.CallOption) (*Worker, error)
-	DeleteWorker(ctx context.Context, in *DeleteWorkerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Agents
+	RegisterAgent(ctx context.Context, in *RegisterAgentRequest, opts ...grpc.CallOption) (*Agent, error)
+	GetAgent(ctx context.Context, in *GetAgentRequest, opts ...grpc.CallOption) (*Agent, error)
+	ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
+	HeartbeatAgent(ctx context.Context, in *HeartbeatAgentRequest, opts ...grpc.CallOption) (*Agent, error)
+	DeleteAgent(ctx context.Context, in *DeleteAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// IdP signing keys. The IdP persists its RSA signing keyring here so that
 	// multiple IdP replicas share the same keys and serve a consistent JWKS.
 	// ListIDPSigningKeys returns the current key plus any not-yet-expired
@@ -816,7 +816,7 @@ type DatabaseClient interface {
 	// forever.
 	ReconcileConcurrency(ctx context.Context, in *ReconcileConcurrencyRequest, opts ...grpc.CallOption) (*ReconcileConcurrencyResponse, error)
 	// Concurrency limit rules (F-16). The limits that bound how much runs in
-	// parallel — the system-wide cap, per-worker-group caps, and per-concurrency-
+	// parallel — the system-wide cap, per-agent-group caps, and per-concurrency-
 	// key caps — are stored as regex-based rules in the database (not
 	// configuration), so they can be edited at runtime via the API without a
 	// redeployment. A rule has a kind (global / group / key), a regex pattern
@@ -938,11 +938,11 @@ type DatabaseClient interface {
 	// DeleteEnvironment removes an environment. A missing environment returns
 	// NotFound.
 	DeleteEnvironment(ctx context.Context, in *DeleteEnvironmentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// ListWorkersByEnvironment returns the workers that belong to the named
+	// ListAgentsByEnvironment returns the workers that belong to the named
 	// environment (F-17): the workers whose declared environment list includes
 	// it. This is how the API resolves an environment to its target workers
 	// when it dispatches a job targeting the environment.
-	ListWorkersByEnvironment(ctx context.Context, in *ListWorkersByEnvironmentRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error)
+	ListAgentsByEnvironment(ctx context.Context, in *ListAgentsByEnvironmentRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error)
 	// ProceedJob releases a job held by a `manual` environment (F-17): it
 	// conditionally marks the job as running (and stamps the started timestamp)
 	// only if the job is still awaiting_proceed. It returns whether the job was
@@ -950,31 +950,31 @@ type DatabaseClient interface {
 	// job that is no longer awaiting_proceed (it was cancelled, or it was
 	// already proceeded) is left untouched, so a late proceed is a no-op.
 	ProceedJob(ctx context.Context, in *ProceedJobRequest, opts ...grpc.CallOption) (*ProceedJobResponse, error)
-	// Worker groups (F-29). A worker group is a named group of long-lived
+	// Agent groups (F-29). A worker group is a named group of long-lived
 	// workers (a job's target_group names it; a worker's group names it). It is
 	// a first-class, labelable row: its labels are combined onto the runs of the
 	// jobs that target it. The row is metadata-only — it does not change
 	// dispatch (which still keys off the worker's declared group string) — so a
 	// group that has no row simply contributes no labels.
 	//
-	// CreateWorkerGroup adds a worker group. It rejects an empty name and a
+	// CreateAgentGroup adds a worker group. It rejects an empty name and a
 	// name that collides with an existing group (it is idempotent on name: a
 	// create for an existing group is a no-op that returns the existing row).
-	CreateWorkerGroup(ctx context.Context, in *CreateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
-	// GetWorkerGroup returns the named worker group. A missing group returns
+	CreateAgentGroup(ctx context.Context, in *CreateAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error)
+	// GetAgentGroup returns the named worker group. A missing group returns
 	// NotFound.
-	GetWorkerGroup(ctx context.Context, in *GetWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
-	// ListWorkerGroups returns every worker group, optionally filtered by name
+	GetAgentGroup(ctx context.Context, in *GetAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error)
+	// ListAgentGroups returns every worker group, optionally filtered by name
 	// prefix.
-	ListWorkerGroups(ctx context.Context, in *ListWorkerGroupsRequest, opts ...grpc.CallOption) (*ListWorkerGroupsResponse, error)
-	// UpdateWorkerGroup edits a worker group's description and/or labels. A
+	ListAgentGroups(ctx context.Context, in *ListAgentGroupsRequest, opts ...grpc.CallOption) (*ListAgentGroupsResponse, error)
+	// UpdateAgentGroup edits a worker group's description and/or labels. A
 	// missing group returns NotFound.
-	UpdateWorkerGroup(ctx context.Context, in *UpdateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error)
-	// DeleteWorkerGroup removes a worker group. A missing group returns
+	UpdateAgentGroup(ctx context.Context, in *UpdateAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error)
+	// DeleteAgentGroup removes a worker group. A missing group returns
 	// NotFound. Deleting a group does not affect the workers that belong to it
 	// (they keep their group string) or the jobs that target it (they still
 	// dispatch to the group's workers); it only removes the group's labels.
-	DeleteWorkerGroup(ctx context.Context, in *DeleteWorkerGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	DeleteAgentGroup(ctx context.Context, in *DeleteAgentGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Storage objects (F-21.6 storage redesign). A storage_object is the
 	// DATABASE'S record of a file held by the artifacts service: its kind,
 	// namespace, display name, size, content hash, package coordinates (when
@@ -1344,10 +1344,10 @@ func (c *databaseClient) UpdateJobExecution(ctx context.Context, in *UpdateJobEx
 	return out, nil
 }
 
-func (c *databaseClient) AbandonWorkerExecutions(ctx context.Context, in *AbandonWorkerExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *databaseClient) AbandonAgentExecutions(ctx context.Context, in *AbandonAgentExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Database_AbandonWorkerExecutions_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Database_AbandonAgentExecutions_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1424,10 +1424,10 @@ func (c *databaseClient) PublishRunStatus(ctx context.Context, in *PublishRunSta
 	return out, nil
 }
 
-func (c *databaseClient) PublishWorkerEvent(ctx context.Context, in *PublishWorkerEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
+func (c *databaseClient) PublishAgentEvent(ctx context.Context, in *PublishAgentEventRequest, opts ...grpc.CallOption) (*PublishEventResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PublishEventResponse)
-	err := c.cc.Invoke(ctx, Database_PublishWorkerEvent_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Database_PublishAgentEvent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1484,50 +1484,50 @@ func (c *databaseClient) GetLease(ctx context.Context, in *GetLeaseRequest, opts
 	return out, nil
 }
 
-func (c *databaseClient) RegisterWorker(ctx context.Context, in *RegisterWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
+func (c *databaseClient) RegisterAgent(ctx context.Context, in *RegisterAgentRequest, opts ...grpc.CallOption) (*Agent, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Worker)
-	err := c.cc.Invoke(ctx, Database_RegisterWorker_FullMethodName, in, out, cOpts...)
+	out := new(Agent)
+	err := c.cc.Invoke(ctx, Database_RegisterAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) GetWorker(ctx context.Context, in *GetWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
+func (c *databaseClient) GetAgent(ctx context.Context, in *GetAgentRequest, opts ...grpc.CallOption) (*Agent, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Worker)
-	err := c.cc.Invoke(ctx, Database_GetWorker_FullMethodName, in, out, cOpts...)
+	out := new(Agent)
+	err := c.cc.Invoke(ctx, Database_GetAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error) {
+func (c *databaseClient) ListAgents(ctx context.Context, in *ListAgentsRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListWorkersResponse)
-	err := c.cc.Invoke(ctx, Database_ListWorkers_FullMethodName, in, out, cOpts...)
+	out := new(ListAgentsResponse)
+	err := c.cc.Invoke(ctx, Database_ListAgents_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) HeartbeatWorker(ctx context.Context, in *HeartbeatWorkerRequest, opts ...grpc.CallOption) (*Worker, error) {
+func (c *databaseClient) HeartbeatAgent(ctx context.Context, in *HeartbeatAgentRequest, opts ...grpc.CallOption) (*Agent, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Worker)
-	err := c.cc.Invoke(ctx, Database_HeartbeatWorker_FullMethodName, in, out, cOpts...)
+	out := new(Agent)
+	err := c.cc.Invoke(ctx, Database_HeartbeatAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) DeleteWorker(ctx context.Context, in *DeleteWorkerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *databaseClient) DeleteAgent(ctx context.Context, in *DeleteAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Database_DeleteWorker_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Database_DeleteAgent_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2564,10 +2564,10 @@ func (c *databaseClient) DeleteEnvironment(ctx context.Context, in *DeleteEnviro
 	return out, nil
 }
 
-func (c *databaseClient) ListWorkersByEnvironment(ctx context.Context, in *ListWorkersByEnvironmentRequest, opts ...grpc.CallOption) (*ListWorkersResponse, error) {
+func (c *databaseClient) ListAgentsByEnvironment(ctx context.Context, in *ListAgentsByEnvironmentRequest, opts ...grpc.CallOption) (*ListAgentsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListWorkersResponse)
-	err := c.cc.Invoke(ctx, Database_ListWorkersByEnvironment_FullMethodName, in, out, cOpts...)
+	out := new(ListAgentsResponse)
+	err := c.cc.Invoke(ctx, Database_ListAgentsByEnvironment_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2584,50 +2584,50 @@ func (c *databaseClient) ProceedJob(ctx context.Context, in *ProceedJobRequest, 
 	return out, nil
 }
 
-func (c *databaseClient) CreateWorkerGroup(ctx context.Context, in *CreateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error) {
+func (c *databaseClient) CreateAgentGroup(ctx context.Context, in *CreateAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(WorkerGroup)
-	err := c.cc.Invoke(ctx, Database_CreateWorkerGroup_FullMethodName, in, out, cOpts...)
+	out := new(AgentGroup)
+	err := c.cc.Invoke(ctx, Database_CreateAgentGroup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) GetWorkerGroup(ctx context.Context, in *GetWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error) {
+func (c *databaseClient) GetAgentGroup(ctx context.Context, in *GetAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(WorkerGroup)
-	err := c.cc.Invoke(ctx, Database_GetWorkerGroup_FullMethodName, in, out, cOpts...)
+	out := new(AgentGroup)
+	err := c.cc.Invoke(ctx, Database_GetAgentGroup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) ListWorkerGroups(ctx context.Context, in *ListWorkerGroupsRequest, opts ...grpc.CallOption) (*ListWorkerGroupsResponse, error) {
+func (c *databaseClient) ListAgentGroups(ctx context.Context, in *ListAgentGroupsRequest, opts ...grpc.CallOption) (*ListAgentGroupsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListWorkerGroupsResponse)
-	err := c.cc.Invoke(ctx, Database_ListWorkerGroups_FullMethodName, in, out, cOpts...)
+	out := new(ListAgentGroupsResponse)
+	err := c.cc.Invoke(ctx, Database_ListAgentGroups_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) UpdateWorkerGroup(ctx context.Context, in *UpdateWorkerGroupRequest, opts ...grpc.CallOption) (*WorkerGroup, error) {
+func (c *databaseClient) UpdateAgentGroup(ctx context.Context, in *UpdateAgentGroupRequest, opts ...grpc.CallOption) (*AgentGroup, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(WorkerGroup)
-	err := c.cc.Invoke(ctx, Database_UpdateWorkerGroup_FullMethodName, in, out, cOpts...)
+	out := new(AgentGroup)
+	err := c.cc.Invoke(ctx, Database_UpdateAgentGroup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *databaseClient) DeleteWorkerGroup(ctx context.Context, in *DeleteWorkerGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *databaseClient) DeleteAgentGroup(ctx context.Context, in *DeleteAgentGroupRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Database_DeleteWorkerGroup_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Database_DeleteAgentGroup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2873,7 +2873,7 @@ type DatabaseServer interface {
 	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
 	// ListJobExecutions returns a job's executions (one per worker that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
-	// derive the job's overall status from the per-worker outcomes (fan-out).
+	// derive the job's overall status from the per-agent outcomes (fan-out).
 	ListJobExecutions(context.Context, *ListJobExecutionsRequest) (*ListJobExecutionsResponse, error)
 	// UpdateJobExecution records a worker's outcome for its execution of a job
 	// (fan-out): it sets the execution's terminal status (and finished
@@ -2881,14 +2881,14 @@ type DatabaseServer interface {
 	// job's current attempt. The job row's overall status is not touched here —
 	// it is derived from the executions by the scheduler's job-status loop.
 	UpdateJobExecution(context.Context, *UpdateJobExecutionRequest) (*JobExecution, error)
-	// AbandonWorkerExecutions marks all of a worker's running executions as
+	// AbandonAgentExecutions marks all of a worker's running executions as
 	// failed (fan-out). It is called when a worker re-registers after a
 	// restart: the worker's in-progress executions from before the restart are
 	// abandoned (the worker will not resume them) so they do not block the job's
 	// overall status.
-	AbandonWorkerExecutions(context.Context, *AbandonWorkerExecutionsRequest) (*emptypb.Empty, error)
+	AbandonAgentExecutions(context.Context, *AbandonAgentExecutionsRequest) (*emptypb.Empty, error)
 	// ReportStepCompletion records that a worker has completed a step of a job
-	// (the cross-worker step barrier). A worker that runs a job with a step
+	// (the cross-agent step barrier). A worker that runs a job with a step
 	// barrier reports each step it finishes; the barrier for a step is satisfied
 	// once every worker that is alive has reported that step. The completion is
 	// recorded for the job's current attempt.
@@ -2928,9 +2928,9 @@ type DatabaseServer interface {
 	PublishJobStatus(context.Context, *PublishJobStatusRequest) (*PublishEventResponse, error)
 	// PublishRunStatus appends a "run_status" event for a run's status change.
 	PublishRunStatus(context.Context, *PublishRunStatusRequest) (*PublishEventResponse, error)
-	// PublishWorkerEvent appends a "worker" event for a worker lifecycle change
+	// PublishAgentEvent appends a "worker" event for a worker lifecycle change
 	// (registered / deregistered / watching).
-	PublishWorkerEvent(context.Context, *PublishWorkerEventRequest) (*PublishEventResponse, error)
+	PublishAgentEvent(context.Context, *PublishAgentEventRequest) (*PublishEventResponse, error)
 	// PublishLogUpdated appends a "job_log_updated" event: a pointer that says a
 	// job's log has grown to a given size. The log bytes themselves live in the
 	// artifacts store, never in the event log; a consumer range-reads the delta
@@ -2968,12 +2968,12 @@ type DatabaseServer interface {
 	// expiry, and last heartbeat) so followers and observers can watch the
 	// leader's liveness. A lease that has never been acquired is NotFound.
 	GetLease(context.Context, *GetLeaseRequest) (*Lease, error)
-	// Workers
-	RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error)
-	GetWorker(context.Context, *GetWorkerRequest) (*Worker, error)
-	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error)
-	HeartbeatWorker(context.Context, *HeartbeatWorkerRequest) (*Worker, error)
-	DeleteWorker(context.Context, *DeleteWorkerRequest) (*emptypb.Empty, error)
+	// Agents
+	RegisterAgent(context.Context, *RegisterAgentRequest) (*Agent, error)
+	GetAgent(context.Context, *GetAgentRequest) (*Agent, error)
+	ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error)
+	HeartbeatAgent(context.Context, *HeartbeatAgentRequest) (*Agent, error)
+	DeleteAgent(context.Context, *DeleteAgentRequest) (*emptypb.Empty, error)
 	// IdP signing keys. The IdP persists its RSA signing keyring here so that
 	// multiple IdP replicas share the same keys and serve a consistent JWKS.
 	// ListIDPSigningKeys returns the current key plus any not-yet-expired
@@ -3340,7 +3340,7 @@ type DatabaseServer interface {
 	// forever.
 	ReconcileConcurrency(context.Context, *ReconcileConcurrencyRequest) (*ReconcileConcurrencyResponse, error)
 	// Concurrency limit rules (F-16). The limits that bound how much runs in
-	// parallel — the system-wide cap, per-worker-group caps, and per-concurrency-
+	// parallel — the system-wide cap, per-agent-group caps, and per-concurrency-
 	// key caps — are stored as regex-based rules in the database (not
 	// configuration), so they can be edited at runtime via the API without a
 	// redeployment. A rule has a kind (global / group / key), a regex pattern
@@ -3462,11 +3462,11 @@ type DatabaseServer interface {
 	// DeleteEnvironment removes an environment. A missing environment returns
 	// NotFound.
 	DeleteEnvironment(context.Context, *DeleteEnvironmentRequest) (*emptypb.Empty, error)
-	// ListWorkersByEnvironment returns the workers that belong to the named
+	// ListAgentsByEnvironment returns the workers that belong to the named
 	// environment (F-17): the workers whose declared environment list includes
 	// it. This is how the API resolves an environment to its target workers
 	// when it dispatches a job targeting the environment.
-	ListWorkersByEnvironment(context.Context, *ListWorkersByEnvironmentRequest) (*ListWorkersResponse, error)
+	ListAgentsByEnvironment(context.Context, *ListAgentsByEnvironmentRequest) (*ListAgentsResponse, error)
 	// ProceedJob releases a job held by a `manual` environment (F-17): it
 	// conditionally marks the job as running (and stamps the started timestamp)
 	// only if the job is still awaiting_proceed. It returns whether the job was
@@ -3474,31 +3474,31 @@ type DatabaseServer interface {
 	// job that is no longer awaiting_proceed (it was cancelled, or it was
 	// already proceeded) is left untouched, so a late proceed is a no-op.
 	ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error)
-	// Worker groups (F-29). A worker group is a named group of long-lived
+	// Agent groups (F-29). A worker group is a named group of long-lived
 	// workers (a job's target_group names it; a worker's group names it). It is
 	// a first-class, labelable row: its labels are combined onto the runs of the
 	// jobs that target it. The row is metadata-only — it does not change
 	// dispatch (which still keys off the worker's declared group string) — so a
 	// group that has no row simply contributes no labels.
 	//
-	// CreateWorkerGroup adds a worker group. It rejects an empty name and a
+	// CreateAgentGroup adds a worker group. It rejects an empty name and a
 	// name that collides with an existing group (it is idempotent on name: a
 	// create for an existing group is a no-op that returns the existing row).
-	CreateWorkerGroup(context.Context, *CreateWorkerGroupRequest) (*WorkerGroup, error)
-	// GetWorkerGroup returns the named worker group. A missing group returns
+	CreateAgentGroup(context.Context, *CreateAgentGroupRequest) (*AgentGroup, error)
+	// GetAgentGroup returns the named worker group. A missing group returns
 	// NotFound.
-	GetWorkerGroup(context.Context, *GetWorkerGroupRequest) (*WorkerGroup, error)
-	// ListWorkerGroups returns every worker group, optionally filtered by name
+	GetAgentGroup(context.Context, *GetAgentGroupRequest) (*AgentGroup, error)
+	// ListAgentGroups returns every worker group, optionally filtered by name
 	// prefix.
-	ListWorkerGroups(context.Context, *ListWorkerGroupsRequest) (*ListWorkerGroupsResponse, error)
-	// UpdateWorkerGroup edits a worker group's description and/or labels. A
+	ListAgentGroups(context.Context, *ListAgentGroupsRequest) (*ListAgentGroupsResponse, error)
+	// UpdateAgentGroup edits a worker group's description and/or labels. A
 	// missing group returns NotFound.
-	UpdateWorkerGroup(context.Context, *UpdateWorkerGroupRequest) (*WorkerGroup, error)
-	// DeleteWorkerGroup removes a worker group. A missing group returns
+	UpdateAgentGroup(context.Context, *UpdateAgentGroupRequest) (*AgentGroup, error)
+	// DeleteAgentGroup removes a worker group. A missing group returns
 	// NotFound. Deleting a group does not affect the workers that belong to it
 	// (they keep their group string) or the jobs that target it (they still
 	// dispatch to the group's workers); it only removes the group's labels.
-	DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error)
+	DeleteAgentGroup(context.Context, *DeleteAgentGroupRequest) (*emptypb.Empty, error)
 	// Storage objects (F-21.6 storage redesign). A storage_object is the
 	// DATABASE'S record of a file held by the artifacts service: its kind,
 	// namespace, display name, size, content hash, package coordinates (when
@@ -3651,8 +3651,8 @@ func (UnimplementedDatabaseServer) ListJobExecutions(context.Context, *ListJobEx
 func (UnimplementedDatabaseServer) UpdateJobExecution(context.Context, *UpdateJobExecutionRequest) (*JobExecution, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateJobExecution not implemented")
 }
-func (UnimplementedDatabaseServer) AbandonWorkerExecutions(context.Context, *AbandonWorkerExecutionsRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method AbandonWorkerExecutions not implemented")
+func (UnimplementedDatabaseServer) AbandonAgentExecutions(context.Context, *AbandonAgentExecutionsRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method AbandonAgentExecutions not implemented")
 }
 func (UnimplementedDatabaseServer) ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportStepCompletion not implemented")
@@ -3675,8 +3675,8 @@ func (UnimplementedDatabaseServer) PublishJobStatus(context.Context, *PublishJob
 func (UnimplementedDatabaseServer) PublishRunStatus(context.Context, *PublishRunStatusRequest) (*PublishEventResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishRunStatus not implemented")
 }
-func (UnimplementedDatabaseServer) PublishWorkerEvent(context.Context, *PublishWorkerEventRequest) (*PublishEventResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method PublishWorkerEvent not implemented")
+func (UnimplementedDatabaseServer) PublishAgentEvent(context.Context, *PublishAgentEventRequest) (*PublishEventResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PublishAgentEvent not implemented")
 }
 func (UnimplementedDatabaseServer) PublishLogUpdated(context.Context, *PublishLogUpdatedRequest) (*PublishEventResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PublishLogUpdated not implemented")
@@ -3693,20 +3693,20 @@ func (UnimplementedDatabaseServer) ReleaseLease(context.Context, *ReleaseLeaseRe
 func (UnimplementedDatabaseServer) GetLease(context.Context, *GetLeaseRequest) (*Lease, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetLease not implemented")
 }
-func (UnimplementedDatabaseServer) RegisterWorker(context.Context, *RegisterWorkerRequest) (*Worker, error) {
-	return nil, status.Error(codes.Unimplemented, "method RegisterWorker not implemented")
+func (UnimplementedDatabaseServer) RegisterAgent(context.Context, *RegisterAgentRequest) (*Agent, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterAgent not implemented")
 }
-func (UnimplementedDatabaseServer) GetWorker(context.Context, *GetWorkerRequest) (*Worker, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetWorker not implemented")
+func (UnimplementedDatabaseServer) GetAgent(context.Context, *GetAgentRequest) (*Agent, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAgent not implemented")
 }
-func (UnimplementedDatabaseServer) ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListWorkers not implemented")
+func (UnimplementedDatabaseServer) ListAgents(context.Context, *ListAgentsRequest) (*ListAgentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgents not implemented")
 }
-func (UnimplementedDatabaseServer) HeartbeatWorker(context.Context, *HeartbeatWorkerRequest) (*Worker, error) {
-	return nil, status.Error(codes.Unimplemented, "method HeartbeatWorker not implemented")
+func (UnimplementedDatabaseServer) HeartbeatAgent(context.Context, *HeartbeatAgentRequest) (*Agent, error) {
+	return nil, status.Error(codes.Unimplemented, "method HeartbeatAgent not implemented")
 }
-func (UnimplementedDatabaseServer) DeleteWorker(context.Context, *DeleteWorkerRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteWorker not implemented")
+func (UnimplementedDatabaseServer) DeleteAgent(context.Context, *DeleteAgentRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAgent not implemented")
 }
 func (UnimplementedDatabaseServer) ListIDPSigningKeys(context.Context, *ListIDPSigningKeysRequest) (*ListIDPSigningKeysResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListIDPSigningKeys not implemented")
@@ -4017,26 +4017,26 @@ func (UnimplementedDatabaseServer) UpdateEnvironment(context.Context, *UpdateEnv
 func (UnimplementedDatabaseServer) DeleteEnvironment(context.Context, *DeleteEnvironmentRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteEnvironment not implemented")
 }
-func (UnimplementedDatabaseServer) ListWorkersByEnvironment(context.Context, *ListWorkersByEnvironmentRequest) (*ListWorkersResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListWorkersByEnvironment not implemented")
+func (UnimplementedDatabaseServer) ListAgentsByEnvironment(context.Context, *ListAgentsByEnvironmentRequest) (*ListAgentsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgentsByEnvironment not implemented")
 }
 func (UnimplementedDatabaseServer) ProceedJob(context.Context, *ProceedJobRequest) (*ProceedJobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProceedJob not implemented")
 }
-func (UnimplementedDatabaseServer) CreateWorkerGroup(context.Context, *CreateWorkerGroupRequest) (*WorkerGroup, error) {
-	return nil, status.Error(codes.Unimplemented, "method CreateWorkerGroup not implemented")
+func (UnimplementedDatabaseServer) CreateAgentGroup(context.Context, *CreateAgentGroupRequest) (*AgentGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateAgentGroup not implemented")
 }
-func (UnimplementedDatabaseServer) GetWorkerGroup(context.Context, *GetWorkerGroupRequest) (*WorkerGroup, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetWorkerGroup not implemented")
+func (UnimplementedDatabaseServer) GetAgentGroup(context.Context, *GetAgentGroupRequest) (*AgentGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAgentGroup not implemented")
 }
-func (UnimplementedDatabaseServer) ListWorkerGroups(context.Context, *ListWorkerGroupsRequest) (*ListWorkerGroupsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListWorkerGroups not implemented")
+func (UnimplementedDatabaseServer) ListAgentGroups(context.Context, *ListAgentGroupsRequest) (*ListAgentGroupsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgentGroups not implemented")
 }
-func (UnimplementedDatabaseServer) UpdateWorkerGroup(context.Context, *UpdateWorkerGroupRequest) (*WorkerGroup, error) {
-	return nil, status.Error(codes.Unimplemented, "method UpdateWorkerGroup not implemented")
+func (UnimplementedDatabaseServer) UpdateAgentGroup(context.Context, *UpdateAgentGroupRequest) (*AgentGroup, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateAgentGroup not implemented")
 }
-func (UnimplementedDatabaseServer) DeleteWorkerGroup(context.Context, *DeleteWorkerGroupRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteWorkerGroup not implemented")
+func (UnimplementedDatabaseServer) DeleteAgentGroup(context.Context, *DeleteAgentGroupRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteAgentGroup not implemented")
 }
 func (UnimplementedDatabaseServer) AllocateStorageObject(context.Context, *AllocateStorageObjectRequest) (*StorageObject, error) {
 	return nil, status.Error(codes.Unimplemented, "method AllocateStorageObject not implemented")
@@ -4641,20 +4641,20 @@ func _Database_UpdateJobExecution_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_AbandonWorkerExecutions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AbandonWorkerExecutionsRequest)
+func _Database_AbandonAgentExecutions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AbandonAgentExecutionsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).AbandonWorkerExecutions(ctx, in)
+		return srv.(DatabaseServer).AbandonAgentExecutions(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_AbandonWorkerExecutions_FullMethodName,
+		FullMethod: Database_AbandonAgentExecutions_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).AbandonWorkerExecutions(ctx, req.(*AbandonWorkerExecutionsRequest))
+		return srv.(DatabaseServer).AbandonAgentExecutions(ctx, req.(*AbandonAgentExecutionsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -4785,20 +4785,20 @@ func _Database_PublishRunStatus_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_PublishWorkerEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PublishWorkerEventRequest)
+func _Database_PublishAgentEvent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishAgentEventRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).PublishWorkerEvent(ctx, in)
+		return srv.(DatabaseServer).PublishAgentEvent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_PublishWorkerEvent_FullMethodName,
+		FullMethod: Database_PublishAgentEvent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).PublishWorkerEvent(ctx, req.(*PublishWorkerEventRequest))
+		return srv.(DatabaseServer).PublishAgentEvent(ctx, req.(*PublishAgentEventRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -4893,92 +4893,92 @@ func _Database_GetLease_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_RegisterWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RegisterWorkerRequest)
+func _Database_RegisterAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterAgentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).RegisterWorker(ctx, in)
+		return srv.(DatabaseServer).RegisterAgent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_RegisterWorker_FullMethodName,
+		FullMethod: Database_RegisterAgent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).RegisterWorker(ctx, req.(*RegisterWorkerRequest))
+		return srv.(DatabaseServer).RegisterAgent(ctx, req.(*RegisterAgentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_GetWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetWorkerRequest)
+func _Database_GetAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).GetWorker(ctx, in)
+		return srv.(DatabaseServer).GetAgent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_GetWorker_FullMethodName,
+		FullMethod: Database_GetAgent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).GetWorker(ctx, req.(*GetWorkerRequest))
+		return srv.(DatabaseServer).GetAgent(ctx, req.(*GetAgentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_ListWorkers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListWorkersRequest)
+func _Database_ListAgents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).ListWorkers(ctx, in)
+		return srv.(DatabaseServer).ListAgents(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_ListWorkers_FullMethodName,
+		FullMethod: Database_ListAgents_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).ListWorkers(ctx, req.(*ListWorkersRequest))
+		return srv.(DatabaseServer).ListAgents(ctx, req.(*ListAgentsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_HeartbeatWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HeartbeatWorkerRequest)
+func _Database_HeartbeatAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeartbeatAgentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).HeartbeatWorker(ctx, in)
+		return srv.(DatabaseServer).HeartbeatAgent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_HeartbeatWorker_FullMethodName,
+		FullMethod: Database_HeartbeatAgent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).HeartbeatWorker(ctx, req.(*HeartbeatWorkerRequest))
+		return srv.(DatabaseServer).HeartbeatAgent(ctx, req.(*HeartbeatAgentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_DeleteWorker_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteWorkerRequest)
+func _Database_DeleteAgent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteAgentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).DeleteWorker(ctx, in)
+		return srv.(DatabaseServer).DeleteAgent(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_DeleteWorker_FullMethodName,
+		FullMethod: Database_DeleteAgent_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).DeleteWorker(ctx, req.(*DeleteWorkerRequest))
+		return srv.(DatabaseServer).DeleteAgent(ctx, req.(*DeleteAgentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6837,20 +6837,20 @@ func _Database_DeleteEnvironment_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_ListWorkersByEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListWorkersByEnvironmentRequest)
+func _Database_ListAgentsByEnvironment_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentsByEnvironmentRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).ListWorkersByEnvironment(ctx, in)
+		return srv.(DatabaseServer).ListAgentsByEnvironment(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_ListWorkersByEnvironment_FullMethodName,
+		FullMethod: Database_ListAgentsByEnvironment_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).ListWorkersByEnvironment(ctx, req.(*ListWorkersByEnvironmentRequest))
+		return srv.(DatabaseServer).ListAgentsByEnvironment(ctx, req.(*ListAgentsByEnvironmentRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6873,92 +6873,92 @@ func _Database_ProceedJob_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_CreateWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateWorkerGroupRequest)
+func _Database_CreateAgentGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAgentGroupRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).CreateWorkerGroup(ctx, in)
+		return srv.(DatabaseServer).CreateAgentGroup(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_CreateWorkerGroup_FullMethodName,
+		FullMethod: Database_CreateAgentGroup_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).CreateWorkerGroup(ctx, req.(*CreateWorkerGroupRequest))
+		return srv.(DatabaseServer).CreateAgentGroup(ctx, req.(*CreateAgentGroupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_GetWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetWorkerGroupRequest)
+func _Database_GetAgentGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentGroupRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).GetWorkerGroup(ctx, in)
+		return srv.(DatabaseServer).GetAgentGroup(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_GetWorkerGroup_FullMethodName,
+		FullMethod: Database_GetAgentGroup_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).GetWorkerGroup(ctx, req.(*GetWorkerGroupRequest))
+		return srv.(DatabaseServer).GetAgentGroup(ctx, req.(*GetAgentGroupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_ListWorkerGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListWorkerGroupsRequest)
+func _Database_ListAgentGroups_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentGroupsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).ListWorkerGroups(ctx, in)
+		return srv.(DatabaseServer).ListAgentGroups(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_ListWorkerGroups_FullMethodName,
+		FullMethod: Database_ListAgentGroups_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).ListWorkerGroups(ctx, req.(*ListWorkerGroupsRequest))
+		return srv.(DatabaseServer).ListAgentGroups(ctx, req.(*ListAgentGroupsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_UpdateWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UpdateWorkerGroupRequest)
+func _Database_UpdateAgentGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateAgentGroupRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).UpdateWorkerGroup(ctx, in)
+		return srv.(DatabaseServer).UpdateAgentGroup(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_UpdateWorkerGroup_FullMethodName,
+		FullMethod: Database_UpdateAgentGroup_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).UpdateWorkerGroup(ctx, req.(*UpdateWorkerGroupRequest))
+		return srv.(DatabaseServer).UpdateAgentGroup(ctx, req.(*UpdateAgentGroupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Database_DeleteWorkerGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteWorkerGroupRequest)
+func _Database_DeleteAgentGroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteAgentGroupRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(DatabaseServer).DeleteWorkerGroup(ctx, in)
+		return srv.(DatabaseServer).DeleteAgentGroup(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Database_DeleteWorkerGroup_FullMethodName,
+		FullMethod: Database_DeleteAgentGroup_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DatabaseServer).DeleteWorkerGroup(ctx, req.(*DeleteWorkerGroupRequest))
+		return srv.(DatabaseServer).DeleteAgentGroup(ctx, req.(*DeleteAgentGroupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -7239,8 +7239,8 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_UpdateJobExecution_Handler,
 		},
 		{
-			MethodName: "AbandonWorkerExecutions",
-			Handler:    _Database_AbandonWorkerExecutions_Handler,
+			MethodName: "AbandonAgentExecutions",
+			Handler:    _Database_AbandonAgentExecutions_Handler,
 		},
 		{
 			MethodName: "ReportStepCompletion",
@@ -7271,8 +7271,8 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_PublishRunStatus_Handler,
 		},
 		{
-			MethodName: "PublishWorkerEvent",
-			Handler:    _Database_PublishWorkerEvent_Handler,
+			MethodName: "PublishAgentEvent",
+			Handler:    _Database_PublishAgentEvent_Handler,
 		},
 		{
 			MethodName: "PublishLogUpdated",
@@ -7295,24 +7295,24 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_GetLease_Handler,
 		},
 		{
-			MethodName: "RegisterWorker",
-			Handler:    _Database_RegisterWorker_Handler,
+			MethodName: "RegisterAgent",
+			Handler:    _Database_RegisterAgent_Handler,
 		},
 		{
-			MethodName: "GetWorker",
-			Handler:    _Database_GetWorker_Handler,
+			MethodName: "GetAgent",
+			Handler:    _Database_GetAgent_Handler,
 		},
 		{
-			MethodName: "ListWorkers",
-			Handler:    _Database_ListWorkers_Handler,
+			MethodName: "ListAgents",
+			Handler:    _Database_ListAgents_Handler,
 		},
 		{
-			MethodName: "HeartbeatWorker",
-			Handler:    _Database_HeartbeatWorker_Handler,
+			MethodName: "HeartbeatAgent",
+			Handler:    _Database_HeartbeatAgent_Handler,
 		},
 		{
-			MethodName: "DeleteWorker",
-			Handler:    _Database_DeleteWorker_Handler,
+			MethodName: "DeleteAgent",
+			Handler:    _Database_DeleteAgent_Handler,
 		},
 		{
 			MethodName: "ListIDPSigningKeys",
@@ -7727,32 +7727,32 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Database_DeleteEnvironment_Handler,
 		},
 		{
-			MethodName: "ListWorkersByEnvironment",
-			Handler:    _Database_ListWorkersByEnvironment_Handler,
+			MethodName: "ListAgentsByEnvironment",
+			Handler:    _Database_ListAgentsByEnvironment_Handler,
 		},
 		{
 			MethodName: "ProceedJob",
 			Handler:    _Database_ProceedJob_Handler,
 		},
 		{
-			MethodName: "CreateWorkerGroup",
-			Handler:    _Database_CreateWorkerGroup_Handler,
+			MethodName: "CreateAgentGroup",
+			Handler:    _Database_CreateAgentGroup_Handler,
 		},
 		{
-			MethodName: "GetWorkerGroup",
-			Handler:    _Database_GetWorkerGroup_Handler,
+			MethodName: "GetAgentGroup",
+			Handler:    _Database_GetAgentGroup_Handler,
 		},
 		{
-			MethodName: "ListWorkerGroups",
-			Handler:    _Database_ListWorkerGroups_Handler,
+			MethodName: "ListAgentGroups",
+			Handler:    _Database_ListAgentGroups_Handler,
 		},
 		{
-			MethodName: "UpdateWorkerGroup",
-			Handler:    _Database_UpdateWorkerGroup_Handler,
+			MethodName: "UpdateAgentGroup",
+			Handler:    _Database_UpdateAgentGroup_Handler,
 		},
 		{
-			MethodName: "DeleteWorkerGroup",
-			Handler:    _Database_DeleteWorkerGroup_Handler,
+			MethodName: "DeleteAgentGroup",
+			Handler:    _Database_DeleteAgentGroup_Handler,
 		},
 		{
 			MethodName: "AllocateStorageObject",

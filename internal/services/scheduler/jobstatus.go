@@ -1,19 +1,19 @@
 // Package scheduler — job-status loop (fan-out).
 //
-// A job that targets a worker group runs on every worker in the group (fan-out):
-// each worker's run is a separate JobExecution, and the worker reports its
+// A job that targets a agent group runs on every agent in the group (fan-out):
+// each agent's run is a separate JobExecution, and the agent reports its
 // outcome to its own execution (not the job row). The job row's status is the
 // *derived* overall status, maintained by this loop: it periodically re-derives
-// each in-flight group job's status from the per-worker outcomes of the workers
+// each in-flight group job's status from the per-agent outcomes of the agents
 // that are alive, per the job's failure mode, and persists the change
 // (Database.UpdateJob) and appends a "job_status" event to the shared event log
 // (F-23), which every API pod tails and fans out to its UI clients.
 //
-// A worker that is not alive (it has not heartbeated within the liveness
+// A agent that is not alive (it has not heartbeated within the liveness
 // window) is dropped from the derivation: its in-progress execution does not
-// block the job. This is what lets a job complete when a worker in the group
+// block the job. This is what lets a job complete when a agent in the group
 // dies mid-run, and it is the job-level counterpart to the step barrier's
-// "barrier only among workers alive at step start" rule.
+// "barrier only among agents alive at step start" rule.
 package scheduler
 
 import (
@@ -28,26 +28,26 @@ import (
 )
 
 // jobStatusInterval is how often the job-status loop re-derives in-flight
-// group jobs' overall status from their per-worker executions. It is a
+// group jobs' overall status from their per-agent executions. It is a
 // variable (not a constant) so tests can shorten it.
 var jobStatusInterval = 5 * time.Second
 
-// workerAliveThreshold is how recent a worker's last_seen_at must be for it to
-// be considered alive. A worker that has not heartbeated within this window is
+// agentAliveThreshold is how recent a agent's last_seen_at must be for it to
+// be considered alive. A agent that has not heartbeated within this window is
 // considered dead and is dropped from a job's fan-out derivation (its
-// in-progress execution does not block the job). The worker heartbeats every
+// in-progress execution does not block the job). The agent heartbeats every
 // 10s, so the threshold is a few missed heartbeats. It is a variable (not a
 // constant) so tests can shorten it.
-var workerAliveThreshold = 30 * time.Second
+var agentAliveThreshold = 30 * time.Second
 
 // jobStatusDB is the subset of the Database client the job-status loop uses to
-// list in-flight group jobs, read a job's executions and the group's workers,
+// list in-flight group jobs, read a job's executions and the group's agents,
 // and persist a job's derived status. The concrete dbpb.DatabaseClient
 // satisfies it; tests inject a fake.
 type jobStatusDB interface {
 	ListJobs(ctx context.Context, in *dbpb.ListJobsRequest, opts ...grpc.CallOption) (*dbpb.ListJobsResponse, error)
 	ListJobExecutions(ctx context.Context, in *dbpb.ListJobExecutionsRequest, opts ...grpc.CallOption) (*dbpb.ListJobExecutionsResponse, error)
-	ListWorkers(ctx context.Context, in *dbpb.ListWorkersRequest, opts ...grpc.CallOption) (*dbpb.ListWorkersResponse, error)
+	ListAgents(ctx context.Context, in *dbpb.ListAgentsRequest, opts ...grpc.CallOption) (*dbpb.ListAgentsResponse, error)
 	UpdateJob(ctx context.Context, in *dbpb.UpdateJobRequest, opts ...grpc.CallOption) (*dbpb.Job, error)
 }
 
@@ -61,7 +61,7 @@ type jobStatusEventPublisher interface {
 
 // StartJobStatusLoop runs the job-status loop in the background until ctx is
 // cancelled. It periodically re-derives each in-flight group job's overall
-// status from the per-worker outcomes of the workers that are alive, per the
+// status from the per-agent outcomes of the agents that are alive, per the
 // job's failure mode. It is a no-op when the Database client is nil (e.g. in
 // tests that do not exercise the loop).
 func (s *Server) StartJobStatusLoop(ctx context.Context) {
@@ -85,17 +85,17 @@ func (s *Server) StartJobStatusLoop(ctx context.Context) {
 }
 
 // processJobStatuses re-derives the overall status of every in-flight group
-// job (a running job that targets a worker group) from its per-worker
+// job (a running job that targets a agent group) from its per-agent
 // executions and, when the derived status differs from the stored one,
 // persists it and appends a "job_status" event to the shared event log (F-23).
-// Jobs with an empty target group (ephemeral agents) report their status
+// Jobs with an empty target group (ephemeral workers) report their status
 // directly to the job row and are not derived here. db and publisher are the
 // loop's dependencies (the concrete clients in production, fakes in tests);
 // publisher may be nil to skip the event append.
 func (s *Server) processJobStatuses(ctx context.Context, db jobStatusDB, publisher jobStatusEventPublisher) {
 	// In-flight group jobs are those that are running or paused at an approval
 	// gate (F-13). A group job that is awaiting_approval (its job row was set
-	// when a worker reported the gate) is re-derived here once its workers'
+	// when a agent reported the gate) is re-derived here once its agents'
 	// executions leave the gate (after the gate is resolved), so the job row
 	// returns to running or a terminal status.
 	var jobs []*dbpb.Job
@@ -117,7 +117,7 @@ func (s *Server) processJobStatuses(ctx context.Context, db jobStatusDB, publish
 }
 
 // processJob re-derives a single group job's overall status from the
-// per-worker outcomes of the workers that are alive and, if it changed,
+// per-agent outcomes of the agents that are alive and, if it changed,
 // persists the change (recording the finish time when the job reaches a
 // terminal status) and appends a "job_status" event to the shared event log
 // (F-23).
@@ -127,31 +127,31 @@ func (s *Server) processJob(ctx context.Context, db jobStatusDB, publisher jobSt
 		s.logger.Warn("scheduler: job-status list executions", "job", job.GetId(), "err", err)
 		return
 	}
-	workersResp, err := db.ListWorkers(ctx, &dbpb.ListWorkersRequest{Group: job.GetTargetGroup()})
+	agentsResp, err := db.ListAgents(ctx, &dbpb.ListAgentsRequest{Group: job.GetTargetGroup()})
 	if err != nil {
-		s.logger.Warn("scheduler: job-status list workers", "job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
+		s.logger.Warn("scheduler: job-status list agents", "job", job.GetId(), "group", job.GetTargetGroup(), "err", err)
 		return
 	}
-	alive := aliveWorkers(workersResp.GetWorkers())
-	// Only the most recent execution per alive worker is considered: a worker
+	alive := aliveAgents(agentsResp.GetAgents())
+	// Only the most recent execution per alive agent is considered: a agent
 	// that restarted and re-ran the job supersedes its abandoned (pre-restart)
-	// execution, and a worker that is not alive is dropped entirely (its
+	// execution, and a agent that is not alive is dropped entirely (its
 	// in-progress execution does not block the job).
-	latest := latestExecutionPerWorker(executionsResp.GetExecutions(), alive)
+	latest := latestExecutionPerAgent(executionsResp.GetExecutions(), alive)
 	if len(latest) == 0 {
-		// No alive worker has an execution for this job (e.g. every worker in
+		// No alive agent has an execution for this job (e.g. every agent in
 		// the group is down). Leave the job running; the watchdog reaps it if
 		// it has a timeout.
 		return
 	}
 	// A group job paused at an approval gate (F-13) has its job row in
-	// awaiting_approval (set when a worker reported the gate on the job row;
-	// the workers' executions stay running while they wait). While no alive
-	// worker's execution has reached a terminal status, the gate is still open
-	// (or workers are running post-approval but none has finished): leave the
+	// awaiting_approval (set when a agent reported the gate on the job row;
+	// the agents' executions stay running while they wait). While no alive
+	// agent's execution has reached a terminal status, the gate is still open
+	// (or agents are running post-approval but none has finished): leave the
 	// job row as-is, so re-deriving does not wrongly move it back to running.
 	// Once at least one execution reaches a terminal status (the gate resolved
-	// and a worker finished, or was rejected), re-derive normally.
+	// and a agent finished, or was rejected), re-derive normally.
 	if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL {
 		anyTerminal := false
 		for _, execution := range latest {
@@ -182,7 +182,7 @@ func (s *Server) processJob(ctx context.Context, db jobStatusDB, publisher jobSt
 		// state — so the job row would otherwise never carry its outputs, and
 		// downstream consumers (the UI's job views, F-22's dependency
 		// observations, a resumption's carry-over clones) could not read
-		// them. Union the terminal executions' outputs (a later worker
+		// them. Union the terminal executions' outputs (a later agent
 		// overrides an earlier one on a name collision, mirroring the
 		// per-job aggregation). Written exactly once: only at the terminal
 		// transition.
@@ -219,37 +219,37 @@ func (s *Server) processJob(ctx context.Context, db jobStatusDB, publisher jobSt
 	}
 }
 
-// aliveWorkers returns the set of worker names in the group that are alive: a
-// worker is alive when its last_seen_at is within workerAliveThreshold (it has
-// heartbeated recently). A worker with no last_seen_at, or one that has gone
+// aliveAgents returns the set of agent names in the group that are alive: a
+// agent is alive when its last_seen_at is within agentAliveThreshold (it has
+// heartbeated recently). A agent with no last_seen_at, or one that has gone
 // quiet beyond the threshold, is not alive.
-func aliveWorkers(workers []*dbpb.Worker) map[string]bool {
+func aliveAgents(agents []*dbpb.Agent) map[string]bool {
 	now := time.Now()
-	alive := make(map[string]bool, len(workers))
-	for _, worker := range workers {
-		lastSeen := worker.GetLastSeenAt()
+	alive := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		lastSeen := agent.GetLastSeenAt()
 		if lastSeen == nil {
 			continue
 		}
-		if now.Sub(lastSeen.AsTime()) <= workerAliveThreshold {
-			alive[worker.GetName()] = true
+		if now.Sub(lastSeen.AsTime()) <= agentAliveThreshold {
+			alive[agent.GetName()] = true
 		}
 	}
 	return alive
 }
 
-// latestExecutionPerWorker returns, for each alive worker that has an
-// execution, the worker's most recent execution (highest id). Executions of
-// workers that are not alive are dropped (a dead worker's in-progress
+// latestExecutionPerAgent returns, for each alive agent that has an
+// execution, the agent's most recent execution (highest id). Executions of
+// agents that are not alive are dropped (a dead agent's in-progress
 // execution does not block the job).
-func latestExecutionPerWorker(executions []*dbpb.JobExecution, alive map[string]bool) []*dbpb.JobExecution {
+func latestExecutionPerAgent(executions []*dbpb.JobExecution, alive map[string]bool) []*dbpb.JobExecution {
 	best := make(map[string]*dbpb.JobExecution)
 	for _, execution := range executions {
-		if !alive[execution.GetWorkerName()] {
+		if !alive[execution.GetAgentName()] {
 			continue
 		}
-		if current, ok := best[execution.GetWorkerName()]; !ok || execution.GetId() > current.GetId() {
-			best[execution.GetWorkerName()] = execution
+		if current, ok := best[execution.GetAgentName()]; !ok || execution.GetId() > current.GetId() {
+			best[execution.GetAgentName()] = execution
 		}
 	}
 	out := make([]*dbpb.JobExecution, 0, len(best))
@@ -259,17 +259,17 @@ func latestExecutionPerWorker(executions []*dbpb.JobExecution, alive map[string]
 	return out
 }
 
-// deriveJobStatus derives a group job's overall status from the per-worker
-// outcomes (the most recent execution per alive worker) per the job's failure
+// deriveJobStatus derives a group job's overall status from the per-agent
+// outcomes (the most recent execution per alive agent) per the job's failure
 // mode:
 //
-//   - ALL: failed if any worker's run failed or timed out; running while any
-//     is still running; succeeded only if every worker's run succeeded.
-//   - BEST_EFFORT: running while any worker's run is still running; succeeded
-//     once every worker's run reaches a terminal state (a per-worker failure
+//   - ALL: failed if any agent's run failed or timed out; running while any
+//     is still running; succeeded only if every agent's run succeeded.
+//   - BEST_EFFORT: running while any agent's run is still running; succeeded
+//     once every agent's run reaches a terminal state (a per-agent failure
 //     or timeout is recorded but does not fail the job).
-//   - ANY: succeeded as soon as one worker's run succeeds; running while none
-//     has succeeded and some are still running; failed only if every worker's
+//   - ANY: succeeded as soon as one agent's run succeeds; running while none
+//     has succeeded and some are still running; failed only if every agent's
 //     run failed or timed out.
 func deriveJobStatus(executions []*dbpb.JobExecution, mode models.FailureMode) models.JobStatus {
 	anySucceeded := false
@@ -285,7 +285,7 @@ func deriveJobStatus(executions []*dbpb.JobExecution, mode models.FailureMode) m
 		case dbpb.JobStatus_JOB_STATUS_TIMED_OUT:
 			anyTimedOut = true
 		case dbpb.JobStatus_JOB_STATUS_PENDING, dbpb.JobStatus_JOB_STATUS_RUNNING, dbpb.JobStatus_JOB_STATUS_AWAITING_APPROVAL:
-			// Awaiting approval (F-13) is in-flight: a worker paused at an
+			// Awaiting approval (F-13) is in-flight: a agent paused at an
 			// approval gate has not finished, so its execution does not count
 			// as a terminal outcome.
 			anyRunning = true
@@ -304,7 +304,7 @@ func deriveJobStatus(executions []*dbpb.JobExecution, mode models.FailureMode) m
 		if anyRunning {
 			return models.JobStatusRunning
 		}
-		// No worker succeeded and none is running: the job is a failure. A
+		// No agent succeeded and none is running: the job is a failure. A
 		// concrete failure takes precedence over a timeout; a job that only
 		// timed out is reported as timed_out (distinct from failed) so the UI
 		// can tell a hung job apart from one that ran and errored.

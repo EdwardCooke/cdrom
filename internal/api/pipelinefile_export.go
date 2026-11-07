@@ -21,7 +21,7 @@ import (
 // variables). The round-trip property holds: the exported file, re-imported
 // through the compiler, yields the same compiled definition (the jobs,
 // variable sets, secret sources, params, triggers, and failure mode are all
-// reproduced; a pipeline-level workerGroup is a file-authoring convenience
+// reproduced; a pipeline-level agentGroup is a file-authoring convenience
 // that is not stored in the schema, so it is not reproduced).
 func (s *Server) exportPipeline(w http.ResponseWriter, r *http.Request) {
 	pipelineID, ok := pathID(w, r)
@@ -177,7 +177,7 @@ func exportJobs(jobs []*dbpb.JobDefinition) pipelinefile.Value {
 }
 
 // exportJob builds a single job's spec (a mapping): its display name,
-// dependencies, environment, worker group, automation, approval policy,
+// dependencies, environment, agent group, automation, approval policy,
 // labels, and its execution spec (steps, timeout, retry, failure mode,
 // concurrency keys, step barrier, ignore-failed) and variables.
 func exportJob(job *dbpb.JobDefinition) pipelinefile.Value {
@@ -192,7 +192,7 @@ func exportJob(job *dbpb.JobDefinition) pipelinefile.Value {
 		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "environment", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: job.GetEnvironment()}})
 	}
 	if job.GetTargetGroup() != "" {
-		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "workerGroup", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: job.GetTargetGroup()}})
+		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "agentGroup", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: job.GetTargetGroup()}})
 	}
 	if a := automationName(job.GetAutomation()); a != "" {
 		out.Entries = append(out.Entries, pipelinefile.Entry{Key: "automation", Value: pipelinefile.Value{Type: pipelinefile.Scalar, String: a}})

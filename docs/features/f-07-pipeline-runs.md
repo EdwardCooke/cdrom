@@ -30,7 +30,7 @@ A run is the unit CD tools report on.
       non-skipped jobs succeeded).
 - [x] Historical runs are retained and browsable.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **`PipelineRun` is a first-class entity.** A run is one execution of a
   pipeline: it carries `pipeline_id`, an overall `status` (`pending`,
   `running`, `succeeded`, `failed`, `cancelled`), a `trigger` (how it was
@@ -48,7 +48,7 @@ A run is the unit CD tools report on.
 - **The scheduler drives the instances.** `Scheduler.CreateRun` calls
   `Database.CreateRun` and then drives each instance: a job with a
   `target_group` is dispatched to the API (which fans it out to the live
-  workers); a job with `depends_on` is left `pending` for the dependency
+  agents); a job with `depends_on` is left `pending` for the dependency
   resolver (F-06); a job with an empty `target_group` and no dependencies is
   left `pending` for an ephemeral agent.
 - **Run status is derived, not reported.** A run has no target of its own, so

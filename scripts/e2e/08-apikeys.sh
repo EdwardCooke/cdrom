@@ -2,7 +2,7 @@
 #
 # 08-apikeys.sh — F-25: API keys.
 #
-# Boots the stack (no worker needed — API keys do not run jobs) and a SECOND
+# Boots the stack (no agent needed — API keys do not run jobs) and a SECOND
 # API instance with OIDC authentication + RBAC + API-key lockout enabled,
 # sharing the same IdP (users + JWKS) and db/scheduler/artifacts as the main
 # stack. The main stack runs with OIDC auth OFF, so its API is open; the

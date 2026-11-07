@@ -1,5 +1,5 @@
 // Package target is the shared execution layer for the two kinds of
-// execution targets — the long-lived worker and the ephemeral agent. Both
+// execution targets — the long-lived agent and the ephemeral agent. Both
 // talk only to the API and run a job's spec through the shared executor, so
 // the parts they have in common live here rather than being duplicated in
 // each target:
@@ -13,9 +13,9 @@
 //   - reporting a job's final status (with its collected step results and
 //     outputs) back to the API, presenting the job's token.
 //
-// The two targets differ only in how they acquire a job (a worker holds a
+// The two targets differ only in how they acquire a job (a agent holds a
 // WatchJobs stream and polls; an agent is spawned with a job id) and in the
-// worker-only cross-worker step barrier, which a target supplies through
-// Context.StepBarrier. The package is shared by the worker and the agent and
+// agent-only cross-agent step barrier, which a target supplies through
+// Context.StepBarrier. The package is shared by the agent and the agent and
 // must run on both Windows and Linux.
 package target

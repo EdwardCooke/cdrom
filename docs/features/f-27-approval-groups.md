@@ -135,7 +135,7 @@ or version snapshot.
   references, claim derivation) and an approval prompt that names the waiting
   party(ies) and, under quorum, shows approvals collected vs. required.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **A group is people; a role is permissions.** F-14 roles grant *what you may
   do*; an approval group names *who may act on a specific gate*. They are
   separate concepts that compose: the actor must be in the gate's authorized

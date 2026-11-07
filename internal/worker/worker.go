@@ -1,22 +1,22 @@
-// Package worker implements the long-lived worker: a resident process on a
-// deployment target, targetable by group. Must run on both Windows and Linux.
+// Package agent implements the ephemeral agent: a short-lived process
+// spawned in Kubernetes to execute a single one-off job, then terminate.
+// Must run on both Windows and Linux.
 //
-// A worker talks ONLY to the API service. It registers with the API, holds a
-// WatchJobs stream open, and executes the jobs the API dispatches to its
-// group. Job status is reported back to the API, and all logging is local
+// The control plane spawns an agent with a job ID. The agent talks ONLY to
+// the API service: it fetches the job from the API, executes it, and reports
+// the final status back to the API before exiting. All logging is local
 // (stdout or a file) — there is no central logs service.
-package worker
+package agent
 
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"sync"
 	"time"
 
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/metrics"
 	"cdrom/internal/target"
 
@@ -25,368 +25,134 @@ import (
 	_ "cdrom/internal/stephandlers"
 )
 
-// Dependencies are the gRPC clients a worker needs. The worker talks only to
+// agentCancelPollInterval is how often an ephemeral agent polls the API for
+// its job's status to observe a cancellation (F-05). An agent holds no
+// WatchJobs stream, so it cannot be signalled directly; it observes the
+// cancellation on the API instead. It is a variable (not a constant) so tests
+// can shorten the interval.
+var agentCancelPollInterval = 2 * time.Second
+
+// Dependencies are the gRPC clients an agent needs. The agent talks only to
 // the API service.
 type Dependencies struct {
 	API apipb.APIClient
-	// WorkerRoot is the base directory the worker's staged working area
+	// AgentRoot is the base directory the agent's staged working area
 	// (F-21.6) is created under; empty means the OS temp dir. Carried from
-	// the worker's config (worker_root / CDROM_WORKER_ROOT).
-	WorkerRoot string
+	// the agent's config (agent_root / CDROM_AGENT_ROOT).
+	AgentRoot string
 }
 
-// Worker is a long-lived worker process.
-type Worker struct {
-	name  string
-	group string
-	// environments are the environments the worker belongs to (F-17); a job
-	// that targets one of them is dispatched to this worker.
-	environments []string
-	// labels are the worker's labels (F-29); a job dispatched to the worker merges
-	// them into the job's execution's label set.
-	labels   map[string]string
+// Work is an ephemeral job executor.
+type Work struct {
+	name   string // the agent's identity (its host name); reported with the job's status
+	jobID  int64
 	deps   Dependencies
 	logger *slog.Logger
-	// metrics is the worker's metric set (F-20); nil when metrics are
-	// disabled, in which case all recording is a no-op.
-	metrics *metrics.WorkerMetrics
-
-	// sem bounds the worker to one job at a time (preserving the previous
-	// sequential behavior) while the watch loop stays free to receive
-	// cancellations for the running job (F-05).
-	//
-	// LOAD BEARING (do not widen casually): the database service's
-	// StartJobExecution duplicate-delivery guard (F-23/flake 2026-11-07) is a
-	// check-then-act that is race-free ONLY because a single worker's
-	// acquisitions are SERIAL — no second StartJobExecution for this worker
-	// can be in flight while the first's execution row is uncommitted.
-	// Growing this semaphore to N (internally parallel jobs) re-opens the
-	// double-execution race; enforce the invariant at the storage layer
-	// first (e.g. a partial unique index on (job, worker, attempt) WHERE
-	// status='running') before scaling. Horizontal fan-out (MORE workers,
-	// each serial) is unaffected and encouraged.
-	sem chan struct{}
-
-	mu       sync.Mutex
-	inflight map[int64]*jobRun // jobID -> run state for a running job
+	token  string // job token handed over by the API via GetJob
+	// metrics is the agent's metric set (F-20); nil when metrics are
+	// disabled, in which case all recording is a no-op. An agent records only
+	// the job/step/in-flight/log metrics (it holds no WatchJobs stream and
+	// polls no queue).
+	metrics *metrics.AgentMetrics
 }
 
-// New creates a worker with the given identity and service dependencies.
-// environments are the environments the worker belongs to (F-17); they are
-// declared at registration and used to route environment jobs to this worker.
-// labels are the worker's labels (F-29); they are declared at registration and
-// merged into the label set of the jobs the worker runs.
-func New(name, group string, environments []string, labels map[string]string, deps Dependencies, logger *slog.Logger) *Worker {
+// New creates an agent that will execute jobID. name is the agent's identity
+// (its host name); it is reported with the job's status so the API can record
+// which target ran the job.
+func New(name string, jobID int64, deps Dependencies, logger *slog.Logger) *Work {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	// Advise (warn) once at startup when the staged-working-area root is
 	// RAM-backed (F-21.6): staged files would consume memory.
-	target.WarnTmpfsWorkerRoot(deps.WorkerRoot, logger)
-	return &Worker{
-		name:         name,
-		group:        group,
-		environments: environments,
-		labels:         labels,
-		deps:         deps,
-		logger:       logger,
-		sem:          make(chan struct{}, 1),
-		inflight:     make(map[int64]*jobRun),
-	}
+	target.WarnTmpfsAgentRoot(deps.AgentRoot, logger)
+	return &Work{name: name, jobID: jobID, deps: deps, logger: logger}
 }
 
-// SetMetrics sets the worker's metric set (F-20). It must be called before
+// SetMetrics sets the agent's metric set (F-20). It must be called before
 // Run. A nil set disables all metric recording.
-func (w *Worker) SetMetrics(m *metrics.WorkerMetrics) {
-	w.metrics = m
+func (a *Work) SetMetrics(m *metrics.AgentMetrics) {
+	a.metrics = m
 }
 
-// Run registers the worker, then serves jobs until ctx is cancelled. It
-// returns nil on a clean shutdown.
-func (w *Worker) Run(ctx context.Context) error {
-	if _, err := w.deps.API.RegisterWorker(ctx, &apipb.RegisterWorkerRequest{
-		Name:         w.name,
-		Group:        w.group,
-		Address:      w.name,
-		Environments: w.environments,
-		Labels:         w.labels,
-	}); err != nil {
-		return fmt.Errorf("worker: register: %w", err)
+// Run executes the job and returns the final status. The process should exit
+// once Run returns.
+func (a *Work) Run(ctx context.Context) (dbpb.JobStatus, error) {
+	if a.jobID == 0 {
+		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED, fmt.Errorf("agent: job id is required")
 	}
-	w.logger.Info("worker: registered", "name", w.name, "group", w.group, "environments", w.environments, "labels", w.labels)
-
-	defer func() {
-		if _, err := w.deps.API.DeregisterWorker(context.WithoutCancel(ctx), &apipb.DeregisterWorkerRequest{Name: w.name}); err != nil {
-			w.logger.Warn("worker: deregister", "err", err)
-		}
-	}()
-
-	// Heartbeat in the background.
-	go w.heartbeat(ctx)
-	// Poll for pending jobs in the background (F-23): the authoritative
-	// catch-up path that picks up jobs published while the worker was
-	// unreachable or whose push nudge was dropped.
-	go w.poll(ctx)
-
-	// Watch for job assignments, reconnecting on transient failures.
-	for {
-		if err := w.watch(ctx); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			w.logger.Warn("worker: watch stream ended; reconnecting", "err", err)
-			w.metrics.SetWatchState("reconnecting")
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}
-}
-
-// watch opens a WatchJobs stream and processes messages until the stream
-// closes or ctx is cancelled. Each message is either an assignment (a new job
-// to run) or a cancellation (stop a job the worker is running, F-05).
-//
-// Assignments are run in a goroutine (bounded by the worker's semaphore to
-// one job at a time) so the watch loop stays free to receive a cancellation
-// for the running job. A cancellation delivered while a job runs interrupts
-// that job's step (see cancelJob); one delivered for a job that is not
-// running on this worker is ignored (the job's status is already reconciled
-// by the database).
-func (w *Worker) watch(ctx context.Context) error {
-	stream, err := w.deps.API.WatchJobs(ctx, &apipb.WatchJobsRequest{
-		WorkerName:   w.name,
-		Group:        w.group,
-		Environments: w.environments,
-	})
+	job, err := a.deps.API.GetJob(ctx, &apipb.GetJobRequest{Id: a.jobID})
 	if err != nil {
-		return fmt.Errorf("worker: watch: %w", err)
+		return dbpb.JobStatus_JOB_STATUS_UNSPECIFIED, fmt.Errorf("agent: get job: %w", err)
 	}
-	w.metrics.SetWatchState("connected")
-	for {
-		message, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("worker: recv: %w", err)
-		}
-		switch m := message.GetMessage().(type) {
-		case *apipb.WatchMessage_Assignment:
-			// A full assignment (legacy push). The worker starts its own
-			// execution of the job (fan-out): a job that targets the worker's
-			// group runs on every worker in the group, so the start is not
-			// exclusive. The start returns the fresh spec + token.
-			w.startAndExecute(ctx, m.Assignment.GetJob().GetId())
-		case *apipb.WatchMessage_Nudge:
-			// A nudge (F-23): the push carries only the job id. The worker
-			// starts its own execution, so a job delivered via both push and
-			// poll is run once by this worker (its execution is created once).
-			w.startAndExecute(ctx, m.Nudge.GetJobId())
-		case *apipb.WatchMessage_Cancellation:
-			w.cancelJob(m.Cancellation.GetJobId())
-		}
-	}
-}
+	a.token = job.GetToken()
+	a.logger.Info("agent: executing job", "job", job.GetId(), "name", job.GetName())
 
-// pollInterval is how often the worker polls the API for pending jobs in its
-// group (F-23). It is the authoritative catch-up path: if a push nudge is
-// dropped (queue full, pod restart, stream flap), the next poll picks the job
-// up. It is a variable (not a constant) so tests can shorten it.
-var pollInterval = 1 * time.Second
-
-// poll runs the worker's pull loop (F-23): on each tick it asks the API for
-// the pending jobs targeting its group and claims each one. It is the
-// authoritative delivery path — a job published while the worker was
-// unreachable (or whose push was dropped) is picked up here, so no job is
-// stranded pending.
-func (w *Worker) poll(ctx context.Context) {
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.pollOnce(ctx)
-		}
-	}
-}
-
-// pollOnce lists the pending jobs in the worker's group and environments and
-// starts each one.
-func (w *Worker) pollOnce(ctx context.Context) {
-	resp, err := w.deps.API.ListPendingJobs(ctx, &apipb.ListPendingJobsRequest{
-		Group:        w.group,
-		Environments: w.environments,
-	})
-	if err != nil {
-		w.logger.Warn("worker: list pending jobs", "err", err)
-		return
-	}
-	if len(resp.GetJobs()) == 0 {
-		w.metrics.RecordPoll("idle")
-		return
-	}
-	w.metrics.RecordPoll("claimed")
-	for _, job := range resp.GetJobs() {
-		w.startAndExecute(ctx, job.GetId())
-	}
-}
-
-// startAndExecute starts this worker's execution of a job (fan-out) and, if
-// the job is still pending, executes it. It is the single entry point for job
-// acquisition, used by both the push path (a nudge or full assignment on the
-// WatchJobs stream) and the pull path (the periodic poll). A job that targets
-// the worker's group runs on every worker in the group, so the start is not
-// exclusive: this worker creates its own execution and runs the job. A job
-// that is no longer pending (it reached a terminal state, or it is not
-// targeted at the worker's group) is not started (started=false), so a job
-// delivered to several workers — or via both push and poll — is run once by
-// each of them, and a job that finished before a slow worker started it is not
-// run.
-//
-// The job runs in a goroutine (bounded by the worker's semaphore to one job
-// at a time) so the watch loop stays free to receive cancellations (F-05).
-func (w *Worker) startAndExecute(ctx context.Context, jobID int64) {
-	w.sem <- struct{}{}
-	go func() {
-		defer func() { <-w.sem }()
-		w.doStartAndExecute(ctx, jobID)
-	}()
-}
-
-// doStartAndExecute starts the worker's execution of the job and, on success,
-// executes it (which carries its spec, upstream jobs, and a fresh job token).
-func (w *Worker) doStartAndExecute(ctx context.Context, jobID int64) {
-	resp, err := w.deps.API.StartJobExecution(ctx, &apipb.StartJobExecutionRequest{
-		JobId:      jobID,
-		WorkerName: w.name,
-	})
-	if err != nil {
-		w.logger.Warn("worker: start job execution", "job", jobID, "err", err)
-		return
-	}
-	if !resp.GetStarted() {
-		// The job is no longer pending (it reached a terminal state, or it is
-		// not targeted at the worker's group).
-		return
-	}
-	job := resp.GetJob()
-	w.execute(ctx, job, job.GetToken())
-}
-
-// cancelJob interrupts the job the worker is running (F-05): it marks the
-// job's run as user-cancelled and cancels its context, which terminates the
-// running step. A cancellation for a job that is not running on this worker
-// (already finished, or running on another target) is a no-op — the job's
-// status is reconciled by the database.
-func (w *Worker) cancelJob(jobID int64) {
-	w.mu.Lock()
-	run, running := w.inflight[jobID]
-	if running {
-		run.userCancel = true
-	}
-	w.mu.Unlock()
-	if !running {
-		w.logger.Info("worker: cancel for job not running on this worker", "job", jobID)
-		return
-	}
-	w.logger.Info("worker: cancelling job", "job", jobID)
-	run.cancel()
-}
-
-// heartbeat refreshes the worker's liveness on an interval.
-func (w *Worker) heartbeat(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if _, err := w.deps.API.Heartbeat(ctx, &apipb.HeartbeatRequest{Name: w.name}); err != nil {
-				w.logger.Warn("worker: heartbeat", "err", err)
-				w.metrics.RecordHeartbeatFailure()
-			}
-		}
-	}
-}
-
-// jobRun is the per-job execution state the worker tracks so a cancellation
-// (F-05) can interrupt a running job: cancel terminates the job's context
-// (killing the running step), and userCancel records that the interruption
-// was a user cancellation (as opposed to a timeout or a worker shutdown).
-type jobRun struct {
-	cancel     context.CancelFunc
-	userCancel bool
-}
-
-// execute runs a single job assignment: mark running, execute, and report the
-// final status. All job logging is local. token is the job token the API
-// handed over with the assignment; it is presented on the status reports so
-// the API (and any outside resources) can authenticate the worker for this
-// job.
-//
-// The job runs under a cancellable context registered in the worker's
-// in-flight set (F-05): a cancellation delivered on the WatchJobs stream
-// cancels this context, which terminates the running step, and the job is
-// reported as cancelled.
-func (w *Worker) execute(ctx context.Context, job *apipb.Job, token string) {
-	w.logger.Info("worker: executing job", "job", job.GetId(), "name", job.GetName())
-
-	// A cancellable context bounds the job's execution; a cancellation (F-05)
-	// cancels it to interrupt the running step. It is also cancelled on
-	// worker shutdown (via the parent ctx).
-	jobCtx, cancel := context.WithCancel(ctx)
-	run := &jobRun{cancel: cancel}
-	w.mu.Lock()
-	w.inflight[job.GetId()] = run
-	w.metrics.SetInflight(len(w.inflight))
-	w.mu.Unlock()
-	defer func() {
-		cancel()
-		w.mu.Lock()
-		delete(w.inflight, job.GetId())
-		w.metrics.SetInflight(len(w.inflight))
-		w.mu.Unlock()
-	}()
-
-	// The shared execution context: the target's API client, the worker's
-	// name (so a fan-out job's outcome is recorded against this worker's
-	// execution), the job's token, the worker's step metrics (F-20), and the
-	// worker's step barrier (when the job has the step-barrier flag set and
-	// targets a worker group).
+	// The shared execution context: the target's API client, the agent's name
+	// (its host name, so the API can record which target ran the job), the
+	// job's token, and the agent's step metrics (F-20). An ephemeral agent has
+	// no step barrier (it runs its steps unbarriered).
 	tc := &target.Context{
-		API:        w.deps.API,
-		WorkerName: w.name,
-		Token:      token,
-		Metrics:    w.metrics,
-		Logger:     w.logger,
-		WorkerRoot:   w.deps.WorkerRoot,
-	}
-	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
-		tc.StepBarrier = newStepBarrier(w.deps.API, w.name, job.GetId(), token, w.logger, 0)
+		API:        a.deps.API,
+		AgentName: a.name,
+		Token:      a.token,
+		Metrics:    a.metrics,
+		Logger:     a.logger,
+		AgentRoot:   a.deps.AgentRoot,
 	}
 
-	target.ReportRunning(ctx, tc, job.GetId())
-	w.logger.Info("job started", "job", job.GetId())
+	// The agent runs exactly one job, so it is in flight for the whole run.
+	a.metrics.SetInflight(1)
+	defer a.metrics.SetInflight(0)
+
+	target.ReportRunning(ctx, tc, a.jobID)
+	a.logger.Info("job started", "job", a.jobID)
+	// The job runs under a cancellable context (F-05): a background poller
+	// watches the job's status and cancels the context if the job is
+	// cancelled, which interrupts the running step.
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go a.watchCancellation(jobCtx, cancel)
+
 	collector := &executor.StepResultCollector{}
 	start := time.Now()
-	err := target.RunJob(jobCtx, tc, job, collector)
-	// A cancellation delivered on the WatchJobs stream (F-05) marks the run
-	// as user-cancelled; FinishJob reports the job as cancelled, distinct
-	// from a failure.
-	w.mu.Lock()
-	userCancelled := run.userCancel
-	w.mu.Unlock()
-	finalStatus := target.FinishJob(ctx, tc, job.GetId(), collector, err, userCancelled)
+	err = target.RunJob(jobCtx, tc, job, collector)
+	// A cancellation observed by the agent's status poller (F-05) — or the
+	// agent's own shutdown — cancelled the job's context; FinishJob reports
+	// the job as cancelled, distinct from a failure.
+	finalStatus := target.FinishJob(ctx, tc, a.jobID, collector, err, jobCtx.Err() == context.Canceled)
 	// Record the job's terminal status and duration (F-20), matching the
 	// status the API records for the same job.
-	w.metrics.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
+	a.metrics.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
+	return finalStatus, nil
+}
+
+// watchCancellation polls the job's status (F-05) and cancels the job's
+// context if the job is cancelled. An ephemeral agent holds no WatchJobs
+// stream, so it observes the cancellation on the API: the scheduler's
+// CancelJob marks the job cancelled in the database, and the agent's next
+// poll sees it and interrupts the running step (by cancelling the job's
+// context). Polling stops when the job's context is done (the job finished or
+// was cancelled).
+func (a *Work) watchCancellation(ctx context.Context, cancel context.CancelFunc) {
+	ticker := time.NewTicker(agentCancelPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			job, err := a.deps.API.GetJob(ctx, &apipb.GetJobRequest{Id: a.jobID})
+			if err != nil {
+				// A transient failure to fetch the job is not a cancellation;
+				// keep polling.
+				continue
+			}
+			if job.GetStatus() == dbpb.JobStatus_JOB_STATUS_CANCELLED {
+				a.logger.Info("agent: job cancelled", "job", a.jobID)
+				cancel()
+				return
+			}
+		}
+	}
 }

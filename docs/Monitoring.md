@@ -31,7 +31,7 @@ Prometheus at each one (adjust the host for your deployment):
 
 | Component | Default metrics port | `CDROM_METRICS_ADDR` |
 |-----------|----------------------|----------------------|
-| worker    | `127.0.0.1:9100`    | `:9100`             |
+| agent    | `127.0.0.1:9100`    | `:9100`             |
 | agent     | `127.0.0.1:9100`    | `:9100`             |
 | database  | `127.0.0.1:9101`    | `:9101`             |
 | scheduler | `127.0.0.1:9102`    | `:9102`             |
@@ -39,7 +39,7 @@ Prometheus at each one (adjust the host for your deployment):
 | api       | `127.0.0.1:9104`    | `:9104`             |
 | idp       | `127.0.0.1:9105`    | `:9105`             |
 
-> **Note on worker/agent ports.** Workers and agents both default to `:9100`.
+> **Note on agent/agent ports.** Agents and workers both default to `:9100`.
 > When several targets run on one host, give each a distinct
 > `CDROM_METRICS_ADDR` (e.g. `:9106`, `:9107`, …) so their ports do not
 > collide. In the bundled `local/docker-compose.yaml` each service is given a
@@ -57,7 +57,7 @@ scrape_configs:
           - scheduler:9102
           - database:9101
           - artifacts:9103
-          - worker-1:9100
+          - agent-1:9100
 ```
 
 Every metric is prefixed `cdrom_`. The Go runtime collectors (`go_*`,
@@ -69,7 +69,7 @@ heap, GC, CPU, file descriptors) comes for free.
 - **API** — `cdrom_api_http_requests_total` / `cdrom_api_http_request_duration_seconds`
   (UI surface), `cdrom_grpc_server_handled_total{method,code}` (gRPC surface,
   including streaming RPCs such as `WatchJobs`), `cdrom_api_job_status_total` /
-  `cdrom_api_job_duration_seconds`, `cdrom_api_ws_clients`, `cdrom_api_workers`,
+  `cdrom_api_job_duration_seconds`, `cdrom_api_ws_clients`, `cdrom_api_agents`,
   `cdrom_api_event_log_lag`, `cdrom_api_artifact_bytes_total`,
   `cdrom_api_log_stream_bytes_total`, `cdrom_api_tokens_minted_total`,
   `cdrom_api_secrets_decrypted_total`, `cdrom_api_notifications_total`,
@@ -79,7 +79,7 @@ heap, GC, CPU, file descriptors) comes for free.
   verdicts — `admitted` / `deactivated` / `deprovisioned` /
   `unknown_rejected` / `no_roles_rejected` / `infra_failure` — judged PER
   REQUEST, no cache; metered by the API adapter from the IdP's verdicts). Probe steps surface
-  through the worker's generic step counters
+  through the agent's generic step counters
   (`cdrom_worker_steps_total{step_type="probe"}`).
 - **Scheduler** — `cdrom_scheduler_dispatches_total{outcome}`,
   `cdrom_scheduler_admission_checks_total` / `cdrom_scheduler_admission_duration_seconds`,
@@ -97,11 +97,11 @@ heap, GC, CPU, file descriptors) comes for free.
   `cdrom_artifacts_bytes_total{op}`, `cdrom_artifacts_duration_seconds{op}`.
 - **IdP** — `cdrom_idp_tokens_minted_total{kind}`, `cdrom_idp_logins_total{outcome}`,
   `cdrom_idp_keys`, `cdrom_idp_key_rotations_total`, `cdrom_idp_users`.
-- **Worker / agent** — `cdrom_worker_jobs_total{status}`,
+- **Agent / agent** — `cdrom_worker_jobs_total{status}`,
   `cdrom_worker_job_duration_seconds{status}`, `cdrom_worker_steps_total{step_type,status}`,
   `cdrom_worker_step_duration_seconds{step_type}`, `cdrom_worker_inflight`,
-  `cdrom_worker_watch_state{state}` (worker), `cdrom_worker_polls_total{outcome}`
-  (worker), `cdrom_worker_heartbeat_failures_total` (worker),
+  `cdrom_worker_watch_state{state}` (agent), `cdrom_worker_polls_total{outcome}`
+  (agent), `cdrom_worker_heartbeat_failures_total` (agent),
   `cdrom_worker_log_bytes_total`.
 
 ## Deployment reporting (DORA-style indicators)

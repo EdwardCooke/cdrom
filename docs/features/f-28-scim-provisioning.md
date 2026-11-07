@@ -86,7 +86,7 @@ provisioning both flow from the same corporate IdP.
 - **Groups → F-27 approval groups** (F-28.5) — the group→role mapping is core;
   additionally targeting F-27 approval groups is a stretch.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **SCIM lives on the built-in IdP, not the API.** The user directory is owned
   by the IdP (via the Database service, F-24), and SCIM is an
   identity-provisioning protocol; the corporate IdP points its SCIM

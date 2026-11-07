@@ -2,7 +2,7 @@
 #
 # 09-concurrency.sh — F-16: concurrency keys serialize jobs that share a key.
 #
-# Boots the stack (with a worker) and submits two jobs that both carry the
+# Boots the stack (with a agent) and submits two jobs that both carry the
 # concurrency key "e2e-key". A key with no configured limit defaults to a
 # limit of 1 — a lock — so the two jobs serialize on it:
 #
@@ -27,10 +27,10 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-# Boot the stack (with a worker). The key "e2e-key" is a lock by default (a
+# Boot the stack (with a agent). The key "e2e-key" is a lock by default (a
 # key with no configured limit defaults to a limit of 1), so the two jobs
 # that carry it serialize on it.
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # --- exercise the concurrency-limit CRUD endpoints (F-16) -------------------
 # The limits are stored as regex-based rules in the database (not
@@ -80,7 +80,7 @@ JOB_A=$(e2e_submit_job "$JOB_A_BODY")
 log ">> job A id: $JOB_A"
 
 # Wait until job A is running: it has been admitted (acquiring the key) and
-# dispatched to the worker. While it runs it holds the key.
+# dispatched to the agent. While it runs it holds the key.
 log ">> waiting for job A to be admitted and running"
 A=""
 for i in $(seq 1 100); do

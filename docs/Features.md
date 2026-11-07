@@ -11,7 +11,7 @@ and built in isolation.
 > implementation checklist. Each feature's full spec (what/why/scope/acceptance
 > criteria/design decisions) lives in its own file under [`features/`](features/).
 > When a feature is implemented, tick it in the checklist below and note any
-> design decisions that should be folded back into `AGENTS.md` /
+> design decisions that should be folded back into `WORKER.md` /
 > `Architecture.md`.
 
 ## Current state (what already exists)
@@ -23,16 +23,16 @@ Before adding features, note the baseline that is already built and working:
 | Pipeline model | `Pipeline` (name, description, job definitions with `key`/`needs`) — CRUD via DB service; a pipeline's jobs form a DAG (F-08) |
 | Job model | `Job` (status, `target_group`, `key`, `depends_on`, start/finish timestamps) |
 | Job lifecycle | `pending → running → succeeded / failed / cancelled / timed_out / skipped` |
-| Dispatch | `target_group` set → fan out to live workers; empty → ephemeral K8s agent |
+| Dispatch | `target_group` set → fan out to live agents; empty → ephemeral K8s agent |
 | DAG / dependencies | Jobs in a pipeline declare `needs` (other jobs' `key`s), forming a DAG (F-08); the graph is validated at save time (unique keys, known needs, no cycle), and a run's job instances are dispatched in parallel as their dependencies succeed (a failed dependency skips its dependents, F-06) |
-| Execution targets | Long-lived **workers** (register, `WatchJobs` stream, heartbeat) and ephemeral **agents** (`GetJob` → run → report) |
-| Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the worker/agent run the steps in order via `internal/executor` and fail on the first step that errors. A job-level `timeout` bounds the whole job and a per-step `timeout` bounds a step; exceeding either terminates the job as `timed_out` (F-03), and a scheduler watchdog reaps jobs whose target goes silent |
+| Execution targets | Long-lived **agents** (register, `WatchJobs` stream, heartbeat) and ephemeral **workers** (`GetJob` → run → report) |
+| Job execution | **Real** — a job carries a `JobSpec` (ordered steps; each step's `type` selects a handler, defaulting to the built-in `shell` handler that reads its command/args/shell from the step's `params` and runs them with workdir, env, and a per-step timeout); the agent/agent run the steps in order via `internal/executor` and fail on the first step that errors. A job-level `timeout` bounds the whole job and a per-step `timeout` bounds a step; exceeding either terminates the job as `timed_out` (F-03), and a scheduler watchdog reaps jobs whose target goes silent |
 | Retry & re-run | A job's `JobSpec` may carry a `retry` policy (`max_attempts` retries after the initial attempt, `backoff` delay); a scheduler retry loop re-dispatches a failed job up to the limit (a new attempt on the same `Job` row, `attempt` counter, F-04). A user can re-run any finished job (`POST /api/jobs/{id}/rerun`) for a fresh attempt; attempts are visible to the UI ("attempt N of M") |
-| Cancellation | Cancelling a running job (`POST /api/jobs/{id}/cancel`) signals the execution target to stop the work (F-05): the API delivers a `JobCancellation` down the worker's `WatchJobs` stream (or an agent observes it on its next `GetJob`), the target interrupts the running step and reports `cancelled`; cancelling a finished job is a no-op |
+| Cancellation | Cancelling a running job (`POST /api/jobs/{id}/cancel`) signals the execution target to stop the work (F-05): the API delivers a `JobCancellation` down the agent's `WatchJobs` stream (or an agent observes it on its next `GetJob`), the target interrupts the running step and reports `cancelled`; cancelling a finished job is a no-op |
 | Job tokens | Minted per job by the API (via IdP), audience exchange, verified on status/artifact RPCs |
 | UI auth | OIDC authorization-code + PKCE; the API verifies the OAuth token as a Bearer token (no session cookie) |
 | Artifacts | General-purpose, namespaced file store (streamed upload/download); jobs scope files by job id, other callers (e.g. deployed releases) use their own namespaces; proxied through the API |
-| Live events | WebSocket `/api/ws` — `job_status`, `worker`, and `job_log` events |
+| Live events | WebSocket `/api/ws` — `job_status`, `agent`, and `job_log` events |
 | Job logs | Streamed from the target to the API (`StreamJobLogs`), persisted to the artifacts service (one file per step + `job.log`), fanned out to the UI as `job_log` events, and retrievable via `GET /api/jobs/{id}/logs[/{name}]` |
 | Transport | gRPC everywhere, optional mutual TLS |
 
@@ -82,7 +82,7 @@ Control who can do what, protect secrets, and keep an accountable record.
 | F-14 | Roles & permissions (RBAC) | done | [F-14](features/f-14-rbac.md) |
 | F-15 | Audit log | done | [F-15](features/f-15-audit-log.md) |
 | F-16 | Concurrency control & queueing (per-group/global/per-key limits as regex-based rules in the database, editable at runtime via the API, pending queue, cross-pipeline templatable concurrency keys) | done | [F-16](features/f-16-concurrency-queueing.md) |
-| F-17 | Environments & deployment targets (first-class environments that group targets and carry deployment policy: worker-declared environment membership (multiple, configurable), an approval gate (`requires_approval`, F-13), and an `automatic`/`manual` automation policy — a `manual` environment holds a run for an explicit proceed call and overrides any trigger and the previous environment; managed in the database via the API) | done | [F-17](features/f-17-environments.md) |
+| F-17 | Environments & deployment targets (first-class environments that group targets and carry deployment policy: agent-declared environment membership (multiple, configurable), an approval gate (`requires_approval`, F-13), and an `automatic`/`manual` automation policy — a `manual` environment holds a run for an explicit proceed call and overrides any trigger and the previous environment; managed in the database via the API) | done | [F-17](features/f-17-environments.md) |
 
 ### Phase 4 — Delivery & observability
 
@@ -121,7 +121,7 @@ tool.
 | F-21.5.1 | Source model & storage (`PipelineSource`/`State`, `periodicRefresh` policy + admin override gate on `Pipeline`, stored YAML+hash, kickoff provenance fields on the run row, source CRUD, `GET …/source`) | done | [F-21.5.1](features/f-21.5.1-source-model-storage.md) |
 | F-21.5.2 | The sync routine (fetch → hash → compare → recompile if changed; credential selection; serialization) | done | [F-21.5.2](features/f-21.5.2-sync-routine.md) |
 | F-21.5.3 | Refresh triggers (periodic loop at the effective cadence — file `spec.periodicRefresh` (interval/cron) when the admin gate allows it, else the 2-min system default — refresh-on-run + kickoff provenance, manual refresh) | done | [F-21.5.3](features/f-21.5.3-refresh-triggers.md) |
-| F-21.6 | Artifact packages (`spec.artifacts` resolution + per-run snapshot pin; `download_artifact`/`extract`/`publish_artifact` step handlers; job stage area under a configurable worker root; job-bound zip publishing via multiline globs; registry publish endpoint with explicit prerelease flag; promotes F-19's promotion op as a server-side blob copy) | done | [F-21.6](features/f-21.6-artifact-package-references.md) |
+| F-21.6 | Artifact packages (`spec.artifacts` resolution + per-run snapshot pin; `download_artifact`/`extract`/`publish_artifact` step handlers; job stage area under a configurable agent root; job-bound zip publishing via multiline globs; registry publish endpoint with explicit prerelease flag; promotes F-19's promotion op as a server-side blob copy) | done | [F-21.6](features/f-21.6-artifact-package-references.md) |
 | F-21.7 | `tags` → `labels` rename (+ `metadata.annotations`) | done | [F-21.7](features/f-21.7-tags-to-labels-rename.md) |
 | F-22 | Post-deploy verification & rollback (`branch` jobs observing dependency outcomes via `.deps.<key>.*`; `probe` health-check step; `rollback` step initiating a resumption run that carries over the cut point's strict-ancestor prefix and re-executes the rest from the anchor's verbatim snapshot; armed (job-mediated) and manual (operator) doors with depth≤1/no-re-arm and flap cooldown; `POST /api/pipelines/{id}/restart`) | done | [F-22](features/f-22-verification-rollback.md) |
 
@@ -152,7 +152,21 @@ First-class labeling and organization of the platform's resources.
 
 | ID | Feature | Status | Spec |
 |----|---------|--------|------|
-| F-29 | Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; the `tags` term is renamed to `labels` as part of F-21; combined onto a job run when it is kicked off) | done | [F-29](features/f-29-tagging.md) |
+| F-29 | Labeling (key/value labels on pipelines, jobs, environments, agent groups, and agents; the `tags` term is renamed to `labels` as part of F-21; combined onto a job run when it is kicked off) | done | [F-29](features/f-29-tagging.md) |
+
+### Phase 8 — Target credentials & execution topology
+
+Durable, revocable identity for execution targets, and the role swap that
+makes the ephemeral half portable (a future Kubernetes agent satisfies the
+same contract by writing Pod env instead of forking a process).
+
+| ID | Feature | Status | Spec |
+|----|---------|--------|------|
+| F-30 | Work credentials & the agent/agent topology (tracked, renewable/rotatable/revocable IdP-issued JWTs for long-lived targets; agent↔API over TLS+bearer instead of mTLS; role swap — long-lived **agent** supervises ephemeral per-job **agent** subprocesses via an env-var mandate + loopback gRPC channel; parallel agents per agent; wholesale rename, no backwards compat; decomposed into F-30.1…F-30.4) | planned | [F-30](features/f-30-agent-credentials-and-topology.md) |
+| F-30.1 | Role swap & wholesale rename (behavior-preserving: long-lived target → agent, ephemeral one-job executable → agent, across binaries/packages/models/protos/config/RBAC/events/metrics/docs; registry reset on upgrade) | planned | [F-30.1](features/f-30.1-role-swap-and-rename.md) |
+| F-30.2 | Work credential model & lifecycle (`AgentCredential` row, IdP-signed JWT with `jti`=row id, issue/list/renew-self/rotate/revoke endpoints, TTL + renew-ahead config, lapse semantics) | planned | [F-30.2](features/f-30.2-agent-credential-model.md) |
+| F-30.3 | Target-surface auth & transport (mandatory bearer-credential on target RPCs, shared JWKS + row-liveness verifier, `RegisterAgent` name binding, stream teardown on revocation, mTLS stripped from the agent↔API leg) | planned | [F-30.3](features/f-30.3-target-surface-auth.md) |
+| F-30.4 | Agent subprocess & supervision channel (env-only mandate, agent claims payload from API with job token, loopback `Signals`/`Telemetry` channel, `ReportChildDeath`, parallel children + per-coordinate uniqueness) | planned | [F-30.4](features/f-30.4-agent-supervision.md) |
 
 11. **F-14 → F-25 → F-26** — service accounts (non-human role-bound
     identities, two individually rotatable Database-generated keys,
@@ -302,4 +316,4 @@ Tick each feature off as it lands.
       verbatim opaque member values (unknown users ignored + logged),
       `displayName` NOT unique, missing mapped roles warned not created,
       operators keep manual role grants on SCIM-managed users)_
-- [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)
+- [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, agent groups, and agents; combined onto a job run)

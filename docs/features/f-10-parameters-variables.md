@@ -33,7 +33,7 @@ inputs, not by editing the definition.
       strings) — or a defined fallback policy is documented.
 - [x] Parameter values are visible on the run (non-secret ones).
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **Parameters are declared on the pipeline.** A `Parameter` (name, optional
   `default`, optional `description`) is a first-class message on `Pipeline`
   (and on `CreatePipelineRequest` / `UpdatePipelineRequest`), stored as a JSON
@@ -49,7 +49,7 @@ inputs, not by editing the definition.
   execution target can interpolate it without a round-trip to the run row —
   the same denormalization pattern the trigger context uses.
 - **The executor interpolates the spec with Go templates.** Before running a
-  job, the execution target (worker or agent) sets the run's parameter values
+  job, the execution target (agent or agent) sets the run's parameter values
   (plus the run's identity: id, pipeline id, trigger, trigger name) on the
   executor's context via `executor.ContextWithRunInfo`. The executor then
   renders each step's `workdir`, each `env` value, and each `params` value

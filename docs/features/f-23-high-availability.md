@@ -6,14 +6,14 @@
 
 **What.** Run multiple API pods and multiple scheduler replicas without losing
 job delivery or live events: a shared Postgres **event log** that every API pod
-tails, **hybrid push + pull** job dispatch (workers poll pending-for-group ~1 s
+tails, **hybrid push + pull** job dispatch (agents poll pending-for-group ~1 s
 as the authoritative path; the event log is the ~50 ms fast path), **scheduler
 leader election** so only one replica runs the background loops, and
 **cross-pod near-live logs** (a lean `job_log_updated` pointer event + a range
 read of the log delta from the shared artifacts store).
 
-**Why.** Today the control plane assumes a single API instance: worker streams,
-the UI event hub, and job dispatch are per-pod in-memory state. A worker on pod
+**Why.** Today the control plane assumes a single API instance: agent streams,
+the UI event hub, and job dispatch are per-pod in-memory state. A agent on pod
 B never receives a job dispatched via pod A (stranded `pending` forever), UI
 clients only see events from their own pod, and >1 scheduler replica duplicates
 dispatches. This makes the platform deployable as a real HA service (e.g. 4 API
@@ -22,7 +22,7 @@ pods per cluster, dual cluster).
 **Scope.**
 - `proto/cdrom/db/v1/db.proto` — `events` table + publish RPCs
   (`PublishAssignment` / `PublishCancel` / `PublishJobStatus` /
-  `PublishRunStatus` / `PublishWorkerEvent` / `PublishLogUpdated`),
+  `PublishRunStatus` / `PublishAgentEvent` / `PublishLogUpdated`),
   `TailEvents(cursor, limit)`, `ClaimJob` (atomic pending→running),
   `ListPendingByGroup`, and leader-election lease RPCs (`AcquireLease` /
   `ReleaseLease`).
@@ -35,9 +35,9 @@ pods per cluster, dual cluster).
   (job, log) byte cursor + range read + WS fan-out, skipped when the pod has
   no UI subscribers); log-event coalescer (200 ms window) in `handleLogChunk`;
   `ClaimJob` / `ListPendingJobs` RPCs; the one-shot `dispatch()` push is kept
-  only as a same-pod fast path — the event log + worker poll are the source of
+  only as a same-pod fast path — the event log + agent poll are the source of
   truth.
-- `internal/worker` — 1 s poll of pending-for-group + atomic `ClaimJob` (the
+- `internal/agent` — 1 s poll of pending-for-group + atomic `ClaimJob` (the
   claim returns the fresh spec + token); robust reconnect (2 s backoff) on the
   `WatchJobs` stream.
 - `internal/services/scheduler` — drop the API push client for dispatch (publish
@@ -53,19 +53,19 @@ pods per cluster, dual cluster).
   appended; keep `AppendLog`'s close-per-append (close-to-open consistency).
 
 **Acceptance criteria.**
-- [x] A worker connected to API pod B receives a job dispatched while it is
+- [x] A agent connected to API pod B receives a job dispatched while it is
       registered on pod B, even though the scheduler wrote it via the shared
       event log (no scheduler→specific-pod dependency).
-- [x] A job whose dispatch missed its worker (worker down at dispatch time) is
-      picked up by the worker on its next poll — no job is stranded `pending`
+- [x] A job whose dispatch missed its agent (agent down at dispatch time) is
+      picked up by the agent on its next poll — no job is stranded `pending`
       forever.
-- [x] A UI client on pod A sees `job_status` / `run_status` / `worker` events
+- [x] A UI client on pod A sees `job_status` / `run_status` / `agent` events
       produced by activity on pod B (via the shared event log).
 - [x] Two scheduler replicas run concurrently: only the leader runs the
       background loops; no duplicate dispatches or duplicate UI events.
-- [x] A worker's job log is visible (near-live) in a UI connected to a
-      *different* API pod than the one the worker streams to.
-- [x] Killing an API pod does not lose in-flight job delivery: the worker
+- [x] A agent's job log is visible (near-live) in a UI connected to a
+      *different* API pod than the one the agent streams to.
+- [x] Killing an API pod does not lose in-flight job delivery: the agent
       reconnects to another pod (2 s backoff) and its poll keeps it in step.
 - [ ] The `events` table does not bloat: old partitions are dropped on a
       retention schedule. *(Deferred: the table is a plain append-only log

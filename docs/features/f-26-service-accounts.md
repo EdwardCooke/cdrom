@@ -119,7 +119,7 @@ bypass delegation checks. Authorize before generating or returning secrets.
   HTTP API through the existing API-key authentication branch. Resolve a
   distinct service-account principal (`service-account:<id>`) with its
   current role bindings; never treat it as a human user or a job token.
-  F-26 does not replace worker/agent job-token authentication.
+  F-26 does not replace agent/agent job-token authentication.
 - API middleware delegates verification to the IdP, which calls the
   Database service to check account state and either slot's hash. Read state
   and roles consistently on every request; do not exchange these keys for

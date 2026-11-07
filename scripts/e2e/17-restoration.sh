@@ -2,7 +2,7 @@
 #
 # 17-restoration.sh — F-22 post-deploy verification & rollback, end to end.
 #
-# Boots the full local stack (db, scheduler, artifacts, idp, api, worker)
+# Boots the full local stack (db, scheduler, artifacts, idp, api, agent)
 # against a throwaway SQLite database and exercises the RESTORED ARC:
 #
 #   1. A pipeline with a small DAG:
@@ -38,14 +38,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 HEALTH_PORT=10090
 DEAD_PORT=10091
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # Per-instance log baselines: on the SHARED stack (make e2e) the component
 # logs ACCUMULATE across suite members, so the log-driven waits below must
 # consider only what was written AFTER this incarnation began — otherwise a
 # stale line from an earlier member satisfies a grep early (or correlates the
 # WRONG run). Standalone mode: the logs are fresh, so the baseline is ~0.
-WORKER_LOG_BASE=$(stat -c%s "$WORK/worker.log" 2>/dev/null || echo 0)
+WORKER_LOG_BASE=$(stat -c%s "$WORK/agent.log" 2>/dev/null || echo 0)
 API_LOG_BASE=$(stat -c%s "$WORK/api.log" 2>/dev/null || echo 0)
 AUDIT_BOOT_BASE=$(stat -c%s "$WORK/audit.log" 2>/dev/null || echo 0)
 # newpart FILE OFFSET DEST copies the bytes of FILE from OFFSET onwards (the
@@ -208,7 +208,7 @@ BAD_RUN_ID=$(jq -r '.id' <<<"$BAD_RUN")
 log ">> bad run id: $BAD_RUN_ID"
 
 # The bad run's verify job FAILS (probe deadline, connect-error) and the
-# rollback job's step FIRES: the worker logs the initiation. Budget
+# rollback job's step FIRES: the agent logs the initiation. Budget
 # GENEROUSLY: verify's 5s probe deadline + the resolver's 5s tick + admission
 # + dispatch easily exceeds the library's 20s wait, so poll longer here.
 #
@@ -217,7 +217,7 @@ log ">> bad run id: $BAD_RUN_ID"
 # ALSO dumps the DATABASE'S VIEW OF THE WORLD (every job/run/execution with
 # its timestamps) straight from the SQLite file, so a stall that predates the
 # resumption (e.g. the good run never finishing) is diagnosable from the dump
-# alone: which job sat where, since when, and whether the worker acknowledged
+# alone: which job sat where, since when, and whether the agent acknowledged
 # it at all.
 dump_failure() {
   echo "> $*" >&2
@@ -229,15 +229,15 @@ dump_failure() {
     echo "--- good run ($GOOD_RUN_ID) jobs (straight from the db):" >&2
     sqlite3 -batch -separator ' | ' "$WORK/cdrom.db" \
       "SELECT 'job '||id||' key='||key||' status='||status||' attempt='||COALESCE(attempt,0)||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');
-       SELECT 'exe '||id||' job='||job_id||' worker='||worker_name||' status='||status||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');" \
+       SELECT 'exe '||id||' job='||job_id||' agent='||agent_name||' status='||status||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');" \
       2>/dev/null | grep -E "^job|^exe" >&2 || true
     echo "--- good run row:" >&2
     sqlite3 -batch -separator ' | ' "$WORK/cdrom.db" \
       "SELECT 'run '||id||' status='||status||' trigger='||COALESCE(trigger,'-')||' created='||created_at||' started='||COALESCE(started_at,'-')||' finished='||COALESCE(finished_at,'-');" \
       2>/dev/null | grep "^run" >&2 || true
   fi
-  echo "--- worker.log (full):" >&2
-  cat "$WORK/worker.log" >&2 2>/dev/null || true
+  echo "--- agent.log (full):" >&2
+  cat "$WORK/agent.log" >&2 2>/dev/null || true
   echo "--- scheduler.log (tail 40):" >&2
   tail -n 40 "$WORK/scheduler.log" >&2 2>/dev/null || true
   echo "--- api.log (tail 40):" >&2
@@ -253,9 +253,9 @@ dump_failure() {
 # nominal figure assumes an unloaded scheduler, and in shared-stack mode
 # (make e2e) the components absorb the residue of the preceding suites, so
 # the ticks stretch. A tight budget here is a standing invitation to flake.
-SLICE_W="$WORK/.worker.slice" SLICE_A="$WORK/.api.slice"
+SLICE_W="$WORK/.agent.slice" SLICE_A="$WORK/.api.slice"
 i=0
-until newpart "$WORK/worker.log" "$WORKER_LOG_BASE" "$SLICE_W" && grep -qF 'executor: rollback initiated' "$SLICE_W" 2>/dev/null; do
+until newpart "$WORK/agent.log" "$WORKER_LOG_BASE" "$SLICE_W" && grep -qF 'executor: rollback initiated' "$SLICE_W" 2>/dev/null; do
   i=$((i+1))
   [ $i -le 600 ] || { dump_failure "timed out waiting for the armed rollback step to fire"; exit 1; }
   if [ $((i % 10)) -eq 0 ]; then echo "...waiting for the armed rollback to fire (iteration $i)"; fi
@@ -370,7 +370,7 @@ log ">> manual door spawned resumption run $MANUAL_NEW_RUN (operator-initiated)"
 
 # CLEANUP: the manual-door assertion deliberately stops at SPAWN (the armed
 # door already proved the full restore arc). Leaving the manual resumption
-# LIVE abandons work on the shared stack: its jobs tie up the lone worker and
+# LIVE abandons work on the shared stack: its jobs tie up the lone agent and
 # inflate the scheduler's per-tick scans for every SUITE MEMBER THAT RUNS NEXT
 # (classic self-inflicted flake source). Cancel the run's jobs and VERIFY THEY
 # SETTLE: the job list can race the row creation (and a partial cancel leaves

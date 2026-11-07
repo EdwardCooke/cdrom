@@ -56,7 +56,7 @@ condition context is what lets a step say "only run if the build step produced
       as satisfied (the dependent job is dispatched, not skipped); a cancelled
       or skipped dependency always blocks (skip propagates).
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **`depends_on` was a minimal stand-in for F-08's `needs`/DAG; F-08 is now
   built on it.** F-06 landed ahead of F-08 in the roadmap, so `Job` gained a
   minimal `depends_on` field (`[]uint`): a flat list of raw job ids, checked
@@ -68,7 +68,7 @@ condition context is what lets a step say "only run if the build step produced
   saved, and `Database.CreateRun` remaps a run's instances' `depends_on`
   (definition ids) onto the run's own instance ids, so the same resolver
   dispatches ready jobs in parallel and skips dependents of a failed job. The
-  resolver is now the DAG resolver (see F-08 and AGENTS.md's "Skip
+  resolver is now the DAG resolver (see F-08 and WORKER.md's "Skip
   propagation & step conditions (F-06)" section).
 - **`SubmitJob` withholds dispatch for a job with dependencies.** A job
   submitted with a non-empty `depends_on` is created `pending` but, unlike a
@@ -129,7 +129,7 @@ condition context is what lets a step say "only run if the build step produced
   `Select`/`Updates` serializer pattern as `step_results`).
 - **Per-step outcomes are collected and persisted.** The executor gained a
   `StepStatusReporter` interface (set in its context, mirroring the existing
-  `LogSink` pattern) and a `StepResultCollector` helper; the worker and agent
+  `LogSink` pattern) and a `StepResultCollector` helper; the agent and agent
   create one per job, wire it into the executor's context, and attach the
   collected results (`executor.StepResultCollector.ToProto()`) to the job's
   final `ReportJobStatus` call as `step_results`. `Database.UpdateJob`

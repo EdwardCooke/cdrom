@@ -2,7 +2,7 @@
 #
 # 06-rbac.sh — F-14: roles & permissions (RBAC).
 #
-# Boots the stack (with a worker, so the operator's triggered run has a
+# Boots the stack (with a agent, so the operator's triggered run has a
 # target to dispatch to) and a SECOND API instance with OIDC authentication
 # and RBAC enabled, sharing the same IdP (users + JWKS) and
 # db/scheduler/artifacts as the main stack. The main stack runs with OIDC
@@ -29,7 +29,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 log ">> verifying role-based access control (F-14)"
 

@@ -4,7 +4,7 @@
 > Phase 3 — Safety & governance · [Feature index](../Features.md)
 
 
-**What.** Bound how much runs in parallel: max concurrent jobs per worker
+**What.** Bound how much runs in parallel: max concurrent jobs per agent
 group (and/or globally), a visible pending queue, optional job priority, and
 **concurrency keys** — named, cross-run (and cross-pipeline) locks that limit
 what may run at the same time. Jobs beyond a limit, or blocked by a held
@@ -122,7 +122,7 @@ different pipelines and runs.
   whose keys are now all free and dispatches them. This composes with the
   existing per-group limit: a job is dispatched only when its group has a free
   slot *and* none of its keys are held.
-- **Keys are additive to the group limit, not a replacement.** The per-worker
+- **Keys are additive to the group limit, not a replacement.** The per-agent
   group limit (and any global limit) still bounds how much runs on a target;
   concurrency keys bound how much runs *across* targets and pipelines that
   share a resource. A job can be group-limited, key-blocked, or both.
@@ -140,12 +140,12 @@ different pipelines and runs.
   unnecessary.)
 - **Limits are regex-based rules in the database, not configuration.** The
   limits that bound how much runs in parallel — the system-wide cap,
-  per-worker-group caps, and per-concurrency-key caps — are stored as
+  per-agent-group caps, and per-concurrency-key caps — are stored as
   `ConcurrencyLimit` rows (a rule = `kind` + `pattern` + `limit`) in the
   Database service, so they can be edited at runtime via the API
   (`GET/POST/PUT/DELETE /api/concurrency-limits`) without a redeployment. A
   rule's `pattern` is a regular expression matched against the dimension's
-  name (a worker group's name or a concurrency key's name; empty for the
+  name (a agent group's name or a concurrency key's name; empty for the
   single `global` resource). A concrete resource's effective limit is the
   limit of the **most specific (longest) matching rule** of its kind; a
   resource matching no rule falls back to a default (a concurrency key

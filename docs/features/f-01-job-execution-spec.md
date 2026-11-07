@@ -13,7 +13,7 @@ value is either a scalar string or a list of strings), not in the step's own
 fields, so a new step type can be added without changing the spec schema. The
 built-in `shell` handler (default when `type` is empty) runs a command,
 directly or through a user-chosen shell, reading its `command`, `args`, and
-`shell` from `params`. The worker/agent executes the steps in order and the
+`shell` from `params`. The agent/agent executes the steps in order and the
 job fails on the first step that errors.
 
 **Why.** CD jobs are fundamentally "run these commands in this environment".
@@ -29,18 +29,18 @@ missing piece.
   edit never changes what a past run did.
 - `proto/cdrom/db/v1/db.proto` + `proto/cdrom/api/v1/api.proto` — carry the
   spec to the execution target.
-- `internal/worker/worker.go`, `internal/agent/agent.go` — replace the
+- `internal/agent/agent.go`, `internal/agent/agent.go` — replace the
   `runJob` stub with a real executor that runs each step (portable across
   Windows + Linux — see cross-platform constraints).
 - `internal/api/server.go` — accept the spec on `POST /api/jobs`.
 
 **Acceptance criteria.**
 - [x] A job submitted with a multi-step spec runs the steps in order on a
-      worker and on an agent.
+      agent and on an agent.
 - [x] A failing step marks the job `failed` and stops subsequent steps.
 - [x] Step environment variables are available to the command.
-- [x] The spec is portable: the same job spec executes on a Windows worker and
-      a Linux worker (no shell-specific assumptions, or an explicit shell
+- [x] The spec is portable: the same job spec executes on a Windows agent and
+      a Linux agent (no shell-specific assumptions, or an explicit shell
       contract is documented).
 - [x] A step's `shell` param runs the step through a user-chosen shell
       (`<shell> <args> <command>`), e.g. `pwsh` on Windows.
@@ -54,18 +54,18 @@ missing piece.
       output directory, so later steps and jobs can read it through the
       condition context.
 - [ ] A step's `once` field runs the step on at most one target of a fan-out
-      job: the first worker to reach it claims a durable slot (job id + step
-      index + attempt) and runs it; the other workers skip it (recorded
+      job: the first agent to reach it claims a durable slot (job id + step
+      index + attempt) and runs it; the other agents skip it (recorded
       `skipped`, not failed), and a retry (a new attempt) may run it again.
 - [x] `GOOS=windows GOARCH=amd64 go build ./cmd/...` stays green.
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - The spec is a **per-run snapshot** stored on the `Job` row (a JSON `text`
   column via GORM's `serializer:json`), so a pipeline edit never changes what
   a past run did.
 - The canonical spec type is `cdrom.db.v1.JobSpec`; the API and scheduler
   protos reference it rather than redefining it.
-- Execution is shared by worker and agent in `internal/executor`
+- Execution is shared by agent and agent in `internal/executor`
   (`executor.Execute(ctx, spec, logger)`).
 - **Step types & handlers:** the executor (`internal/executor`) is the generic
   dispatch engine; a step's `type` selects an `executor.StepHandler` (empty →
@@ -77,7 +77,7 @@ missing piece.
   `executor.RegisterStepType(name, handler)` (e.g. `ansible`, `terraform`,
   `argo`). An unregistered type fails the job with a clear error.
   `params` carries handler-specific configuration so a new type needs no
-  spec-schema change. The worker and agent blank-import `internal/stephandlers`
+  spec-schema change. The agent and agent blank-import `internal/stephandlers`
   so the built-in handlers are registered before any job runs. This is the
   seam for the later plugin architecture.
 - **Shell contract:** the shell handler reads its `command` (string param),
@@ -101,7 +101,7 @@ missing piece.
   step-output name the token is written under, default `token`) from the step's
   `params`. It obtains the exchanged token from the execution target through the
   executor's `TokenExchange` (set via `executor.ContextWithTokenExchange`): the
-  worker and agent implement it by calling the API's `ExchangeJobToken` RPC,
+  agent and agent implement it by calling the API's `ExchangeJobToken` RPC,
   presenting the job's own token. The executor gives every step a per-step
   output directory (the step's env carries `executor.StepOutputDirEnv`), so the
   handler always writes the token into it under the output name; the executor
@@ -113,7 +113,7 @@ missing piece.
 - **`once` (run a step on one target of a fan-out job).** A step may set
   `once` (a boolean field on `JobStep`, alongside `condition` and
   `ignore_failed`). When set, the executor runs the step on at most one target
-  of a job that fans out to a worker group: before running it, the target
+  of a job that fans out to a agent group: before running it, the target
   claims a durable slot (job id + step name + attempt) in the Database service
   (a guarded atomic claim, like F-16's slot accounting); the first target to
   claim it runs the step, and every other target that reaches the same step in
@@ -122,8 +122,8 @@ missing piece.
   (F-04) is a new attempt, so it may run the step again. A job on a single
   target (an ephemeral agent) is unaffected — there is only one target to
   claim. This is what keeps a notification step (F-18) from sending once per
-  worker, and lets any step type (e.g. a one-shot `shell` command) run on a
-  single worker of a group.
+  agent, and lets any step type (e.g. a one-shot `shell` command) run on a
+  single agent of a group.
 - Per-step `timeout` is enforced by the target via a derived context; a
   job-level `timeout` bounds the whole job (F-03), and a scheduler-side
   watchdog reaps jobs whose target goes silent (F-03).

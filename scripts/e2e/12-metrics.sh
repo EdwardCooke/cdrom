@@ -2,7 +2,7 @@
 #
 # 12-metrics.sh — verifies the F-20 metrics endpoints actually return data.
 #
-# Boots the full local stack (db, scheduler, artifacts, idp, api, worker)
+# Boots the full local stack (db, scheduler, artifacts, idp, api, agent)
 # against a throwaway SQLite database. Every component serves Prometheus
 # metrics at /metrics (plus a /healthz probe) on a DEDICATED metrics port,
 # separate from its service ports (gRPC, the UI HTTP, the IdP's OIDC surface).
@@ -12,8 +12,8 @@
 #      GET /metrics (200, non-empty), and the body carries the always-present
 #      process metrics (go_goroutines, cdrom_up) plus the component's own
 #      metric set (a component-specific metric name).
-#   2. After a job runs to completion on the worker, the execution-target and
-#      control-plane components report the job in their metrics: the worker's
+#   2. After a job runs to completion on the agent, the execution-target and
+#      control-plane components report the job in their metrics: the agent's
 #      job/step counters, the API's job-status + gRPC-handled counters, the
 #      scheduler's dispatch counter, the artifacts service's operation
 #      counter, and the IdP's job-token mint counter. The scheduler also
@@ -30,7 +30,7 @@
 #      live only on the dedicated ports.
 #
 # The default metrics ports (one per component, 127.0.0.1) are used:
-#   worker/agent :9100, database :9101, scheduler :9102, artifacts :9103,
+#   agent/agent :9100, database :9101, scheduler :9102, artifacts :9103,
 #   api :9104, idp :9105.
 #
 # Usage: scripts/e2e/12-metrics.sh
@@ -141,7 +141,7 @@ e2e_wait_for_metric() {
   exit 1
 }
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # --- 1. every component's dedicated metrics port returns data ----------------
 # The always-present process metrics (go_goroutines, cdrom_up) plus one
@@ -149,7 +149,7 @@ e2e_boot_stack with-worker
 # even before any job runs) prove the port serves the component's own metric
 # set, not just an empty registry.
 log ">> checking each component's dedicated metrics port"
-e2e_metrics_check worker    "$E2E_METRICS_WORKER"    cdrom_worker_inflight
+e2e_metrics_check agent    "$E2E_METRICS_WORKER"    cdrom_worker_inflight
 e2e_metrics_check database  "$E2E_METRICS_DATABASE"  cdrom_db_event_log_size
 e2e_metrics_check scheduler "$E2E_METRICS_SCHEDULER" cdrom_scheduler_leader
 # The artifacts metric set is all label-vecs (no plain gauge), so its baseline
@@ -159,8 +159,8 @@ e2e_metrics_check api       "$E2E_METRICS_API"       cdrom_api_event_log_lag
 e2e_metrics_check idp       "$E2E_METRICS_IDP"       cdrom_idp_keys
 
 # --- 2. a job that runs to completion is reflected in the metrics -----------
-# Submit a two-step shell job to the worker group. Running it exercises the
-# full path, so every component records the job in its metrics: the worker
+# Submit a two-step shell job to the agent group. Running it exercises the
+# full path, so every component records the job in its metrics: the agent
 # (job + step counters), the API (job-status + gRPC-handled), the scheduler
 # (dispatch), the artifacts service (log persistence), and the IdP (job-token
 # mint).
@@ -196,8 +196,8 @@ done
 
 # Now each component's dedicated metrics port must report the job.
 log ">> verifying the job is reflected in each component's metrics"
-e2e_wait_for_metric worker    "$E2E_METRICS_WORKER"    cdrom_worker_jobs_total      'worker recorded the completed job'
-e2e_wait_for_metric worker    "$E2E_METRICS_WORKER"    cdrom_worker_steps_total     'worker recorded the job steps'
+e2e_wait_for_metric agent    "$E2E_METRICS_WORKER"    cdrom_worker_jobs_total      'agent recorded the completed job'
+e2e_wait_for_metric agent    "$E2E_METRICS_WORKER"    cdrom_worker_steps_total     'agent recorded the job steps'
 e2e_wait_for_metric api       "$E2E_METRICS_API"       cdrom_api_job_status_total   'api recorded the job status'
 e2e_wait_for_metric api       "$E2E_METRICS_API"       cdrom_grpc_server_handled_total 'api recorded the gRPC calls'
 e2e_wait_for_metric scheduler "$E2E_METRICS_SCHEDULER" cdrom_scheduler_dispatches_total 'scheduler recorded the dispatch'

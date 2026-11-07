@@ -2,7 +2,7 @@
 #
 # 04-approval.sh — F-13: approval gates.
 #
-# Boots the stack (with a worker) and verifies:
+# Boots the stack (with a agent) and verifies:
 #   1. a job whose second step is an approval gate (type "approval") pauses in
 #      the awaiting_approval state (status 8) until an authorized user
 #      approves it via the HTTP API. The gate's message is a template rendered
@@ -22,7 +22,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-e2e_boot_stack with-worker
+e2e_boot_stack with-agent
 
 # --- verify an approval gate pauses the job until approved (F-13) ----------
 log ">> submitting a job with an approval gate"
@@ -43,7 +43,7 @@ EOF
 APPROVAL_JOB_ID=$(e2e_submit_job "$APPROVAL_BODY")
 log ">> approval job id: $APPROVAL_JOB_ID"
 
-# The worker runs the pre-gate step, then pauses at the approval step and
+# The agent runs the pre-gate step, then pauses at the approval step and
 # reports the job awaiting_approval (status 8) with the rendered message.
 log ">> waiting for the job to pause at the approval gate (status 8)"
 AWAITING=$(e2e_wait_for_status "$APPROVAL_JOB_ID" 8 'job awaiting approval')
@@ -64,7 +64,7 @@ APPROVE_RESPONSE=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$APPROVAL_JOB
   -d '{"reason": "lgtm"}')
 log "   $APPROVE_RESPONSE"
 
-# The worker observes the approval on its next poll and continues to the
+# The agent observes the approval on its next poll and continues to the
 # post-gate step, which runs and the job succeeds.
 log ">> waiting for the job to continue past the gate and succeed"
 APPROVED_FINAL=$(e2e_wait_for_status "$APPROVAL_JOB_ID" 3 'job succeeded after approval')
@@ -95,7 +95,7 @@ EOF
 REJECT_JOB_ID=$(e2e_submit_job "$REJECT_BODY")
 log ">> reject job id: $REJECT_JOB_ID"
 
-# The worker pauses at the approval gate (status 8) with the rendered message.
+# The agent pauses at the approval gate (status 8) with the rendered message.
 log ">> waiting for the job to pause at the approval gate (status 8)"
 REJECT_AWAITING=$(e2e_wait_for_status "$REJECT_JOB_ID" 8 'job awaiting approval')
 [ "$(printf '%s' "$REJECT_AWAITING" | jq -r '.approval_message')" = "ship e2e-reject-job?" ] \
@@ -109,7 +109,7 @@ REJECT_DECISION=$(curl -s -X POST "http://127.0.0.1:8080/api/jobs/$REJECT_JOB_ID
   -d '{"reason": "not yet"}')
 log "   $REJECT_DECISION"
 
-# The job fails (status 4): the worker observes the rejection on its next poll
+# The job fails (status 4): the agent observes the rejection on its next poll
 # and fails the job, and the gate's rejection already moved it to failed.
 log ">> waiting for the job to fail after the rejection"
 REJECTED_FINAL=$(e2e_wait_for_status "$REJECT_JOB_ID" 4 'job failed after rejection')
@@ -119,7 +119,7 @@ log "   $REJECTED_FINAL"
   || { echo ">> approval decision was not recorded as rejected" >&2; exit 1; }
 [ "$(printf '%s' "$REJECTED_FINAL" | jq -r '.approval_reason')" = "not yet" ] \
   || { echo ">> reject reason was not recorded" >&2; exit 1; }
-# The post-gate step never ran (the job failed at the gate). Give the worker a
+# The post-gate step never ran (the job failed at the gate). Give the agent a
 # moment to settle, then confirm its output is absent from the job log.
 sleep 1
 REJECT_LOG=$(curl -s "http://127.0.0.1:8080/api/jobs/$REJECT_JOB_ID/logs/job.log")

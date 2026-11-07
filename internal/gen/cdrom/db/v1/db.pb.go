@@ -406,7 +406,7 @@ func (ApprovalPolicy) EnumDescriptor() ([]byte, []int) {
 
 // FailureMode controls how a job that runs on several workers (a job targeting
 // a worker group, which runs on every worker in the group) is judged from the
-// per-worker outcomes. It is set at the pipeline level and may be overridden
+// per-agent outcomes. It is set at the pipeline level and may be overridden
 // per job; a job that sets no failure mode inherits its pipeline's (defaulting
 // to ALL). It only affects jobs that fan out to more than one worker; a job on
 // a single target is unaffected.
@@ -418,7 +418,7 @@ const (
 	// any worker that fails or times out fails the job.
 	FailureMode_FAILURE_MODE_ALL FailureMode = 1
 	// FAILURE_MODE_BEST_EFFORT: the job succeeds if every worker's run reaches
-	// a terminal state (a per-worker failure or timeout is recorded but does
+	// a terminal state (a per-agent failure or timeout is recorded but does
 	// not fail the job).
 	FailureMode_FAILURE_MODE_BEST_EFFORT FailureMode = 2
 	// FAILURE_MODE_ANY: the job succeeds as soon as one worker's run succeeds.
@@ -4045,7 +4045,7 @@ type JobStep struct {
 	// already claimed and skips the step (recorded skipped, not failed). A
 	// retry (F-04) is a new attempt, so it may run the step again. A job on a
 	// single target (an ephemeral agent) is unaffected. This is what keeps a
-	// notification step (F-18) from sending once per worker.
+	// notification step (F-18) from sending once per agent.
 	Once          bool `protobuf:"varint,12,opt,name=once,proto3" json:"once,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4228,14 +4228,14 @@ type JobSpec struct {
 	IgnoreFailed bool `protobuf:"varint,4,opt,name=ignore_failed,json=ignoreFailed,proto3" json:"ignore_failed,omitempty"`
 	// failure_mode controls how a job that runs on several workers (a job
 	// targeting a worker group, which runs on every worker in the group) is
-	// judged from the per-worker outcomes. It is set at the pipeline level and
+	// judged from the per-agent outcomes. It is set at the pipeline level and
 	// may be overridden per job; a job that sets no failure mode inherits its
 	// pipeline's (defaulting to ALL). It only affects jobs that fan out to
 	// more than one worker; a job on a single target is unaffected.
 	//   - ALL: the job succeeds only if every worker's run succeeds; any
 	//     worker that fails or times out fails the job.
 	//   - BEST_EFFORT: the job succeeds if every worker's run reaches a
-	//     terminal state (a per-worker failure or timeout is recorded but does
+	//     terminal state (a per-agent failure or timeout is recorded but does
 	//     not fail the job).
 	//   - ANY: the job succeeds as soon as one worker's run succeeds.
 	FailureMode FailureMode `protobuf:"varint,5,opt,name=failure_mode,json=failureMode,proto3,enum=cdrom.db.v1.FailureMode" json:"failure_mode,omitempty"`
@@ -4424,7 +4424,7 @@ type Job struct {
 	// failure_mode is the job's failure mode (see JobSpec.failure_mode),
 	// denormalized from the spec (or the pipeline's default) when the job was
 	// created. The scheduler's job-status loop uses it to derive the job's
-	// overall status from the per-worker outcomes of a job that fanned out to
+	// overall status from the per-agent outcomes of a job that fanned out to
 	// a worker group.
 	FailureMode FailureMode `protobuf:"varint,19,opt,name=failure_mode,json=failureMode,proto3,enum=cdrom.db.v1.FailureMode" json:"failure_mode,omitempty"`
 	// step_barrier is the job's step-barrier flag (see JobSpec.step_barrier),
@@ -6101,7 +6101,7 @@ func (x *ListPendingByGroupRequest) GetEnvironments() []string {
 // JobExecution is one worker's run of a job (fan-out). A job that targets a
 // worker group runs on every worker in the group; each worker's run is a
 // separate JobExecution, tracked independently so the job's overall status can
-// be derived from the per-worker outcomes (see FailureMode). A job that runs
+// be derived from the per-agent outcomes (see FailureMode). A job that runs
 // on a single target (an ephemeral agent, or a group with one worker) has a
 // single execution.
 type JobExecution struct {
@@ -6109,8 +6109,8 @@ type JobExecution struct {
 	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// job_id is the job this execution runs.
 	JobId int64 `protobuf:"varint,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// worker_name is the worker that runs (or ran) this execution.
-	WorkerName string `protobuf:"bytes,3,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
+	// agent_name is the worker that runs (or ran) this execution.
+	AgentName string `protobuf:"bytes,3,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// attempt is the job attempt this execution belongs to (F-04); a retry
 	// creates a fresh set of executions.
 	Attempt int32 `protobuf:"varint,4,opt,name=attempt,proto3" json:"attempt,omitempty"`
@@ -6131,7 +6131,7 @@ type JobExecution struct {
 	// instance's base label set (pipeline + job + environment + worker group)
 	// merged with the labels of the worker that ran this execution (the worker's
 	// labels win on a key collision). They are set when the worker starts the
-	// execution (StartJobExecution), so a fan-out job's each-worker execution
+	// execution (StartJobExecution), so a fan-out job's each-agent execution
 	// carries that worker's own labels. Empty means the execution has no labels.
 	Labels        map[string]string `protobuf:"bytes,12,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
@@ -6182,9 +6182,9 @@ func (x *JobExecution) GetJobId() int64 {
 	return 0
 }
 
-func (x *JobExecution) GetWorkerName() string {
+func (x *JobExecution) GetAgentName() string {
 	if x != nil {
-		return x.WorkerName
+		return x.AgentName
 	}
 	return ""
 }
@@ -6259,8 +6259,8 @@ type StartJobExecutionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the worker is starting.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// worker_name is the worker starting the job.
-	WorkerName string `protobuf:"bytes,2,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
+	// agent_name is the worker starting the job.
+	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// started_at is the timestamp to record when the execution starts; when
 	// absent the server stamps the current time.
 	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
@@ -6305,9 +6305,9 @@ func (x *StartJobExecutionRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *StartJobExecutionRequest) GetWorkerName() string {
+func (x *StartJobExecutionRequest) GetAgentName() string {
 	if x != nil {
-		return x.WorkerName
+		return x.AgentName
 	}
 	return ""
 }
@@ -6475,8 +6475,8 @@ type UpdateJobExecutionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the execution runs.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// worker_name is the worker whose execution is updated.
-	WorkerName string `protobuf:"bytes,2,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
+	// agent_name is the worker whose execution is updated.
+	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// status is the execution's new status (a terminal status on the worker's
 	// final report).
 	Status JobStatus `protobuf:"varint,3,opt,name=status,proto3,enum=cdrom.db.v1.JobStatus" json:"status,omitempty"`
@@ -6530,9 +6530,9 @@ func (x *UpdateJobExecutionRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *UpdateJobExecutionRequest) GetWorkerName() string {
+func (x *UpdateJobExecutionRequest) GetAgentName() string {
 	if x != nil {
-		return x.WorkerName
+		return x.AgentName
 	}
 	return ""
 }
@@ -6565,30 +6565,30 @@ func (x *UpdateJobExecutionRequest) GetOutputs() map[string]string {
 	return nil
 }
 
-// AbandonWorkerExecutionsRequest asks the database to abandon a worker's
+// AbandonAgentExecutionsRequest asks the database to abandon a worker's
 // running executions (fan-out).
-type AbandonWorkerExecutionsRequest struct {
+type AbandonAgentExecutionsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// worker_name is the worker whose running executions are abandoned.
-	WorkerName    string `protobuf:"bytes,1,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
+	// agent_name is the worker whose running executions are abandoned.
+	AgentName    string `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *AbandonWorkerExecutionsRequest) Reset() {
-	*x = AbandonWorkerExecutionsRequest{}
+func (x *AbandonAgentExecutionsRequest) Reset() {
+	*x = AbandonAgentExecutionsRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *AbandonWorkerExecutionsRequest) String() string {
+func (x *AbandonAgentExecutionsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*AbandonWorkerExecutionsRequest) ProtoMessage() {}
+func (*AbandonAgentExecutionsRequest) ProtoMessage() {}
 
-func (x *AbandonWorkerExecutionsRequest) ProtoReflect() protoreflect.Message {
+func (x *AbandonAgentExecutionsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -6600,20 +6600,20 @@ func (x *AbandonWorkerExecutionsRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use AbandonWorkerExecutionsRequest.ProtoReflect.Descriptor instead.
-func (*AbandonWorkerExecutionsRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use AbandonAgentExecutionsRequest.ProtoReflect.Descriptor instead.
+func (*AbandonAgentExecutionsRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{63}
 }
 
-func (x *AbandonWorkerExecutionsRequest) GetWorkerName() string {
+func (x *AbandonAgentExecutionsRequest) GetAgentName() string {
 	if x != nil {
-		return x.WorkerName
+		return x.AgentName
 	}
 	return ""
 }
 
 // StepCompletion is one worker's completion of a step of a job (the
-// cross-worker step barrier). A job that runs on several workers with a step
+// cross-agent step barrier). A job that runs on several workers with a step
 // barrier runs its steps in lockstep: no worker proceeds to step N+1 until
 // every worker that is alive has completed step N. Each worker's completion of
 // a step is recorded here (one row per (job, worker, step, attempt)); the
@@ -6624,8 +6624,8 @@ type StepCompletion struct {
 	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// job_id is the job this step belongs to.
 	JobId int64 `protobuf:"varint,2,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// worker_name is the worker that completed the step.
-	WorkerName string `protobuf:"bytes,3,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
+	// agent_name is the worker that completed the step.
+	AgentName string `protobuf:"bytes,3,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// step_name is the step's name (its identity in the job's spec).
 	StepName string `protobuf:"bytes,4,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	// attempt is the job attempt this completion belongs to (F-04); a retry
@@ -6681,9 +6681,9 @@ func (x *StepCompletion) GetJobId() int64 {
 	return 0
 }
 
-func (x *StepCompletion) GetWorkerName() string {
+func (x *StepCompletion) GetAgentName() string {
 	if x != nil {
-		return x.WorkerName
+		return x.AgentName
 	}
 	return ""
 }
@@ -6717,13 +6717,13 @@ func (x *StepCompletion) GetUpdatedAt() *timestamppb.Timestamp {
 }
 
 // ReportStepCompletionRequest records that a worker has completed a step of a
-// job (the cross-worker step barrier).
+// job (the cross-agent step barrier).
 type ReportStepCompletionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// job_id is the job the step belongs to.
 	JobId int64 `protobuf:"varint,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	// worker_name is the worker that completed the step.
-	WorkerName string `protobuf:"bytes,2,opt,name=worker_name,json=workerName,proto3" json:"worker_name,omitempty"`
+	// agent_name is the worker that completed the step.
+	AgentName string `protobuf:"bytes,2,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	// step_name is the step's name (the step the worker completed).
 	StepName      string `protobuf:"bytes,3,opt,name=step_name,json=stepName,proto3" json:"step_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -6767,9 +6767,9 @@ func (x *ReportStepCompletionRequest) GetJobId() int64 {
 	return 0
 }
 
-func (x *ReportStepCompletionRequest) GetWorkerName() string {
+func (x *ReportStepCompletionRequest) GetAgentName() string {
 	if x != nil {
-		return x.WorkerName
+		return x.AgentName
 	}
 	return ""
 }
@@ -7059,9 +7059,9 @@ type Event struct {
 	// name is the event kind: "assignment", "cancel", "job_status",
 	// "run_status", "worker", or "job_log_updated".
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// worker_group is the group the event is relevant to (for group-scoped
+	// agent_group is the group the event is relevant to (for group-scoped
 	// events like assignment); empty for events that are not group-scoped.
-	WorkerGroup string `protobuf:"bytes,3,opt,name=worker_group,json=workerGroup,proto3" json:"worker_group,omitempty"`
+	AgentGroup string `protobuf:"bytes,3,opt,name=agent_group,json=agentGroup,proto3" json:"agent_group,omitempty"`
 	// payload is the small JSON object that carries the event's data.
 	Payload   string                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
@@ -7117,9 +7117,9 @@ func (x *Event) GetName() string {
 	return ""
 }
 
-func (x *Event) GetWorkerGroup() string {
+func (x *Event) GetAgentGroup() string {
 	if x != nil {
-		return x.WorkerGroup
+		return x.AgentGroup
 	}
 	return ""
 }
@@ -7375,7 +7375,7 @@ func (x *PublishRunStatusRequest) GetStatus() RunStatus {
 	return RunStatus_RUN_STATUS_UNSPECIFIED
 }
 
-type PublishWorkerEventRequest struct {
+type PublishAgentEventRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Group string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
@@ -7386,20 +7386,20 @@ type PublishWorkerEventRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PublishWorkerEventRequest) Reset() {
-	*x = PublishWorkerEventRequest{}
+func (x *PublishAgentEventRequest) Reset() {
+	*x = PublishAgentEventRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PublishWorkerEventRequest) String() string {
+func (x *PublishAgentEventRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PublishWorkerEventRequest) ProtoMessage() {}
+func (*PublishAgentEventRequest) ProtoMessage() {}
 
-func (x *PublishWorkerEventRequest) ProtoReflect() protoreflect.Message {
+func (x *PublishAgentEventRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -7411,26 +7411,26 @@ func (x *PublishWorkerEventRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PublishWorkerEventRequest.ProtoReflect.Descriptor instead.
-func (*PublishWorkerEventRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use PublishAgentEventRequest.ProtoReflect.Descriptor instead.
+func (*PublishAgentEventRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{75}
 }
 
-func (x *PublishWorkerEventRequest) GetName() string {
+func (x *PublishAgentEventRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *PublishWorkerEventRequest) GetGroup() string {
+func (x *PublishAgentEventRequest) GetGroup() string {
 	if x != nil {
 		return x.Group
 	}
 	return ""
 }
 
-func (x *PublishWorkerEventRequest) GetAction() string {
+func (x *PublishAgentEventRequest) GetAction() string {
 	if x != nil {
 		return x.Action
 	}
@@ -8176,7 +8176,7 @@ func (x *DeleteJobRequest) GetId() int64 {
 	return 0
 }
 
-type Worker struct {
+type Agent struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Id         int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	Name       string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
@@ -8185,12 +8185,12 @@ type Worker struct {
 	LastSeenAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
 	// environments are the names of the environments this worker belongs to
 	// (F-17). Membership is many-to-many: a worker may list several
-	// environments, and an environment can be served by many workers. A job
+	// environments, and an environment can be served by many agents. A job
 	// targeting an environment is dispatched to the live workers that
 	// registered it. Empty means the worker is reachable only by its group.
 	Environments []string `protobuf:"bytes,6,rep,name=environments,proto3" json:"environments,omitempty"`
 	// labels are the worker's labels (F-29): a set of key/value pairs that label
-	// the worker. A worker declares them at registration (configurable, like
+	// the agent. A worker declares them at registration (configurable, like
 	// its environments, F-17); re-registration updates them. When a job is
 	// dispatched to the worker, the worker's labels are merged into the job's
 	// execution's label set (the worker's labels win on a key collision). They are
@@ -8201,20 +8201,20 @@ type Worker struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Worker) Reset() {
-	*x = Worker{}
+func (x *Agent) Reset() {
+	*x = Agent{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Worker) String() string {
+func (x *Agent) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Worker) ProtoMessage() {}
+func (*Agent) ProtoMessage() {}
 
-func (x *Worker) ProtoReflect() protoreflect.Message {
+func (x *Agent) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8226,61 +8226,61 @@ func (x *Worker) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Worker.ProtoReflect.Descriptor instead.
-func (*Worker) Descriptor() ([]byte, []int) {
+// Deprecated: Use Agent.ProtoReflect.Descriptor instead.
+func (*Agent) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{89}
 }
 
-func (x *Worker) GetId() int64 {
+func (x *Agent) GetId() int64 {
 	if x != nil {
 		return x.Id
 	}
 	return 0
 }
 
-func (x *Worker) GetName() string {
+func (x *Agent) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *Worker) GetGroup() string {
+func (x *Agent) GetGroup() string {
 	if x != nil {
 		return x.Group
 	}
 	return ""
 }
 
-func (x *Worker) GetAddress() string {
+func (x *Agent) GetAddress() string {
 	if x != nil {
 		return x.Address
 	}
 	return ""
 }
 
-func (x *Worker) GetLastSeenAt() *timestamppb.Timestamp {
+func (x *Agent) GetLastSeenAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.LastSeenAt
 	}
 	return nil
 }
 
-func (x *Worker) GetEnvironments() []string {
+func (x *Agent) GetEnvironments() []string {
 	if x != nil {
 		return x.Environments
 	}
 	return nil
 }
 
-func (x *Worker) GetLabels() map[string]string {
+func (x *Agent) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
 	}
 	return nil
 }
 
-type RegisterWorkerRequest struct {
+type RegisterAgentRequest struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Name    string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Group   string                 `protobuf:"bytes,2,opt,name=group,proto3" json:"group,omitempty"`
@@ -8297,20 +8297,20 @@ type RegisterWorkerRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RegisterWorkerRequest) Reset() {
-	*x = RegisterWorkerRequest{}
+func (x *RegisterAgentRequest) Reset() {
+	*x = RegisterAgentRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RegisterWorkerRequest) String() string {
+func (x *RegisterAgentRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RegisterWorkerRequest) ProtoMessage() {}
+func (*RegisterAgentRequest) ProtoMessage() {}
 
-func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
+func (x *RegisterAgentRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8322,67 +8322,67 @@ func (x *RegisterWorkerRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RegisterWorkerRequest.ProtoReflect.Descriptor instead.
-func (*RegisterWorkerRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use RegisterAgentRequest.ProtoReflect.Descriptor instead.
+func (*RegisterAgentRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{90}
 }
 
-func (x *RegisterWorkerRequest) GetName() string {
+func (x *RegisterAgentRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *RegisterWorkerRequest) GetGroup() string {
+func (x *RegisterAgentRequest) GetGroup() string {
 	if x != nil {
 		return x.Group
 	}
 	return ""
 }
 
-func (x *RegisterWorkerRequest) GetAddress() string {
+func (x *RegisterAgentRequest) GetAddress() string {
 	if x != nil {
 		return x.Address
 	}
 	return ""
 }
 
-func (x *RegisterWorkerRequest) GetEnvironments() []string {
+func (x *RegisterAgentRequest) GetEnvironments() []string {
 	if x != nil {
 		return x.Environments
 	}
 	return nil
 }
 
-func (x *RegisterWorkerRequest) GetLabels() map[string]string {
+func (x *RegisterAgentRequest) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
 	}
 	return nil
 }
 
-type GetWorkerRequest struct {
+type GetAgentRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GetWorkerRequest) Reset() {
-	*x = GetWorkerRequest{}
+func (x *GetAgentRequest) Reset() {
+	*x = GetAgentRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GetWorkerRequest) String() string {
+func (x *GetAgentRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GetWorkerRequest) ProtoMessage() {}
+func (*GetAgentRequest) ProtoMessage() {}
 
-func (x *GetWorkerRequest) ProtoReflect() protoreflect.Message {
+func (x *GetAgentRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8394,19 +8394,19 @@ func (x *GetWorkerRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GetWorkerRequest.ProtoReflect.Descriptor instead.
-func (*GetWorkerRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use GetAgentRequest.ProtoReflect.Descriptor instead.
+func (*GetAgentRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{91}
 }
 
-func (x *GetWorkerRequest) GetName() string {
+func (x *GetAgentRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-type ListWorkersRequest struct {
+type ListAgentsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// group of "" lists workers in all groups.
 	Group         string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
@@ -8414,20 +8414,20 @@ type ListWorkersRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkersRequest) Reset() {
-	*x = ListWorkersRequest{}
+func (x *ListAgentsRequest) Reset() {
+	*x = ListAgentsRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkersRequest) String() string {
+func (x *ListAgentsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkersRequest) ProtoMessage() {}
+func (*ListAgentsRequest) ProtoMessage() {}
 
-func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
+func (x *ListAgentsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8439,39 +8439,39 @@ func (x *ListWorkersRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkersRequest.ProtoReflect.Descriptor instead.
-func (*ListWorkersRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentsRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentsRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{92}
 }
 
-func (x *ListWorkersRequest) GetGroup() string {
+func (x *ListAgentsRequest) GetGroup() string {
 	if x != nil {
 		return x.Group
 	}
 	return ""
 }
 
-type ListWorkersResponse struct {
+type ListAgentsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Workers       []*Worker              `protobuf:"bytes,1,rep,name=workers,proto3" json:"workers,omitempty"`
+	Agents       []*Agent              `protobuf:"bytes,1,rep,name=workers,proto3" json:"workers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkersResponse) Reset() {
-	*x = ListWorkersResponse{}
+func (x *ListAgentsResponse) Reset() {
+	*x = ListAgentsResponse{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkersResponse) String() string {
+func (x *ListAgentsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkersResponse) ProtoMessage() {}
+func (*ListAgentsResponse) ProtoMessage() {}
 
-func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
+func (x *ListAgentsResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8483,39 +8483,39 @@ func (x *ListWorkersResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkersResponse.ProtoReflect.Descriptor instead.
-func (*ListWorkersResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentsResponse.ProtoReflect.Descriptor instead.
+func (*ListAgentsResponse) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{93}
 }
 
-func (x *ListWorkersResponse) GetWorkers() []*Worker {
+func (x *ListAgentsResponse) GetAgents() []*Agent {
 	if x != nil {
-		return x.Workers
+		return x.Agents
 	}
 	return nil
 }
 
-type HeartbeatWorkerRequest struct {
+type HeartbeatAgentRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *HeartbeatWorkerRequest) Reset() {
-	*x = HeartbeatWorkerRequest{}
+func (x *HeartbeatAgentRequest) Reset() {
+	*x = HeartbeatAgentRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *HeartbeatWorkerRequest) String() string {
+func (x *HeartbeatAgentRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*HeartbeatWorkerRequest) ProtoMessage() {}
+func (*HeartbeatAgentRequest) ProtoMessage() {}
 
-func (x *HeartbeatWorkerRequest) ProtoReflect() protoreflect.Message {
+func (x *HeartbeatAgentRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8527,39 +8527,39 @@ func (x *HeartbeatWorkerRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use HeartbeatWorkerRequest.ProtoReflect.Descriptor instead.
-func (*HeartbeatWorkerRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use HeartbeatAgentRequest.ProtoReflect.Descriptor instead.
+func (*HeartbeatAgentRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{94}
 }
 
-func (x *HeartbeatWorkerRequest) GetName() string {
+func (x *HeartbeatAgentRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-type DeleteWorkerRequest struct {
+type DeleteAgentRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DeleteWorkerRequest) Reset() {
-	*x = DeleteWorkerRequest{}
+func (x *DeleteAgentRequest) Reset() {
+	*x = DeleteAgentRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DeleteWorkerRequest) String() string {
+func (x *DeleteAgentRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeleteWorkerRequest) ProtoMessage() {}
+func (*DeleteAgentRequest) ProtoMessage() {}
 
-func (x *DeleteWorkerRequest) ProtoReflect() protoreflect.Message {
+func (x *DeleteAgentRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -8571,12 +8571,12 @@ func (x *DeleteWorkerRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeleteWorkerRequest.ProtoReflect.Descriptor instead.
-func (*DeleteWorkerRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use DeleteAgentRequest.ProtoReflect.Descriptor instead.
+func (*DeleteAgentRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{95}
 }
 
-func (x *DeleteWorkerRequest) GetName() string {
+func (x *DeleteAgentRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
@@ -9069,27 +9069,27 @@ func (x *DeleteEnvironmentRequest) GetName() string {
 	return ""
 }
 
-type ListWorkersByEnvironmentRequest struct {
+type ListAgentsByEnvironmentRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Environment   string                 `protobuf:"bytes,1,opt,name=environment,proto3" json:"environment,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkersByEnvironmentRequest) Reset() {
-	*x = ListWorkersByEnvironmentRequest{}
+func (x *ListAgentsByEnvironmentRequest) Reset() {
+	*x = ListAgentsByEnvironmentRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkersByEnvironmentRequest) String() string {
+func (x *ListAgentsByEnvironmentRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkersByEnvironmentRequest) ProtoMessage() {}
+func (*ListAgentsByEnvironmentRequest) ProtoMessage() {}
 
-func (x *ListWorkersByEnvironmentRequest) ProtoReflect() protoreflect.Message {
+func (x *ListAgentsByEnvironmentRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9101,12 +9101,12 @@ func (x *ListWorkersByEnvironmentRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkersByEnvironmentRequest.ProtoReflect.Descriptor instead.
-func (*ListWorkersByEnvironmentRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentsByEnvironmentRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentsByEnvironmentRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{103}
 }
 
-func (x *ListWorkersByEnvironmentRequest) GetEnvironment() string {
+func (x *ListAgentsByEnvironmentRequest) GetEnvironment() string {
 	if x != nil {
 		return x.Environment
 	}
@@ -9214,14 +9214,14 @@ func (x *ProceedJobResponse) GetProceeded() bool {
 	return false
 }
 
-// WorkerGroup is a named group of long-lived workers (F-29). A worker group is
+// AgentGroup is a named group of long-lived workers (F-29). A worker group is
 // the unit a job targets (a job's target_group names it) and the unit a worker
 // belongs to (a worker's group names it). It is a first-class, labelable row:
 // its labels are combined onto the runs of the jobs that target it. The row is
 // metadata-only — it does not change dispatch (which still keys off the
 // worker's declared group string) — so a group that has no row simply
-// contributes no labels and jobs targeting it still run on its workers.
-type WorkerGroup struct {
+// contributes no labels and jobs targeting it still run on its agents.
+type AgentGroup struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
 	// name is the group's unique name (e.g. "build", "prod-fleet"); it is the
@@ -9230,7 +9230,7 @@ type WorkerGroup struct {
 	// description is a human-readable description of the group.
 	Description string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
 	// labels are the group's labels (F-29): a set of key/value pairs that label the
-	// group. They are managed through the API (the PUT /api/worker-groups/{name}
+	// group. They are managed through the API (the PUT /api/agent-groups/{name}
 	// body) and stored in the database. When a job targets the group, the
 	// group's labels are combined with the labels of the run's other resources onto
 	// the run's job instances. They are metadata (they never gate, route, or
@@ -9242,20 +9242,20 @@ type WorkerGroup struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WorkerGroup) Reset() {
-	*x = WorkerGroup{}
+func (x *AgentGroup) Reset() {
+	*x = AgentGroup{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WorkerGroup) String() string {
+func (x *AgentGroup) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WorkerGroup) ProtoMessage() {}
+func (*AgentGroup) ProtoMessage() {}
 
-func (x *WorkerGroup) ProtoReflect() protoreflect.Message {
+func (x *AgentGroup) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9267,77 +9267,77 @@ func (x *WorkerGroup) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WorkerGroup.ProtoReflect.Descriptor instead.
-func (*WorkerGroup) Descriptor() ([]byte, []int) {
+// Deprecated: Use AgentGroup.ProtoReflect.Descriptor instead.
+func (*AgentGroup) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{106}
 }
 
-func (x *WorkerGroup) GetId() int64 {
+func (x *AgentGroup) GetId() int64 {
 	if x != nil {
 		return x.Id
 	}
 	return 0
 }
 
-func (x *WorkerGroup) GetName() string {
+func (x *AgentGroup) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *WorkerGroup) GetDescription() string {
+func (x *AgentGroup) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-func (x *WorkerGroup) GetLabels() map[string]string {
+func (x *AgentGroup) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
 	}
 	return nil
 }
 
-func (x *WorkerGroup) GetCreatedAt() *timestamppb.Timestamp {
+func (x *AgentGroup) GetCreatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.CreatedAt
 	}
 	return nil
 }
 
-func (x *WorkerGroup) GetUpdatedAt() *timestamppb.Timestamp {
+func (x *AgentGroup) GetUpdatedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.UpdatedAt
 	}
 	return nil
 }
 
-type CreateWorkerGroupRequest struct {
+type CreateAgentGroupRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	// labels are the group's labels (F-29); see WorkerGroup.labels.
+	// labels are the group's labels (F-29); see AgentGroup.labels.
 	Labels        map[string]string `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CreateWorkerGroupRequest) Reset() {
-	*x = CreateWorkerGroupRequest{}
+func (x *CreateAgentGroupRequest) Reset() {
+	*x = CreateAgentGroupRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CreateWorkerGroupRequest) String() string {
+func (x *CreateAgentGroupRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CreateWorkerGroupRequest) ProtoMessage() {}
+func (*CreateAgentGroupRequest) ProtoMessage() {}
 
-func (x *CreateWorkerGroupRequest) ProtoReflect() protoreflect.Message {
+func (x *CreateAgentGroupRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9349,53 +9349,53 @@ func (x *CreateWorkerGroupRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CreateWorkerGroupRequest.ProtoReflect.Descriptor instead.
-func (*CreateWorkerGroupRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use CreateAgentGroupRequest.ProtoReflect.Descriptor instead.
+func (*CreateAgentGroupRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{107}
 }
 
-func (x *CreateWorkerGroupRequest) GetName() string {
+func (x *CreateAgentGroupRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *CreateWorkerGroupRequest) GetDescription() string {
+func (x *CreateAgentGroupRequest) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-func (x *CreateWorkerGroupRequest) GetLabels() map[string]string {
+func (x *CreateAgentGroupRequest) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
 	}
 	return nil
 }
 
-type GetWorkerGroupRequest struct {
+type GetAgentGroupRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GetWorkerGroupRequest) Reset() {
-	*x = GetWorkerGroupRequest{}
+func (x *GetAgentGroupRequest) Reset() {
+	*x = GetAgentGroupRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GetWorkerGroupRequest) String() string {
+func (x *GetAgentGroupRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GetWorkerGroupRequest) ProtoMessage() {}
+func (*GetAgentGroupRequest) ProtoMessage() {}
 
-func (x *GetWorkerGroupRequest) ProtoReflect() protoreflect.Message {
+func (x *GetAgentGroupRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9407,19 +9407,19 @@ func (x *GetWorkerGroupRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GetWorkerGroupRequest.ProtoReflect.Descriptor instead.
-func (*GetWorkerGroupRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use GetAgentGroupRequest.ProtoReflect.Descriptor instead.
+func (*GetAgentGroupRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{108}
 }
 
-func (x *GetWorkerGroupRequest) GetName() string {
+func (x *GetAgentGroupRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-type ListWorkerGroupsRequest struct {
+type ListAgentGroupsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name_prefix, when set, filters to groups whose name starts with it.
 	NamePrefix    string `protobuf:"bytes,1,opt,name=name_prefix,json=namePrefix,proto3" json:"name_prefix,omitempty"`
@@ -9427,20 +9427,20 @@ type ListWorkerGroupsRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkerGroupsRequest) Reset() {
-	*x = ListWorkerGroupsRequest{}
+func (x *ListAgentGroupsRequest) Reset() {
+	*x = ListAgentGroupsRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkerGroupsRequest) String() string {
+func (x *ListAgentGroupsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkerGroupsRequest) ProtoMessage() {}
+func (*ListAgentGroupsRequest) ProtoMessage() {}
 
-func (x *ListWorkerGroupsRequest) ProtoReflect() protoreflect.Message {
+func (x *ListAgentGroupsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9452,39 +9452,39 @@ func (x *ListWorkerGroupsRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkerGroupsRequest.ProtoReflect.Descriptor instead.
-func (*ListWorkerGroupsRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentGroupsRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentGroupsRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{109}
 }
 
-func (x *ListWorkerGroupsRequest) GetNamePrefix() string {
+func (x *ListAgentGroupsRequest) GetNamePrefix() string {
 	if x != nil {
 		return x.NamePrefix
 	}
 	return ""
 }
 
-type ListWorkerGroupsResponse struct {
+type ListAgentGroupsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Groups        []*WorkerGroup         `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
+	Groups        []*AgentGroup         `protobuf:"bytes,1,rep,name=groups,proto3" json:"groups,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListWorkerGroupsResponse) Reset() {
-	*x = ListWorkerGroupsResponse{}
+func (x *ListAgentGroupsResponse) Reset() {
+	*x = ListAgentGroupsResponse{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListWorkerGroupsResponse) String() string {
+func (x *ListAgentGroupsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListWorkerGroupsResponse) ProtoMessage() {}
+func (*ListAgentGroupsResponse) ProtoMessage() {}
 
-func (x *ListWorkerGroupsResponse) ProtoReflect() protoreflect.Message {
+func (x *ListAgentGroupsResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9496,19 +9496,19 @@ func (x *ListWorkerGroupsResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListWorkerGroupsResponse.ProtoReflect.Descriptor instead.
-func (*ListWorkerGroupsResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListAgentGroupsResponse.ProtoReflect.Descriptor instead.
+func (*ListAgentGroupsResponse) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{110}
 }
 
-func (x *ListWorkerGroupsResponse) GetGroups() []*WorkerGroup {
+func (x *ListAgentGroupsResponse) GetGroups() []*AgentGroup {
 	if x != nil {
 		return x.Groups
 	}
 	return nil
 }
 
-type UpdateWorkerGroupRequest struct {
+type UpdateAgentGroupRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Description string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
@@ -9519,20 +9519,20 @@ type UpdateWorkerGroupRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *UpdateWorkerGroupRequest) Reset() {
-	*x = UpdateWorkerGroupRequest{}
+func (x *UpdateAgentGroupRequest) Reset() {
+	*x = UpdateAgentGroupRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *UpdateWorkerGroupRequest) String() string {
+func (x *UpdateAgentGroupRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*UpdateWorkerGroupRequest) ProtoMessage() {}
+func (*UpdateAgentGroupRequest) ProtoMessage() {}
 
-func (x *UpdateWorkerGroupRequest) ProtoReflect() protoreflect.Message {
+func (x *UpdateAgentGroupRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9544,53 +9544,53 @@ func (x *UpdateWorkerGroupRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use UpdateWorkerGroupRequest.ProtoReflect.Descriptor instead.
-func (*UpdateWorkerGroupRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use UpdateAgentGroupRequest.ProtoReflect.Descriptor instead.
+func (*UpdateAgentGroupRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{111}
 }
 
-func (x *UpdateWorkerGroupRequest) GetName() string {
+func (x *UpdateAgentGroupRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *UpdateWorkerGroupRequest) GetDescription() string {
+func (x *UpdateAgentGroupRequest) GetDescription() string {
 	if x != nil {
 		return x.Description
 	}
 	return ""
 }
 
-func (x *UpdateWorkerGroupRequest) GetLabels() map[string]string {
+func (x *UpdateAgentGroupRequest) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
 	}
 	return nil
 }
 
-type DeleteWorkerGroupRequest struct {
+type DeleteAgentGroupRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DeleteWorkerGroupRequest) Reset() {
-	*x = DeleteWorkerGroupRequest{}
+func (x *DeleteAgentGroupRequest) Reset() {
+	*x = DeleteAgentGroupRequest{}
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DeleteWorkerGroupRequest) String() string {
+func (x *DeleteAgentGroupRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeleteWorkerGroupRequest) ProtoMessage() {}
+func (*DeleteAgentGroupRequest) ProtoMessage() {}
 
-func (x *DeleteWorkerGroupRequest) ProtoReflect() protoreflect.Message {
+func (x *DeleteAgentGroupRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cdrom_db_v1_db_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -9602,12 +9602,12 @@ func (x *DeleteWorkerGroupRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeleteWorkerGroupRequest.ProtoReflect.Descriptor instead.
-func (*DeleteWorkerGroupRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use DeleteAgentGroupRequest.ProtoReflect.Descriptor instead.
+func (*DeleteAgentGroupRequest) Descriptor() ([]byte, []int) {
 	return file_cdrom_db_v1_db_proto_rawDescGZIP(), []int{112}
 }
 
-func (x *DeleteWorkerGroupRequest) GetName() string {
+func (x *DeleteAgentGroupRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
@@ -20539,8 +20539,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\fJobExecution\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vworker_name\x18\x03 \x01(\tR\n" +
-	"workerName\x12\x18\n" +
+	"\vagent_name\x18\x03 \x01(\tR\n" +
+	"agentName\x12\x18\n" +
 	"\aattempt\x18\x04 \x01(\x05R\aattempt\x12.\n" +
 	"\x06status\x18\x05 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x129\n" +
 	"\n" +
@@ -20563,8 +20563,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8d\x01\n" +
 	"\x18StartJobExecutionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vworker_name\x18\x02 \x01(\tR\n" +
-	"workerName\x129\n" +
+	"\vagent_name\x18\x02 \x01(\tR\n" +
+	"agentName\x129\n" +
 	"\n" +
 	"started_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\"n\n" +
 	"\x19StartJobExecutionResponse\x12\x18\n" +
@@ -20578,8 +20578,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"executions\"\x87\x03\n" +
 	"\x19UpdateJobExecutionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vworker_name\x18\x02 \x01(\tR\n" +
-	"workerName\x12.\n" +
+	"\vagent_name\x18\x02 \x01(\tR\n" +
+	"agentName\x12.\n" +
 	"\x06status\x18\x03 \x01(\x0e2\x16.cdrom.db.v1.JobStatusR\x06status\x12;\n" +
 	"\vfinished_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"finishedAt\x12:\n" +
@@ -20588,14 +20588,14 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"A\n" +
-	"\x1eAbandonWorkerExecutionsRequest\x12\x1f\n" +
-	"\vworker_name\x18\x01 \x01(\tR\n" +
-	"workerName\"\x85\x02\n" +
+	"\x1eAbandonAgentExecutionsRequest\x12\x1f\n" +
+	"\vagent_name\x18\x01 \x01(\tR\n" +
+	"agentName\"\x85\x02\n" +
 	"\x0eStepCompletion\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x15\n" +
 	"\x06job_id\x18\x02 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vworker_name\x18\x03 \x01(\tR\n" +
-	"workerName\x12\x1b\n" +
+	"\vagent_name\x18\x03 \x01(\tR\n" +
+	"agentName\x12\x1b\n" +
 	"\tstep_name\x18\x04 \x01(\tR\bstepName\x12\x18\n" +
 	"\aattempt\x18\x05 \x01(\x05R\aattempt\x129\n" +
 	"\n" +
@@ -20604,8 +20604,8 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"updated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"r\n" +
 	"\x1bReportStepCompletionRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1f\n" +
-	"\vworker_name\x18\x02 \x01(\tR\n" +
-	"workerName\x12\x1b\n" +
+	"\vagent_name\x18\x02 \x01(\tR\n" +
+	"agentName\x12\x1b\n" +
 	"\tstep_name\x18\x03 \x01(\tR\bstepName\"M\n" +
 	"\x17CheckStepBarrierRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x1b\n" +
@@ -20627,7 +20627,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05Event\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12!\n" +
-	"\fworker_group\x18\x03 \x01(\tR\vworkerGroup\x12\x18\n" +
+	"\fagent_group\x18\x03 \x01(\tR\vagentGroup\x12\x18\n" +
 	"\apayload\x18\x04 \x01(\tR\apayload\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12 \n" +
@@ -20646,7 +20646,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x17PublishRunStatusRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\x03R\x05runId\x12.\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x16.cdrom.db.v1.RunStatusR\x06status\"]\n" +
-	"\x19PublishWorkerEventRequest\x12\x12\n" +
+	"\x19PublishAgentEventRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x16\n" +
 	"\x06action\x18\x03 \x01(\tR\x06action\"\x8c\x01\n" +
@@ -20692,7 +20692,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\aattempt\x18\x02 \x01(\x05R\aattempt\"\"\n" +
 	"\x10DeleteJobRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"\xb2\x02\n" +
-	"\x06Worker\x12\x0e\n" +
+	"\x06Agent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x03 \x01(\tR\x05group\x12\x18\n" +
@@ -20700,28 +20700,28 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\flast_seen_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"lastSeenAt\x12\"\n" +
 	"\fenvironments\x18\x06 \x03(\tR\fenvironments\x127\n" +
-	"\x06labels\x18\a \x03(\v2\x1f.cdrom.db.v1.Worker.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\a \x03(\v2\x1f.cdrom.db.v1.Agent.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x02\n" +
-	"\x15RegisterWorkerRequest\x12\x12\n" +
+	"\x15RegisterAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05group\x18\x02 \x01(\tR\x05group\x12\x18\n" +
 	"\aaddress\x18\x03 \x01(\tR\aaddress\x12\"\n" +
 	"\fenvironments\x18\x04 \x03(\tR\fenvironments\x12F\n" +
-	"\x06labels\x18\x05 \x03(\v2..cdrom.db.v1.RegisterWorkerRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x05 \x03(\v2..cdrom.db.v1.RegisterAgentRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"&\n" +
-	"\x10GetWorkerRequest\x12\x12\n" +
+	"\x10GetAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"*\n" +
-	"\x12ListWorkersRequest\x12\x14\n" +
+	"\x12ListAgentsRequest\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\"D\n" +
-	"\x13ListWorkersResponse\x12-\n" +
-	"\aworkers\x18\x01 \x03(\v2\x13.cdrom.db.v1.WorkerR\aworkers\",\n" +
-	"\x16HeartbeatWorkerRequest\x12\x12\n" +
+	"\x13ListAgentsResponse\x12-\n" +
+	"\aagents\x18\x01 \x03(\v2\x13.cdrom.db.v1.AgentR\aagents\",\n" +
+	"\x16HeartbeatAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\")\n" +
-	"\x13DeleteWorkerRequest\x12\x12\n" +
+	"\x13DeleteAgentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\xcb\x03\n" +
 	"\vEnvironment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
@@ -20773,18 +20773,18 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\".\n" +
 	"\x18DeleteEnvironmentRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"C\n" +
-	"\x1fListWorkersByEnvironmentRequest\x12 \n" +
+	"\x1fListAgentsByEnvironmentRequest\x12 \n" +
 	"\venvironment\x18\x01 \x01(\tR\venvironment\"@\n" +
 	"\x11ProceedJobRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\x03R\x05jobId\x12\x14\n" +
 	"\x05actor\x18\x02 \x01(\tR\x05actor\"2\n" +
 	"\x12ProceedJobResponse\x12\x1c\n" +
 	"\tproceeded\x18\x01 \x01(\bR\tproceeded\"\xc2\x02\n" +
-	"\vWorkerGroup\x12\x0e\n" +
+	"\vAgentGroup\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12<\n" +
-	"\x06labels\x18\x04 \x03(\v2$.cdrom.db.v1.WorkerGroup.LabelsEntryR\x06labels\x129\n" +
+	"\x06labels\x18\x04 \x03(\v2$.cdrom.db.v1.AgentGroup.LabelsEntryR\x06labels\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
@@ -20792,28 +20792,28 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd6\x01\n" +
-	"\x18CreateWorkerGroupRequest\x12\x12\n" +
+	"\x18CreateAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12I\n" +
-	"\x06labels\x18\x03 \x03(\v21.cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x03 \x03(\v21.cdrom.db.v1.CreateAgentGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"+\n" +
-	"\x15GetWorkerGroupRequest\x12\x12\n" +
+	"\x15GetAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\":\n" +
-	"\x17ListWorkerGroupsRequest\x12\x1f\n" +
+	"\x17ListAgentGroupsRequest\x12\x1f\n" +
 	"\vname_prefix\x18\x01 \x01(\tR\n" +
 	"namePrefix\"L\n" +
-	"\x18ListWorkerGroupsResponse\x120\n" +
-	"\x06groups\x18\x01 \x03(\v2\x18.cdrom.db.v1.WorkerGroupR\x06groups\"\xd6\x01\n" +
-	"\x18UpdateWorkerGroupRequest\x12\x12\n" +
+	"\x18ListAgentGroupsResponse\x120\n" +
+	"\x06groups\x18\x01 \x03(\v2\x18.cdrom.db.v1.AgentGroupR\x06groups\"\xd6\x01\n" +
+	"\x18UpdateAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12I\n" +
-	"\x06labels\x18\x03 \x03(\v21.cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x03 \x03(\v21.cdrom.db.v1.UpdateAgentGroupRequest.LabelsEntryR\x06labels\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\".\n" +
-	"\x18DeleteWorkerGroupRequest\x12\x12\n" +
+	"\x18DeleteAgentGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\xc8\x01\n" +
 	"\rIDPSigningKey\x12\x10\n" +
 	"\x03kid\x18\x01 \x01(\tR\x03kid\x12\x1d\n" +
@@ -21649,7 +21649,7 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x11StartJobExecution\x12%.cdrom.db.v1.StartJobExecutionRequest\x1a&.cdrom.db.v1.StartJobExecutionResponse\x12b\n" +
 	"\x11ListJobExecutions\x12%.cdrom.db.v1.ListJobExecutionsRequest\x1a&.cdrom.db.v1.ListJobExecutionsResponse\x12W\n" +
 	"\x12UpdateJobExecution\x12&.cdrom.db.v1.UpdateJobExecutionRequest\x1a\x19.cdrom.db.v1.JobExecution\x12^\n" +
-	"\x17AbandonWorkerExecutions\x12+.cdrom.db.v1.AbandonWorkerExecutionsRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
+	"\x17AbandonAgentExecutions\x12+.cdrom.db.v1.AbandonAgentExecutionsRequest\x1a\x16.google.protobuf.Empty\x12X\n" +
 	"\x14ReportStepCompletion\x12(.cdrom.db.v1.ReportStepCompletionRequest\x1a\x16.google.protobuf.Empty\x12_\n" +
 	"\x10CheckStepBarrier\x12$.cdrom.db.v1.CheckStepBarrierRequest\x1a%.cdrom.db.v1.CheckStepBarrierResponse\x12\\\n" +
 	"\x0fResolveApproval\x12#.cdrom.db.v1.ResolveApprovalRequest\x1a$.cdrom.db.v1.ResolveApprovalResponse\x12]\n" +
@@ -21657,18 +21657,18 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\rPublishCancel\x12!.cdrom.db.v1.PublishCancelRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12[\n" +
 	"\x10PublishJobStatus\x12$.cdrom.db.v1.PublishJobStatusRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12[\n" +
 	"\x10PublishRunStatus\x12$.cdrom.db.v1.PublishRunStatusRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12_\n" +
-	"\x12PublishWorkerEvent\x12&.cdrom.db.v1.PublishWorkerEventRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12]\n" +
+	"\x12PublishAgentEvent\x12&.cdrom.db.v1.PublishAgentEventRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12]\n" +
 	"\x11PublishLogUpdated\x12%.cdrom.db.v1.PublishLogUpdatedRequest\x1a!.cdrom.db.v1.PublishEventResponse\x12M\n" +
 	"\n" +
 	"TailEvents\x12\x1e.cdrom.db.v1.TailEventsRequest\x1a\x1f.cdrom.db.v1.TailEventsResponse\x12S\n" +
 	"\fAcquireLease\x12 .cdrom.db.v1.AcquireLeaseRequest\x1a!.cdrom.db.v1.AcquireLeaseResponse\x12H\n" +
 	"\fReleaseLease\x12 .cdrom.db.v1.ReleaseLeaseRequest\x1a\x16.google.protobuf.Empty\x12<\n" +
 	"\bGetLease\x12\x1c.cdrom.db.v1.GetLeaseRequest\x1a\x12.cdrom.db.v1.Lease\x12I\n" +
-	"\x0eRegisterWorker\x12\".cdrom.db.v1.RegisterWorkerRequest\x1a\x13.cdrom.db.v1.Worker\x12?\n" +
-	"\tGetWorker\x12\x1d.cdrom.db.v1.GetWorkerRequest\x1a\x13.cdrom.db.v1.Worker\x12P\n" +
-	"\vListWorkers\x12\x1f.cdrom.db.v1.ListWorkersRequest\x1a .cdrom.db.v1.ListWorkersResponse\x12K\n" +
-	"\x0fHeartbeatWorker\x12#.cdrom.db.v1.HeartbeatWorkerRequest\x1a\x13.cdrom.db.v1.Worker\x12H\n" +
-	"\fDeleteWorker\x12 .cdrom.db.v1.DeleteWorkerRequest\x1a\x16.google.protobuf.Empty\x12e\n" +
+	"\x0eRegisterAgent\x12\".cdrom.db.v1.RegisterAgentRequest\x1a\x13.cdrom.db.v1.Agent\x12?\n" +
+	"\tGetAgent\x12\x1d.cdrom.db.v1.GetAgentRequest\x1a\x13.cdrom.db.v1.Agent\x12P\n" +
+	"\vListAgents\x12\x1f.cdrom.db.v1.ListAgentsRequest\x1a .cdrom.db.v1.ListAgentsResponse\x12K\n" +
+	"\x0fHeartbeatAgent\x12#.cdrom.db.v1.HeartbeatAgentRequest\x1a\x13.cdrom.db.v1.Agent\x12H\n" +
+	"\fDeleteAgent\x12 .cdrom.db.v1.DeleteAgentRequest\x1a\x16.google.protobuf.Empty\x12e\n" +
 	"\x12ListIDPSigningKeys\x12&.cdrom.db.v1.ListIDPSigningKeysRequest\x1a'.cdrom.db.v1.ListIDPSigningKeysResponse\x12R\n" +
 	"\x11SetIDPSigningKeys\x12%.cdrom.db.v1.SetIDPSigningKeysRequest\x1a\x16.google.protobuf.Empty\x12P\n" +
 	"\x10StoreIDPAuthCode\x12$.cdrom.db.v1.StoreIDPAuthCodeRequest\x1a\x16.google.protobuf.Empty\x12V\n" +
@@ -21779,14 +21779,14 @@ const file_cdrom_db_v1_db_proto_rawDesc = "" +
 	"\x10ListEnvironments\x12$.cdrom.db.v1.ListEnvironmentsRequest\x1a%.cdrom.db.v1.ListEnvironmentsResponse\x12T\n" +
 	"\x11UpdateEnvironment\x12%.cdrom.db.v1.UpdateEnvironmentRequest\x1a\x18.cdrom.db.v1.Environment\x12R\n" +
 	"\x11DeleteEnvironment\x12%.cdrom.db.v1.DeleteEnvironmentRequest\x1a\x16.google.protobuf.Empty\x12j\n" +
-	"\x18ListWorkersByEnvironment\x12,.cdrom.db.v1.ListWorkersByEnvironmentRequest\x1a .cdrom.db.v1.ListWorkersResponse\x12M\n" +
+	"\x18ListAgentsByEnvironment\x12,.cdrom.db.v1.ListAgentsByEnvironmentRequest\x1a .cdrom.db.v1.ListAgentsResponse\x12M\n" +
 	"\n" +
 	"ProceedJob\x12\x1e.cdrom.db.v1.ProceedJobRequest\x1a\x1f.cdrom.db.v1.ProceedJobResponse\x12T\n" +
-	"\x11CreateWorkerGroup\x12%.cdrom.db.v1.CreateWorkerGroupRequest\x1a\x18.cdrom.db.v1.WorkerGroup\x12N\n" +
-	"\x0eGetWorkerGroup\x12\".cdrom.db.v1.GetWorkerGroupRequest\x1a\x18.cdrom.db.v1.WorkerGroup\x12_\n" +
-	"\x10ListWorkerGroups\x12$.cdrom.db.v1.ListWorkerGroupsRequest\x1a%.cdrom.db.v1.ListWorkerGroupsResponse\x12T\n" +
-	"\x11UpdateWorkerGroup\x12%.cdrom.db.v1.UpdateWorkerGroupRequest\x1a\x18.cdrom.db.v1.WorkerGroup\x12R\n" +
-	"\x11DeleteWorkerGroup\x12%.cdrom.db.v1.DeleteWorkerGroupRequest\x1a\x16.google.protobuf.Empty\x12^\n" +
+	"\x11CreateAgentGroup\x12%.cdrom.db.v1.CreateAgentGroupRequest\x1a\x18.cdrom.db.v1.AgentGroup\x12N\n" +
+	"\x0eGetAgentGroup\x12\".cdrom.db.v1.GetAgentGroupRequest\x1a\x18.cdrom.db.v1.AgentGroup\x12_\n" +
+	"\x10ListAgentGroups\x12$.cdrom.db.v1.ListAgentGroupsRequest\x1a%.cdrom.db.v1.ListAgentGroupsResponse\x12T\n" +
+	"\x11UpdateAgentGroup\x12%.cdrom.db.v1.UpdateAgentGroupRequest\x1a\x18.cdrom.db.v1.AgentGroup\x12R\n" +
+	"\x11DeleteAgentGroup\x12%.cdrom.db.v1.DeleteAgentGroupRequest\x1a\x16.google.protobuf.Empty\x12^\n" +
 	"\x15AllocateStorageObject\x12).cdrom.db.v1.AllocateStorageObjectRequest\x1a\x1a.cdrom.db.v1.StorageObject\x12\\\n" +
 	"\x14ConfirmStorageObject\x12(.cdrom.db.v1.ConfirmStorageObjectRequest\x1a\x1a.cdrom.db.v1.StorageObject\x12T\n" +
 	"\x10GetStorageObject\x12$.cdrom.db.v1.GetStorageObjectRequest\x1a\x1a.cdrom.db.v1.StorageObject\x12e\n" +
@@ -21882,7 +21882,7 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*ListJobExecutionsRequest)(nil),              // 68: cdrom.db.v1.ListJobExecutionsRequest
 	(*ListJobExecutionsResponse)(nil),             // 69: cdrom.db.v1.ListJobExecutionsResponse
 	(*UpdateJobExecutionRequest)(nil),             // 70: cdrom.db.v1.UpdateJobExecutionRequest
-	(*AbandonWorkerExecutionsRequest)(nil),        // 71: cdrom.db.v1.AbandonWorkerExecutionsRequest
+	(*AbandonAgentExecutionsRequest)(nil),        // 71: cdrom.db.v1.AbandonAgentExecutionsRequest
 	(*StepCompletion)(nil),                        // 72: cdrom.db.v1.StepCompletion
 	(*ReportStepCompletionRequest)(nil),           // 73: cdrom.db.v1.ReportStepCompletionRequest
 	(*CheckStepBarrierRequest)(nil),               // 74: cdrom.db.v1.CheckStepBarrierRequest
@@ -21894,7 +21894,7 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*PublishCancelRequest)(nil),                  // 80: cdrom.db.v1.PublishCancelRequest
 	(*PublishJobStatusRequest)(nil),               // 81: cdrom.db.v1.PublishJobStatusRequest
 	(*PublishRunStatusRequest)(nil),               // 82: cdrom.db.v1.PublishRunStatusRequest
-	(*PublishWorkerEventRequest)(nil),             // 83: cdrom.db.v1.PublishWorkerEventRequest
+	(*PublishAgentEventRequest)(nil),             // 83: cdrom.db.v1.PublishAgentEventRequest
 	(*PublishLogUpdatedRequest)(nil),              // 84: cdrom.db.v1.PublishLogUpdatedRequest
 	(*PublishEventResponse)(nil),                  // 85: cdrom.db.v1.PublishEventResponse
 	(*TailEventsRequest)(nil),                     // 86: cdrom.db.v1.TailEventsRequest
@@ -21908,13 +21908,13 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*RerunJobRequest)(nil),                       // 94: cdrom.db.v1.RerunJobRequest
 	(*ClaimJobRetryResponse)(nil),                 // 95: cdrom.db.v1.ClaimJobRetryResponse
 	(*DeleteJobRequest)(nil),                      // 96: cdrom.db.v1.DeleteJobRequest
-	(*Worker)(nil),                                // 97: cdrom.db.v1.Worker
-	(*RegisterWorkerRequest)(nil),                 // 98: cdrom.db.v1.RegisterWorkerRequest
-	(*GetWorkerRequest)(nil),                      // 99: cdrom.db.v1.GetWorkerRequest
-	(*ListWorkersRequest)(nil),                    // 100: cdrom.db.v1.ListWorkersRequest
-	(*ListWorkersResponse)(nil),                   // 101: cdrom.db.v1.ListWorkersResponse
-	(*HeartbeatWorkerRequest)(nil),                // 102: cdrom.db.v1.HeartbeatWorkerRequest
-	(*DeleteWorkerRequest)(nil),                   // 103: cdrom.db.v1.DeleteWorkerRequest
+	(*Agent)(nil),                                // 97: cdrom.db.v1.Agent
+	(*RegisterAgentRequest)(nil),                 // 98: cdrom.db.v1.RegisterAgentRequest
+	(*GetAgentRequest)(nil),                      // 99: cdrom.db.v1.GetAgentRequest
+	(*ListAgentsRequest)(nil),                    // 100: cdrom.db.v1.ListAgentsRequest
+	(*ListAgentsResponse)(nil),                   // 101: cdrom.db.v1.ListAgentsResponse
+	(*HeartbeatAgentRequest)(nil),                // 102: cdrom.db.v1.HeartbeatAgentRequest
+	(*DeleteAgentRequest)(nil),                   // 103: cdrom.db.v1.DeleteAgentRequest
 	(*Environment)(nil),                           // 104: cdrom.db.v1.Environment
 	(*CreateEnvironmentRequest)(nil),              // 105: cdrom.db.v1.CreateEnvironmentRequest
 	(*GetEnvironmentRequest)(nil),                 // 106: cdrom.db.v1.GetEnvironmentRequest
@@ -21922,16 +21922,16 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	(*ListEnvironmentsResponse)(nil),              // 108: cdrom.db.v1.ListEnvironmentsResponse
 	(*UpdateEnvironmentRequest)(nil),              // 109: cdrom.db.v1.UpdateEnvironmentRequest
 	(*DeleteEnvironmentRequest)(nil),              // 110: cdrom.db.v1.DeleteEnvironmentRequest
-	(*ListWorkersByEnvironmentRequest)(nil),       // 111: cdrom.db.v1.ListWorkersByEnvironmentRequest
+	(*ListAgentsByEnvironmentRequest)(nil),       // 111: cdrom.db.v1.ListAgentsByEnvironmentRequest
 	(*ProceedJobRequest)(nil),                     // 112: cdrom.db.v1.ProceedJobRequest
 	(*ProceedJobResponse)(nil),                    // 113: cdrom.db.v1.ProceedJobResponse
-	(*WorkerGroup)(nil),                           // 114: cdrom.db.v1.WorkerGroup
-	(*CreateWorkerGroupRequest)(nil),              // 115: cdrom.db.v1.CreateWorkerGroupRequest
-	(*GetWorkerGroupRequest)(nil),                 // 116: cdrom.db.v1.GetWorkerGroupRequest
-	(*ListWorkerGroupsRequest)(nil),               // 117: cdrom.db.v1.ListWorkerGroupsRequest
-	(*ListWorkerGroupsResponse)(nil),              // 118: cdrom.db.v1.ListWorkerGroupsResponse
-	(*UpdateWorkerGroupRequest)(nil),              // 119: cdrom.db.v1.UpdateWorkerGroupRequest
-	(*DeleteWorkerGroupRequest)(nil),              // 120: cdrom.db.v1.DeleteWorkerGroupRequest
+	(*AgentGroup)(nil),                           // 114: cdrom.db.v1.AgentGroup
+	(*CreateAgentGroupRequest)(nil),              // 115: cdrom.db.v1.CreateAgentGroupRequest
+	(*GetAgentGroupRequest)(nil),                 // 116: cdrom.db.v1.GetAgentGroupRequest
+	(*ListAgentGroupsRequest)(nil),               // 117: cdrom.db.v1.ListAgentGroupsRequest
+	(*ListAgentGroupsResponse)(nil),              // 118: cdrom.db.v1.ListAgentGroupsResponse
+	(*UpdateAgentGroupRequest)(nil),              // 119: cdrom.db.v1.UpdateAgentGroupRequest
+	(*DeleteAgentGroupRequest)(nil),              // 120: cdrom.db.v1.DeleteAgentGroupRequest
 	(*IDPSigningKey)(nil),                         // 121: cdrom.db.v1.IDPSigningKey
 	(*ListIDPSigningKeysRequest)(nil),             // 122: cdrom.db.v1.ListIDPSigningKeysRequest
 	(*ListIDPSigningKeysResponse)(nil),            // 123: cdrom.db.v1.ListIDPSigningKeysResponse
@@ -22115,14 +22115,14 @@ var file_cdrom_db_v1_db_proto_goTypes = []any{
 	nil,                                           // 301: cdrom.db.v1.JobExecution.OutputsEntry
 	nil,                                           // 302: cdrom.db.v1.JobExecution.LabelsEntry
 	nil,                                           // 303: cdrom.db.v1.UpdateJobExecutionRequest.OutputsEntry
-	nil,                                           // 304: cdrom.db.v1.Worker.LabelsEntry
-	nil,                                           // 305: cdrom.db.v1.RegisterWorkerRequest.LabelsEntry
+	nil,                                           // 304: cdrom.db.v1.Agent.LabelsEntry
+	nil,                                           // 305: cdrom.db.v1.RegisterAgentRequest.LabelsEntry
 	nil,                                           // 306: cdrom.db.v1.Environment.LabelsEntry
 	nil,                                           // 307: cdrom.db.v1.CreateEnvironmentRequest.LabelsEntry
 	nil,                                           // 308: cdrom.db.v1.UpdateEnvironmentRequest.LabelsEntry
-	nil,                                           // 309: cdrom.db.v1.WorkerGroup.LabelsEntry
-	nil,                                           // 310: cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntry
-	nil,                                           // 311: cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntry
+	nil,                                           // 309: cdrom.db.v1.AgentGroup.LabelsEntry
+	nil,                                           // 310: cdrom.db.v1.CreateAgentGroupRequest.LabelsEntry
+	nil,                                           // 311: cdrom.db.v1.UpdateAgentGroupRequest.LabelsEntry
 	(*ListIDPUsersRequest_Predicate)(nil),         // 312: cdrom.db.v1.ListIDPUsersRequest.Predicate
 	(*ListGroupsRequest_Predicate)(nil),           // 313: cdrom.db.v1.ListGroupsRequest.Predicate
 	(*timestamppb.Timestamp)(nil),                 // 314: google.protobuf.Timestamp
@@ -22292,10 +22292,10 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	316, // 158: cdrom.db.v1.AcquireLeaseRequest.heartbeat_ttl:type_name -> google.protobuf.Duration
 	314, // 159: cdrom.db.v1.Lease.expires_at:type_name -> google.protobuf.Timestamp
 	314, // 160: cdrom.db.v1.Lease.last_heartbeat:type_name -> google.protobuf.Timestamp
-	314, // 161: cdrom.db.v1.Worker.last_seen_at:type_name -> google.protobuf.Timestamp
-	304, // 162: cdrom.db.v1.Worker.labels:type_name -> cdrom.db.v1.Worker.LabelsEntry
-	305, // 163: cdrom.db.v1.RegisterWorkerRequest.labels:type_name -> cdrom.db.v1.RegisterWorkerRequest.LabelsEntry
-	97,  // 164: cdrom.db.v1.ListWorkersResponse.workers:type_name -> cdrom.db.v1.Worker
+	314, // 161: cdrom.db.v1.Agent.last_seen_at:type_name -> google.protobuf.Timestamp
+	304, // 162: cdrom.db.v1.Agent.labels:type_name -> cdrom.db.v1.Agent.LabelsEntry
+	305, // 163: cdrom.db.v1.RegisterAgentRequest.labels:type_name -> cdrom.db.v1.RegisterAgentRequest.LabelsEntry
+	97,  // 164: cdrom.db.v1.ListAgentsResponse.agents:type_name -> cdrom.db.v1.Agent
 	4,   // 165: cdrom.db.v1.Environment.automation:type_name -> cdrom.db.v1.Automation
 	314, // 166: cdrom.db.v1.Environment.created_at:type_name -> google.protobuf.Timestamp
 	314, // 167: cdrom.db.v1.Environment.updated_at:type_name -> google.protobuf.Timestamp
@@ -22305,12 +22305,12 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	104, // 171: cdrom.db.v1.ListEnvironmentsResponse.environments:type_name -> cdrom.db.v1.Environment
 	4,   // 172: cdrom.db.v1.UpdateEnvironmentRequest.automation:type_name -> cdrom.db.v1.Automation
 	308, // 173: cdrom.db.v1.UpdateEnvironmentRequest.labels:type_name -> cdrom.db.v1.UpdateEnvironmentRequest.LabelsEntry
-	309, // 174: cdrom.db.v1.WorkerGroup.labels:type_name -> cdrom.db.v1.WorkerGroup.LabelsEntry
-	314, // 175: cdrom.db.v1.WorkerGroup.created_at:type_name -> google.protobuf.Timestamp
-	314, // 176: cdrom.db.v1.WorkerGroup.updated_at:type_name -> google.protobuf.Timestamp
-	310, // 177: cdrom.db.v1.CreateWorkerGroupRequest.labels:type_name -> cdrom.db.v1.CreateWorkerGroupRequest.LabelsEntry
-	114, // 178: cdrom.db.v1.ListWorkerGroupsResponse.groups:type_name -> cdrom.db.v1.WorkerGroup
-	311, // 179: cdrom.db.v1.UpdateWorkerGroupRequest.labels:type_name -> cdrom.db.v1.UpdateWorkerGroupRequest.LabelsEntry
+	309, // 174: cdrom.db.v1.AgentGroup.labels:type_name -> cdrom.db.v1.AgentGroup.LabelsEntry
+	314, // 175: cdrom.db.v1.AgentGroup.created_at:type_name -> google.protobuf.Timestamp
+	314, // 176: cdrom.db.v1.AgentGroup.updated_at:type_name -> google.protobuf.Timestamp
+	310, // 177: cdrom.db.v1.CreateAgentGroupRequest.labels:type_name -> cdrom.db.v1.CreateAgentGroupRequest.LabelsEntry
+	114, // 178: cdrom.db.v1.ListAgentGroupsResponse.groups:type_name -> cdrom.db.v1.AgentGroup
+	311, // 179: cdrom.db.v1.UpdateAgentGroupRequest.labels:type_name -> cdrom.db.v1.UpdateAgentGroupRequest.LabelsEntry
 	314, // 180: cdrom.db.v1.IDPSigningKey.not_before:type_name -> google.protobuf.Timestamp
 	314, // 181: cdrom.db.v1.IDPSigningKey.expires_at:type_name -> google.protobuf.Timestamp
 	121, // 182: cdrom.db.v1.ListIDPSigningKeysResponse.keys:type_name -> cdrom.db.v1.IDPSigningKey
@@ -22432,7 +22432,7 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	66,  // 298: cdrom.db.v1.Database.StartJobExecution:input_type -> cdrom.db.v1.StartJobExecutionRequest
 	68,  // 299: cdrom.db.v1.Database.ListJobExecutions:input_type -> cdrom.db.v1.ListJobExecutionsRequest
 	70,  // 300: cdrom.db.v1.Database.UpdateJobExecution:input_type -> cdrom.db.v1.UpdateJobExecutionRequest
-	71,  // 301: cdrom.db.v1.Database.AbandonWorkerExecutions:input_type -> cdrom.db.v1.AbandonWorkerExecutionsRequest
+	71,  // 301: cdrom.db.v1.Database.AbandonAgentExecutions:input_type -> cdrom.db.v1.AbandonAgentExecutionsRequest
 	73,  // 302: cdrom.db.v1.Database.ReportStepCompletion:input_type -> cdrom.db.v1.ReportStepCompletionRequest
 	74,  // 303: cdrom.db.v1.Database.CheckStepBarrier:input_type -> cdrom.db.v1.CheckStepBarrierRequest
 	76,  // 304: cdrom.db.v1.Database.ResolveApproval:input_type -> cdrom.db.v1.ResolveApprovalRequest
@@ -22440,17 +22440,17 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	80,  // 306: cdrom.db.v1.Database.PublishCancel:input_type -> cdrom.db.v1.PublishCancelRequest
 	81,  // 307: cdrom.db.v1.Database.PublishJobStatus:input_type -> cdrom.db.v1.PublishJobStatusRequest
 	82,  // 308: cdrom.db.v1.Database.PublishRunStatus:input_type -> cdrom.db.v1.PublishRunStatusRequest
-	83,  // 309: cdrom.db.v1.Database.PublishWorkerEvent:input_type -> cdrom.db.v1.PublishWorkerEventRequest
+	83,  // 309: cdrom.db.v1.Database.PublishAgentEvent:input_type -> cdrom.db.v1.PublishAgentEventRequest
 	84,  // 310: cdrom.db.v1.Database.PublishLogUpdated:input_type -> cdrom.db.v1.PublishLogUpdatedRequest
 	86,  // 311: cdrom.db.v1.Database.TailEvents:input_type -> cdrom.db.v1.TailEventsRequest
 	88,  // 312: cdrom.db.v1.Database.AcquireLease:input_type -> cdrom.db.v1.AcquireLeaseRequest
 	90,  // 313: cdrom.db.v1.Database.ReleaseLease:input_type -> cdrom.db.v1.ReleaseLeaseRequest
 	91,  // 314: cdrom.db.v1.Database.GetLease:input_type -> cdrom.db.v1.GetLeaseRequest
-	98,  // 315: cdrom.db.v1.Database.RegisterWorker:input_type -> cdrom.db.v1.RegisterWorkerRequest
-	99,  // 316: cdrom.db.v1.Database.GetWorker:input_type -> cdrom.db.v1.GetWorkerRequest
-	100, // 317: cdrom.db.v1.Database.ListWorkers:input_type -> cdrom.db.v1.ListWorkersRequest
-	102, // 318: cdrom.db.v1.Database.HeartbeatWorker:input_type -> cdrom.db.v1.HeartbeatWorkerRequest
-	103, // 319: cdrom.db.v1.Database.DeleteWorker:input_type -> cdrom.db.v1.DeleteWorkerRequest
+	98,  // 315: cdrom.db.v1.Database.RegisterAgent:input_type -> cdrom.db.v1.RegisterAgentRequest
+	99,  // 316: cdrom.db.v1.Database.GetAgent:input_type -> cdrom.db.v1.GetAgentRequest
+	100, // 317: cdrom.db.v1.Database.ListAgents:input_type -> cdrom.db.v1.ListAgentsRequest
+	102, // 318: cdrom.db.v1.Database.HeartbeatAgent:input_type -> cdrom.db.v1.HeartbeatAgentRequest
+	103, // 319: cdrom.db.v1.Database.DeleteAgent:input_type -> cdrom.db.v1.DeleteAgentRequest
 	122, // 320: cdrom.db.v1.Database.ListIDPSigningKeys:input_type -> cdrom.db.v1.ListIDPSigningKeysRequest
 	124, // 321: cdrom.db.v1.Database.SetIDPSigningKeys:input_type -> cdrom.db.v1.SetIDPSigningKeysRequest
 	126, // 322: cdrom.db.v1.Database.StoreIDPAuthCode:input_type -> cdrom.db.v1.StoreIDPAuthCodeRequest
@@ -22554,13 +22554,13 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	107, // 420: cdrom.db.v1.Database.ListEnvironments:input_type -> cdrom.db.v1.ListEnvironmentsRequest
 	109, // 421: cdrom.db.v1.Database.UpdateEnvironment:input_type -> cdrom.db.v1.UpdateEnvironmentRequest
 	110, // 422: cdrom.db.v1.Database.DeleteEnvironment:input_type -> cdrom.db.v1.DeleteEnvironmentRequest
-	111, // 423: cdrom.db.v1.Database.ListWorkersByEnvironment:input_type -> cdrom.db.v1.ListWorkersByEnvironmentRequest
+	111, // 423: cdrom.db.v1.Database.ListAgentsByEnvironment:input_type -> cdrom.db.v1.ListAgentsByEnvironmentRequest
 	112, // 424: cdrom.db.v1.Database.ProceedJob:input_type -> cdrom.db.v1.ProceedJobRequest
-	115, // 425: cdrom.db.v1.Database.CreateWorkerGroup:input_type -> cdrom.db.v1.CreateWorkerGroupRequest
-	116, // 426: cdrom.db.v1.Database.GetWorkerGroup:input_type -> cdrom.db.v1.GetWorkerGroupRequest
-	117, // 427: cdrom.db.v1.Database.ListWorkerGroups:input_type -> cdrom.db.v1.ListWorkerGroupsRequest
-	119, // 428: cdrom.db.v1.Database.UpdateWorkerGroup:input_type -> cdrom.db.v1.UpdateWorkerGroupRequest
-	120, // 429: cdrom.db.v1.Database.DeleteWorkerGroup:input_type -> cdrom.db.v1.DeleteWorkerGroupRequest
+	115, // 425: cdrom.db.v1.Database.CreateAgentGroup:input_type -> cdrom.db.v1.CreateAgentGroupRequest
+	116, // 426: cdrom.db.v1.Database.GetAgentGroup:input_type -> cdrom.db.v1.GetAgentGroupRequest
+	117, // 427: cdrom.db.v1.Database.ListAgentGroups:input_type -> cdrom.db.v1.ListAgentGroupsRequest
+	119, // 428: cdrom.db.v1.Database.UpdateAgentGroup:input_type -> cdrom.db.v1.UpdateAgentGroupRequest
+	120, // 429: cdrom.db.v1.Database.DeleteAgentGroup:input_type -> cdrom.db.v1.DeleteAgentGroupRequest
 	266, // 430: cdrom.db.v1.Database.AllocateStorageObject:input_type -> cdrom.db.v1.AllocateStorageObjectRequest
 	267, // 431: cdrom.db.v1.Database.ConfirmStorageObject:input_type -> cdrom.db.v1.ConfirmStorageObjectRequest
 	268, // 432: cdrom.db.v1.Database.GetStorageObject:input_type -> cdrom.db.v1.GetStorageObjectRequest
@@ -22600,7 +22600,7 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	67,  // 466: cdrom.db.v1.Database.StartJobExecution:output_type -> cdrom.db.v1.StartJobExecutionResponse
 	69,  // 467: cdrom.db.v1.Database.ListJobExecutions:output_type -> cdrom.db.v1.ListJobExecutionsResponse
 	65,  // 468: cdrom.db.v1.Database.UpdateJobExecution:output_type -> cdrom.db.v1.JobExecution
-	317, // 469: cdrom.db.v1.Database.AbandonWorkerExecutions:output_type -> google.protobuf.Empty
+	317, // 469: cdrom.db.v1.Database.AbandonAgentExecutions:output_type -> google.protobuf.Empty
 	317, // 470: cdrom.db.v1.Database.ReportStepCompletion:output_type -> google.protobuf.Empty
 	75,  // 471: cdrom.db.v1.Database.CheckStepBarrier:output_type -> cdrom.db.v1.CheckStepBarrierResponse
 	77,  // 472: cdrom.db.v1.Database.ResolveApproval:output_type -> cdrom.db.v1.ResolveApprovalResponse
@@ -22608,17 +22608,17 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	85,  // 474: cdrom.db.v1.Database.PublishCancel:output_type -> cdrom.db.v1.PublishEventResponse
 	85,  // 475: cdrom.db.v1.Database.PublishJobStatus:output_type -> cdrom.db.v1.PublishEventResponse
 	85,  // 476: cdrom.db.v1.Database.PublishRunStatus:output_type -> cdrom.db.v1.PublishEventResponse
-	85,  // 477: cdrom.db.v1.Database.PublishWorkerEvent:output_type -> cdrom.db.v1.PublishEventResponse
+	85,  // 477: cdrom.db.v1.Database.PublishAgentEvent:output_type -> cdrom.db.v1.PublishEventResponse
 	85,  // 478: cdrom.db.v1.Database.PublishLogUpdated:output_type -> cdrom.db.v1.PublishEventResponse
 	87,  // 479: cdrom.db.v1.Database.TailEvents:output_type -> cdrom.db.v1.TailEventsResponse
 	89,  // 480: cdrom.db.v1.Database.AcquireLease:output_type -> cdrom.db.v1.AcquireLeaseResponse
 	317, // 481: cdrom.db.v1.Database.ReleaseLease:output_type -> google.protobuf.Empty
 	92,  // 482: cdrom.db.v1.Database.GetLease:output_type -> cdrom.db.v1.Lease
-	97,  // 483: cdrom.db.v1.Database.RegisterWorker:output_type -> cdrom.db.v1.Worker
-	97,  // 484: cdrom.db.v1.Database.GetWorker:output_type -> cdrom.db.v1.Worker
-	101, // 485: cdrom.db.v1.Database.ListWorkers:output_type -> cdrom.db.v1.ListWorkersResponse
-	97,  // 486: cdrom.db.v1.Database.HeartbeatWorker:output_type -> cdrom.db.v1.Worker
-	317, // 487: cdrom.db.v1.Database.DeleteWorker:output_type -> google.protobuf.Empty
+	97,  // 483: cdrom.db.v1.Database.RegisterAgent:output_type -> cdrom.db.v1.Agent
+	97,  // 484: cdrom.db.v1.Database.GetAgent:output_type -> cdrom.db.v1.Agent
+	101, // 485: cdrom.db.v1.Database.ListAgents:output_type -> cdrom.db.v1.ListAgentsResponse
+	97,  // 486: cdrom.db.v1.Database.HeartbeatAgent:output_type -> cdrom.db.v1.Agent
+	317, // 487: cdrom.db.v1.Database.DeleteAgent:output_type -> google.protobuf.Empty
 	123, // 488: cdrom.db.v1.Database.ListIDPSigningKeys:output_type -> cdrom.db.v1.ListIDPSigningKeysResponse
 	317, // 489: cdrom.db.v1.Database.SetIDPSigningKeys:output_type -> google.protobuf.Empty
 	317, // 490: cdrom.db.v1.Database.StoreIDPAuthCode:output_type -> google.protobuf.Empty
@@ -22722,13 +22722,13 @@ var file_cdrom_db_v1_db_proto_depIdxs = []int32{
 	108, // 588: cdrom.db.v1.Database.ListEnvironments:output_type -> cdrom.db.v1.ListEnvironmentsResponse
 	104, // 589: cdrom.db.v1.Database.UpdateEnvironment:output_type -> cdrom.db.v1.Environment
 	317, // 590: cdrom.db.v1.Database.DeleteEnvironment:output_type -> google.protobuf.Empty
-	101, // 591: cdrom.db.v1.Database.ListWorkersByEnvironment:output_type -> cdrom.db.v1.ListWorkersResponse
+	101, // 591: cdrom.db.v1.Database.ListAgentsByEnvironment:output_type -> cdrom.db.v1.ListAgentsResponse
 	113, // 592: cdrom.db.v1.Database.ProceedJob:output_type -> cdrom.db.v1.ProceedJobResponse
-	114, // 593: cdrom.db.v1.Database.CreateWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
-	114, // 594: cdrom.db.v1.Database.GetWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
-	118, // 595: cdrom.db.v1.Database.ListWorkerGroups:output_type -> cdrom.db.v1.ListWorkerGroupsResponse
-	114, // 596: cdrom.db.v1.Database.UpdateWorkerGroup:output_type -> cdrom.db.v1.WorkerGroup
-	317, // 597: cdrom.db.v1.Database.DeleteWorkerGroup:output_type -> google.protobuf.Empty
+	114, // 593: cdrom.db.v1.Database.CreateAgentGroup:output_type -> cdrom.db.v1.AgentGroup
+	114, // 594: cdrom.db.v1.Database.GetAgentGroup:output_type -> cdrom.db.v1.AgentGroup
+	118, // 595: cdrom.db.v1.Database.ListAgentGroups:output_type -> cdrom.db.v1.ListAgentGroupsResponse
+	114, // 596: cdrom.db.v1.Database.UpdateAgentGroup:output_type -> cdrom.db.v1.AgentGroup
+	317, // 597: cdrom.db.v1.Database.DeleteAgentGroup:output_type -> google.protobuf.Empty
 	265, // 598: cdrom.db.v1.Database.AllocateStorageObject:output_type -> cdrom.db.v1.StorageObject
 	265, // 599: cdrom.db.v1.Database.ConfirmStorageObject:output_type -> cdrom.db.v1.StorageObject
 	265, // 600: cdrom.db.v1.Database.GetStorageObject:output_type -> cdrom.db.v1.StorageObject

@@ -22,8 +22,8 @@ The system is organized into four layers, top to bottom:
    a gRPC interface: **Database**, **Scheduler**, **Artifacts**, and the local
    **IdP** (an OIDC identity provider / JWT issuer: an HTTP OIDC surface plus a
    gRPC API-only surface for job-token minting and user management).
-4. **Execution layer** — where jobs actually run: long-lived **workers** and
-   ephemeral **agents**.
+4. **Execution layer** — where jobs actually run: long-lived **agents** and
+   ephemeral **workers**.
 
 ```mermaid
 flowchart TB
@@ -33,7 +33,7 @@ flowchart TB
 
     subgraph API["API / controller layer (Go) — single control plane"]
         HTTP["HTTP server<br/>:8080 (UI + /api/ws)"]
-        GRPC["gRPC server<br/>:7105 (workers, agents, scheduler)"]
+        GRPC["gRPC server<br/>:7105 (agents, workers, scheduler)"]
         HUB["EventHub<br/>(live events)"]
         JA["JobTokenAuth<br/>(verify + mint)"]
     end
@@ -46,8 +46,8 @@ flowchart TB
     end
 
     subgraph EXEC["Execution layer (Go)"]
-        WORKER["Long-lived workers<br/>(Windows + Linux)"]
-        AGENT["Ephemeral agents<br/>(Kubernetes)"]
+        WORKER["Long-lived agents<br/>(Windows + Linux)"]
+        WORKER["Ephemeral workers<br/>(Kubernetes)"]
     end
 
     subgraph STORE["Storage"]
@@ -69,7 +69,7 @@ flowchart TB
     SCHED -->|DispatchJob| GRPC
 
     WORKER <-->|gRPC: register, watch, report| GRPC
-    AGENT <-->|gRPC: get job, report| GRPC
+    WORKER <-->|gRPC: get job, report| GRPC
 
     JA -->|gRPC mTLS: mint job tokens + users| IDP
     HTTP -->|OIDC discovery / exchange| IDP
@@ -81,17 +81,17 @@ flowchart TB
 
 ### Topology rule
 
-> **Execution targets (workers, agents) talk *only* to the API.** The API is
+> **Execution targets (agents, workers) talk *only* to the API.** The API is
 > the single control plane and talks to everything else (database, scheduler,
 > artifacts, IdP). There is no central logs service — every process logs
 > locally to stdout or a file.
 
-This means a worker or agent never dials the database, scheduler, or artifacts
+This means a agent or agent never dials the database, scheduler, or artifacts
 service directly. Artifact traffic from execution targets is **proxied**
 through the API to the artifacts service.
 
 > **Single-instance assumption.** The design above assumes **one API
-> instance**: worker streams, the UI event hub, and job dispatch all live in
+> instance**: agent streams, the UI event hub, and job dispatch all live in
 > that pod's memory. The high-availability design (multiple API pods, a
 > shared Postgres event log, hybrid push/pull dispatch, scheduler leader
 > election, cross-pod live logs) is documented in
@@ -106,8 +106,8 @@ The API process serves **two surfaces** from one binary:
 - **HTTP** (`:8080`) — consumed by the UI. Routes requests to the gRPC
   services (pipelines → database, jobs → scheduler, artifacts → artifacts) and
   hosts the `/api/ws` WebSocket endpoint for live events.
-- **gRPC** (`:7105`) — consumed by workers, agents, and the scheduler. This is
-  the control-plane hub: it holds the workers' `WatchJobs` streams, relays job
+- **gRPC** (`:7105`) — consumed by agents, workers, and the scheduler. This is
+  the control-plane hub: it holds the agents' `WatchJobs` streams, relays job
   assignments pushed by the scheduler (`DispatchJob`), and proxies artifact
   traffic.
 
@@ -123,8 +123,8 @@ flowchart LR
     end
 
     UI["React UI"] -->|REST + WS| H
-    W["Workers"] <--> G
-    A["Agents"] <--> G
+    W["Agents"] <--> G
+    A["Works"] <--> G
     S["Scheduler"] -->|DispatchJob| G
 
     G --> DB["Database"]
@@ -138,13 +138,13 @@ The gRPC surface exposes these RPCs (see `proto/cdrom/api/v1/api.proto`):
 
 | Group | RPCs | Called by |
 |-------|------|-----------|
-| Worker lifecycle | `RegisterWorker`, `DeregisterWorker`, `Heartbeat` | workers |
-| Execution | `WatchJobs` (server stream), `GetJob`, `ReportJobStatus` | workers, agents |
-| Token exchange | `ExchangeJobToken` | workers, agents |
+| Agent lifecycle | `RegisterAgent`, `DeregisterAgent`, `Heartbeat` | agents |
+| Execution | `WatchJobs` (server stream), `GetJob`, `ReportJobStatus` | agents, workers |
+| Token exchange | `ExchangeJobToken` | agents, workers |
 | Dispatch | `DispatchJob`, `NotifyJobStatus`, `CancelJob` | scheduler |
-| Artifact proxy | `UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts`, `DeleteArtifact` | workers, agents |
-| Job logs | `StreamJobLogs` (client stream) | workers, agents |
-| Restoration (F-22) | `InitiateRestore` (armed door: a `rollback` step mediating a resumption of its own pipeline), `GetRun` (polling the resumption's verdict) | workers, agents |
+| Artifact proxy | `UploadArtifact`, `DownloadArtifact`, `GetArtifact`, `ListArtifacts`, `DeleteArtifact` | agents, workers |
+| Job logs | `StreamJobLogs` (client stream) | agents, workers |
+| Restoration (F-22) | `InitiateRestore` (armed door: a `rollback` step mediating a resumption of its own pipeline), `GetRun` (polling the resumption's verdict) | agents, workers |
 
 ---
 
@@ -189,9 +189,9 @@ flowchart TB
   hand-written SQL or migration scripts.
 - **Scheduler** (`cmd/scheduler`) — manages job lifecycle and dispatch. It
   holds **no durable state of its own**; all pipelines and jobs are persisted
-  through the Database service. When a job targets a worker group or an
+  through the Database service. When a job targets a agent group or an
   environment (F-17) it pushes it to the API (`DispatchJob`), which fans it
-  out to the live workers that serve it. A job held by a `manual` environment
+  out to the live agents that serve it. A job held by a `manual` environment
   is kept `awaiting_proceed` until a proceed call releases it.
 - **Artifacts** (`cmd/artifacts`) — a general-purpose, **namespaced file
   store**, filesystem-backed with streamed uploads/downloads. Every file lives
@@ -252,16 +252,16 @@ API:
 ```mermaid
 flowchart TB
     subgraph API["API (control plane)"]
-        HUB["Worker hub<br/>(live workers + WatchJobs streams)"]
+        HUB["Agent hub<br/>(live agents + WatchJobs streams)"]
     end
 
-    subgraph LONG["Long-lived workers"]
-        W1["worker-1<br/>group: default"]
-        W2["worker-2<br/>group: default"]
-        W3["worker-3<br/>group: canary"]
+    subgraph LONG["Long-lived agents"]
+        W1["agent-1<br/>group: default"]
+        W2["agent-2<br/>group: default"]
+        W3["agent-3<br/>group: canary"]
     end
 
-    subgraph EPHEM["Ephemeral agents (Kubernetes)"]
+    subgraph EPHEM["Ephemeral workers (Kubernetes)"]
         A1["agent (job 42)"]
     end
 
@@ -271,26 +271,26 @@ flowchart TB
     HUB <-->|GetJob / ReportJobStatus| A1
 ```
 
-- **Long-lived workers** — resident processes on deployment targets. Workers
+- **Long-lived agents** — resident processes on deployment targets. Agents
   are **targetable by group**: a job can be dispatched to all (or a selection
-  of) workers in a named group. A worker registers with the API and holds a
+  of) agents in a named group. A agent registers with the API and holds a
   `WatchJobs` stream open; the API pushes `WatchMessage`s down the stream — a
   `JobAssignment` (a new job to run) or a `JobCancellation` (stop a job the
-  worker is running, F-05). Workers must run on **Windows and Linux**.
-  A worker may also declare the **environments** it belongs to (F-17,
-  `CDROM_WORKER_ENVIRONMENTS`, multiple allowed) at registration; a job that
-  targets an environment is dispatched to the live workers registered for it
+  agent is running, F-05). Agents must run on **Windows and Linux**.
+  A agent may also declare the **environments** it belongs to (F-17,
+  `CDROM_AGENT_ENVIRONMENTS`, multiple allowed) at registration; a job that
+  targets an environment is dispatched to the live agents registered for it
   (intersected with the environment's `target_group` when set).
-- **Ephemeral agents** — short-lived processes that spin up in **Kubernetes**
+- **Ephemeral workers** — short-lived processes that spin up in **Kubernetes**
   when a one-off job runs, execute it, and terminate. An agent fetches its job
   from the API (`GetJob`), reports status back to the API, and exits. An agent
   holds no `WatchJobs` stream, so it observes a cancellation (F-05) by polling
-  `GetJob` while the job runs. Agents must also run on **Windows and Linux**.
+  `GetJob` while the job runs. Works must also run on **Windows and Linux**.
 
-A job with a **non-empty** `target_group` is dispatched to live workers in that
+A job with a **non-empty** `target_group` is dispatched to live agents in that
 group. A job with an **empty** `target_group` is left pending for an ephemeral
 agent. A job that names an **environment** (F-17) is dispatched to the live
-workers that registered that environment (∩ the environment's `target_group`
+agents that registered that environment (∩ the environment's `target_group`
 when set), and is subject to the environment's approval and automation policy:
 an environment that requires approval inserts an F-13 approval gate before
 dispatch, and a `manual` environment holds the job (`awaiting_proceed`) until
@@ -315,7 +315,7 @@ reference it rather than redefining it.
 - **Per-run snapshot.** The spec is stored on the `Job` row (a JSON `text`
   column via GORM's `serializer:json`), snapshotted when the job is created.
   Editing a pipeline therefore never changes what a past run did.
-- **Shared executor.** Both workers and agents run the spec through
+- **Shared executor.** Both agents and workers run the spec through
   `internal/executor` (`executor.Execute(ctx, spec, logger)`): steps run in
   order and the job fails on the first step that errors. A job with no spec is
   a no-op that succeeds.
@@ -329,7 +329,7 @@ reference it rather than redefining it.
   `terraform`, `argo`). A step whose type is not registered on the target
   fails the job with a clear error. `params` carries handler-specific
   configuration so a new step type can be added without changing the spec
-  schema. The worker and agent blank-import `internal/stephandlers` so the
+  schema. The agent and agent blank-import `internal/stephandlers` so the
   built-in handlers are registered before any job runs. This is the seam for
   the later plugin architecture: writing a new step type is a matter of
   registering a handler, not changing the executor core.
@@ -362,7 +362,7 @@ reference it rather than redefining it.
   nested context for a step's timeout in `runStep`, cancelling the running
   step when a deadline passes. A job with no job-level and no per-step timeout
   runs unbounded. When a deadline expires the executor returns the sentinel
-  `executor.ErrTimeout`; the worker and agent check `errors.Is(err,
+  `executor.ErrTimeout`; the agent and agent check `errors.Is(err,
   executor.ErrTimeout)` and report the terminal status `timed_out` (distinct
   from `failed`). As a safety valve for a target that goes silent, the
   scheduler runs a background **watchdog** that reaps running jobs past their
@@ -403,14 +403,14 @@ reference it rather than redefining it.
   signals the target through the API's `CancelJob` RPC. The API's `WatchJobs`
   server stream carries a `WatchMessage` (a oneof of `JobAssignment` and
   `JobCancellation`): the API pushes a `JobCancellation` down every live
-  worker's stream, and a worker that is running the job interrupts the running
+  agent's stream, and a agent that is running the job interrupts the running
   step (cancelling the job's context, which terminates the command) and
   reports `cancelled`; a cancellation for a job that is not running on that
-  worker is ignored. An ephemeral agent holds no `WatchJobs` stream, so it
+  agent is ignored. An ephemeral agent holds no `WatchJobs` stream, so it
   observes the cancellation on the API instead: it polls `GetJob` on a short
   interval while the job runs and, when it sees the job is `cancelled`,
   interrupts the running step and reports `cancelled`. Signalling the target
-  is best-effort: if it cannot be reached (no live worker, or the API is down)
+  is best-effort: if it cannot be reached (no live agent, or the API is down)
   the job is still marked `cancelled` in the database, and the target's next
   status report (or the scheduler's watchdog) reconciles it. A late target
   report cannot clobber a terminal status: `Database.UpdateJob` applies a
@@ -483,7 +483,7 @@ reference it rather than redefining it.
   - *The scheduler drives the instances.* `Scheduler.CreateRun` calls
     `Database.CreateRun` and then drives each instance: a job with a
     `target_group` is dispatched to the API (which fans it out to the live
-    workers); a job with `depends_on` is left `pending` for the dependency
+    agents); a job with `depends_on` is left `pending` for the dependency
     resolver (F-06); a job with an empty `target_group` and no dependencies is
     left `pending` for an ephemeral agent.
   - *Run status is derived, not reported.* A run has no target of its own, so
@@ -596,7 +596,7 @@ reference it rather than redefining it.
 ## 5. Job lifecycle
 
 The flow below shows how a job submitted from the UI travels through the
-system to a long-lived worker and back.
+system to a long-lived agent and back.
 
 ```mermaid
 sequenceDiagram
@@ -605,7 +605,7 @@ sequenceDiagram
     participant API as API (control plane)
     participant SCHED as Scheduler
     participant DB as Database
-    participant W as Worker (group)
+    participant W as Agent (group)
 
     Note over UI,DB: a run is triggered via POST /api/pipelines/{id}/runs → SCHED CreateRun → DB.CreateRun (run + one job instance per definition, depends_on remapped to instance ids); each instance then flows through the path below
     UI->>API: POST /api/jobs (name, target_group, depends_on, spec)
@@ -642,7 +642,7 @@ Job status transitions (see `proto/cdrom/db/v1/db.proto`):
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING: job created
-    PENDING --> RUNNING: picked up by worker / agent
+    PENDING --> RUNNING: picked up by agent / agent
     RUNNING --> SUCCEEDED: job completes
     RUNNING --> FAILED: job errors
     RUNNING --> TIMED_OUT: job/step timeout (target) or watchdog reap
@@ -675,14 +675,14 @@ stateDiagram-v2
 ### Live events
 
 `GET /api/ws` is a WebSocket endpoint. On connect the client receives a state
-snapshot (jobs + workers + runs); afterwards it receives one message per
+snapshot (jobs + agents + runs); afterwards it receives one message per
 event. Event types are `job_status` (job id + status — including `skipped`,
 F-06, and `awaiting_proceed`, F-17 — plus `attempt` / `max_attempts` for
-F-04), `worker` (name/group + action `registered` / `deregistered` /
+F-04), `agent` (name/group + action `registered` / `deregistered` /
 `watching`), `job_log` (job id + step name + stream `stdout`/`stderr` + a
 chunk of output, F-02), `run_status` (run id + status, F-07), and
 `environment` (an environment was created / updated / deleted, F-17). Events
-are published from the gRPC server (worker lifecycle, job status reports,
+are published from the gRPC server (agent lifecycle, job status reports,
 streamed job logs, run status notifications) and the HTTP handlers (job
 submit / cancel / re-run, run trigger, environment management) through a
 shared `EventHub`; slow subscribers have
@@ -718,7 +718,7 @@ flowchart TB
     subgraph GRPCAUTH["gRPC surface — job tokens"]
         APIG["API gRPC"]
         APIG -->|mint (mTLS client cert)| IDP
-        APIG -->|token in JobAssignment / Job| TARGET["Worker / Agent"]
+        APIG -->|token in JobAssignment / Job| TARGET["Agent / Work"]
         TARGET -->|Bearer token| APIG
         TARGET -->|ExchangeJobToken (new audience)| APIG
     end
@@ -754,7 +754,7 @@ may do. It is a deny-by-default authorization layer evaluated in the API
   (`<area>.can-<action>`), e.g. `pipelines.can-view`, `runs.can-trigger`,
   `jobs.can-approve`, `secrets.can-manage`, `roles.can-assign`. Some are
   **resource-scoped** (pipelines, runs, jobs, secrets — scoped per pipeline)
-  and some are **platform-wide** (role/user management, audit, worker view).
+  and some are **platform-wide** (role/user management, audit, agent view).
 - **Roles** are named sets of permissions. Built-in roles (`admin`,
   `operator`, `viewer`, `user`) are seeded by the Database service on startup
   and cannot be deleted or have their permission sets edited; **custom roles**
@@ -780,7 +780,7 @@ may do. It is a deny-by-default authorization layer evaluated in the API
   count) with a scope at least as wide as the one being granted; `admin` is
   grantable only by an `admin`.
 - **Enforcement.** The API enforces permissions on the UI-facing HTTP surface
-  (pipelines, runs, jobs, approvals, workers, logs, secrets, and role/binding
+  (pipelines, runs, jobs, approvals, agents, logs, secrets, and role/binding
   management). The gRPC target surface keeps job-token auth (a separate,
   job-scoped mechanism). **When authentication is disabled, requests act as a
   synthetic admin** (the engine is wired in but bypassed).
@@ -791,8 +791,8 @@ may do. It is a deny-by-default authorization layer evaluated in the API
 
 ### Job tokens (gRPC surface)
 
-Separate from the UI's OIDC token, the API's **gRPC surface** (workers and
-agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
+Separate from the UI's OIDC token, the API's **gRPC surface** (agents and
+workers) supports **job-token authentication** (`internal/api/jobsauth.go`).
 
 - **Disabled by default.** Enable it with `grpc_auth.enabled: true`;
   `idp_address` and `audiences` are then required and validated at startup.
@@ -801,7 +801,7 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   same `tls` section used for gRPC) — there is no shared secret, and the IdP's
   gRPC server requires a CA-signed client certificate when TLS is configured,
   so only the API can mint. The API mints one RS256 token per job: on dispatch
-  it is delivered to workers inside the `JobAssignment` (gRPC field `token`),
+  it is delivered to agents inside the `JobAssignment` (gRPC field `token`),
   and on `GetJob` it is returned in the `Job` for ephemeral agents. Claims:
   `iss`, `sub: "job:<jobID>"`, `aud` (the configured audiences), `exp`, `iat`,
   `job_id`, `pipeline_id`, `target_group`, `token_type: "job"`. The main job
@@ -819,7 +819,7 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   set, else the configured default (`grpc_auth.exchanged_token_lifetime`,
   defaulting to 15 minutes). The built-in **`token_exchange`** step
   handler is the in-job way to do this: a step of type `token_exchange` asks
-  the execution target (worker/agent) for an exchanged token through the
+  the execution target (agent/agent) for an exchanged token through the
   executor's `TokenExchange` (which calls `ExchangeJobToken`) and writes it to
   the step's outputs so later steps and jobs can use it.
 - **Verification:** when enabled, `ReportJobStatus` and the artifact RPCs
@@ -836,7 +836,7 @@ agents) supports **job-token authentication** (`internal/api/jobsauth.go`).
   job that has reached a terminal state (`succeeded`, `failed`, `cancelled`,
   `timed_out`, or `skipped`) is rejected, so a job's token is invalidated the
   moment the job stops running (missing/invalid token → `Unauthenticated`,
-  wrong job or a finished job → `PermissionDenied`). Workers and agents
+  wrong job or a finished job → `PermissionDenied`). Agents and workers
   present the token via `grpcutil.WithBearerToken`.
 
 ```mermaid
@@ -844,7 +844,7 @@ sequenceDiagram
     autonumber
     participant API as API
     participant IDP as IdP
-    participant W as Worker
+    participant W as Agent
 
     Note over API,IDP: API authenticates to IdP with its mTLS client certificate
     API->>IDP: MintJobToken (gRPC, job_id, ...)
@@ -865,7 +865,7 @@ sequenceDiagram
 ## 7. Data & artifacts
 
 - **Durable state** lives only in the Database service. Pipelines, pipeline
-  runs, jobs, and workers are GORM models in `internal/models`; the schema is
+  runs, jobs, and agents are GORM models in `internal/models`; the schema is
   derived via `AutoMigrate`. The driver is swappable (SQLite for local
   development, PostgreSQL for deployments) behind the database service's gRPC
   API — code outside the database service never talks to a specific driver
@@ -903,7 +903,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     subgraph EXEC["Execution target"]
-        W["Worker / Agent"]
+        W["Agent / Work"]
     end
     subgraph API["API (proxy)"]
         P["Artifact proxy RPCs"]
@@ -925,13 +925,13 @@ flowchart LR
 
 ## 8. Technology & constraints
 
-- **Everything except the frontend is Go** (API, services, workers, ephemeral
-  agents). **Frontend is React.**
+- **Everything except the frontend is Go** (API, services, agents, ephemeral
+  workers). **Frontend is React.**
 - **Database:** SQLite for local development, PostgreSQL for deployments. ORM
   is GORM with `gorm.io/driver/postgres` and `github.com/glebarez/sqlite` (the
   pure-Go GORM SQLite driver — the official `gorm.io/driver/sqlite` requires
   cgo and breaks Windows cross-compiles). Migrations use `AutoMigrate`.
-- **Cross-platform:** both long-lived workers and ephemeral agents must run on
+- **Cross-platform:** both long-lived agents and ephemeral workers must run on
   **Windows and Linux**. Portable Go is required (`filepath`, `os` env
   handling); no cgo dependencies, no hard-coded path separators, no Unix-only
   syscalls. The cross-compile check
@@ -965,17 +965,17 @@ Standard Go layout; the frontend lives outside the Go module.
 
 ```
 cmd/
-  api/             API/controller entrypoint (HTTP for UI + gRPC for workers/agents/scheduler)
+  api/             API/controller entrypoint (HTTP for UI + gRPC for agents/agents/scheduler)
   db/              database service entrypoint (gRPC)
   scheduler/       scheduler service entrypoint (gRPC)
   artifacts/       artifacts service entrypoint (gRPC)
   idp/             local OIDC identity provider entrypoint (HTTP + gRPC)
   pipelinesource/  source-fetcher service entrypoint (F-21.2, gRPC)
-  worker/          long-lived worker entrypoint
+  agent/          long-lived agent entrypoint
   agent/           ephemeral Kubernetes agent entrypoint
 internal/
   api/        API/controller layer: HTTP routing + gRPC control-plane server
-              (worker hub, artifact proxy, StreamJobLogs persistence + job_log
+              (agent hub, artifact proxy, StreamJobLogs persistence + job_log
               fan-out, event hub + /api/ws WebSocket, job-token auth)
   auth/       OIDC authentication (provider, PKCE, Bearer-token verification, discovery, middleware)
   authz/      RBAC engine (F-14): permission catalog, role/binding resolution,
@@ -989,11 +989,11 @@ internal/
               /healthz handler, label conventions, bucket presets, gRPC
               stats.Handler) + per-component metric sets
   logstream/  executor.LogSink that streams a job's step output to the API's
-              StreamJobLogs RPC (bounded queue, drop-on-full; used by worker + agent)
-  tokenexchange/ executor.TokenExchange via the API's ExchangeJobToken (worker + agent)
+              StreamJobLogs RPC (bounded queue, drop-on-full; used by agent + agent)
+  tokenexchange/ executor.TokenExchange via the API's ExchangeJobToken (agent + agent)
   approval/   approval gate (F-13): report awaiting_approval + poll CheckApproval
-  target/     shared execution layer for worker + agent (run context, status
-              reporting, post-run decision; worker supplies the StepBarrier)
+  target/     shared execution layer for agent + agent (run context, status
+              reporting, post-run decision; agent supplies the StepBarrier)
   executor/   shared job-step executor: the generic dispatch engine (selects a
               StepHandler by step type, enforces the job-level and per-step
               timeouts, returns ErrTimeout on a deadline, carries an optional
@@ -1001,7 +1001,7 @@ internal/
               evaluating each step's `condition` (F-06) to skip it when
               false, and reporting each step's terminal status for a
               caller's StepResultCollector to attach to its final status
-              report; used by worker + agent)
+              report; used by agent + agent)
   stephandlers/ built-in step handlers: `shell` (DefaultType), `token_exchange`,
               `approval` (F-13), `email` + `webhook` (F-18); a target or plugin
               adds more via executor.RegisterStepType
@@ -1024,7 +1024,7 @@ internal/
     pipelinesource/ source-fetcher service (F-21.2): git/http/file fetch
                     clients, shallow bare-object-store git cache, strict SSH
                     host-key pinning
-  worker/     long-lived worker implementation
+  agent/     long-lived agent implementation
   agent/      ephemeral agent implementation
   idp/        local OIDC identity provider (JWT issuer, auto key rotation;
               signing keys + auth codes + user directory persisted through the
@@ -1059,7 +1059,7 @@ service runs on localhost.
 | api (gRPC)  | 127.0.0.1:7105  | `CDROM_LISTEN_ADDR` | db, scheduler, artifacts |
 | api (HTTP)  | 127.0.0.1:8080  | `CDROM_API_HTTP_ADDR` | — |
 | idp         | 127.0.0.1:7104  | `CDROM_LISTEN_ADDR` | `CDROM_DB_ADDR` |
-| worker      | —               | —                | `CDROM_API_ADDR` |
+| agent      | —               | —                | `CDROM_API_ADDR` |
 | agent       | —               | —                | `CDROM_API_ADDR` |
 
 ```mermaid
@@ -1071,7 +1071,7 @@ flowchart TB
         IDP["idp :7104"]
         APIG["api gRPC :7105"]
         APIH["api HTTP :8080"]
-        W["worker"]
+        W["agent"]
         A["agent"]
         UI["React UI"]
     end
@@ -1098,7 +1098,7 @@ make build
 ./bin/scheduler   # dials db and the api
 ./bin/artifacts   # stores files under ./artifacts
 ./bin/api         # gRPC on :7105 + HTTP on :8080, dials db/scheduler/artifacts
-./bin/worker      # registers with the api, watches for jobs
+./bin/agent      # registers with the api, watches for jobs
 ```
 
 To exercise the full OIDC login flow locally, also run the local identity
@@ -1126,7 +1126,7 @@ make certs        # writes certs/ca.crt, certs/cert.crt, certs/cert.key
 #     cert_file: certs/cert.crt
 #     key_file:  certs/cert.key
 ./bin/db --config-file config.yaml
-# ... and so on for the other services, api, and worker
+# ... and so on for the other services, api, and agent
 ```
 
 ---
@@ -1147,7 +1147,7 @@ same binary run in a container or on a laptop unchanged.
 | api | db / scheduler / artifacts | `CDROM_DB_ADDR` / `CDROM_SCHEDULER_ADDR` / `CDROM_ARTIFACTS_ADDR` | respective `CDROM_LISTEN_ADDR` |
 | api | idp (gRPC, mTLS) | `CDROM_IDP_GRPC_ADDR` | `CDROM_IDP_GRPC_ADDR` (default `127.0.0.1:7106`) |
 | api | pipelinesource | `CDROM_PIPELINE_SOURCE_ADDR` | `CDROM_LISTEN_ADDR` (default `127.0.0.1:7107`) |
-| worker / agent | api (gRPC) | `CDROM_API_ADDR` | `CDROM_LISTEN_ADDR` (default `127.0.0.1:7105`) |
+| agent / agent | api (gRPC) | `CDROM_API_ADDR` | `CDROM_LISTEN_ADDR` (default `127.0.0.1:7105`) |
 | UI | api (HTTP) | — | `CDROM_API_HTTP_ADDR` (default `127.0.0.1:8080`) |
 | scrapers | any component | — | `CDROM_METRICS_ADDR` (per-component default port; see `Monitoring.md`) |
 
@@ -1281,10 +1281,10 @@ on), `CDROM_METRICS_ADDR` (dedicated `/metrics` + `/healthz` port; see
 
 ### Execution targets
 
-`CDROM_WORKER_NAME`, `CDROM_WORKER_GROUP`, `CDROM_WORKER_ENVIRONMENTS`
-(comma-separated environment memberships, F-17), `CDROM_WORKER_LABELS`;
-`CDROM_AGENT_JOB_ID`, `CDROM_AGENT_NAME`; `CDROM_WORKER_ROOT` (the base
-directory a worker/agent creates its per-job staged working area under,
+`CDROM_AGENT_NAME`, `CDROM_AGENT_GROUP`, `CDROM_AGENT_ENVIRONMENTS`
+(comma-separated environment memberships, F-17), `CDROM_AGENT_LABELS`;
+`CDROM_WORKER_JOB_ID`, `CDROM_WORKER_NAME`; `CDROM_AGENT_ROOT` (the base
+directory a agent/agent creates its per-job staged working area under,
 F-21.6; default: the OS temp dir — the target warns at startup when the
 effective root sits on a tmpfs/ramfs mount, since staged files then consume
 memory).

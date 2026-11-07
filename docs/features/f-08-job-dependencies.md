@@ -23,7 +23,7 @@ lists. Parallelism and correct ordering come from the DAG.
 - [x] A cycle in the graph is rejected when the pipeline is saved.
 - [x] Failure of A skips its dependents (F-06).
 
-**Design decisions (folded into AGENTS.md / Architecture.md).**
+**Design decisions (folded into WORKER.md / Architecture.md).**
 - **`needs` are keys, not ids.** A job in a pipeline has a stable,
   pipeline-scoped `key` (a short name, e.g. `build`, `test`), unique within
   the pipeline. A job's `needs` reference other jobs by their `key`, not by

@@ -16,8 +16,8 @@ import (
 // deriveJobStatus
 // ---------------------------------------------------------------------------
 
-func execWithStatus(jobID, id int64, worker string, status dbpb.JobStatus) *dbpb.JobExecution {
-	return &dbpb.JobExecution{Id: id, JobId: jobID, WorkerName: worker, Status: status}
+func execWithStatus(jobID, id int64, agent string, status dbpb.JobStatus) *dbpb.JobExecution {
+	return &dbpb.JobExecution{Id: id, JobId: jobID, AgentName: agent, Status: status}
 }
 
 func TestDeriveJobStatus(t *testing.T) {
@@ -60,21 +60,21 @@ func TestDeriveJobStatus(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// aliveWorkers
+// aliveAgents
 // ---------------------------------------------------------------------------
 
-func TestAliveWorkers(t *testing.T) {
+func TestAliveAgents(t *testing.T) {
 	now := time.Now()
 	cases := []struct {
 		name    string
-		workers []*dbpb.Worker
+		agents []*dbpb.Agent
 		want    map[string]bool
 	}{
-		{"no workers", nil, map[string]bool{}},
-		{"alive worker", []*dbpb.Worker{{Name: "w1", LastSeenAt: timestamppb.New(now)}}, map[string]bool{"w1": true}},
-		{"dead worker", []*dbpb.Worker{{Name: "w1", LastSeenAt: timestamppb.New(now.Add(-2 * time.Minute))}}, map[string]bool{}},
-		{"no last seen", []*dbpb.Worker{{Name: "w1"}}, map[string]bool{}},
-		{"mixed", []*dbpb.Worker{
+		{"no agents", nil, map[string]bool{}},
+		{"alive agent", []*dbpb.Agent{{Name: "w1", LastSeenAt: timestamppb.New(now)}}, map[string]bool{"w1": true}},
+		{"dead agent", []*dbpb.Agent{{Name: "w1", LastSeenAt: timestamppb.New(now.Add(-2 * time.Minute))}}, map[string]bool{}},
+		{"no last seen", []*dbpb.Agent{{Name: "w1"}}, map[string]bool{}},
+		{"mixed", []*dbpb.Agent{
 			{Name: "w1", LastSeenAt: timestamppb.New(now)},
 			{Name: "w2", LastSeenAt: timestamppb.New(now.Add(-2 * time.Minute))},
 			{Name: "w3"},
@@ -82,13 +82,13 @@ func TestAliveWorkers(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := aliveWorkers(tc.workers)
+			got := aliveAgents(tc.agents)
 			if len(got) != len(tc.want) {
-				t.Fatalf("aliveWorkers(%v) = %v (len %d), want %v (len %d)", tc.workers, got, len(got), tc.want, len(tc.want))
+				t.Fatalf("aliveAgents(%v) = %v (len %d), want %v (len %d)", tc.agents, got, len(got), tc.want, len(tc.want))
 			}
 			for name, want := range tc.want {
 				if got[name] != want {
-					t.Errorf("aliveWorkers(%v)[%s] = %v, want %v", tc.workers, name, got[name], want)
+					t.Errorf("aliveAgents(%v)[%s] = %v, want %v", tc.agents, name, got[name], want)
 				}
 			}
 		})
@@ -96,36 +96,36 @@ func TestAliveWorkers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// latestExecutionPerWorker
+// latestExecutionPerAgent
 // ---------------------------------------------------------------------------
 
-func TestLatestExecutionPerWorker(t *testing.T) {
+func TestLatestExecutionPerAgent(t *testing.T) {
 	alive := map[string]bool{"w1": true, "w2": true}
 	cases := []struct {
 		name       string
 		executions []*dbpb.JobExecution
 		alive      map[string]bool
-		want       map[string]int64 // worker -> expected execution id
+		want       map[string]int64 // agent -> expected execution id
 	}{
 		{"single execution", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING)}, alive, map[string]int64{"w1": 1}},
 		{"latest wins", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_FAILED), execWithStatus(1, 2, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING)}, alive, map[string]int64{"w1": 2}},
-		{"dead worker dropped", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING), execWithStatus(1, 2, "w3", dbpb.JobStatus_JOB_STATUS_RUNNING)}, alive, map[string]int64{"w1": 1}},
+		{"dead agent dropped", []*dbpb.JobExecution{execWithStatus(1, 1, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING), execWithStatus(1, 2, "w3", dbpb.JobStatus_JOB_STATUS_RUNNING)}, alive, map[string]int64{"w1": 1}},
 		{"all dead", []*dbpb.JobExecution{execWithStatus(1, 1, "w3", dbpb.JobStatus_JOB_STATUS_RUNNING)}, alive, map[string]int64{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := latestExecutionPerWorker(tc.executions, tc.alive)
+			got := latestExecutionPerAgent(tc.executions, tc.alive)
 			if len(got) != len(tc.want) {
-				t.Fatalf("latestExecutionPerWorker = %v (len %d), want %v (len %d)", got, len(got), tc.want, len(tc.want))
+				t.Fatalf("latestExecutionPerAgent = %v (len %d), want %v (len %d)", got, len(got), tc.want, len(tc.want))
 			}
 			for _, execution := range got {
-				wantID, ok := tc.want[execution.GetWorkerName()]
+				wantID, ok := tc.want[execution.GetAgentName()]
 				if !ok {
-					t.Errorf("unexpected worker %s in result", execution.GetWorkerName())
+					t.Errorf("unexpected agent %s in result", execution.GetAgentName())
 					continue
 				}
 				if execution.GetId() != wantID {
-					t.Errorf("worker %s execution id = %d, want %d", execution.GetWorkerName(), execution.GetId(), wantID)
+					t.Errorf("agent %s execution id = %d, want %d", execution.GetAgentName(), execution.GetId(), wantID)
 				}
 			}
 		})
@@ -138,13 +138,13 @@ func TestLatestExecutionPerWorker(t *testing.T) {
 
 // fakeJobStatusDB is a stub Database client for the job-status loop. It serves
 // a fixed set of running jobs, a fixed set of executions (filtered by job id),
-// and a fixed set of workers (filtered by group), and records the UpdateJob
+// and a fixed set of agents (filtered by group), and records the UpdateJob
 // calls it receives.
 type fakeJobStatusDB struct {
 	dbpb.DatabaseClient // nil
 	jobs                []*dbpb.Job
 	executions          []*dbpb.JobExecution
-	workers             []*dbpb.Worker
+	agents             []*dbpb.Agent
 	updated             []*dbpb.UpdateJobRequest
 }
 
@@ -170,13 +170,13 @@ func (f *fakeJobStatusDB) ListJobExecutions(ctx context.Context, in *dbpb.ListJo
 	return response, nil
 }
 
-func (f *fakeJobStatusDB) ListWorkers(ctx context.Context, in *dbpb.ListWorkersRequest, opts ...grpc.CallOption) (*dbpb.ListWorkersResponse, error) {
-	response := &dbpb.ListWorkersResponse{}
-	for _, worker := range f.workers {
-		if in.GetGroup() != "" && worker.GetGroup() != in.GetGroup() {
+func (f *fakeJobStatusDB) ListAgents(ctx context.Context, in *dbpb.ListAgentsRequest, opts ...grpc.CallOption) (*dbpb.ListAgentsResponse, error) {
+	response := &dbpb.ListAgentsResponse{}
+	for _, agent := range f.agents {
+		if in.GetGroup() != "" && agent.GetGroup() != in.GetGroup() {
 			continue
 		}
-		response.Workers = append(response.Workers, worker)
+		response.Agents = append(response.Agents, agent)
 	}
 	return response, nil
 }
@@ -198,15 +198,15 @@ func (f *fakeJobStatusPublisher) PublishJobStatus(ctx context.Context, in *dbpb.
 	return &dbpb.PublishEventResponse{}, nil
 }
 
-func recentWorker(name, group string) *dbpb.Worker {
-	return &dbpb.Worker{Name: name, Group: group, LastSeenAt: timestamppb.New(time.Now())}
+func recentAgent(name, group string) *dbpb.Agent {
+	return &dbpb.Agent{Name: name, Group: group, LastSeenAt: timestamppb.New(time.Now())}
 }
 
-func deadWorker(name, group string) *dbpb.Worker {
-	return &dbpb.Worker{Name: name, Group: group, LastSeenAt: timestamppb.New(time.Now().Add(-2 * time.Minute))}
+func deadAgent(name, group string) *dbpb.Agent {
+	return &dbpb.Agent{Name: name, Group: group, LastSeenAt: timestamppb.New(time.Now().Add(-2 * time.Minute))}
 }
 
-// TestJobStatusLoopSucceedsJob verifies that a running group job whose workers
+// TestJobStatusLoopSucceedsJob verifies that a running group job whose agents
 // all succeeded is re-derived as succeeded, persisted (with a finish time),
 // and fanned out to the UI.
 func TestJobStatusLoopSucceedsJob(t *testing.T) {
@@ -218,7 +218,7 @@ func TestJobStatusLoopSucceedsJob(t *testing.T) {
 			execWithStatus(1, 10, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED),
 			execWithStatus(1, 11, "w2", dbpb.JobStatus_JOB_STATUS_SUCCEEDED),
 		},
-		workers: []*dbpb.Worker{recentWorker("w1", "pool-a"), recentWorker("w2", "pool-a")},
+		agents: []*dbpb.Agent{recentAgent("w1", "pool-a"), recentAgent("w2", "pool-a")},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
@@ -244,7 +244,7 @@ func TestJobStatusLoopSucceedsJob(t *testing.T) {
 }
 
 // TestJobStatusLoopFailsJob verifies that a running group job with failure
-// mode ALL that has one worker fail is re-derived as failed.
+// mode ALL that has one agent fail is re-derived as failed.
 func TestJobStatusLoopFailsJob(t *testing.T) {
 	db := &fakeJobStatusDB{
 		jobs: []*dbpb.Job{
@@ -254,7 +254,7 @@ func TestJobStatusLoopFailsJob(t *testing.T) {
 			execWithStatus(2, 20, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED),
 			execWithStatus(2, 21, "w2", dbpb.JobStatus_JOB_STATUS_FAILED),
 		},
-		workers: []*dbpb.Worker{recentWorker("w1", "pool-a"), recentWorker("w2", "pool-a")},
+		agents: []*dbpb.Agent{recentAgent("w1", "pool-a"), recentAgent("w2", "pool-a")},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
@@ -270,8 +270,8 @@ func TestJobStatusLoopFailsJob(t *testing.T) {
 }
 
 // TestJobStatusLoopBestEffort verifies that a running group job with failure
-// mode BEST_EFFORT that has one worker fail and one succeed is re-derived as
-// succeeded (a per-worker failure does not fail the job).
+// mode BEST_EFFORT that has one agent fail and one succeed is re-derived as
+// succeeded (a per-agent failure does not fail the job).
 func TestJobStatusLoopBestEffort(t *testing.T) {
 	db := &fakeJobStatusDB{
 		jobs: []*dbpb.Job{
@@ -281,7 +281,7 @@ func TestJobStatusLoopBestEffort(t *testing.T) {
 			execWithStatus(3, 30, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED),
 			execWithStatus(3, 31, "w2", dbpb.JobStatus_JOB_STATUS_FAILED),
 		},
-		workers: []*dbpb.Worker{recentWorker("w1", "pool-a"), recentWorker("w2", "pool-a")},
+		agents: []*dbpb.Agent{recentAgent("w1", "pool-a"), recentAgent("w2", "pool-a")},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
@@ -297,7 +297,7 @@ func TestJobStatusLoopBestEffort(t *testing.T) {
 }
 
 // TestJobStatusLoopAny verifies that a running group job with failure mode ANY
-// that has one worker succeed is re-derived as succeeded (one success is
+// that has one agent succeed is re-derived as succeeded (one success is
 // enough).
 func TestJobStatusLoopAny(t *testing.T) {
 	db := &fakeJobStatusDB{
@@ -308,7 +308,7 @@ func TestJobStatusLoopAny(t *testing.T) {
 			execWithStatus(4, 40, "w1", dbpb.JobStatus_JOB_STATUS_FAILED),
 			execWithStatus(4, 41, "w2", dbpb.JobStatus_JOB_STATUS_SUCCEEDED),
 		},
-		workers: []*dbpb.Worker{recentWorker("w1", "pool-a"), recentWorker("w2", "pool-a")},
+		agents: []*dbpb.Agent{recentAgent("w1", "pool-a"), recentAgent("w2", "pool-a")},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
@@ -335,12 +335,12 @@ func TestJobStatusLoopNoopWhenUnchanged(t *testing.T) {
 			execWithStatus(5, 50, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING),
 			execWithStatus(5, 51, "w2", dbpb.JobStatus_JOB_STATUS_RUNNING),
 		},
-		workers: []*dbpb.Worker{recentWorker("w1", "pool-a"), recentWorker("w2", "pool-a")},
+		agents: []*dbpb.Agent{recentAgent("w1", "pool-a"), recentAgent("w2", "pool-a")},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
 
-	// Both workers are still running: the derived status is running, which
+	// Both agents are still running: the derived status is running, which
 	// matches the stored status, so nothing is persisted or fanned out.
 	s.processJobStatuses(context.Background(), db, publisher)
 
@@ -352,10 +352,10 @@ func TestJobStatusLoopNoopWhenUnchanged(t *testing.T) {
 	}
 }
 
-// TestJobStatusLoopDropsDeadWorkers verifies that a dead worker's in-progress
-// execution does not block the job: the job is derived from the alive workers
+// TestJobStatusLoopDropsDeadAgents verifies that a dead agent's in-progress
+// execution does not block the job: the job is derived from the alive agents
 // only.
-func TestJobStatusLoopDropsDeadWorkers(t *testing.T) {
+func TestJobStatusLoopDropsDeadAgents(t *testing.T) {
 	db := &fakeJobStatusDB{
 		jobs: []*dbpb.Job{
 			{Id: 6, TargetGroup: "pool-a", Status: dbpb.JobStatus_JOB_STATUS_RUNNING, FailureMode: dbpb.FailureMode_FAILURE_MODE_ALL},
@@ -364,23 +364,23 @@ func TestJobStatusLoopDropsDeadWorkers(t *testing.T) {
 			execWithStatus(6, 60, "w1", dbpb.JobStatus_JOB_STATUS_SUCCEEDED),
 			execWithStatus(6, 61, "w2", dbpb.JobStatus_JOB_STATUS_RUNNING), // w2 is dead
 		},
-		workers: []*dbpb.Worker{
-			recentWorker("w1", "pool-a"),
-			deadWorker("w2", "pool-a"), // w2 has not heartbeated recently
+		agents: []*dbpb.Agent{
+			recentAgent("w1", "pool-a"),
+			deadAgent("w2", "pool-a"), // w2 has not heartbeated recently
 		},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
 
 	// w2 is dead, so only w1's execution (succeeded) is considered. The job
-	// is derived as succeeded (all alive workers succeeded).
+	// is derived as succeeded (all alive agents succeeded).
 	s.processJobStatuses(context.Background(), db, publisher)
 
 	if len(db.updated) != 1 {
 		t.Fatalf("UpdateJob called %d times, want 1", len(db.updated))
 	}
 	if db.updated[0].GetStatus() != dbpb.JobStatus_JOB_STATUS_SUCCEEDED {
-		t.Errorf("UpdateJob status = %v, want SUCCEEDED (dead worker dropped)", db.updated[0].GetStatus())
+		t.Errorf("UpdateJob status = %v, want SUCCEEDED (dead agent dropped)", db.updated[0].GetStatus())
 	}
 }
 
@@ -406,10 +406,10 @@ func TestJobStatusLoopSkipsAgentJobs(t *testing.T) {
 	}
 }
 
-// TestJobStatusLoopNoAliveWorkers verifies that a job whose workers are all
+// TestJobStatusLoopNoAliveAgents verifies that a job whose agents are all
 // dead is left running (no update): the watchdog reaps it if it has a
 // timeout.
-func TestJobStatusLoopNoAliveWorkers(t *testing.T) {
+func TestJobStatusLoopNoAliveAgents(t *testing.T) {
 	db := &fakeJobStatusDB{
 		jobs: []*dbpb.Job{
 			{Id: 8, TargetGroup: "pool-a", Status: dbpb.JobStatus_JOB_STATUS_RUNNING, FailureMode: dbpb.FailureMode_FAILURE_MODE_ALL},
@@ -417,21 +417,21 @@ func TestJobStatusLoopNoAliveWorkers(t *testing.T) {
 		executions: []*dbpb.JobExecution{
 			execWithStatus(8, 80, "w1", dbpb.JobStatus_JOB_STATUS_RUNNING),
 		},
-		workers: []*dbpb.Worker{
-			deadWorker("w1", "pool-a"),
+		agents: []*dbpb.Agent{
+			deadAgent("w1", "pool-a"),
 		},
 	}
 	publisher := &fakeJobStatusPublisher{}
 	s := &Server{db: db, logger: testLogger()}
 
-	// w1 is dead, so there are no alive workers with executions. The job is
+	// w1 is dead, so there are no alive agents with executions. The job is
 	// left running (the watchdog reaps it if it has a timeout).
 	s.processJobStatuses(context.Background(), db, publisher)
 
 	if len(db.updated) != 0 {
-		t.Errorf("UpdateJob called %d times, want 0 (no alive workers)", len(db.updated))
+		t.Errorf("UpdateJob called %d times, want 0 (no alive agents)", len(db.updated))
 	}
 	if len(publisher.notified) != 0 {
-		t.Errorf("PublishJobStatus called %d times, want 0 (no alive workers)", len(publisher.notified))
+		t.Errorf("PublishJobStatus called %d times, want 0 (no alive agents)", len(publisher.notified))
 	}
 }

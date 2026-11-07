@@ -26,7 +26,7 @@ type Kind string
 // The kinds a document can be.
 const (
 	// KindPipeline is a pipeline definition: its spec holds the jobs and the
-	// pipeline-level config (workerGroup, failureMode, concurrencyKeys,
+	// pipeline-level config (agentGroup, failureMode, concurrencyKeys,
 	// params, triggers, artifacts, steps, variableSets, secretSources).
 	KindPipeline Kind = "Pipeline"
 	// KindVariableSet is a single named variable set: its spec is the set's
