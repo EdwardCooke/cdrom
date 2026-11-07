@@ -149,38 +149,38 @@ func NewAPIMetrics(reg prometheus.Registerer) *APIMetrics {
 		}, []string{"kind"}),
 		SecretsDecrypted: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: Prefix + "_api_secrets_decrypted_total",
-			Help: "Secret decryptions at dispatch (F-12).",
+			Help: "Secret decryptions at dispatch.",
 		}),
 		Notifications: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: Prefix + "_api_notifications_total",
-			Help: "Email/webhook notification sends (F-18), by kind and outcome.",
+			Help: "Email/webhook notification sends, by kind and outcome.",
 		}, []string{"kind", "outcome"}),
 		SourceSyncs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: Prefix + "_api_source_syncs_total",
-			Help: "Source-refresh syncs (F-21.5.3), by outcome.",
+			Help: "Source-refresh syncs, by outcome.",
 		}, []string{"outcome"}),
 		SourceSyncDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    Prefix + "_api_source_sync_duration_seconds",
-			Help:    "Source-refresh sync duration (F-21.5.3), by outcome.",
+			Help:    "Source-refresh sync duration, by outcome.",
 			Buckets: JobRunBuckets,
 		}, []string{"outcome"}),
 		SourceSyncInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: Prefix + "_api_source_sync_in_flight",
-			Help: "Source-refresh syncs currently in flight on this pod (F-21.5.3).",
+			Help: "Source-refresh syncs currently in flight on this pod.",
 		}),
 		LeaderState: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: Prefix + "_api_leader_state",
-			Help: "1 while this pod holds the source-refresh leader lease (F-21.5.3), 0 otherwise.",
+			Help: "1 while this pod holds the source-refresh leader lease, 0 otherwise.",
 		}),
 		Restorations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: Prefix + "_api_restorations_total",
-			Help: "Resumption (rollback) initiations (F-22), by door and result.",
+			Help: "Resumption (rollback) initiations, by door and result.",
 		}, []string{"door", "result"}),
 		Admissions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			// SPEC-MANDATED NAME (F-28.4 S3): cdrom_admissions_total (no
 			// _api_ infix — the spec fixes the series name).
 			Name: Prefix + "_admissions_total",
-			Help: "Admission-gate verdicts (F-28.4 S3), by verdict — judged per request.",
+			Help: "Admission-gate verdicts, by verdict — judged per request.",
 		}, []string{"verdict"}),
 	}
 	reg.MustRegister(

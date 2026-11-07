@@ -29,6 +29,12 @@ type DatabaseMetrics struct {
 	// ConcurrencySlots is the durable slots held per concurrency resource
 	// (kind: global / group / key; resource: the resource's name), (F-16).
 	ConcurrencySlots *prometheus.GaugeVec
+	// DuplicateStartsDeclined counts StartJobExecution calls DECLINED by the
+	// duplicate-delivery guard (a worker already owning an execution of the
+	// same job+attempt in a non-pending episode). Rare by construction — a
+	// rising trend signals a delivery pathology (nudge storms, stream flaps,
+	// lease anomalies) rather than steady state.
+	DuplicateStartsDeclined prometheus.Counter
 }
 
 // NewDatabaseMetrics builds the database metric set, registering its
@@ -37,19 +43,31 @@ func NewDatabaseMetrics(reg prometheus.Registerer) *DatabaseMetrics {
 	m := &DatabaseMetrics{
 		EventLogSize: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: Prefix + "_db_event_log_size",
-			Help: "Row count of the shared event log (F-23).",
+			Help: "Row count of the shared event log.",
+		}),
+		DuplicateStartsDeclined: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: Prefix + "_db_duplicate_starts_declined_total",
+			Help: "StartJobExecution calls declined by the duplicate-delivery guard.",
 		}),
 		QueueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: Prefix + "_db_queue_depth",
-			Help: "Pending jobs per group (empty label = the global queue), from the durable queue state (F-16).",
+			Help: "Pending jobs per group (empty label = the global queue), from the durable queue state.",
 		}, []string{"group"}),
 		ConcurrencySlots: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: Prefix + "_db_concurrency_slots",
-			Help: "Durable slots held per concurrency resource (F-16).",
+			Help: "Durable slots held per concurrency resource.",
 		}, []string{"kind", "resource"}),
 	}
-	reg.MustRegister(m.EventLogSize, m.QueueDepth, m.ConcurrencySlots)
+	reg.MustRegister(m.EventLogSize, m.QueueDepth, m.ConcurrencySlots, m.DuplicateStartsDeclined)
 	return m
+}
+
+// IncDuplicateStartsDeclined records a guard declination (nil-safe).
+func (m *DatabaseMetrics) IncDuplicateStartsDeclined() {
+	if m == nil {
+		return
+	}
+	m.DuplicateStartsDeclined.Inc()
 }
 
 // SetEventLogSize sets the shared event log's row count.

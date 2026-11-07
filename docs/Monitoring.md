@@ -91,7 +91,8 @@ heap, GC, CPU, file descriptors) comes for free.
   `cdrom_scheduler_loop_duration_seconds{loop}`.
 - **Database** — `cdrom_db_rpc_duration_seconds{method}`,
   `cdrom_db_event_log_size`, `cdrom_db_queue_depth{group}`,
-  `cdrom_db_concurrency_slots{kind,resource}`.
+  `cdrom_db_concurrency_slots{kind,resource}`,
+  `cdrom_db_duplicate_starts_declined_total`.
 - **Artifacts** — `cdrom_artifacts_operations_total{op,code}`,
   `cdrom_artifacts_bytes_total{op}`, `cdrom_artifacts_duration_seconds{op}`.
 - **IdP** — `cdrom_idp_tokens_minted_total{kind}`, `cdrom_idp_logins_total{outcome}`,

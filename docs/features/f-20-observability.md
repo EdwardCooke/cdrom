@@ -180,6 +180,11 @@ histograms; gauges are point-in-time.)
   label = the global queue), from the durable queue state (F-16).
 - `cdrom_db_concurrency_slots{kind,resource}` — gauge, durable slots held
   per concurrency resource (kind: `global` / `group` / `key`; F-16).
+- `cdrom_db_duplicate_starts_declined_total` — counter, `StartJobExecution`
+  calls declined by the duplicate-delivery guard (a worker already owning an
+  execution of the same job+attempt in a non-pending episode; F-23,
+  flake 2026-11-07). Rising trend ⇒ a delivery pathology (nudge storms,
+  stream flaps, lease anomalies).
 
 *Artifacts service:*
 - `cdrom_artifacts_operations_total{op,code}` — op: `upload` /

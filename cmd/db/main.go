@@ -58,6 +58,11 @@ func main() {
 	// database (the ConcurrencyLimit table), not in configuration, so they can
 	// be edited at runtime via the API without a redeployment.
 	server := database.NewServer(db)
+	// The service's operational logger (breadcrumb events like the
+	// duplicate-delivery guard's declinations). Attached unconditionally —
+	// it works even when metrics are disabled (not every environment has
+	// them).
+	server.SetLogger(logger)
 
 	// Metrics (F-20): the Database service serves /metrics and /healthz on a
 	// dedicated metrics port (separate from its gRPC port). When disabled

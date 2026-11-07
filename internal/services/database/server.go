@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"sort"
@@ -40,6 +41,13 @@ type Server struct {
 	// concurrency slots held per resource). It is nil when metrics are
 	// disabled, in which case the refresh loop is not started.
 	metrics *metrics.DatabaseMetrics
+	// logger records the service's own operational events (nil-safe; defaults
+	// to slog.Default when unwired). Historically the service stayed silent
+	// (GORM's slog router owned its noise); the duplicate-delivery guard
+	// (flake 2026-11-07) needs a voice — a declined start is otherwise
+	// invisible, and invisibility is exactly what made the original flake
+	// archaeological.
+	logger *slog.Logger
 	// limitsMu guards limitsCache and limitsAt (F-16). The concurrency limit
 	// rules are loaded from the database and cached briefly so the scheduler's
 	// dispatch path (which resolves a job's limits on every admission attempt)
@@ -63,6 +71,22 @@ func NewServer(db *gorm.DB) *Server {
 // left nil (metrics disabled) the loop is not started.
 func (s *Server) SetMetrics(m *metrics.DatabaseMetrics) {
 	s.metrics = m
+}
+
+// SetLogger attaches the service's operational logger (defaults to
+// slog.Default when unwired). Recording is nil-safe throughout.
+func (s *Server) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		s.logger = logger
+	}
+}
+
+// log returns the service's logger (never nil).
+func (s *Server) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
 }
 
 // ---------------------------------------------------------------------------
@@ -2323,6 +2347,46 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	// group each start their own execution, so the start is allowed even after
 	// the first worker has marked the job running.
 	if isTerminalJobStatus(job.Status) {
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
+	}
+	// A worker that has ALREADY STARTED this (job, worker, attempt) in the
+	// current EPISODE is declined a second start. The job row's status is
+	// DERIVED (the scheduler's job-status loop reconciles it from the
+	// executions), so a FAST job can still read as running LONG AFTER ITS
+	// FIRST EXECUTION FINISHED — the terminal-state check above is blind to
+	// that window. Without this guard a duplicate delivery (queued push
+	// nudges overtaking the first start; the poll re-listing) spawns a
+	// SECOND execution of the same (job, worker, attempt): the job runs
+	// TWICE, and side-effecting steps (publish_artifact's immutable
+	// filenames) fail with AlreadyExists.
+	//
+	// The discriminator is the job's PENDING state, because a rerun is the
+	// ONLY legitimate path that re-opens a used coordinate — and RerunJob
+	// explicitly resets the job to pending. A retry BUMPs the attempt (a
+	// fresh coordinate with no execution yet), so it never meets this guard.
+	// Hence: an execution exists AND the job is NOT pending ⇒ duplicate ⇒
+	// decline; an execution exists AND the job IS pending ⇒ rerun ⇒ proceed
+	// (equivalent to the pre-guard behavior, which also created a fresh
+	// execution on rerun). Declined, not errored: the duplicate is a
+	// delivery artifact, not a client fault — the job is already covered by
+	// the first execution.
+	var existingExecs int64
+	if err := db.Model(&models.JobExecution{}).
+		Where("job_id = ? AND worker_name = ? AND attempt = ?",
+			req.GetJobId(), req.GetWorkerName(), job.Attempt).
+		Count(&existingExecs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if existingExecs > 0 && job.Status != models.JobStatusPending {
+		// Breadcrumb (rare by construction — a duplicate delivery, not
+		// steady state): without this, a recurrence of the 2026-11-07 flake
+		// is invisible in the database service's logs and the diagnosis
+		// turns archaeological again. The metric (nil-safe) is the
+		// dashboards' version of the same breadcrumb.
+		s.log().Info("database: declined duplicate job start (episode already underway)",
+			"job", req.GetJobId(), "worker", req.GetWorkerName(),
+			"attempt", job.Attempt, "job_status", job.Status)
+		s.metrics.IncDuplicateStartsDeclined()
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
 	// A job still HOLDING DEPENDENCIES (depends_on non-empty) is owned by the

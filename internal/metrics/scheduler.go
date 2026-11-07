@@ -6,14 +6,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// SchedulerMetrics is the scheduler service's metric set (F-20). It is
+// SchedulerMetrics is the scheduler service's metric set. It is
 // constructed against a Collector's registry (NewSchedulerMetrics) and
 // recorded into at the scheduler's hot spots: dispatch outcomes, the
 // leader-gated admission loop, queue wait, run status/duration/lead-time, the
 // watchdog / retry / dependency / trigger counters, the leader gauge, and the
 // per-loop tick durations.
 //
-// HA (F-23): counters are recorded by exactly one replica per event — the
+// HA: counters are recorded by exactly one replica per event — the
 // replica that handled the event (a dispatch is handled by one scheduler
 // replica) or the leader for leader-gated work (the admission loop, the
 // run-status loop) — so summing the per-pod series gives the fleet total.
@@ -24,14 +24,14 @@ type SchedulerMetrics struct {
 	// Dispatches counts dispatch decisions by outcome: dispatched /
 	// blocked_limit / blocked_key / held_manual / skipped.
 	Dispatches *prometheus.CounterVec
-	// AdmissionChecks counts the admission loop's checks (F-16).
+	// AdmissionChecks counts the admission loop's checks.
 	AdmissionChecks prometheus.Counter
 	// AdmissionDuration is the admission loop's per-pass duration.
 	AdmissionDuration prometheus.Histogram
 	// QueueWait is a job's pending→running wait (the queue's wait time),
 	// recorded by the replica that dispatches it.
 	QueueWait *prometheus.HistogramVec
-	// Runs counts run status transitions from the run-status loop (F-07), by
+	// Runs counts run status transitions from the run-status loop, by
 	// status, trigger (manual / cron / webhook / event), and environment (the
 	// highest environment the run reached, empty when it targets none).
 	Runs *prometheus.CounterVec
@@ -40,17 +40,16 @@ type SchedulerMetrics struct {
 	// RunLeadTime is a run's creation (trigger) → completion; the
 	// lead-time-for-changes signal.
 	RunLeadTime *prometheus.HistogramVec
-	// WatchdogReaps counts jobs reaped as timed out (F-03).
+	// WatchdogReaps counts jobs reaped as timed out.
 	WatchdogReaps prometheus.Counter
-	// Retries counts retry re-dispatches (F-04).
+	// Retries counts retry re-dispatches.
 	Retries prometheus.Counter
 	// DependenciesResolved counts dependency resolutions by outcome (released /
-	// skipped) (F-06/F-08).
+	// skipped).
 	DependenciesResolved *prometheus.CounterVec
-	// TriggersFired counts trigger fires by kind (cron / webhook / event)
-	// (F-09).
+	// TriggersFired counts trigger fires by kind (cron / webhook / event).
 	TriggersFired *prometheus.CounterVec
-	// Leader is 1 while this replica holds the leader lease (F-23).
+	// Leader is 1 while this replica holds the leader lease.
 	Leader prometheus.Gauge
 	// LoopDuration is a background loop's per-tick duration, by loop name
 	// (watchdog / retry / dependencies / run_status / job_status / admission /
@@ -68,11 +67,11 @@ func NewSchedulerMetrics(reg prometheus.Registerer) *SchedulerMetrics {
 		}, []string{"outcome"}),
 		AdmissionChecks: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: Prefix + "_scheduler_admission_checks_total",
-			Help: "Admission-loop checks (F-16).",
+			Help: "Admission-loop checks.",
 		}),
 		AdmissionDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    Prefix + "_scheduler_admission_duration_seconds",
-			Help:    "Admission-loop pass duration (F-16).",
+			Help:    "Admission-loop pass duration.",
 			Buckets: RequestBuckets,
 		}),
 		QueueWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -82,7 +81,7 @@ func NewSchedulerMetrics(reg prometheus.Registerer) *SchedulerMetrics {
 		}, []string{"group"}),
 		Runs: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: Prefix + "_scheduler_runs_total",
-			Help: "Run status transitions from the run-status loop (F-07), by status, trigger, and environment.",
+			Help: "Run status transitions from the run-status loop, by status, trigger, and environment.",
 		}, []string{"status", "trigger", "environment"}),
 		RunDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    Prefix + "_scheduler_run_duration_seconds",
@@ -96,23 +95,23 @@ func NewSchedulerMetrics(reg prometheus.Registerer) *SchedulerMetrics {
 		}, []string{"trigger", "environment"}),
 		WatchdogReaps: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: Prefix + "_scheduler_watchdog_reaps_total",
-			Help: "Jobs reaped as timed out (F-03).",
+			Help: "Jobs reaped as timed out.",
 		}),
 		Retries: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: Prefix + "_scheduler_retries_total",
-			Help: "Retry re-dispatches (F-04).",
+			Help: "Retry re-dispatches.",
 		}),
 		DependenciesResolved: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: Prefix + "_scheduler_dependencies_resolved_total",
-			Help: "Dependency resolutions, by outcome (released / skipped) (F-06/F-08).",
+			Help: "Dependency resolutions, by outcome (released / skipped).",
 		}, []string{"outcome"}),
 		TriggersFired: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: Prefix + "_scheduler_triggers_fired_total",
-			Help: "Trigger fires, by kind (cron / webhook / event) (F-09).",
+			Help: "Trigger fires, by kind (cron / webhook / event).",
 		}, []string{"kind"}),
 		Leader: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: Prefix + "_scheduler_leader",
-			Help: "1 while this replica holds the leader lease (F-23).",
+			Help: "1 while this replica holds the leader lease.",
 		}),
 		LoopDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    Prefix + "_scheduler_loop_duration_seconds",
@@ -155,7 +154,7 @@ func (m *SchedulerMetrics) ObserveQueueWait(group string, d time.Duration) {
 	m.QueueWait.WithLabelValues(group).Observe(d.Seconds())
 }
 
-// RecordRun counts a run status transition (F-07), by status, trigger, and
+// RecordRun counts a run status transition, by status, trigger, and
 // environment.
 func (m *SchedulerMetrics) RecordRun(status, trigger, environment string) {
 	if m == nil || status == "" {
@@ -180,7 +179,7 @@ func (m *SchedulerMetrics) ObserveRunLeadTime(trigger, environment string, d tim
 	m.RunLeadTime.WithLabelValues(trigger, environment).Observe(d.Seconds())
 }
 
-// RecordWatchdogReap counts a job reaped as timed out (F-03).
+// RecordWatchdogReap counts a job reaped as timed out.
 func (m *SchedulerMetrics) RecordWatchdogReap() {
 	if m == nil {
 		return
@@ -188,7 +187,7 @@ func (m *SchedulerMetrics) RecordWatchdogReap() {
 	m.WatchdogReaps.Inc()
 }
 
-// RecordRetry counts a retry re-dispatch (F-04).
+// RecordRetry counts a retry re-dispatch.
 func (m *SchedulerMetrics) RecordRetry() {
 	if m == nil {
 		return
@@ -196,8 +195,7 @@ func (m *SchedulerMetrics) RecordRetry() {
 	m.Retries.Inc()
 }
 
-// RecordDependencyResolution counts a dependency resolution by outcome
-// (released / skipped).
+// RecordDependencyResolution counts a dependency resolution by outcome (released / skipped).
 func (m *SchedulerMetrics) RecordDependencyResolution(outcome string) {
 	if m == nil || outcome == "" {
 		return

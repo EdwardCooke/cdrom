@@ -6,8 +6,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// WorkerMetrics is the execution target's (worker or agent) metric set
-// (F-20). It is constructed against a Collector's registry
+// WorkerMetrics is the execution target's (worker or agent) metric set.
+// It is constructed against a Collector's registry
 // (NewWorkerMetrics) and recorded into at the target's hot spots: the jobs it
 // completes (by terminal status) and their durations, the steps it runs (by
 // step type and status) and their durations, its in-flight job count
@@ -41,7 +41,7 @@ type WorkerMetrics struct {
 	Polls *prometheus.CounterVec
 	// HeartbeatFailures counts failed heartbeats. Recorded by workers only.
 	HeartbeatFailures prometheus.Counter
-	// LogBytes is the log bytes streamed to the API (F-02).
+	// LogBytes is the log bytes streamed to the API.
 	LogBytes prometheus.Counter
 }
 
@@ -85,7 +85,7 @@ func NewWorkerMetrics(reg prometheus.Registerer) *WorkerMetrics {
 		}),
 		LogBytes: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: Prefix + "_worker_log_bytes_total",
-			Help: "Log bytes streamed to the API (F-02).",
+			Help: "Log bytes streamed to the API.",
 		}),
 	}
 	reg.MustRegister(

@@ -336,9 +336,16 @@ type DatabaseClient interface {
 	// job (fan-out): it creates the worker's JobExecution for the job's current
 	// attempt and marks the job running. A job that targets a worker group runs
 	// on every worker in the group; each worker's run is a separate execution,
-	// so the start is not exclusive (unlike the old single-claim work queue).
-	// Starting an execution for a job that is no longer pending (it reached a
-	// terminal state, or it is not targeted at the worker's group) is rejected.
+	// so the start is not exclusive BETWEEN WORKERS (unlike the old single-claim
+	// work queue). Within a worker it IS exclusive: a worker that already has a
+	// RUNNING execution of the job (same attempt) is declined a second start —
+	// the job row's status is derived (reconciled from the executions by the
+	// scheduler), so a fast job can still read as running long after its first
+	// execution finished, and without the guard a duplicate delivery (queued
+	// push nudges overtaking the first start) would spawn a second execution
+	// and run the job twice. Starting an execution for a job that is no longer
+	// pending (it reached a terminal state, or it is not targeted at the
+	// worker's group) is rejected.
 	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
 	// ListJobExecutions returns a job's executions (one per worker that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to
@@ -2853,9 +2860,16 @@ type DatabaseServer interface {
 	// job (fan-out): it creates the worker's JobExecution for the job's current
 	// attempt and marks the job running. A job that targets a worker group runs
 	// on every worker in the group; each worker's run is a separate execution,
-	// so the start is not exclusive (unlike the old single-claim work queue).
-	// Starting an execution for a job that is no longer pending (it reached a
-	// terminal state, or it is not targeted at the worker's group) is rejected.
+	// so the start is not exclusive BETWEEN WORKERS (unlike the old single-claim
+	// work queue). Within a worker it IS exclusive: a worker that already has a
+	// RUNNING execution of the job (same attempt) is declined a second start —
+	// the job row's status is derived (reconciled from the executions by the
+	// scheduler), so a fast job can still read as running long after its first
+	// execution finished, and without the guard a duplicate delivery (queued
+	// push nudges overtaking the first start) would spawn a second execution
+	// and run the job twice. Starting an execution for a job that is no longer
+	// pending (it reached a terminal state, or it is not targeted at the
+	// worker's group) is rejected.
 	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
 	// ListJobExecutions returns a job's executions (one per worker that started
 	// it, for its current attempt). The scheduler's job-status loop uses it to

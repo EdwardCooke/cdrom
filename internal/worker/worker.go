@@ -54,6 +54,17 @@ type Worker struct {
 	// sem bounds the worker to one job at a time (preserving the previous
 	// sequential behavior) while the watch loop stays free to receive
 	// cancellations for the running job (F-05).
+	//
+	// LOAD BEARING (do not widen casually): the database service's
+	// StartJobExecution duplicate-delivery guard (F-23/flake 2026-11-07) is a
+	// check-then-act that is race-free ONLY because a single worker's
+	// acquisitions are SERIAL — no second StartJobExecution for this worker
+	// can be in flight while the first's execution row is uncommitted.
+	// Growing this semaphore to N (internally parallel jobs) re-opens the
+	// double-execution race; enforce the invariant at the storage layer
+	// first (e.g. a partial unique index on (job, worker, attempt) WHERE
+	// status='running') before scaling. Horizontal fan-out (MORE workers,
+	// each serial) is unaffected and encouraged.
 	sem chan struct{}
 
 	mu       sync.Mutex

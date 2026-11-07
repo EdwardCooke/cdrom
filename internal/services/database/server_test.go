@@ -1981,6 +1981,98 @@ func TestStartJobExecution(t *testing.T) {
 	}
 }
 
+// TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution
+// verifies the DOUBLE-DELIVERY GUARD (flaky e2e 2026-11-07, scenario 16):
+// once a worker has started a (job, worker, attempt) episode, a duplicate
+// delivery is DECLINED — in BOTH phases of the episode: while the first
+// execution is still running, AND after it has finished while the job row
+// still reads running (the derived status lags the executions — the exact
+// window that caused the flake: a 28 ms job succeeded, its duplicate pickup
+// arrived 8 ms later, and the old unconditional create spun up a SECOND
+// execution that failed on publish_artifact's AlreadyExists). Legitimate
+// re-openings are carved out: fan-out (a different worker is a different
+// coordinate) proceeds, and a RERUN (which resets the job to pending)
+// proceeds. Previously the guard was unconditional execution creation.
+func TestStartJobExecutionDuplicateDeliveryGuardsAgainstSecondExecution(t *testing.T) {
+	client := startServer(t)
+	ctx := context.Background()
+	job := newGroupJob(t, client, ctx, "dup-guard", "pool-a")
+
+	start := func(worker string) (started bool, execID int64) {
+		t.Helper()
+		resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: job.GetId(), WorkerName: worker})
+		if err != nil {
+			t.Fatalf("StartJobExecution(%s): %v", worker, err)
+		}
+		return resp.GetStarted(), resp.GetExecution().GetId()
+	}
+
+	// Episode begins: w1 starts.
+	if started, _ := start("w1"); !started {
+		t.Fatal("first start = false, want true")
+	}
+
+	// PHASE 1 (running): the job is RUNNING (marked by the first start) —
+	// the OLD code saw non-terminal and waved the duplicate through.
+	if started, _ := start("w1"); started {
+		t.Error("duplicate while RUNNING started a second execution (want declined)")
+	}
+
+	// Fan-out is ALLOWED: a different worker starts its own execution.
+	if started, _ := start("w2"); !started {
+		t.Error("fan-out start = false, want true (different worker is a different coordinate)")
+	}
+
+	// PHASE 2 (the FLAKE WINDOW): w1's execution FINISHES, but the job row
+	// still reads running (the derived status hasn't reconciled). A
+	// duplicate pickup arriving now must STILL be declined.
+	if _, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
+		JobId: job.GetId(), WorkerName: "w1", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+	}); err != nil {
+		t.Fatalf("terminate w1's execution: %v", err)
+	}
+	if started, _ := start("w1"); started {
+		t.Error("duplicate AFTER the execution finished started a THIRD execution (want declined — the flake window)")
+	}
+
+	// RERUN CARVE-OUT: quiesce the episode (w2's fan-out execution still
+	// runs — RerunJob refuses a job that reads running), simulate the
+	// derived loop marking the job terminal, then RerunJob resets it to
+	// pending (the ONLY lawful reopening of a used coordinate) — w1 may
+	// start the episode afresh.
+	if _, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
+		JobId: job.GetId(), WorkerName: "w2", Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
+	}); err != nil {
+		t.Fatalf("terminate w2's execution: %v", err)
+	}
+	if _, err := client.UpdateJob(ctx, &dbpb.UpdateJobRequest{Id: job.GetId(), Status: dbpb.JobStatus_JOB_STATUS_SUCCEEDED}); err != nil {
+		t.Fatalf("simulate the derived loop (job terminal): %v", err)
+	}
+	if _, err := client.RerunJob(ctx, &dbpb.RerunJobRequest{Id: job.GetId()}); err != nil {
+		t.Fatalf("RerunJob: %v", err)
+	}
+	refetched, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()})
+	if err != nil {
+		t.Fatalf("GetJob after rerun: %v", err)
+	}
+	if refetched.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+		t.Fatalf("job after rerun = %v, want PENDING (the guard's discriminator)", refetched.GetStatus())
+	}
+	if started, _ := start("w1"); !started {
+		t.Error("start after RERUN = false, want true (pending re-opens the episode)")
+	}
+
+	// Total executions: w1(ep1) + w2(fan-out) + w1(rerun) = 3 — the two
+	// duplicates created NO rows.
+	list, err := client.ListJobExecutions(ctx, &dbpb.ListJobExecutionsRequest{JobId: job.GetId()})
+	if err != nil {
+		t.Fatalf("ListJobExecutions: %v", err)
+	}
+	if got := len(list.GetExecutions()); got != 3 {
+		t.Errorf("executions = %d, want 3 (duplicates must not create rows)", got)
+	}
+}
+
 // TestStartJobExecutionRejectsTerminalJob verifies that a job that has reached
 // a terminal state is not started (a late worker start is a no-op).
 func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
