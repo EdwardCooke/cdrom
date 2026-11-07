@@ -165,6 +165,18 @@ type Server struct {
 	// bgAuditor records break-glass invocations (F-15). May be nil (unit
 	// tests without an audit sink).
 	bgAuditor *audit.Recorder
+	// db is the IdP's shared Database client (attached by cmd/idp). The
+	// SCIM group→role mapping applicator (F-28.5, Slice 3) walks it for the
+	// role catalog, the scim_group binding lane, and role-change
+	// publication. When nil the applicator declines (logged) — the group
+	// RESOURCE still functions, its groups simply derive no roles.
+	db dbpb.DatabaseClient
+}
+
+// SetDatabaseClient attaches the shared Database client the group→role
+// mapping applicator (F-28.5, Slice 3) needs. Called by cmd/idp at boot.
+func (s *Server) SetDatabaseClient(db dbpb.DatabaseClient) {
+	s.db = db
 }
 
 // NewServer creates the IdP HTTP server over the given key manager and

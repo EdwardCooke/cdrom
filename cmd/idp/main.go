@@ -188,6 +188,10 @@ func main() {
 		// directory (through the Database service, like the user directory)
 		// and shares the same auditor (actions distinguish the surface).
 		srv.SetScimGroupBacking(idp.NewDBGroupStore(dbClient))
+		// The group→role mapping APPLICATOR (F-28.5, Slice 3) walks the same
+		// Database client for the role catalog, the scim_group binding lane,
+		// and role-change publication (cache invalidation without restart).
+		srv.SetDatabaseClient(dbClient)
 	}
 	// Break-glass escape hatch (F-28.3, Slice 3): coins ephemeral
 	// random-identity admins for holders of a CA-signed client certificate

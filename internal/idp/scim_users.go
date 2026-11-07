@@ -123,7 +123,11 @@ type scimUserPayload struct {
 	PrimaryEmail string
 	ExternalID   string
 	Active       *bool
-	HadGroups    bool // groups present (acknowledged, discarded until F-28.5)
+	// EmbeddedGroups are the RAW `groups` references of the posted document
+	// (F-28.5 Slice 3 switchover: processed via scimEnsureEmbeddedGroups —
+	// existing groups get membership ensured, unknown ones are logged +
+	// ignored; NO phantom groups).
+	EmbeddedGroups []any
 }
 
 // decodeSCIMUser extracts the tracked fields from a SCIM User document. It is
@@ -179,8 +183,8 @@ func decodeSCIMUser(raw map[string]any) (*scimUserPayload, error) {
 	if a, ok := raw["active"].(bool); ok {
 		doc.Active = &a
 	}
-	if _, ok := raw["groups"]; ok {
-		doc.HadGroups = true
+	if gs, ok := raw["groups"].([]any); ok {
+		doc.EmbeddedGroups = gs
 	}
 	return doc, nil
 }
@@ -538,9 +542,6 @@ func (s *Server) handleSCIMUsersCreate(w http.ResponseWriter, r *http.Request) {
 		s.scimErrTyped(w, r, http.StatusBadRequest, scimTypeInvalidValue, err.Error())
 		return
 	}
-	if payload.HadGroups {
-		s.logger.Debug("scim: acknowledging and discarding groups (until F-28.5)", "userName", payload.UserName)
-	}
 	desiredActive := true
 	if payload.Active != nil {
 		desiredActive = *payload.Active
@@ -604,6 +605,10 @@ func (s *Server) handleSCIMUsersCreate(w http.ResponseWriter, r *http.Request) {
 				user = refreshed
 			}
 		}
+		// Slice 3 trigger point (switchover): embedded `groups` ensure
+		// membership in EXISTING groups (gap-fill) and drive the user's
+		// derivation; unknown references are logged + ignored.
+		s.scimEnsureEmbeddedGroups(r, user.Username, payload.EmbeddedGroups)
 		s.finishSCIMOp(r, "provision", "success")
 		s.auditSCIMOp(r, "provision", user.ID, user.Username, nil, user)
 		w.Header().Set("Location", s.scimLocation(r, "/Users/"+user.ID))
@@ -625,6 +630,10 @@ func (s *Server) handleSCIMUsersCreate(w http.ResponseWriter, r *http.Request) {
 			s.renderSCIMMutationError(w, r, err)
 			return
 		}
+		// Slice 3 trigger point: rehires carry the same embedded-group
+		// supplements as provisions (membership may have aged out meanwhile —
+		// the gap-fill heals it).
+		s.scimEnsureEmbeddedGroups(r, repopulated.Username, payload.EmbeddedGroups)
 		s.finishSCIMOp(r, "reprovision", "success")
 		s.auditSCIMOp(r, "reprovision", repopulated.ID, repopulated.Username, matched, repopulated)
 		s.scimWrite(w, r, http.StatusOK, s.scimUserDoc(r, repopulated))
@@ -639,6 +648,9 @@ func (s *Server) handleSCIMUsersCreate(w http.ResponseWriter, r *http.Request) {
 			s.renderSCIMMutationError(w, r, err)
 			return
 		}
+		// Slice 3 trigger point: renames/repopulation reposts may embed
+		// group references too (best-effort supplements, as everywhere).
+		s.scimEnsureEmbeddedGroups(r, refreshed.Username, payload.EmbeddedGroups)
 		s.finishSCIMOp(r, "update", "success")
 		s.auditSCIMOp(r, "update", refreshed.ID, refreshed.Username, matched, refreshed)
 		s.scimWrite(w, r, http.StatusOK, s.scimUserDoc(r, refreshed))
@@ -760,6 +772,9 @@ func (s *Server) handleSCIMUserPut(w http.ResponseWriter, r *http.Request) {
 		s.renderSCIMMutationError(w, r, err)
 		return
 	}
+	// Slice 3 trigger point: PUTs may embed group references (best-effort
+	// supplements — the group resource stays authoritative).
+	s.scimEnsureEmbeddedGroups(r, refreshed.Username, payload.EmbeddedGroups)
 	op := scimTransitionOp(prevActive, refreshed.Active)
 	s.finishSCIMOp(r, op, "success")
 	s.auditSCIMOp(r, op, refreshed.ID, refreshed.Username, current, refreshed)
@@ -835,6 +850,9 @@ func (s *Server) handleSCIMUserPatch(w http.ResponseWriter, r *http.Request) {
 		s.renderSCIMMutationError(w, r, err)
 		return
 	}
+	// Slice 3 trigger point: accumulated embedded `groups` ops (add/replace)
+	// ensure membership in EXISTING groups and drive the derivation.
+	s.scimEnsureEmbeddedGroups(r, refreshed.Username, work.EmbeddedGroups)
 	op := scimTransitionOp(prevActive, refreshed.Active)
 	s.finishSCIMOp(r, op, "success")
 	s.auditSCIMOp(r, op, refreshed.ID, refreshed.Username, current, refreshed)
@@ -906,8 +924,10 @@ func applyPatchOp(work *scimUserPayload, path string, value any) error {
 			return errors.New("externalId is immutable")
 		}
 	case "groups":
-		// Acknowledged and discarded until F-28.5 (consistent with POST).
-		return nil
+		// F-28.5 Slice 3 switchover: EMBEDDED REFERENCES ARE ACCUMULATED
+		// (add/replace merge — the gap-fill is idempotent and dedupes per
+		// group, so overlapping ops are harmless).
+		work.EmbeddedGroups = append(work.EmbeddedGroups, coerceSCIMGroupRefs(value)...)
 	default:
 		return errors.New("unsupported attribute: " + path)
 	}
@@ -926,9 +946,25 @@ func removePatchOp(work *scimUserPayload, path string) error {
 	case "externalId":
 		return errors.New("externalId is immutable")
 	case "groups":
-		return nil
+		// Removal is UNSUPPORTED: embedded references are ADDITIVE
+		// supplements — membership AUTHORITY lies with the /Groups resource
+		// (spec precedence). Refusing beats silently discarding (the
+		// connector deserves the nudge toward the authoritative surface).
+		return errors.New("removing embedded groups is unsupported; manage membership via the /Groups resource")
 	default:
 		return errors.New("unsupported attribute: " + path)
+	}
+	return nil
+}
+
+// coerceSCIMGroupRefs normalises a PATCH `groups` op VALUE into a reference
+// list: an ARRAY of entries, a bare STRING, or a single OBJECT.
+func coerceSCIMGroupRefs(value any) []any {
+	switch v := value.(type) {
+	case []any:
+		return v
+	case string, map[string]any:
+		return []any{v}
 	}
 	return nil
 }

@@ -466,6 +466,10 @@ func (s *Server) handleSCIMGroupsCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	s.finishSCIMOp(r, "group_create", "success")
 	s.auditSCIMGroupOp(r, "create", g.ID, g.DisplayName, nil, g)
+	// Slice 3 trigger point: the INITIAL membership may derive roles for
+	// freshly resolved members (best-effort — the 201 stands on the store
+	// write; the next sync heals any derivation hiccup).
+	s.scimReconcileGroup(r, g.DisplayName, g.MemberValues, nil)
 	w.Header().Set("Location", s.scimLocation(r, "/Groups/"+g.ID))
 	s.scimWrite(w, r, http.StatusCreated, s.scimGroupDoc(r, g))
 }
@@ -521,6 +525,12 @@ func (s *Server) handleSCIMGroupPut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.finishSCIMOp(r, "group_update", "success")
 	s.auditSCIMGroupOp(r, "replace", refreshed.ID, refreshed.DisplayName, current, refreshed)
+	// Slice 3 trigger point: a DEFINITE replace moves everyone who ENTERED
+	// or EXITED the membership (the symmetric difference of the two sets);
+	// both directions feed the same reconciliation (derive-after-current-
+	// state converges either way).
+	added, removed := symSCIMMemberMove(current.MemberValues, refreshed.MemberValues)
+	s.scimReconcileGroup(r, refreshed.DisplayName, added, removed)
 	s.scimWrite(w, r, http.StatusOK, s.scimGroupDoc(r, refreshed))
 }
 
@@ -551,6 +561,10 @@ func (s *Server) handleSCIMGroupPatch(w http.ResponseWriter, r *http.Request) {
 	newName, newDesc := current.DisplayName, current.Description
 	attrChanged := false
 	addVals, delVals := []string{}, []string{}
+	// MOVEMENT operands feeding the Slice 3 reconciliation (the attribute
+	// leg preserves membership ⇒ no movement; the membership leg carries
+	// the posted add/remove sets).
+	movAdded, movRemoved := []string{}, []string{}
 	for _, opRaw := range envelope.Operations {
 		opKind, _ := opRaw["op"].(string)
 		path, _ := opRaw["path"].(string)
@@ -626,6 +640,7 @@ func (s *Server) handleSCIMGroupPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		refreshed = patched
+		movAdded, movRemoved = addVals, delVals
 	}
 	op := "members"
 	if attrChanged {
@@ -633,7 +648,31 @@ func (s *Server) handleSCIMGroupPatch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.finishSCIMOp(r, "group_update", "success")
 	s.auditSCIMGroupOp(r, op, refreshed.ID, refreshed.DisplayName, current, refreshed)
+	// Slice 3 trigger point: reconcile the movers (entries and departures;
+	// overlap is harmless — resolutions dedupe internally).
+	s.scimReconcileGroup(r, refreshed.DisplayName, movAdded, movRemoved)
 	s.scimWrite(w, r, http.StatusOK, s.scimGroupDoc(r, refreshed))
+}
+
+// symSCIMMemberMove computes the (ADDED, REMOVED) membership movement
+// between two NORMALISED sets (PUT's definite replace: the symmetric
+// difference, split by direction). Inputs are already deduplicated by the
+// store, so set arithmetic is exact.
+func symSCIMMemberMove(before, after []string) (added, removed []string) {
+	was := make(map[string]bool, len(before))
+	for _, v := range before {
+		was[v] = true
+	}
+	for _, v := range after {
+		if !was[v] {
+			added = append(added, v)
+		}
+		delete(was, v)
+	}
+	for v := range was {
+		removed = append(removed, v)
+	}
+	return added, removed
 }
 
 // scimPatchMemberValues extracts the member VALUES from a PATCH op's value:
@@ -678,7 +717,9 @@ func scimPatchMemberValues(value any) ([]string, error) {
 }
 
 // handleSCIMGroupDelete hard-deletes the group (recreatable; no tombstone).
-// The ROLE-DIFF revocation awaits Slice 3 (the mapping applicator).
+// Its former members lose the group's derivations: the Slice 3
+// reconciliation recomputes EACH of them (orphans stripped, survivors kept
+// — union semantics).
 func (s *Server) handleSCIMGroupDelete(w http.ResponseWriter, r *http.Request) {
 	current, ok := s.loadSCIMGroup(w, r)
 	if !ok {
@@ -691,6 +732,9 @@ func (s *Server) handleSCIMGroupDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.finishSCIMOp(r, "group_delete", "success")
 	s.auditSCIMGroupOp(r, "delete", current.ID, current.DisplayName, current, nil)
+	// Slice 3 trigger point: EVERYONE LEFT (the former full set is the
+	// departure operand; nothing joined).
+	s.scimReconcileGroup(r, current.DisplayName, nil, current.MemberValues)
 	w.WriteHeader(http.StatusNoContent)
 }
 

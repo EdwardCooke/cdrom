@@ -1099,8 +1099,10 @@ func TestDecodeSCIMUserUnits(t *testing.T) {
 	if p.PrimaryEmail != "prim@x" {
 		t.Errorf("PrimaryEmail = %q, want prim@x (PRIMARY, not the work one)", p.PrimaryEmail)
 	}
-	if !p.HadGroups {
-		t.Error("HadGroups = false, want true (acknowledged)")
+	// F-28.5 Slice 3 switchover: the embedded references are CAPTURED (no
+	// longer acknowledged-and-discarded).
+	if len(p.EmbeddedGroups) != 1 {
+		t.Errorf("EmbeddedGroups = %v, want the one posted reference", p.EmbeddedGroups)
 	}
 	// Lone untyped email tolerated as primary.
 	p2, err := decodeSCIMUser(map[string]any{"userName": "loner.email", "emails": []any{map[string]any{"value": "only@x"}}})
