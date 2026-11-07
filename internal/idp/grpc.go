@@ -31,8 +31,17 @@ type GRPCServer struct {
 	users           UserStore
 	keys            APIKeyStore
 	serviceAccounts ServiceAccountStore
-	logger          *slog.Logger
-	metrics         *metrics.IDPMetrics
+	// groups is the SCIM group directory (F-28.5) serving the read-only
+	// group-detail RPCs (ListGroupDetails / GetGroupDetails). When nil those
+	// RPCs respond Unimplemented (the surface is unwired — typically SCIM
+	// disabled).
+	groups GroupStore
+	// db is the shared Database client the group-detail enrichment consults
+	// for the role catalog (the derived_roles projection check). When nil
+	// the projection degrades to empty (stored attributes still render).
+	db      dbpb.DatabaseClient
+	logger  *slog.Logger
+	metrics *metrics.IDPMetrics
 }
 
 // NewGRPCServer creates the IdP's gRPC server over the given key manager and
@@ -55,6 +64,19 @@ func (s *GRPCServer) SetAPIKeyStore(keys APIKeyStore) {
 // nil the service-account RPCs respond with Unimplemented.
 func (s *GRPCServer) SetServiceAccountStore(store ServiceAccountStore) {
 	s.serviceAccounts = store
+}
+
+// SetGroupStore attaches the SCIM group directory (F-28.5) the read-only
+// group-detail RPCs serve. When left nil those RPCs respond Unimplemented.
+func (s *GRPCServer) SetGroupStore(store GroupStore) {
+	s.groups = store
+}
+
+// SetDatabaseClient attaches the shared Database client the group-detail
+// enrichment consults for the role catalog. When left nil the derived_roles
+// projection degrades to empty (the stored attributes still render).
+func (s *GRPCServer) SetDatabaseClient(db dbpb.DatabaseClient) {
+	s.db = db
 }
 
 // SetMetrics attaches the IdP's Prometheus metric set (F-20). The gRPC surface
@@ -559,6 +581,118 @@ func (s *GRPCServer) DeleteUser(ctx context.Context, req *idppb.DeleteUserReques
 	}
 	s.refreshUserMetrics(ctx)
 	return &idppb.DeleteUserResponse{Status: "deleted"}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Group details (F-28.5 Slice 4) — the enriched documents behind the API's
+// read-only /api/groups admin surface.
+// ---------------------------------------------------------------------------
+
+// ListGroupDetails returns the ENRICHED group documents (READ-ONLY — group
+// mutation is SCIM-owned; the corporate connector speaks to /scim/v2
+// directly). Enrichment beyond the stored row: (a) RESOLVED MEMBERS — each
+// stored value paired with the live username it denotes (null when
+// unresolvable; the value is kept, per the opacity ruling); (b) DERIVED
+// ROLES — the group's projected role set (its mapped role, present only
+// when it exists in the role catalog — missing mapped roles are excluded,
+// ruling 4). Unimplemented when the group surface is not attached.
+func (s *GRPCServer) ListGroupDetails(ctx context.Context, _ *idppb.ListGroupDetailsRequest) (*idppb.ListGroupDetailsResponse, error) {
+	if s.groups == nil {
+		return nil, status.Error(codes.Unimplemented, "group store is not configured")
+	}
+	groups, err := s.groups.List(ctx, nil)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "idp: list groups: %v", err)
+	}
+	users, catalog := s.enrichmentIndexes(ctx)
+	out := &idppb.ListGroupDetailsResponse{Groups: make([]*idppb.GroupDetail, 0, len(groups))}
+	for _, g := range groups {
+		out.Groups = append(out.Groups, s.buildGroupDetail(users, catalog, g))
+	}
+	return out, nil
+}
+
+// GetGroupDetails returns ONE enriched group document by id. A missing
+// group is NotFound; a malformed id is InvalidArgument.
+func (s *GRPCServer) GetGroupDetails(ctx context.Context, req *idppb.GetGroupDetailsRequest) (*idppb.GroupDetail, error) {
+	if s.groups == nil {
+		return nil, status.Error(codes.Unimplemented, "group store is not configured")
+	}
+	g, err := s.groups.Get(ctx, req.GetId())
+	if err != nil {
+		return nil, err // the store's statuses (NotFound / InvalidArgument) propagate
+	}
+	users, catalog := s.enrichmentIndexes(ctx)
+	return s.buildGroupDetail(users, catalog, g), nil
+}
+
+// groupDetailIndexes preloads the two LOOKUPS the enrichment needs: the
+// live-user index (username + external_id lenses for member resolution) and
+// the role-catalog name set (the derived-role projection check). Either
+// failure degrades the dependent enrichment (unresolved members / no
+// projection) rather than failing the read — the stored attributes always
+// render.
+func (s *GRPCServer) enrichmentIndexes(ctx context.Context) (map[string]*User, map[string]bool) {
+	users := map[string]*User{}
+	if s.users != nil {
+		if ls, err := s.users.List(ctx, false, nil); err == nil {
+			for _, u := range ls {
+				if u.Username != "" {
+					users[u.Username] = u
+				}
+				if u.ExternalID != "" {
+					users[u.ExternalID] = u
+				}
+			}
+		}
+	}
+	catalog := map[string]bool{}
+	if s.db != nil {
+		if resp, err := s.db.ListRoles(ctx, &dbpb.ListRolesRequest{}); err == nil {
+			for _, r := range resp.GetRoles() {
+				catalog[r.GetName()] = true
+			}
+		}
+	}
+	return users, catalog
+}
+
+// buildGroupDetail renders one enriched document from a stored group plus
+// the preloaded indexes.
+func (s *GRPCServer) buildGroupDetail(users map[string]*User, catalog map[string]bool, g *SCIMGroup) *idppb.GroupDetail {
+	detail := &idppb.GroupDetail{
+		Id:           g.ID,
+		DisplayName:  g.DisplayName,
+		Description:  g.Description,
+		ExternalId:   g.ExternalID,
+		MemberValues: append([]string(nil), g.MemberValues...),
+		CreatedAt:    scimTimeOrNil(g.CreatedAt),
+		UpdatedAt:    scimTimeOrNil(g.UpdatedAt),
+	}
+	// Resolved members (parallel arrays, same order as member_values).
+	for _, v := range g.MemberValues {
+		rm := &idppb.ResolvedGroupMember{Value: v}
+		if u, ok := users[v]; ok {
+			rm.Username = &u.Username
+		}
+		detail.Members = append(detail.Members, rm)
+	}
+	// Derived roles: the group's mapped role, present ONLY when it exists in
+	// the catalog (projection — the applicator skips missing roles at
+	// application time, ruling 4).
+	if role, ok := s.cfg.Scim.GroupRoleMappings[g.DisplayName]; ok && catalog[role] {
+		detail.DerivedRoles = append(detail.DerivedRoles, role)
+	}
+	return detail
+}
+
+// scimTimeOrNil renders a timestamp as an RFC3339 string ("" when unset) —
+// the flat-string convention this proto uses for times.
+func scimTimeOrNil(tm time.Time) string {
+	if tm.IsZero() {
+		return ""
+	}
+	return tm.UTC().Format(time.RFC3339)
 }
 
 // ---------------------------------------------------------------------------

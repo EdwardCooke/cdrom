@@ -129,6 +129,11 @@ func main() {
 	// lockout state) through the Database service, so multiple IdP replicas
 	// share it.
 	serviceAccountStore := idp.NewDBServiceAccountStore(dbClient)
+	// The SCIM group directory (F-28.5) persists the synchronized groups
+	// through the Database service. It backs BOTH the HTTP /Groups resource
+	// (corporate connector) and the gRPC face's read-only group-detail RPCs
+	// (the API's /api/groups admin surface, Slice 4).
+	groupStore := idp.NewDBGroupStore(dbClient)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -186,8 +191,10 @@ func main() {
 		srv.SetScimUserBacking(userStore, idpAudit)
 		// The /Groups resource (F-28.5, Slice 2) manages the SHARED group
 		// directory (through the Database service, like the user directory)
-		// and shares the same auditor (actions distinguish the surface).
-		srv.SetScimGroupBacking(idp.NewDBGroupStore(dbClient))
+		// and shares the same auditor (actions distinguish the surface). The
+		// SAME store backs the gRPC face's read-only group-detail RPCs
+		// (F-28.5 Slice 4, attached below).
+		srv.SetScimGroupBacking(groupStore)
 		// The group→role mapping APPLICATOR (F-28.5, Slice 3) walks the same
 		// Database client for the role catalog, the scim_group binding lane,
 		// and role-change publication (cache invalidation without restart).
@@ -254,6 +261,11 @@ func main() {
 	idpGRPC := idp.NewGRPCServer(cfg.IdP, km, userStore, logger)
 	idpGRPC.SetAPIKeyStore(apiKeyStore)
 	idpGRPC.SetServiceAccountStore(serviceAccountStore)
+	// The read-only group-detail RPCs (F-28.5 Slice 4) serve the SAME group
+	// directory the HTTP /Groups resource manages, and walk the Database
+	// client for the role-catalog projection.
+	idpGRPC.SetGroupStore(groupStore)
+	idpGRPC.SetDatabaseClient(dbClient)
 	// Attach the IdP's Prometheus metric set (F-20) so the gRPC surface
 	// records job-token minting, logins, and the user-directory size.
 	idpGRPC.SetMetrics(idpMetrics)

@@ -97,6 +97,11 @@ type Server struct {
 	// pool is not wired, in which case the /api/scim/keys endpoints respond
 	// 501.
 	scimKeys ScimKeyClient
+	// groupSvc bridges the read-only /api/groups admin surface (F-28.5
+	// Slice 4) to the IdP's enriched group-detail RPCs. It is nil when the
+	// IdP is not wired, in which case the endpoints respond 503 (component
+	// degradation — the IdP is the group directory's home).
+	groupSvc groupDetailsService
 	// authz is the authorization engine (F-14, RBAC). It enforces role-based
 	// access on the UI-facing HTTP surface: a request is allowed only if the
 	// authenticated principal's roles grant the required permission (with a
@@ -449,6 +454,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/users", s.createUser)
 	mux.HandleFunc("PUT /api/users/{id}", s.updateUser)
 	mux.HandleFunc("DELETE /api/users/{id}", s.deleteUser)
+
+	// Groups (F-28.5 Slice 4): READ-ONLY admin surface exposing the enriched
+	// group documents (mutation is SCIM-owned). Behind users.can-manage; the
+	// IdP is the group directory's home, so an unwired/unreachable IdP
+	// degrades to 503.
+	mux.HandleFunc("GET /api/groups", s.listGroups)
+	mux.HandleFunc("GET /api/groups/{id}", s.getGroup)
 
 	// API keys (F-25, proxied to the IdP). A user with the api-keys.can-manage
 	// permission can create a key for themselves or (an admin) for another

@@ -300,6 +300,11 @@ func main() {
 	// yields a null segment, never a failed endpoint).
 	apiServer.SetIdPSystemDescriber(idpClient)
 
+	// Groups (F-28.5 Slice 4): the read-only /api/groups admin surface
+	// bridges to the IdP's enriched group-detail RPCs (the IdP is the group
+	// directory's home; a down IdP degrades the endpoints to 503).
+	apiServer.SetGroupDetailsService(idpClient)
+
 	// The API's HTTP handler, wrapped by the auth middleware (which verifies
 	// the Bearer token when auth is enabled). The /api/auth/oidc discovery
 	// endpoint is registered on a parent mux so it is reachable without a

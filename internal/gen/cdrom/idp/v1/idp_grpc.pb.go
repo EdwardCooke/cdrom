@@ -50,6 +50,8 @@ const (
 	IdP_DeriveScimKey_FullMethodName              = "/cdrom.idp.v1.IdP/DeriveScimKey"
 	IdP_AdmitPrincipal_FullMethodName             = "/cdrom.idp.v1.IdP/AdmitPrincipal"
 	IdP_DescribeSystem_FullMethodName             = "/cdrom.idp.v1.IdP/DescribeSystem"
+	IdP_ListGroupDetails_FullMethodName           = "/cdrom.idp.v1.IdP/ListGroupDetails"
+	IdP_GetGroupDetails_FullMethodName            = "/cdrom.idp.v1.IdP/GetGroupDetails"
 )
 
 // IdPClient is the client API for IdP service.
@@ -211,6 +213,17 @@ type IdPClient interface {
 	// aggregator (which drives the UI's show/hide decisions). It reveals
 	// capability, never material: no addresses, keys, peppers, or DSNs.
 	DescribeSystem(ctx context.Context, in *DescribeSystemRequest, opts ...grpc.CallOption) (*DescribeSystemResponse, error)
+	// ListGroupDetails (F-28.5 Slice 4) returns the ENRICHED group documents
+	// powering the API's read-only GET /api/groups admin surface. Enrichment:
+	// resolved members (value + username|null, best-effort live resolution)
+	// and derived_roles (the group's mapped role, catalog-checked projection).
+	// READ-ONLY by design — group mutation is SCIM-owned (the corporate
+	// connector speaks to /scim/v2 directly). Unimplemented when the group
+	// surface is not attached.
+	ListGroupDetails(ctx context.Context, in *ListGroupDetailsRequest, opts ...grpc.CallOption) (*ListGroupDetailsResponse, error)
+	// GetGroupDetails returns ONE enriched group document by id. A missing
+	// group is NotFound; a malformed id is InvalidArgument.
+	GetGroupDetails(ctx context.Context, in *GetGroupDetailsRequest, opts ...grpc.CallOption) (*GroupDetail, error)
 }
 
 type idPClient struct {
@@ -521,6 +534,26 @@ func (c *idPClient) DescribeSystem(ctx context.Context, in *DescribeSystemReques
 	return out, nil
 }
 
+func (c *idPClient) ListGroupDetails(ctx context.Context, in *ListGroupDetailsRequest, opts ...grpc.CallOption) (*ListGroupDetailsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListGroupDetailsResponse)
+	err := c.cc.Invoke(ctx, IdP_ListGroupDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) GetGroupDetails(ctx context.Context, in *GetGroupDetailsRequest, opts ...grpc.CallOption) (*GroupDetail, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GroupDetail)
+	err := c.cc.Invoke(ctx, IdP_GetGroupDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // IdPServer is the server API for IdP service.
 // All implementations must embed UnimplementedIdPServer
 // for forward compatibility.
@@ -680,6 +713,17 @@ type IdPServer interface {
 	// aggregator (which drives the UI's show/hide decisions). It reveals
 	// capability, never material: no addresses, keys, peppers, or DSNs.
 	DescribeSystem(context.Context, *DescribeSystemRequest) (*DescribeSystemResponse, error)
+	// ListGroupDetails (F-28.5 Slice 4) returns the ENRICHED group documents
+	// powering the API's read-only GET /api/groups admin surface. Enrichment:
+	// resolved members (value + username|null, best-effort live resolution)
+	// and derived_roles (the group's mapped role, catalog-checked projection).
+	// READ-ONLY by design — group mutation is SCIM-owned (the corporate
+	// connector speaks to /scim/v2 directly). Unimplemented when the group
+	// surface is not attached.
+	ListGroupDetails(context.Context, *ListGroupDetailsRequest) (*ListGroupDetailsResponse, error)
+	// GetGroupDetails returns ONE enriched group document by id. A missing
+	// group is NotFound; a malformed id is InvalidArgument.
+	GetGroupDetails(context.Context, *GetGroupDetailsRequest) (*GroupDetail, error)
 	mustEmbedUnimplementedIdPServer()
 }
 
@@ -779,6 +823,12 @@ func (UnimplementedIdPServer) AdmitPrincipal(context.Context, *AdmitPrincipalReq
 }
 func (UnimplementedIdPServer) DescribeSystem(context.Context, *DescribeSystemRequest) (*DescribeSystemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DescribeSystem not implemented")
+}
+func (UnimplementedIdPServer) ListGroupDetails(context.Context, *ListGroupDetailsRequest) (*ListGroupDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListGroupDetails not implemented")
+}
+func (UnimplementedIdPServer) GetGroupDetails(context.Context, *GetGroupDetailsRequest) (*GroupDetail, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetGroupDetails not implemented")
 }
 func (UnimplementedIdPServer) mustEmbedUnimplementedIdPServer() {}
 func (UnimplementedIdPServer) testEmbeddedByValue()             {}
@@ -1341,6 +1391,42 @@ func _IdP_DescribeSystem_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _IdP_ListGroupDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListGroupDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).ListGroupDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_ListGroupDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).ListGroupDetails(ctx, req.(*ListGroupDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_GetGroupDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetGroupDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).GetGroupDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_GetGroupDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).GetGroupDetails(ctx, req.(*GetGroupDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // IdP_ServiceDesc is the grpc.ServiceDesc for IdP service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1467,6 +1553,14 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DescribeSystem",
 			Handler:    _IdP_DescribeSystem_Handler,
+		},
+		{
+			MethodName: "ListGroupDetails",
+			Handler:    _IdP_ListGroupDetails_Handler,
+		},
+		{
+			MethodName: "GetGroupDetails",
+			Handler:    _IdP_GetGroupDetails_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

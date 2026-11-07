@@ -168,6 +168,18 @@ service IdP {
   // aggregator (which drives the UI's show/hide decisions). It reveals
   // capability, never material: no addresses, keys, peppers, or DSNs.
   rpc DescribeSystem(DescribeSystemRequest) returns (DescribeSystemResponse);
+
+  // ListGroupDetails (F-28.5 Slice 4) returns the ENRICHED group documents
+  // powering the API's read-only GET /api/groups admin surface. Enrichment:
+  // resolved members (value + username|null, best-effort live resolution)
+  // and derived_roles (the group's mapped role, catalog-checked projection).
+  // READ-ONLY by design — group mutation is SCIM-owned (the corporate
+  // connector speaks to /scim/v2 directly). Unimplemented when the group
+  // surface is not attached.
+  rpc ListGroupDetails(ListGroupDetailsRequest) returns (ListGroupDetailsResponse);
+  // GetGroupDetails returns ONE enriched group document by id. A missing
+  // group is NotFound; a malformed id is InvalidArgument.
+  rpc GetGroupDetails(GetGroupDetailsRequest) returns (GroupDetail);
 }
 
 // MintJobTokenRequest is the request to mint a job token.
@@ -763,4 +775,59 @@ message DescribeSystemResponse {
   // break_glass_enabled reports whether the break-glass escape hatch
   // (F-28.3) is armed.
   bool break_glass_enabled = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Group details (F-28.5 Slice 4) — the enriched documents behind the API's
+// read-only /api/groups admin surface. Stable field names, no secrets.
+// ---------------------------------------------------------------------------
+
+// GroupDetail is one ENRICHED group document: the stored attributes plus the
+// resolved membership and the group's projected derived role. Timestamps are
+// RFC3339 strings (matching this proto's flat-string convention).
+message GroupDetail {
+  // id is the group's stable identifier (decimal string — the SCIM id).
+  string id = 1;
+  string display_name = 2;
+  string description = 3;
+  // external_id is the corporate directory's group identifier (empty when
+  // the provider sent none). Shown for identification; never mutated here.
+  string external_id = 4;
+  // member_values are the group's VERBATIM membership strings (opaque).
+  repeated string member_values = 5;
+  // members are the RESOLVED membership projections: each stored value with
+  // the LIVE username it denotes (null when unresolvable — the value is
+  // kept, per the opacity ruling). Ordered to match member_values.
+  repeated ResolvedGroupMember members = 6;
+  // derived_roles is the group's PROJECTED role set: the mapped role for
+  // this displayName, present ONLY when it exists in the role catalog
+  // (missing mapped roles are excluded — they are skipped at application
+  // time, ruling 4). Typically 0 or 1 entry (the mapping is one role per
+  // group); empty for unmapped groups.
+  repeated string derived_roles = 7;
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+// ResolvedGroupMember pairs a stored membership value with the live user it
+// resolves to (username; null when the value denotes no live user).
+message ResolvedGroupMember {
+  // value is the stored verbatim membership string.
+  string value = 1;
+  // username is the resolved LIVE user's login name; null when the value
+  // is unresolvable (departed/unknown member — kept, degraded).
+  optional string username = 2;
+}
+
+// ListGroupDetailsRequest lists enriched groups (ordered by id).
+message ListGroupDetailsRequest {}
+
+// ListGroupDetailsResponse carries the enriched group documents.
+message ListGroupDetailsResponse {
+  repeated GroupDetail groups = 1;
+}
+
+// GetGroupDetailsRequest fetches one enriched group by id.
+message GetGroupDetailsRequest {
+  string id = 1;
 }
