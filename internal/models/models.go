@@ -1934,6 +1934,60 @@ type ScimKey struct {
 	RevokedAt *time.Time `gorm:"column:revoked_at;index" json:"revoked_at,omitempty"`
 }
 
+// AgentCredential is a tracked agent-credential row (F-30.2). The IdP signs
+// the JWT (whose jti is this row's ID) and drives its lifecycle; the row is
+// the authority for liveness (active, unexpired, unrevoked). The JWT itself
+// is NEVER stored — its signature is the custody proof. Several rows may
+// share AgentName during a rotation overlap; the operating assumption is at
+// most one ACTIVE row per name.
+type AgentCredential struct {
+	gorm.Model
+	// ID is the credential's stable identifier; it EQUALS the JWT's jti claim.
+	// String (a random hex id drawn by the IdP) so the crypto custody proof and
+	// the liveness row share one key.
+	ID string `gorm:"primaryKey;size:64" json:"id"`
+	// AgentName is the agent this credential is bound to (the JWT's subject is
+	// "agent:<AgentName>"). Registration (F-30.3) may only claim this name.
+	AgentName string `gorm:"column:agent_name;size:200;index;not null" json:"agent_name"`
+	// IssuedBy is the principal (user id or name) that caused the issuance
+	// (audit link).
+	IssuedBy string `gorm:"column:issued_by" json:"issued_by,omitempty"`
+	// Description is a human-readable label.
+	Description string `gorm:"column:description;size:200" json:"description"`
+	// ExpiresAt is the row's REAL deadline. The JWT's exp claim is a generous
+	// placeholder nobody enforces; this field is what lapses the credential.
+	ExpiresAt time.Time `gorm:"column:expires_at;index" json:"expires_at"`
+	// ReplacedByID chains rotations: set on the RETIRED row to the successor's
+	// id.
+	ReplacedByID string `gorm:"column:replaced_by_id;size:64" json:"replaced_by_id,omitempty"`
+	// RevokedAt, when set, marks the credential revoked (immediately);
+	// RevokedReason carries why.
+	RevokedAt     *time.Time `gorm:"column:revoked_at" json:"revoked_at,omitempty"`
+	RevokedReason string     `gorm:"column:revoked_reason" json:"revoked_reason,omitempty"`
+	// LastSeenAt is bumped (throttled) on verified presentation (F-30.3 feeds
+	// the UI's "seen recently" indicator).
+	LastSeenAt *time.Time `gorm:"column:last_seen_at" json:"last_seen_at,omitempty"`
+}
+
+// TableName pins the table name (GORM's default would be "agent_credentials").
+func (AgentCredential) TableName() string { return "agent_credentials" }
+
+// Active reports whether the row governs liveness RIGHT NOW: not revoked, not
+// retired (superseded by a successor), and not past its deadline. A zero
+// ExpiresAt (no deadline) imposes no expiry.
+func (c *AgentCredential) Active(asOf time.Time) bool {
+	if c.RevokedAt != nil {
+		return false
+	}
+	if c.ReplacedByID != "" {
+		return false
+	}
+	if c.ExpiresAt.IsZero() {
+		return true
+	}
+	return asOf.Before(c.ExpiresAt)
+}
+
 // Event is a row in the shared, append-only event log (F-23, high
 // availability). The event log is the coordination bus that makes the control
 // plane horizontally scalable: every API pod tails it and fans the events out
@@ -2347,8 +2401,8 @@ const (
 	LabelOwnerJob             = "job"
 	LabelOwnerJobExecution    = "job_execution"
 	LabelOwnerEnvironment     = "environment"
-	LabelOwnerAgent          = "agent"
-	LabelOwnerAgentGroup     = "agent_group"
+	LabelOwnerAgent           = "agent"
+	LabelOwnerAgentGroup      = "agent_group"
 )
 
 // StorageObject is the database's record of a file held by the artifacts
@@ -2483,5 +2537,6 @@ func All() []any {
 		&PipelineSourceState{},
 		&StorageObject{},
 		&ScimKey{},
+		&AgentCredential{},
 	}
 }

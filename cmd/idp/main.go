@@ -134,6 +134,12 @@ func main() {
 	// (corporate connector) and the gRPC face's read-only group-detail RPCs
 	// (the API's /api/groups admin surface, Slice 4).
 	groupStore := idp.NewDBGroupStore(dbClient)
+	// The agent-credential store (F-30.2) persists the credential directory
+	// (tracked rows; never the JWT) through the Database service, so multiple
+	// IdP replicas share it. The ops layer signs the JWTs with the key ring
+	// and drives the lifecycle (issue / renew / rotate / revoke).
+	agentCredentialStore := idp.NewDBAgentCredentialStore(dbClient)
+	agentCredentialOps := idp.NewAgentCredentialOps(cfg.IdP, km, agentCredentialStore, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -266,6 +272,10 @@ func main() {
 	// client for the role-catalog projection.
 	idpGRPC.SetGroupStore(groupStore)
 	idpGRPC.SetDatabaseClient(dbClient)
+	// The agent-credential RPCs (F-30.2) sign JWTs and drive the tracked-row
+	// lifecycle. Attached unconditionally: the directory is always available
+	// once the Database service is reachable.
+	idpGRPC.SetAgentCredentialOps(agentCredentialOps)
 	// Attach the IdP's Prometheus metric set (F-20) so the gRPC surface
 	// records job-token minting, logins, and the user-directory size.
 	idpGRPC.SetMetrics(idpMetrics)

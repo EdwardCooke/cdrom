@@ -35,6 +35,12 @@ const (
 	IdP_DeleteAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/DeleteAPIKey"
 	IdP_VerifyAPIKey_FullMethodName               = "/cdrom.idp.v1.IdP/VerifyAPIKey"
 	IdP_ResetAPIKeyLockout_FullMethodName         = "/cdrom.idp.v1.IdP/ResetAPIKeyLockout"
+	IdP_IssueAgentCredential_FullMethodName       = "/cdrom.idp.v1.IdP/IssueAgentCredential"
+	IdP_GetAgentCredential_FullMethodName         = "/cdrom.idp.v1.IdP/GetAgentCredential"
+	IdP_ListAgentCredentials_FullMethodName       = "/cdrom.idp.v1.IdP/ListAgentCredentials"
+	IdP_RenewAgentCredential_FullMethodName       = "/cdrom.idp.v1.IdP/RenewAgentCredential"
+	IdP_RotateAgentCredential_FullMethodName      = "/cdrom.idp.v1.IdP/RotateAgentCredential"
+	IdP_RevokeAgentCredential_FullMethodName      = "/cdrom.idp.v1.IdP/RevokeAgentCredential"
 	IdP_CreateServiceAccount_FullMethodName       = "/cdrom.idp.v1.IdP/CreateServiceAccount"
 	IdP_GetServiceAccount_FullMethodName          = "/cdrom.idp.v1.IdP/GetServiceAccount"
 	IdP_ListServiceAccounts_FullMethodName        = "/cdrom.idp.v1.IdP/ListServiceAccounts"
@@ -127,6 +133,31 @@ type IdPClient interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant). A missing user is NotFound.
 	ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLockoutRequest, opts ...grpc.CallOption) (*ResetAPIKeyLockoutResponse, error)
+	// Agent credentials (F-30.2). The IdP is the SOLE COMPONENT that mints the
+	// JWTs: it signs them with its key ring and tracks their lifecycle in the
+	// Database service's credential directory. The plaintext JWT is returned
+	// EXACTLY ONCE (IssueAgentCredential / RotateAgentCredential) and is never
+	// retrievable afterwards. The RPCs are Unimplemented when no credential
+	// store is attached.
+	// IssueAgentCredential signs a new credential for the named agent (deadline
+	// = now + the configured TTL) and stores the row. Returns the plaintext JWT
+	// once.
+	IssueAgentCredential(ctx context.Context, in *IssueAgentCredentialRequest, opts ...grpc.CallOption) (*IssueAgentCredentialResponse, error)
+	// GetAgentCredential returns a row's METADATA (never JWT material) by id.
+	GetAgentCredential(ctx context.Context, in *GetAgentCredentialRequest, opts ...grpc.CallOption) (*v1.AgentCredential, error)
+	// ListAgentCredentials returns an agent's rows (or all rows when agent_name
+	// is empty) — metadata only.
+	ListAgentCredentials(ctx context.Context, in *ListAgentCredentialsRequest, opts ...grpc.CallOption) (*ListAgentCredentialsResponse, error)
+	// RenewAgentCredential EXTENDS a row's deadline to now + TTL without touching
+	// the JWT (the same token keeps working — structural no-break). Self-service
+	// (the agent presenting its own valid credential) is authorized at the API
+	// tier (F-30.2's endpoint guard); this RPC simply performs the extension.
+	RenewAgentCredential(ctx context.Context, in *RenewAgentCredentialRequest, opts ...grpc.CallOption) (*v1.AgentCredential, error)
+	// RotateAgentCredential RETIRES a row (chaining replaced_by_id) and signs a
+	// SUCCESSOR for the same agent; the new JWT is returned once.
+	RotateAgentCredential(ctx context.Context, in *RotateAgentCredentialRequest, opts ...grpc.CallOption) (*IssueAgentCredentialResponse, error)
+	// RevokeAgentCredential stamps a row revoked NOW, with a reason.
+	RevokeAgentCredential(ctx context.Context, in *RevokeAgentCredentialRequest, opts ...grpc.CallOption) (*v1.AgentCredential, error)
 	// CreateServiceAccount creates a service account (F-26) and its two freshly
 	// generated key slots, and binds its roles. The IdP generates each key's
 	// plaintext (`cdrom-sa-…`), encodes it with Argon2ID (the pepper prepended
@@ -384,6 +415,66 @@ func (c *idPClient) ResetAPIKeyLockout(ctx context.Context, in *ResetAPIKeyLocko
 	return out, nil
 }
 
+func (c *idPClient) IssueAgentCredential(ctx context.Context, in *IssueAgentCredentialRequest, opts ...grpc.CallOption) (*IssueAgentCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueAgentCredentialResponse)
+	err := c.cc.Invoke(ctx, IdP_IssueAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) GetAgentCredential(ctx context.Context, in *GetAgentCredentialRequest, opts ...grpc.CallOption) (*v1.AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.AgentCredential)
+	err := c.cc.Invoke(ctx, IdP_GetAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) ListAgentCredentials(ctx context.Context, in *ListAgentCredentialsRequest, opts ...grpc.CallOption) (*ListAgentCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAgentCredentialsResponse)
+	err := c.cc.Invoke(ctx, IdP_ListAgentCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) RenewAgentCredential(ctx context.Context, in *RenewAgentCredentialRequest, opts ...grpc.CallOption) (*v1.AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.AgentCredential)
+	err := c.cc.Invoke(ctx, IdP_RenewAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) RotateAgentCredential(ctx context.Context, in *RotateAgentCredentialRequest, opts ...grpc.CallOption) (*IssueAgentCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueAgentCredentialResponse)
+	err := c.cc.Invoke(ctx, IdP_RotateAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *idPClient) RevokeAgentCredential(ctx context.Context, in *RevokeAgentCredentialRequest, opts ...grpc.CallOption) (*v1.AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.AgentCredential)
+	err := c.cc.Invoke(ctx, IdP_RevokeAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *idPClient) CreateServiceAccount(ctx context.Context, in *CreateServiceAccountRequest, opts ...grpc.CallOption) (*CreateServiceAccountResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateServiceAccountResponse)
@@ -627,6 +718,31 @@ type IdPServer interface {
 	// ResetAPIKeyLockout clears a user's API-key lockout state (the failed
 	// counter and the lockout instant). A missing user is NotFound.
 	ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error)
+	// Agent credentials (F-30.2). The IdP is the SOLE COMPONENT that mints the
+	// JWTs: it signs them with its key ring and tracks their lifecycle in the
+	// Database service's credential directory. The plaintext JWT is returned
+	// EXACTLY ONCE (IssueAgentCredential / RotateAgentCredential) and is never
+	// retrievable afterwards. The RPCs are Unimplemented when no credential
+	// store is attached.
+	// IssueAgentCredential signs a new credential for the named agent (deadline
+	// = now + the configured TTL) and stores the row. Returns the plaintext JWT
+	// once.
+	IssueAgentCredential(context.Context, *IssueAgentCredentialRequest) (*IssueAgentCredentialResponse, error)
+	// GetAgentCredential returns a row's METADATA (never JWT material) by id.
+	GetAgentCredential(context.Context, *GetAgentCredentialRequest) (*v1.AgentCredential, error)
+	// ListAgentCredentials returns an agent's rows (or all rows when agent_name
+	// is empty) — metadata only.
+	ListAgentCredentials(context.Context, *ListAgentCredentialsRequest) (*ListAgentCredentialsResponse, error)
+	// RenewAgentCredential EXTENDS a row's deadline to now + TTL without touching
+	// the JWT (the same token keeps working — structural no-break). Self-service
+	// (the agent presenting its own valid credential) is authorized at the API
+	// tier (F-30.2's endpoint guard); this RPC simply performs the extension.
+	RenewAgentCredential(context.Context, *RenewAgentCredentialRequest) (*v1.AgentCredential, error)
+	// RotateAgentCredential RETIRES a row (chaining replaced_by_id) and signs a
+	// SUCCESSOR for the same agent; the new JWT is returned once.
+	RotateAgentCredential(context.Context, *RotateAgentCredentialRequest) (*IssueAgentCredentialResponse, error)
+	// RevokeAgentCredential stamps a row revoked NOW, with a reason.
+	RevokeAgentCredential(context.Context, *RevokeAgentCredentialRequest) (*v1.AgentCredential, error)
 	// CreateServiceAccount creates a service account (F-26) and its two freshly
 	// generated key slots, and binds its roles. The IdP generates each key's
 	// plaintext (`cdrom-sa-…`), encodes it with Argon2ID (the pepper prepended
@@ -778,6 +894,24 @@ func (UnimplementedIdPServer) VerifyAPIKey(context.Context, *VerifyAPIKeyRequest
 }
 func (UnimplementedIdPServer) ResetAPIKeyLockout(context.Context, *ResetAPIKeyLockoutRequest) (*ResetAPIKeyLockoutResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResetAPIKeyLockout not implemented")
+}
+func (UnimplementedIdPServer) IssueAgentCredential(context.Context, *IssueAgentCredentialRequest) (*IssueAgentCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IssueAgentCredential not implemented")
+}
+func (UnimplementedIdPServer) GetAgentCredential(context.Context, *GetAgentCredentialRequest) (*v1.AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAgentCredential not implemented")
+}
+func (UnimplementedIdPServer) ListAgentCredentials(context.Context, *ListAgentCredentialsRequest) (*ListAgentCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgentCredentials not implemented")
+}
+func (UnimplementedIdPServer) RenewAgentCredential(context.Context, *RenewAgentCredentialRequest) (*v1.AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewAgentCredential not implemented")
+}
+func (UnimplementedIdPServer) RotateAgentCredential(context.Context, *RotateAgentCredentialRequest) (*IssueAgentCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateAgentCredential not implemented")
+}
+func (UnimplementedIdPServer) RevokeAgentCredential(context.Context, *RevokeAgentCredentialRequest) (*v1.AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeAgentCredential not implemented")
 }
 func (UnimplementedIdPServer) CreateServiceAccount(context.Context, *CreateServiceAccountRequest) (*CreateServiceAccountResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateServiceAccount not implemented")
@@ -1117,6 +1251,114 @@ func _IdP_ResetAPIKeyLockout_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(IdPServer).ResetAPIKeyLockout(ctx, req.(*ResetAPIKeyLockoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_IssueAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssueAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).IssueAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_IssueAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).IssueAgentCredential(ctx, req.(*IssueAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_GetAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).GetAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_GetAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).GetAgentCredential(ctx, req.(*GetAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_ListAgentCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).ListAgentCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_ListAgentCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).ListAgentCredentials(ctx, req.(*ListAgentCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_RenewAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).RenewAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_RenewAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).RenewAgentCredential(ctx, req.(*RenewAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_RotateAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).RotateAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_RotateAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).RotateAgentCredential(ctx, req.(*RotateAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _IdP_RevokeAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(IdPServer).RevokeAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: IdP_RevokeAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(IdPServer).RevokeAgentCredential(ctx, req.(*RevokeAgentCredentialRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1493,6 +1735,30 @@ var IdP_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResetAPIKeyLockout",
 			Handler:    _IdP_ResetAPIKeyLockout_Handler,
+		},
+		{
+			MethodName: "IssueAgentCredential",
+			Handler:    _IdP_IssueAgentCredential_Handler,
+		},
+		{
+			MethodName: "GetAgentCredential",
+			Handler:    _IdP_GetAgentCredential_Handler,
+		},
+		{
+			MethodName: "ListAgentCredentials",
+			Handler:    _IdP_ListAgentCredentials_Handler,
+		},
+		{
+			MethodName: "RenewAgentCredential",
+			Handler:    _IdP_RenewAgentCredential_Handler,
+		},
+		{
+			MethodName: "RotateAgentCredential",
+			Handler:    _IdP_RotateAgentCredential_Handler,
+		},
+		{
+			MethodName: "RevokeAgentCredential",
+			Handler:    _IdP_RevokeAgentCredential_Handler,
 		},
 		{
 			MethodName: "CreateServiceAccount",

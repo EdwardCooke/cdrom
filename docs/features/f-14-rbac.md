@@ -57,7 +57,7 @@ from its existing IdP groups instead of re-managing membership in Cdrom.
   | `users.can-manage` | Manage users and their roles (F-24) |
   | `api-keys.can-manage` | Create/edit/rotate API keys (F-25) |
   | `audit.can-view` | Query the audit log (F-15) |
-  | `agents.can-view` | View agent/agent status and the pending queue (F-16) |
+  | `agents.can-view` | View agent/worker status and the pending queue (F-16) |
 
 - **Roles** are named sets of permissions. **Built-in roles** ship with the
   platform and cannot be deleted or have their permission sets edited:

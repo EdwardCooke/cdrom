@@ -36,6 +36,11 @@ type GRPCServer struct {
 	// RPCs respond Unimplemented (the surface is unwired — typically SCIM
 	// disabled).
 	groups GroupStore
+	// agentCredentials is the agent-credential ops layer (F-30.2): it signs
+	// the JWTs and drives their lifecycle in the Database service's
+	// credential directory. When nil the credential RPCs respond
+	// Unimplemented (typically the IdP is unwired for credentials).
+	agentCredentials *AgentCredentialOps
 	// db is the shared Database client the group-detail enrichment consults
 	// for the role catalog (the derived_roles projection check). When nil
 	// the projection degrades to empty (stored attributes still render).
@@ -77,6 +82,13 @@ func (s *GRPCServer) SetGroupStore(store GroupStore) {
 // projection degrades to empty (the stored attributes still render).
 func (s *GRPCServer) SetDatabaseClient(db dbpb.DatabaseClient) {
 	s.db = db
+}
+
+// SetAgentCredentialOps attaches the agent-credential ops layer (F-30.2). When
+// left nil the credential RPCs (Issue/Get/List/Renew/Rotate/Revoke) respond
+// Unimplemented.
+func (s *GRPCServer) SetAgentCredentialOps(ops *AgentCredentialOps) {
+	s.agentCredentials = ops
 }
 
 // SetMetrics attaches the IdP's Prometheus metric set (F-20). The gRPC surface
@@ -1061,6 +1073,137 @@ func (s *GRPCServer) ResetAPIKeyLockout(ctx context.Context, req *idppb.ResetAPI
 		return nil, status.Errorf(codes.Internal, "idp: reset api key lockout: %v", err)
 	}
 	return &idppb.ResetAPIKeyLockoutResponse{Status: "reset"}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Agent credentials (F-30.2)
+// ---------------------------------------------------------------------------
+
+// IssueAgentCredential signs a NEW agent credential for the named agent
+// (deadline = now + the configured TTL) and stores the row. The response
+// carries the row PLUS the plaintext JWT, which is returned EXACTLY ONCE.
+// Unimplemented when no credential ops layer is attached.
+func (s *GRPCServer) IssueAgentCredential(ctx context.Context, req *idppb.IssueAgentCredentialRequest) (*idppb.IssueAgentCredentialResponse, error) {
+	if s.agentCredentials == nil {
+		return nil, status.Error(codes.Unimplemented, "agent credential store is not configured")
+	}
+	row, token, err := s.agentCredentials.Issue(ctx, req.GetAgentName(), req.GetIssuedBy(), req.GetDescription())
+	if err != nil {
+		return nil, err
+	}
+	return &idppb.IssueAgentCredentialResponse{Credential: agentCredentialToProto(row), Jwt: token}, nil
+}
+
+// GetAgentCredential returns a row's METADATA (never JWT material) by id.
+// A missing row is NotFound.
+func (s *GRPCServer) GetAgentCredential(ctx context.Context, req *idppb.GetAgentCredentialRequest) (*dbpb.AgentCredential, error) {
+	if s.agentCredentials == nil {
+		return nil, status.Error(codes.Unimplemented, "agent credential store is not configured")
+	}
+	row, err := s.agentCredentials.Get(ctx, req.GetId())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "agent credential not found")
+		}
+		return nil, err
+	}
+	return agentCredentialToProto(row), nil
+}
+
+// ListAgentCredentials returns an agent's rows (or all rows when agent_name
+// is empty) — metadata only, never JWT material.
+func (s *GRPCServer) ListAgentCredentials(ctx context.Context, req *idppb.ListAgentCredentialsRequest) (*idppb.ListAgentCredentialsResponse, error) {
+	if s.agentCredentials == nil {
+		return nil, status.Error(codes.Unimplemented, "agent credential store is not configured")
+	}
+	rows, err := s.agentCredentials.List(ctx, req.GetAgentName())
+	if err != nil {
+		return nil, err
+	}
+	out := &idppb.ListAgentCredentialsResponse{Credentials: make([]*dbpb.AgentCredential, 0, len(rows))}
+	for _, r := range rows {
+		out.Credentials = append(out.Credentials, agentCredentialToProto(r))
+	}
+	return out, nil
+}
+
+// RenewAgentCredential EXTENDS a row's deadline to now + TTL without touching
+// the JWT (the same token keeps working — structural no-break). A revoked row
+// is FailedPrecondition; a missing row is NotFound.
+func (s *GRPCServer) RenewAgentCredential(ctx context.Context, req *idppb.RenewAgentCredentialRequest) (*dbpb.AgentCredential, error) {
+	if s.agentCredentials == nil {
+		return nil, status.Error(codes.Unimplemented, "agent credential store is not configured")
+	}
+	row, err := s.agentCredentials.Renew(ctx, req.GetId())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "agent credential not found")
+		}
+		return nil, err
+	}
+	return agentCredentialToProto(row), nil
+}
+
+// RotateAgentCredential RETIRES a row (chaining replaced_by_id) and signs a
+// SUCCESSOR for the same agent. The response carries the successor row PLUS
+// the new plaintext JWT, returned exactly once.
+func (s *GRPCServer) RotateAgentCredential(ctx context.Context, req *idppb.RotateAgentCredentialRequest) (*idppb.IssueAgentCredentialResponse, error) {
+	if s.agentCredentials == nil {
+		return nil, status.Error(codes.Unimplemented, "agent credential store is not configured")
+	}
+	row, token, err := s.agentCredentials.Rotate(ctx, req.GetId(), req.GetIssuedBy(), req.GetDescription())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "agent credential not found")
+		}
+		return nil, err
+	}
+	return &idppb.IssueAgentCredentialResponse{Credential: agentCredentialToProto(row), Jwt: token}, nil
+}
+
+// RevokeAgentCredential stamps a row revoked NOW, with a reason. Immediate:
+// the row stops governing liveness the moment the write commits.
+func (s *GRPCServer) RevokeAgentCredential(ctx context.Context, req *idppb.RevokeAgentCredentialRequest) (*dbpb.AgentCredential, error) {
+	if s.agentCredentials == nil {
+		return nil, status.Error(codes.Unimplemented, "agent credential store is not configured")
+	}
+	row, err := s.agentCredentials.Revoke(ctx, req.GetId(), req.GetReason())
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil, status.Error(codes.NotFound, "agent credential not found")
+		}
+		return nil, err
+	}
+	return agentCredentialToProto(row), nil
+}
+
+// agentCredentialToProto maps an IdP row to its wire form (metadata only —
+// the JWT never crosses this boundary).
+func agentCredentialToProto(r *AgentCredentialRow) *dbpb.AgentCredential {
+	out := &dbpb.AgentCredential{
+		Id:            r.ID,
+		AgentName:     r.AgentName,
+		IssuedBy:      r.IssuedBy,
+		Description:   r.Description,
+		ReplacedById:  r.ReplacedByID,
+		RevokedReason: r.RevokedReason,
+	}
+	if !r.ExpiresAt.IsZero() {
+		out.ExpiresAt = timestamppb.New(r.ExpiresAt)
+	}
+	if r.RevokedAt != nil {
+		out.RevokedAt = timestamppb.New(*r.RevokedAt)
+	}
+	if r.LastSeenAt != nil {
+		out.LastSeenAt = timestamppb.New(*r.LastSeenAt)
+	}
+	if !r.CreatedAt.IsZero() {
+		out.CreatedAt = timestamppb.New(r.CreatedAt)
+	}
+	if !r.UpdatedAt.IsZero() {
+		out.UpdatedAt = timestamppb.New(r.UpdatedAt)
+	}
+	return out
 }
 
 // userToProto renders a user as its protobuf form (mirrors the

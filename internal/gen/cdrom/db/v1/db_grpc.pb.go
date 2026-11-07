@@ -20,174 +20,181 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Database_CreatePipeline_FullMethodName                 = "/cdrom.db.v1.Database/CreatePipeline"
-	Database_GetPipeline_FullMethodName                    = "/cdrom.db.v1.Database/GetPipeline"
-	Database_ListPipelines_FullMethodName                  = "/cdrom.db.v1.Database/ListPipelines"
-	Database_UpdatePipeline_FullMethodName                 = "/cdrom.db.v1.Database/UpdatePipeline"
-	Database_DeletePipeline_FullMethodName                 = "/cdrom.db.v1.Database/DeletePipeline"
-	Database_TriggerRun_FullMethodName                     = "/cdrom.db.v1.Database/TriggerRun"
-	Database_CreateRun_FullMethodName                      = "/cdrom.db.v1.Database/CreateRun"
-	Database_GetRun_FullMethodName                         = "/cdrom.db.v1.Database/GetRun"
-	Database_ListRuns_FullMethodName                       = "/cdrom.db.v1.Database/ListRuns"
-	Database_PreviousSuccessfulRun_FullMethodName          = "/cdrom.db.v1.Database/PreviousSuccessfulRun"
-	Database_LatestRollbackRun_FullMethodName              = "/cdrom.db.v1.Database/LatestRollbackRun"
-	Database_RestartRun_FullMethodName                     = "/cdrom.db.v1.Database/RestartRun"
-	Database_UpdateRun_FullMethodName                      = "/cdrom.db.v1.Database/UpdateRun"
-	Database_ListPipelineVersions_FullMethodName           = "/cdrom.db.v1.Database/ListPipelineVersions"
-	Database_GetPipelineVersion_FullMethodName             = "/cdrom.db.v1.Database/GetPipelineVersion"
-	Database_CreateJob_FullMethodName                      = "/cdrom.db.v1.Database/CreateJob"
-	Database_GetJob_FullMethodName                         = "/cdrom.db.v1.Database/GetJob"
-	Database_ListJobs_FullMethodName                       = "/cdrom.db.v1.Database/ListJobs"
-	Database_ListRetriableJobs_FullMethodName              = "/cdrom.db.v1.Database/ListRetriableJobs"
-	Database_UpdateJob_FullMethodName                      = "/cdrom.db.v1.Database/UpdateJob"
-	Database_DeleteJob_FullMethodName                      = "/cdrom.db.v1.Database/DeleteJob"
-	Database_ClaimJobRetry_FullMethodName                  = "/cdrom.db.v1.Database/ClaimJobRetry"
-	Database_RerunJob_FullMethodName                       = "/cdrom.db.v1.Database/RerunJob"
-	Database_ReapJob_FullMethodName                        = "/cdrom.db.v1.Database/ReapJob"
-	Database_CancelJob_FullMethodName                      = "/cdrom.db.v1.Database/CancelJob"
-	Database_SkipJob_FullMethodName                        = "/cdrom.db.v1.Database/SkipJob"
-	Database_ClaimJob_FullMethodName                       = "/cdrom.db.v1.Database/ClaimJob"
-	Database_ListPendingByGroup_FullMethodName             = "/cdrom.db.v1.Database/ListPendingByGroup"
-	Database_StartJobExecution_FullMethodName              = "/cdrom.db.v1.Database/StartJobExecution"
-	Database_ListJobExecutions_FullMethodName              = "/cdrom.db.v1.Database/ListJobExecutions"
-	Database_UpdateJobExecution_FullMethodName             = "/cdrom.db.v1.Database/UpdateJobExecution"
-	Database_AbandonAgentExecutions_FullMethodName         = "/cdrom.db.v1.Database/AbandonAgentExecutions"
-	Database_ReportStepCompletion_FullMethodName           = "/cdrom.db.v1.Database/ReportStepCompletion"
-	Database_CheckStepBarrier_FullMethodName               = "/cdrom.db.v1.Database/CheckStepBarrier"
-	Database_ResolveApproval_FullMethodName                = "/cdrom.db.v1.Database/ResolveApproval"
-	Database_PublishAssignment_FullMethodName              = "/cdrom.db.v1.Database/PublishAssignment"
-	Database_PublishCancel_FullMethodName                  = "/cdrom.db.v1.Database/PublishCancel"
-	Database_PublishJobStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishJobStatus"
-	Database_PublishRunStatus_FullMethodName               = "/cdrom.db.v1.Database/PublishRunStatus"
-	Database_PublishAgentEvent_FullMethodName              = "/cdrom.db.v1.Database/PublishAgentEvent"
-	Database_PublishLogUpdated_FullMethodName              = "/cdrom.db.v1.Database/PublishLogUpdated"
-	Database_TailEvents_FullMethodName                     = "/cdrom.db.v1.Database/TailEvents"
-	Database_AcquireLease_FullMethodName                   = "/cdrom.db.v1.Database/AcquireLease"
-	Database_ReleaseLease_FullMethodName                   = "/cdrom.db.v1.Database/ReleaseLease"
-	Database_GetLease_FullMethodName                       = "/cdrom.db.v1.Database/GetLease"
-	Database_RegisterAgent_FullMethodName                  = "/cdrom.db.v1.Database/RegisterAgent"
-	Database_GetAgent_FullMethodName                       = "/cdrom.db.v1.Database/GetAgent"
-	Database_ListAgents_FullMethodName                     = "/cdrom.db.v1.Database/ListAgents"
-	Database_HeartbeatAgent_FullMethodName                 = "/cdrom.db.v1.Database/HeartbeatAgent"
-	Database_DeleteAgent_FullMethodName                    = "/cdrom.db.v1.Database/DeleteAgent"
-	Database_ListIDPSigningKeys_FullMethodName             = "/cdrom.db.v1.Database/ListIDPSigningKeys"
-	Database_SetIDPSigningKeys_FullMethodName              = "/cdrom.db.v1.Database/SetIDPSigningKeys"
-	Database_StoreIDPAuthCode_FullMethodName               = "/cdrom.db.v1.Database/StoreIDPAuthCode"
-	Database_ConsumeIDPAuthCode_FullMethodName             = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
-	Database_PruneIDPAuthCodes_FullMethodName              = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
-	Database_CreateUser_FullMethodName                     = "/cdrom.db.v1.Database/CreateUser"
-	Database_GetIDPUser_FullMethodName                     = "/cdrom.db.v1.Database/GetIDPUser"
-	Database_ListIDPUsers_FullMethodName                   = "/cdrom.db.v1.Database/ListIDPUsers"
-	Database_CountIDPUsers_FullMethodName                  = "/cdrom.db.v1.Database/CountIDPUsers"
-	Database_UpdateIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/UpdateIDPUser"
-	Database_ReplaceIDPUserProfile_FullMethodName          = "/cdrom.db.v1.Database/ReplaceIDPUserProfile"
-	Database_DeleteIDPUser_FullMethodName                  = "/cdrom.db.v1.Database/DeleteIDPUser"
-	Database_ActivateIDPUser_FullMethodName                = "/cdrom.db.v1.Database/ActivateIDPUser"
-	Database_DeactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/DeactivateIDPUser"
-	Database_ReactivateIDPUser_FullMethodName              = "/cdrom.db.v1.Database/ReactivateIDPUser"
-	Database_ExpireTemporaryPassword_FullMethodName        = "/cdrom.db.v1.Database/ExpireTemporaryPassword"
-	Database_CreateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/CreateAPIKey"
-	Database_GetAPIKey_FullMethodName                      = "/cdrom.db.v1.Database/GetAPIKey"
-	Database_ListAPIKeys_FullMethodName                    = "/cdrom.db.v1.Database/ListAPIKeys"
-	Database_UpdateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/UpdateAPIKey"
-	Database_RotateAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/RotateAPIKey"
-	Database_DeleteAPIKey_FullMethodName                   = "/cdrom.db.v1.Database/DeleteAPIKey"
-	Database_AdjustAPIKeyLockout_FullMethodName            = "/cdrom.db.v1.Database/AdjustAPIKeyLockout"
-	Database_ResetAPIKeyLockout_FullMethodName             = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
-	Database_CreateGroup_FullMethodName                    = "/cdrom.db.v1.Database/CreateGroup"
-	Database_GetGroup_FullMethodName                       = "/cdrom.db.v1.Database/GetGroup"
-	Database_ListGroups_FullMethodName                     = "/cdrom.db.v1.Database/ListGroups"
-	Database_ReplaceGroup_FullMethodName                   = "/cdrom.db.v1.Database/ReplaceGroup"
-	Database_PatchGroupMembers_FullMethodName              = "/cdrom.db.v1.Database/PatchGroupMembers"
-	Database_DeleteGroup_FullMethodName                    = "/cdrom.db.v1.Database/DeleteGroup"
-	Database_CreateServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/CreateServiceAccount"
-	Database_GetServiceAccount_FullMethodName              = "/cdrom.db.v1.Database/GetServiceAccount"
-	Database_ListServiceAccounts_FullMethodName            = "/cdrom.db.v1.Database/ListServiceAccounts"
-	Database_UpdateServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/UpdateServiceAccount"
-	Database_RotateServiceAccountKey_FullMethodName        = "/cdrom.db.v1.Database/RotateServiceAccountKey"
-	Database_DisableServiceAccount_FullMethodName          = "/cdrom.db.v1.Database/DisableServiceAccount"
-	Database_EnableServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/EnableServiceAccount"
-	Database_DeleteServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/DeleteServiceAccount"
-	Database_RecordServiceAccountKeyAttempt_FullMethodName = "/cdrom.db.v1.Database/RecordServiceAccountKeyAttempt"
-	Database_ResetServiceAccountLockout_FullMethodName     = "/cdrom.db.v1.Database/ResetServiceAccountLockout"
-	Database_CreateScimKey_FullMethodName                  = "/cdrom.db.v1.Database/CreateScimKey"
-	Database_GetScimKey_FullMethodName                     = "/cdrom.db.v1.Database/GetScimKey"
-	Database_ListScimKeys_FullMethodName                   = "/cdrom.db.v1.Database/ListScimKeys"
-	Database_UpdateScimKey_FullMethodName                  = "/cdrom.db.v1.Database/UpdateScimKey"
-	Database_RevokeScimKey_FullMethodName                  = "/cdrom.db.v1.Database/RevokeScimKey"
-	Database_ReinstateScimKey_FullMethodName               = "/cdrom.db.v1.Database/ReinstateScimKey"
-	Database_BundleScimKeys_FullMethodName                 = "/cdrom.db.v1.Database/BundleScimKeys"
-	Database_MarkScimKeyUsed_FullMethodName                = "/cdrom.db.v1.Database/MarkScimKeyUsed"
-	Database_PruneScimKeys_FullMethodName                  = "/cdrom.db.v1.Database/PruneScimKeys"
-	Database_NextSecretNonce_FullMethodName                = "/cdrom.db.v1.Database/NextSecretNonce"
-	Database_ClaimStepOnce_FullMethodName                  = "/cdrom.db.v1.Database/ClaimStepOnce"
-	Database_CreateRole_FullMethodName                     = "/cdrom.db.v1.Database/CreateRole"
-	Database_GetRole_FullMethodName                        = "/cdrom.db.v1.Database/GetRole"
-	Database_ListRoles_FullMethodName                      = "/cdrom.db.v1.Database/ListRoles"
-	Database_UpdateRole_FullMethodName                     = "/cdrom.db.v1.Database/UpdateRole"
-	Database_DeleteRole_FullMethodName                     = "/cdrom.db.v1.Database/DeleteRole"
-	Database_AddRoleBinding_FullMethodName                 = "/cdrom.db.v1.Database/AddRoleBinding"
-	Database_ListRoleBindings_FullMethodName               = "/cdrom.db.v1.Database/ListRoleBindings"
-	Database_DeleteRoleBinding_FullMethodName              = "/cdrom.db.v1.Database/DeleteRoleBinding"
-	Database_PublishRoleChange_FullMethodName              = "/cdrom.db.v1.Database/PublishRoleChange"
-	Database_CreateApprovalGroup_FullMethodName            = "/cdrom.db.v1.Database/CreateApprovalGroup"
-	Database_GetApprovalGroup_FullMethodName               = "/cdrom.db.v1.Database/GetApprovalGroup"
-	Database_ListApprovalGroups_FullMethodName             = "/cdrom.db.v1.Database/ListApprovalGroups"
-	Database_UpdateApprovalGroup_FullMethodName            = "/cdrom.db.v1.Database/UpdateApprovalGroup"
-	Database_DeleteApprovalGroup_FullMethodName            = "/cdrom.db.v1.Database/DeleteApprovalGroup"
-	Database_AddApprovalGroupMember_FullMethodName         = "/cdrom.db.v1.Database/AddApprovalGroupMember"
-	Database_RemoveApprovalGroupMember_FullMethodName      = "/cdrom.db.v1.Database/RemoveApprovalGroupMember"
-	Database_EffectiveApprovalGroupMembers_FullMethodName  = "/cdrom.db.v1.Database/EffectiveApprovalGroupMembers"
-	Database_RecordObservedClaim_FullMethodName            = "/cdrom.db.v1.Database/RecordObservedClaim"
-	Database_ObservedClaimsFor_FullMethodName              = "/cdrom.db.v1.Database/ObservedClaimsFor"
-	Database_CastApprovalVote_FullMethodName               = "/cdrom.db.v1.Database/CastApprovalVote"
-	Database_ListApprovalVotes_FullMethodName              = "/cdrom.db.v1.Database/ListApprovalVotes"
-	Database_AppendAuditEvent_FullMethodName               = "/cdrom.db.v1.Database/AppendAuditEvent"
-	Database_ListAuditEvents_FullMethodName                = "/cdrom.db.v1.Database/ListAuditEvents"
-	Database_PruneAuditEvents_FullMethodName               = "/cdrom.db.v1.Database/PruneAuditEvents"
-	Database_AcquireJobSlots_FullMethodName                = "/cdrom.db.v1.Database/AcquireJobSlots"
-	Database_ReleaseJobSlots_FullMethodName                = "/cdrom.db.v1.Database/ReleaseJobSlots"
-	Database_GetQueueStatus_FullMethodName                 = "/cdrom.db.v1.Database/GetQueueStatus"
-	Database_ReconcileConcurrency_FullMethodName           = "/cdrom.db.v1.Database/ReconcileConcurrency"
-	Database_ListConcurrencyLimits_FullMethodName          = "/cdrom.db.v1.Database/ListConcurrencyLimits"
-	Database_CreateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/CreateConcurrencyLimit"
-	Database_UpdateConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/UpdateConcurrencyLimit"
-	Database_DeleteConcurrencyLimit_FullMethodName         = "/cdrom.db.v1.Database/DeleteConcurrencyLimit"
-	Database_ListSSHKnownHosts_FullMethodName              = "/cdrom.db.v1.Database/ListSSHKnownHosts"
-	Database_CreateSSHKnownHost_FullMethodName             = "/cdrom.db.v1.Database/CreateSSHKnownHost"
-	Database_DeleteSSHKnownHost_FullMethodName             = "/cdrom.db.v1.Database/DeleteSSHKnownHost"
-	Database_ListSourceCredentials_FullMethodName          = "/cdrom.db.v1.Database/ListSourceCredentials"
-	Database_CreateSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/CreateSourceCredential"
-	Database_GetSourceCredential_FullMethodName            = "/cdrom.db.v1.Database/GetSourceCredential"
-	Database_UpdateSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/UpdateSourceCredential"
-	Database_DeleteSourceCredential_FullMethodName         = "/cdrom.db.v1.Database/DeleteSourceCredential"
-	Database_AttachPipelineSource_FullMethodName           = "/cdrom.db.v1.Database/AttachPipelineSource"
-	Database_GetPipelineSource_FullMethodName              = "/cdrom.db.v1.Database/GetPipelineSource"
-	Database_ListPipelineSources_FullMethodName            = "/cdrom.db.v1.Database/ListPipelineSources"
-	Database_CountSourcesByCredential_FullMethodName       = "/cdrom.db.v1.Database/CountSourcesByCredential"
-	Database_SetPipelineSourceState_FullMethodName         = "/cdrom.db.v1.Database/SetPipelineSourceState"
-	Database_GetPipelineSourceState_FullMethodName         = "/cdrom.db.v1.Database/GetPipelineSourceState"
-	Database_DetachPipelineSource_FullMethodName           = "/cdrom.db.v1.Database/DetachPipelineSource"
-	Database_CreateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/CreateEnvironment"
-	Database_GetEnvironment_FullMethodName                 = "/cdrom.db.v1.Database/GetEnvironment"
-	Database_ListEnvironments_FullMethodName               = "/cdrom.db.v1.Database/ListEnvironments"
-	Database_UpdateEnvironment_FullMethodName              = "/cdrom.db.v1.Database/UpdateEnvironment"
-	Database_DeleteEnvironment_FullMethodName              = "/cdrom.db.v1.Database/DeleteEnvironment"
-	Database_ListAgentsByEnvironment_FullMethodName        = "/cdrom.db.v1.Database/ListAgentsByEnvironment"
-	Database_ProceedJob_FullMethodName                     = "/cdrom.db.v1.Database/ProceedJob"
-	Database_CreateAgentGroup_FullMethodName               = "/cdrom.db.v1.Database/CreateAgentGroup"
-	Database_GetAgentGroup_FullMethodName                  = "/cdrom.db.v1.Database/GetAgentGroup"
-	Database_ListAgentGroups_FullMethodName                = "/cdrom.db.v1.Database/ListAgentGroups"
-	Database_UpdateAgentGroup_FullMethodName               = "/cdrom.db.v1.Database/UpdateAgentGroup"
-	Database_DeleteAgentGroup_FullMethodName               = "/cdrom.db.v1.Database/DeleteAgentGroup"
-	Database_AllocateStorageObject_FullMethodName          = "/cdrom.db.v1.Database/AllocateStorageObject"
-	Database_ConfirmStorageObject_FullMethodName           = "/cdrom.db.v1.Database/ConfirmStorageObject"
-	Database_GetStorageObject_FullMethodName               = "/cdrom.db.v1.Database/GetStorageObject"
-	Database_ListStorageObjects_FullMethodName             = "/cdrom.db.v1.Database/ListStorageObjects"
-	Database_TouchStorageObject_FullMethodName             = "/cdrom.db.v1.Database/TouchStorageObject"
-	Database_SyncLogSize_FullMethodName                    = "/cdrom.db.v1.Database/SyncLogSize"
-	Database_DeleteStorageObject_FullMethodName            = "/cdrom.db.v1.Database/DeleteStorageObject"
-	Database_ResolvePackageReference_FullMethodName        = "/cdrom.db.v1.Database/ResolvePackageReference"
+	Database_CreatePipeline_FullMethodName                  = "/cdrom.db.v1.Database/CreatePipeline"
+	Database_GetPipeline_FullMethodName                     = "/cdrom.db.v1.Database/GetPipeline"
+	Database_ListPipelines_FullMethodName                   = "/cdrom.db.v1.Database/ListPipelines"
+	Database_UpdatePipeline_FullMethodName                  = "/cdrom.db.v1.Database/UpdatePipeline"
+	Database_DeletePipeline_FullMethodName                  = "/cdrom.db.v1.Database/DeletePipeline"
+	Database_TriggerRun_FullMethodName                      = "/cdrom.db.v1.Database/TriggerRun"
+	Database_CreateRun_FullMethodName                       = "/cdrom.db.v1.Database/CreateRun"
+	Database_GetRun_FullMethodName                          = "/cdrom.db.v1.Database/GetRun"
+	Database_ListRuns_FullMethodName                        = "/cdrom.db.v1.Database/ListRuns"
+	Database_PreviousSuccessfulRun_FullMethodName           = "/cdrom.db.v1.Database/PreviousSuccessfulRun"
+	Database_LatestRollbackRun_FullMethodName               = "/cdrom.db.v1.Database/LatestRollbackRun"
+	Database_RestartRun_FullMethodName                      = "/cdrom.db.v1.Database/RestartRun"
+	Database_UpdateRun_FullMethodName                       = "/cdrom.db.v1.Database/UpdateRun"
+	Database_ListPipelineVersions_FullMethodName            = "/cdrom.db.v1.Database/ListPipelineVersions"
+	Database_GetPipelineVersion_FullMethodName              = "/cdrom.db.v1.Database/GetPipelineVersion"
+	Database_CreateJob_FullMethodName                       = "/cdrom.db.v1.Database/CreateJob"
+	Database_GetJob_FullMethodName                          = "/cdrom.db.v1.Database/GetJob"
+	Database_ListJobs_FullMethodName                        = "/cdrom.db.v1.Database/ListJobs"
+	Database_ListRetriableJobs_FullMethodName               = "/cdrom.db.v1.Database/ListRetriableJobs"
+	Database_UpdateJob_FullMethodName                       = "/cdrom.db.v1.Database/UpdateJob"
+	Database_DeleteJob_FullMethodName                       = "/cdrom.db.v1.Database/DeleteJob"
+	Database_ClaimJobRetry_FullMethodName                   = "/cdrom.db.v1.Database/ClaimJobRetry"
+	Database_RerunJob_FullMethodName                        = "/cdrom.db.v1.Database/RerunJob"
+	Database_ReapJob_FullMethodName                         = "/cdrom.db.v1.Database/ReapJob"
+	Database_CancelJob_FullMethodName                       = "/cdrom.db.v1.Database/CancelJob"
+	Database_SkipJob_FullMethodName                         = "/cdrom.db.v1.Database/SkipJob"
+	Database_ClaimJob_FullMethodName                        = "/cdrom.db.v1.Database/ClaimJob"
+	Database_ListPendingByGroup_FullMethodName              = "/cdrom.db.v1.Database/ListPendingByGroup"
+	Database_StartJobExecution_FullMethodName               = "/cdrom.db.v1.Database/StartJobExecution"
+	Database_ListJobExecutions_FullMethodName               = "/cdrom.db.v1.Database/ListJobExecutions"
+	Database_UpdateJobExecution_FullMethodName              = "/cdrom.db.v1.Database/UpdateJobExecution"
+	Database_AbandonAgentExecutions_FullMethodName          = "/cdrom.db.v1.Database/AbandonAgentExecutions"
+	Database_ReportStepCompletion_FullMethodName            = "/cdrom.db.v1.Database/ReportStepCompletion"
+	Database_CheckStepBarrier_FullMethodName                = "/cdrom.db.v1.Database/CheckStepBarrier"
+	Database_ResolveApproval_FullMethodName                 = "/cdrom.db.v1.Database/ResolveApproval"
+	Database_PublishAssignment_FullMethodName               = "/cdrom.db.v1.Database/PublishAssignment"
+	Database_PublishCancel_FullMethodName                   = "/cdrom.db.v1.Database/PublishCancel"
+	Database_PublishJobStatus_FullMethodName                = "/cdrom.db.v1.Database/PublishJobStatus"
+	Database_PublishRunStatus_FullMethodName                = "/cdrom.db.v1.Database/PublishRunStatus"
+	Database_PublishAgentEvent_FullMethodName               = "/cdrom.db.v1.Database/PublishAgentEvent"
+	Database_PublishLogUpdated_FullMethodName               = "/cdrom.db.v1.Database/PublishLogUpdated"
+	Database_TailEvents_FullMethodName                      = "/cdrom.db.v1.Database/TailEvents"
+	Database_AcquireLease_FullMethodName                    = "/cdrom.db.v1.Database/AcquireLease"
+	Database_ReleaseLease_FullMethodName                    = "/cdrom.db.v1.Database/ReleaseLease"
+	Database_GetLease_FullMethodName                        = "/cdrom.db.v1.Database/GetLease"
+	Database_RegisterAgent_FullMethodName                   = "/cdrom.db.v1.Database/RegisterAgent"
+	Database_GetAgent_FullMethodName                        = "/cdrom.db.v1.Database/GetAgent"
+	Database_ListAgents_FullMethodName                      = "/cdrom.db.v1.Database/ListAgents"
+	Database_HeartbeatAgent_FullMethodName                  = "/cdrom.db.v1.Database/HeartbeatAgent"
+	Database_DeleteAgent_FullMethodName                     = "/cdrom.db.v1.Database/DeleteAgent"
+	Database_ListIDPSigningKeys_FullMethodName              = "/cdrom.db.v1.Database/ListIDPSigningKeys"
+	Database_SetIDPSigningKeys_FullMethodName               = "/cdrom.db.v1.Database/SetIDPSigningKeys"
+	Database_StoreIDPAuthCode_FullMethodName                = "/cdrom.db.v1.Database/StoreIDPAuthCode"
+	Database_ConsumeIDPAuthCode_FullMethodName              = "/cdrom.db.v1.Database/ConsumeIDPAuthCode"
+	Database_PruneIDPAuthCodes_FullMethodName               = "/cdrom.db.v1.Database/PruneIDPAuthCodes"
+	Database_CreateUser_FullMethodName                      = "/cdrom.db.v1.Database/CreateUser"
+	Database_GetIDPUser_FullMethodName                      = "/cdrom.db.v1.Database/GetIDPUser"
+	Database_ListIDPUsers_FullMethodName                    = "/cdrom.db.v1.Database/ListIDPUsers"
+	Database_CountIDPUsers_FullMethodName                   = "/cdrom.db.v1.Database/CountIDPUsers"
+	Database_UpdateIDPUser_FullMethodName                   = "/cdrom.db.v1.Database/UpdateIDPUser"
+	Database_ReplaceIDPUserProfile_FullMethodName           = "/cdrom.db.v1.Database/ReplaceIDPUserProfile"
+	Database_DeleteIDPUser_FullMethodName                   = "/cdrom.db.v1.Database/DeleteIDPUser"
+	Database_ActivateIDPUser_FullMethodName                 = "/cdrom.db.v1.Database/ActivateIDPUser"
+	Database_DeactivateIDPUser_FullMethodName               = "/cdrom.db.v1.Database/DeactivateIDPUser"
+	Database_ReactivateIDPUser_FullMethodName               = "/cdrom.db.v1.Database/ReactivateIDPUser"
+	Database_ExpireTemporaryPassword_FullMethodName         = "/cdrom.db.v1.Database/ExpireTemporaryPassword"
+	Database_CreateAPIKey_FullMethodName                    = "/cdrom.db.v1.Database/CreateAPIKey"
+	Database_GetAPIKey_FullMethodName                       = "/cdrom.db.v1.Database/GetAPIKey"
+	Database_ListAPIKeys_FullMethodName                     = "/cdrom.db.v1.Database/ListAPIKeys"
+	Database_UpdateAPIKey_FullMethodName                    = "/cdrom.db.v1.Database/UpdateAPIKey"
+	Database_RotateAPIKey_FullMethodName                    = "/cdrom.db.v1.Database/RotateAPIKey"
+	Database_DeleteAPIKey_FullMethodName                    = "/cdrom.db.v1.Database/DeleteAPIKey"
+	Database_CreateAgentCredential_FullMethodName           = "/cdrom.db.v1.Database/CreateAgentCredential"
+	Database_GetAgentCredential_FullMethodName              = "/cdrom.db.v1.Database/GetAgentCredential"
+	Database_ListAgentCredentials_FullMethodName            = "/cdrom.db.v1.Database/ListAgentCredentials"
+	Database_ExtendAgentCredentialExpiration_FullMethodName = "/cdrom.db.v1.Database/ExtendAgentCredentialExpiration"
+	Database_RetireAgentCredential_FullMethodName           = "/cdrom.db.v1.Database/RetireAgentCredential"
+	Database_RevokeAgentCredential_FullMethodName           = "/cdrom.db.v1.Database/RevokeAgentCredential"
+	Database_MarkAgentCredentialSeen_FullMethodName         = "/cdrom.db.v1.Database/MarkAgentCredentialSeen"
+	Database_AdjustAPIKeyLockout_FullMethodName             = "/cdrom.db.v1.Database/AdjustAPIKeyLockout"
+	Database_ResetAPIKeyLockout_FullMethodName              = "/cdrom.db.v1.Database/ResetAPIKeyLockout"
+	Database_CreateGroup_FullMethodName                     = "/cdrom.db.v1.Database/CreateGroup"
+	Database_GetGroup_FullMethodName                        = "/cdrom.db.v1.Database/GetGroup"
+	Database_ListGroups_FullMethodName                      = "/cdrom.db.v1.Database/ListGroups"
+	Database_ReplaceGroup_FullMethodName                    = "/cdrom.db.v1.Database/ReplaceGroup"
+	Database_PatchGroupMembers_FullMethodName               = "/cdrom.db.v1.Database/PatchGroupMembers"
+	Database_DeleteGroup_FullMethodName                     = "/cdrom.db.v1.Database/DeleteGroup"
+	Database_CreateServiceAccount_FullMethodName            = "/cdrom.db.v1.Database/CreateServiceAccount"
+	Database_GetServiceAccount_FullMethodName               = "/cdrom.db.v1.Database/GetServiceAccount"
+	Database_ListServiceAccounts_FullMethodName             = "/cdrom.db.v1.Database/ListServiceAccounts"
+	Database_UpdateServiceAccount_FullMethodName            = "/cdrom.db.v1.Database/UpdateServiceAccount"
+	Database_RotateServiceAccountKey_FullMethodName         = "/cdrom.db.v1.Database/RotateServiceAccountKey"
+	Database_DisableServiceAccount_FullMethodName           = "/cdrom.db.v1.Database/DisableServiceAccount"
+	Database_EnableServiceAccount_FullMethodName            = "/cdrom.db.v1.Database/EnableServiceAccount"
+	Database_DeleteServiceAccount_FullMethodName            = "/cdrom.db.v1.Database/DeleteServiceAccount"
+	Database_RecordServiceAccountKeyAttempt_FullMethodName  = "/cdrom.db.v1.Database/RecordServiceAccountKeyAttempt"
+	Database_ResetServiceAccountLockout_FullMethodName      = "/cdrom.db.v1.Database/ResetServiceAccountLockout"
+	Database_CreateScimKey_FullMethodName                   = "/cdrom.db.v1.Database/CreateScimKey"
+	Database_GetScimKey_FullMethodName                      = "/cdrom.db.v1.Database/GetScimKey"
+	Database_ListScimKeys_FullMethodName                    = "/cdrom.db.v1.Database/ListScimKeys"
+	Database_UpdateScimKey_FullMethodName                   = "/cdrom.db.v1.Database/UpdateScimKey"
+	Database_RevokeScimKey_FullMethodName                   = "/cdrom.db.v1.Database/RevokeScimKey"
+	Database_ReinstateScimKey_FullMethodName                = "/cdrom.db.v1.Database/ReinstateScimKey"
+	Database_BundleScimKeys_FullMethodName                  = "/cdrom.db.v1.Database/BundleScimKeys"
+	Database_MarkScimKeyUsed_FullMethodName                 = "/cdrom.db.v1.Database/MarkScimKeyUsed"
+	Database_PruneScimKeys_FullMethodName                   = "/cdrom.db.v1.Database/PruneScimKeys"
+	Database_NextSecretNonce_FullMethodName                 = "/cdrom.db.v1.Database/NextSecretNonce"
+	Database_ClaimStepOnce_FullMethodName                   = "/cdrom.db.v1.Database/ClaimStepOnce"
+	Database_CreateRole_FullMethodName                      = "/cdrom.db.v1.Database/CreateRole"
+	Database_GetRole_FullMethodName                         = "/cdrom.db.v1.Database/GetRole"
+	Database_ListRoles_FullMethodName                       = "/cdrom.db.v1.Database/ListRoles"
+	Database_UpdateRole_FullMethodName                      = "/cdrom.db.v1.Database/UpdateRole"
+	Database_DeleteRole_FullMethodName                      = "/cdrom.db.v1.Database/DeleteRole"
+	Database_AddRoleBinding_FullMethodName                  = "/cdrom.db.v1.Database/AddRoleBinding"
+	Database_ListRoleBindings_FullMethodName                = "/cdrom.db.v1.Database/ListRoleBindings"
+	Database_DeleteRoleBinding_FullMethodName               = "/cdrom.db.v1.Database/DeleteRoleBinding"
+	Database_PublishRoleChange_FullMethodName               = "/cdrom.db.v1.Database/PublishRoleChange"
+	Database_CreateApprovalGroup_FullMethodName             = "/cdrom.db.v1.Database/CreateApprovalGroup"
+	Database_GetApprovalGroup_FullMethodName                = "/cdrom.db.v1.Database/GetApprovalGroup"
+	Database_ListApprovalGroups_FullMethodName              = "/cdrom.db.v1.Database/ListApprovalGroups"
+	Database_UpdateApprovalGroup_FullMethodName             = "/cdrom.db.v1.Database/UpdateApprovalGroup"
+	Database_DeleteApprovalGroup_FullMethodName             = "/cdrom.db.v1.Database/DeleteApprovalGroup"
+	Database_AddApprovalGroupMember_FullMethodName          = "/cdrom.db.v1.Database/AddApprovalGroupMember"
+	Database_RemoveApprovalGroupMember_FullMethodName       = "/cdrom.db.v1.Database/RemoveApprovalGroupMember"
+	Database_EffectiveApprovalGroupMembers_FullMethodName   = "/cdrom.db.v1.Database/EffectiveApprovalGroupMembers"
+	Database_RecordObservedClaim_FullMethodName             = "/cdrom.db.v1.Database/RecordObservedClaim"
+	Database_ObservedClaimsFor_FullMethodName               = "/cdrom.db.v1.Database/ObservedClaimsFor"
+	Database_CastApprovalVote_FullMethodName                = "/cdrom.db.v1.Database/CastApprovalVote"
+	Database_ListApprovalVotes_FullMethodName               = "/cdrom.db.v1.Database/ListApprovalVotes"
+	Database_AppendAuditEvent_FullMethodName                = "/cdrom.db.v1.Database/AppendAuditEvent"
+	Database_ListAuditEvents_FullMethodName                 = "/cdrom.db.v1.Database/ListAuditEvents"
+	Database_PruneAuditEvents_FullMethodName                = "/cdrom.db.v1.Database/PruneAuditEvents"
+	Database_AcquireJobSlots_FullMethodName                 = "/cdrom.db.v1.Database/AcquireJobSlots"
+	Database_ReleaseJobSlots_FullMethodName                 = "/cdrom.db.v1.Database/ReleaseJobSlots"
+	Database_GetQueueStatus_FullMethodName                  = "/cdrom.db.v1.Database/GetQueueStatus"
+	Database_ReconcileConcurrency_FullMethodName            = "/cdrom.db.v1.Database/ReconcileConcurrency"
+	Database_ListConcurrencyLimits_FullMethodName           = "/cdrom.db.v1.Database/ListConcurrencyLimits"
+	Database_CreateConcurrencyLimit_FullMethodName          = "/cdrom.db.v1.Database/CreateConcurrencyLimit"
+	Database_UpdateConcurrencyLimit_FullMethodName          = "/cdrom.db.v1.Database/UpdateConcurrencyLimit"
+	Database_DeleteConcurrencyLimit_FullMethodName          = "/cdrom.db.v1.Database/DeleteConcurrencyLimit"
+	Database_ListSSHKnownHosts_FullMethodName               = "/cdrom.db.v1.Database/ListSSHKnownHosts"
+	Database_CreateSSHKnownHost_FullMethodName              = "/cdrom.db.v1.Database/CreateSSHKnownHost"
+	Database_DeleteSSHKnownHost_FullMethodName              = "/cdrom.db.v1.Database/DeleteSSHKnownHost"
+	Database_ListSourceCredentials_FullMethodName           = "/cdrom.db.v1.Database/ListSourceCredentials"
+	Database_CreateSourceCredential_FullMethodName          = "/cdrom.db.v1.Database/CreateSourceCredential"
+	Database_GetSourceCredential_FullMethodName             = "/cdrom.db.v1.Database/GetSourceCredential"
+	Database_UpdateSourceCredential_FullMethodName          = "/cdrom.db.v1.Database/UpdateSourceCredential"
+	Database_DeleteSourceCredential_FullMethodName          = "/cdrom.db.v1.Database/DeleteSourceCredential"
+	Database_AttachPipelineSource_FullMethodName            = "/cdrom.db.v1.Database/AttachPipelineSource"
+	Database_GetPipelineSource_FullMethodName               = "/cdrom.db.v1.Database/GetPipelineSource"
+	Database_ListPipelineSources_FullMethodName             = "/cdrom.db.v1.Database/ListPipelineSources"
+	Database_CountSourcesByCredential_FullMethodName        = "/cdrom.db.v1.Database/CountSourcesByCredential"
+	Database_SetPipelineSourceState_FullMethodName          = "/cdrom.db.v1.Database/SetPipelineSourceState"
+	Database_GetPipelineSourceState_FullMethodName          = "/cdrom.db.v1.Database/GetPipelineSourceState"
+	Database_DetachPipelineSource_FullMethodName            = "/cdrom.db.v1.Database/DetachPipelineSource"
+	Database_CreateEnvironment_FullMethodName               = "/cdrom.db.v1.Database/CreateEnvironment"
+	Database_GetEnvironment_FullMethodName                  = "/cdrom.db.v1.Database/GetEnvironment"
+	Database_ListEnvironments_FullMethodName                = "/cdrom.db.v1.Database/ListEnvironments"
+	Database_UpdateEnvironment_FullMethodName               = "/cdrom.db.v1.Database/UpdateEnvironment"
+	Database_DeleteEnvironment_FullMethodName               = "/cdrom.db.v1.Database/DeleteEnvironment"
+	Database_ListAgentsByEnvironment_FullMethodName         = "/cdrom.db.v1.Database/ListAgentsByEnvironment"
+	Database_ProceedJob_FullMethodName                      = "/cdrom.db.v1.Database/ProceedJob"
+	Database_CreateAgentGroup_FullMethodName                = "/cdrom.db.v1.Database/CreateAgentGroup"
+	Database_GetAgentGroup_FullMethodName                   = "/cdrom.db.v1.Database/GetAgentGroup"
+	Database_ListAgentGroups_FullMethodName                 = "/cdrom.db.v1.Database/ListAgentGroups"
+	Database_UpdateAgentGroup_FullMethodName                = "/cdrom.db.v1.Database/UpdateAgentGroup"
+	Database_DeleteAgentGroup_FullMethodName                = "/cdrom.db.v1.Database/DeleteAgentGroup"
+	Database_AllocateStorageObject_FullMethodName           = "/cdrom.db.v1.Database/AllocateStorageObject"
+	Database_ConfirmStorageObject_FullMethodName            = "/cdrom.db.v1.Database/ConfirmStorageObject"
+	Database_GetStorageObject_FullMethodName                = "/cdrom.db.v1.Database/GetStorageObject"
+	Database_ListStorageObjects_FullMethodName              = "/cdrom.db.v1.Database/ListStorageObjects"
+	Database_TouchStorageObject_FullMethodName              = "/cdrom.db.v1.Database/TouchStorageObject"
+	Database_SyncLogSize_FullMethodName                     = "/cdrom.db.v1.Database/SyncLogSize"
+	Database_DeleteStorageObject_FullMethodName             = "/cdrom.db.v1.Database/DeleteStorageObject"
+	Database_ResolvePackageReference_FullMethodName         = "/cdrom.db.v1.Database/ResolvePackageReference"
 )
 
 // DatabaseClient is the client API for Database service.
@@ -532,6 +539,17 @@ type DatabaseClient interface {
 	UpdateAPIKey(ctx context.Context, in *UpdateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
 	RotateAPIKey(ctx context.Context, in *RotateIDPAPIKeyRequest, opts ...grpc.CallOption) (*IDPAPIKey, error)
 	DeleteAPIKey(ctx context.Context, in *DeleteIDPAPIKeyRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Agent credentials (F-30.2). The Directory the IdP drives: CREATE on issue,
+	// READ for verification (F-30.3) and ADMINISTRATION, EXTEND on renew,
+	// RETIRE on rotation, REVOKE on emergency stop, MARK-SEEN on verified
+	// presentation. The JWT is never seen by the database.
+	CreateAgentCredential(ctx context.Context, in *CreateAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error)
+	GetAgentCredential(ctx context.Context, in *GetAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error)
+	ListAgentCredentials(ctx context.Context, in *ListAgentCredentialsRequest, opts ...grpc.CallOption) (*ListAgentCredentialsResponse, error)
+	ExtendAgentCredentialExpiration(ctx context.Context, in *ExtendAgentCredentialExpirationRequest, opts ...grpc.CallOption) (*AgentCredential, error)
+	RetireAgentCredential(ctx context.Context, in *RetireAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error)
+	RevokeAgentCredential(ctx context.Context, in *RevokeAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error)
+	MarkAgentCredentialSeen(ctx context.Context, in *MarkAgentCredentialSeenRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
 	// and optionally sets/clears the lockout instant (F-25). Relocated here
 	// from VerifyAPIKey because Argon2ID verification (salted KDF) happens in
@@ -1748,6 +1766,76 @@ func (c *databaseClient) DeleteAPIKey(ctx context.Context, in *DeleteIDPAPIKeyRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_DeleteAPIKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) CreateAgentCredential(ctx context.Context, in *CreateAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AgentCredential)
+	err := c.cc.Invoke(ctx, Database_CreateAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) GetAgentCredential(ctx context.Context, in *GetAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AgentCredential)
+	err := c.cc.Invoke(ctx, Database_GetAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ListAgentCredentials(ctx context.Context, in *ListAgentCredentialsRequest, opts ...grpc.CallOption) (*ListAgentCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListAgentCredentialsResponse)
+	err := c.cc.Invoke(ctx, Database_ListAgentCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) ExtendAgentCredentialExpiration(ctx context.Context, in *ExtendAgentCredentialExpirationRequest, opts ...grpc.CallOption) (*AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AgentCredential)
+	err := c.cc.Invoke(ctx, Database_ExtendAgentCredentialExpiration_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RetireAgentCredential(ctx context.Context, in *RetireAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AgentCredential)
+	err := c.cc.Invoke(ctx, Database_RetireAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) RevokeAgentCredential(ctx context.Context, in *RevokeAgentCredentialRequest, opts ...grpc.CallOption) (*AgentCredential, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AgentCredential)
+	err := c.cc.Invoke(ctx, Database_RevokeAgentCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) MarkAgentCredentialSeen(ctx context.Context, in *MarkAgentCredentialSeenRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Database_MarkAgentCredentialSeen_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -3056,6 +3144,17 @@ type DatabaseServer interface {
 	UpdateAPIKey(context.Context, *UpdateIDPAPIKeyRequest) (*IDPAPIKey, error)
 	RotateAPIKey(context.Context, *RotateIDPAPIKeyRequest) (*IDPAPIKey, error)
 	DeleteAPIKey(context.Context, *DeleteIDPAPIKeyRequest) (*emptypb.Empty, error)
+	// Agent credentials (F-30.2). The Directory the IdP drives: CREATE on issue,
+	// READ for verification (F-30.3) and ADMINISTRATION, EXTEND on renew,
+	// RETIRE on rotation, REVOKE on emergency stop, MARK-SEEN on verified
+	// presentation. The JWT is never seen by the database.
+	CreateAgentCredential(context.Context, *CreateAgentCredentialRequest) (*AgentCredential, error)
+	GetAgentCredential(context.Context, *GetAgentCredentialRequest) (*AgentCredential, error)
+	ListAgentCredentials(context.Context, *ListAgentCredentialsRequest) (*ListAgentCredentialsResponse, error)
+	ExtendAgentCredentialExpiration(context.Context, *ExtendAgentCredentialExpirationRequest) (*AgentCredential, error)
+	RetireAgentCredential(context.Context, *RetireAgentCredentialRequest) (*AgentCredential, error)
+	RevokeAgentCredential(context.Context, *RevokeAgentCredentialRequest) (*AgentCredential, error)
+	MarkAgentCredentialSeen(context.Context, *MarkAgentCredentialSeenRequest) (*emptypb.Empty, error)
 	// AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
 	// and optionally sets/clears the lockout instant (F-25). Relocated here
 	// from VerifyAPIKey because Argon2ID verification (salted KDF) happens in
@@ -3773,6 +3872,27 @@ func (UnimplementedDatabaseServer) RotateAPIKey(context.Context, *RotateIDPAPIKe
 }
 func (UnimplementedDatabaseServer) DeleteAPIKey(context.Context, *DeleteIDPAPIKeyRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteAPIKey not implemented")
+}
+func (UnimplementedDatabaseServer) CreateAgentCredential(context.Context, *CreateAgentCredentialRequest) (*AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateAgentCredential not implemented")
+}
+func (UnimplementedDatabaseServer) GetAgentCredential(context.Context, *GetAgentCredentialRequest) (*AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAgentCredential not implemented")
+}
+func (UnimplementedDatabaseServer) ListAgentCredentials(context.Context, *ListAgentCredentialsRequest) (*ListAgentCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAgentCredentials not implemented")
+}
+func (UnimplementedDatabaseServer) ExtendAgentCredentialExpiration(context.Context, *ExtendAgentCredentialExpirationRequest) (*AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExtendAgentCredentialExpiration not implemented")
+}
+func (UnimplementedDatabaseServer) RetireAgentCredential(context.Context, *RetireAgentCredentialRequest) (*AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method RetireAgentCredential not implemented")
+}
+func (UnimplementedDatabaseServer) RevokeAgentCredential(context.Context, *RevokeAgentCredentialRequest) (*AgentCredential, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeAgentCredential not implemented")
+}
+func (UnimplementedDatabaseServer) MarkAgentCredentialSeen(context.Context, *MarkAgentCredentialSeenRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method MarkAgentCredentialSeen not implemented")
 }
 func (UnimplementedDatabaseServer) AdjustAPIKeyLockout(context.Context, *AdjustAPIKeyLockoutRequest) (*IDPUser, error) {
 	return nil, status.Error(codes.Unimplemented, "method AdjustAPIKeyLockout not implemented")
@@ -5375,6 +5495,132 @@ func _Database_DeleteAPIKey_Handler(srv interface{}, ctx context.Context, dec fu
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).DeleteAPIKey(ctx, req.(*DeleteIDPAPIKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_CreateAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).CreateAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_CreateAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).CreateAgentCredential(ctx, req.(*CreateAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_GetAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).GetAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_GetAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).GetAgentCredential(ctx, req.(*GetAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ListAgentCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListAgentCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ListAgentCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ListAgentCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ListAgentCredentials(ctx, req.(*ListAgentCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_ExtendAgentCredentialExpiration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExtendAgentCredentialExpirationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).ExtendAgentCredentialExpiration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_ExtendAgentCredentialExpiration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).ExtendAgentCredentialExpiration(ctx, req.(*ExtendAgentCredentialExpirationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RetireAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RetireAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RetireAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RetireAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RetireAgentCredential(ctx, req.(*RetireAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_RevokeAgentCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeAgentCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).RevokeAgentCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_RevokeAgentCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).RevokeAgentCredential(ctx, req.(*RevokeAgentCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_MarkAgentCredentialSeen_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MarkAgentCredentialSeenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).MarkAgentCredentialSeen(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_MarkAgentCredentialSeen_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).MarkAgentCredentialSeen(ctx, req.(*MarkAgentCredentialSeenRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -7401,6 +7647,34 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteAPIKey",
 			Handler:    _Database_DeleteAPIKey_Handler,
+		},
+		{
+			MethodName: "CreateAgentCredential",
+			Handler:    _Database_CreateAgentCredential_Handler,
+		},
+		{
+			MethodName: "GetAgentCredential",
+			Handler:    _Database_GetAgentCredential_Handler,
+		},
+		{
+			MethodName: "ListAgentCredentials",
+			Handler:    _Database_ListAgentCredentials_Handler,
+		},
+		{
+			MethodName: "ExtendAgentCredentialExpiration",
+			Handler:    _Database_ExtendAgentCredentialExpiration_Handler,
+		},
+		{
+			MethodName: "RetireAgentCredential",
+			Handler:    _Database_RetireAgentCredential_Handler,
+		},
+		{
+			MethodName: "RevokeAgentCredential",
+			Handler:    _Database_RevokeAgentCredential_Handler,
+		},
+		{
+			MethodName: "MarkAgentCredentialSeen",
+			Handler:    _Database_MarkAgentCredentialSeen_Handler,
 		},
 		{
 			MethodName: "AdjustAPIKeyLockout",

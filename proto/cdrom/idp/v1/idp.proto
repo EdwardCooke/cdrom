@@ -79,6 +79,32 @@ service IdP {
   // counter and the lockout instant). A missing user is NotFound.
   rpc ResetAPIKeyLockout(ResetAPIKeyLockoutRequest) returns (ResetAPIKeyLockoutResponse);
 
+  // Agent credentials (F-30.2). The IdP is the SOLE COMPONENT that mints the
+  // JWTs: it signs them with its key ring and tracks their lifecycle in the
+  // Database service's credential directory. The plaintext JWT is returned
+  // EXACTLY ONCE (IssueAgentCredential / RotateAgentCredential) and is never
+  // retrievable afterwards. The RPCs are Unimplemented when no credential
+  // store is attached.
+  // IssueAgentCredential signs a new credential for the named agent (deadline
+  // = now + the configured TTL) and stores the row. Returns the plaintext JWT
+  // once.
+  rpc IssueAgentCredential(IssueAgentCredentialRequest) returns (IssueAgentCredentialResponse);
+  // GetAgentCredential returns a row's METADATA (never JWT material) by id.
+  rpc GetAgentCredential(GetAgentCredentialRequest) returns (cdrom.db.v1.AgentCredential);
+  // ListAgentCredentials returns an agent's rows (or all rows when agent_name
+  // is empty) — metadata only.
+  rpc ListAgentCredentials(ListAgentCredentialsRequest) returns (ListAgentCredentialsResponse);
+  // RenewAgentCredential EXTENDS a row's deadline to now + TTL without touching
+  // the JWT (the same token keeps working — structural no-break). Self-service
+  // (the agent presenting its own valid credential) is authorized at the API
+  // tier (F-30.2's endpoint guard); this RPC simply performs the extension.
+  rpc RenewAgentCredential(RenewAgentCredentialRequest) returns (cdrom.db.v1.AgentCredential);
+  // RotateAgentCredential RETIRES a row (chaining replaced_by_id) and signs a
+  // SUCCESSOR for the same agent; the new JWT is returned once.
+  rpc RotateAgentCredential(RotateAgentCredentialRequest) returns (IssueAgentCredentialResponse);
+  // RevokeAgentCredential stamps a row revoked NOW, with a reason.
+  rpc RevokeAgentCredential(RevokeAgentCredentialRequest) returns (cdrom.db.v1.AgentCredential);
+
   // CreateServiceAccount creates a service account (F-26) and its two freshly
   // generated key slots, and binds its roles. The IdP generates each key's
   // plaintext (`cdrom-sa-…`), encodes it with Argon2ID (the pepper prepended
@@ -830,4 +856,69 @@ message ListGroupDetailsResponse {
 // GetGroupDetailsRequest fetches one enriched group by id.
 message GetGroupDetailsRequest {
   string id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Agent credentials (F-30.2). The IdP signs the JWTs and drives their
+// lifecycle in the Database service's credential directory. The plaintext JWT
+// is returned EXACTLY ONCE (issue / rotate) and is never retrievable
+// afterwards; every other response carries row METADATA only.
+
+// IssueAgentCredentialRequest asks the IdP to sign a new credential for the
+// named agent. Deadline = now + the configured TTL.
+message IssueAgentCredentialRequest {
+  // agent_name is the agent the credential binds to (the JWT's subject is
+  // "agent:<agent_name>"; registration may only claim this name).
+  string agent_name = 1;
+  // issued_by is the acting principal (audit link).
+  string issued_by = 2;
+  // description is a human-readable label.
+  string description = 3;
+}
+
+// IssueAgentCredentialResponse carries the stored row PLUS the plaintext JWT
+// (shown exactly once).
+message IssueAgentCredentialResponse {
+  cdrom.db.v1.AgentCredential credential = 1;
+  // jwt is the signed credential token. Returned only by issue and rotate.
+  string jwt = 2;
+}
+
+// GetAgentCredentialRequest looks a row up by id (metadata only).
+message GetAgentCredentialRequest {
+  string id = 1;
+}
+
+// ListAgentCredentialsRequest lists rows for one agent ("" = all agents).
+message ListAgentCredentialsRequest {
+  string agent_name = 1;
+}
+
+// ListAgentCredentialsResponse carries the rows (metadata only).
+message ListAgentCredentialsResponse {
+  repeated cdrom.db.v1.AgentCredential credentials = 1;
+}
+
+// RenewAgentCredentialRequest extends a row's deadline to now + TTL WITHOUT
+// touching the JWT (the same token keeps working).
+message RenewAgentCredentialRequest {
+  string id = 1;
+}
+
+// RotateAgentCredentialRequest retires a row and signs a successor for the
+// same agent. The new JWT is returned once.
+message RotateAgentCredentialRequest {
+  // id is the credential being retired.
+  string id = 1;
+  // issued_by is the acting principal (recorded on the successor).
+  string issued_by = 2;
+  // description is the successor's label (falls back to the retired row's
+  // when empty).
+  string description = 3;
+}
+
+// RevokeAgentCredentialRequest stamps a row revoked now, with a reason.
+message RevokeAgentCredentialRequest {
+  string id = 1;
+  string reason = 2;
 }

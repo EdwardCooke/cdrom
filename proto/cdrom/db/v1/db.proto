@@ -357,6 +357,17 @@ service Database {
   rpc UpdateAPIKey(UpdateIDPAPIKeyRequest) returns (IDPAPIKey);
   rpc RotateAPIKey(RotateIDPAPIKeyRequest) returns (IDPAPIKey);
   rpc DeleteAPIKey(DeleteIDPAPIKeyRequest) returns (google.protobuf.Empty);
+  // Agent credentials (F-30.2). The Directory the IdP drives: CREATE on issue,
+  // READ for verification (F-30.3) and ADMINISTRATION, EXTEND on renew,
+  // RETIRE on rotation, REVOKE on emergency stop, MARK-SEEN on verified
+  // presentation. The JWT is never seen by the database.
+  rpc CreateAgentCredential(CreateAgentCredentialRequest) returns (AgentCredential);
+  rpc GetAgentCredential(GetAgentCredentialRequest) returns (AgentCredential);
+  rpc ListAgentCredentials(ListAgentCredentialsRequest) returns (ListAgentCredentialsResponse);
+  rpc ExtendAgentCredentialExpiration(ExtendAgentCredentialExpirationRequest) returns (AgentCredential);
+  rpc RetireAgentCredential(RetireAgentCredentialRequest) returns (AgentCredential);
+  rpc RevokeAgentCredential(RevokeAgentCredentialRequest) returns (AgentCredential);
+  rpc MarkAgentCredentialSeen(MarkAgentCredentialSeenRequest) returns (google.protobuf.Empty);
   // AdjustAPIKeyLockout applies a delta to a user's API-key failure counter
   // and optionally sets/clears the lockout instant (F-25). Relocated here
   // from VerifyAPIKey because Argon2ID verification (salted KDF) happens in
@@ -3447,6 +3458,98 @@ message RotateIDPAPIKeyRequest {
 }
 
 message DeleteIDPAPIKeyRequest {
+  string id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Agent credentials (F-30.2). The DATABASE SERVICE OWNS THE CREDENTIAL DIRECTORY
+// (the tracked rows); the IdP signs the JWTs and drives the lifecycle through
+// these RPCs. The JWT itself is NEVER STORED here — its signature is the
+// custody proof; the row is the authority for liveness (active, unexpired,
+// unrevoked). Reads exclude nothing secret (there is no secret material in the
+// row), but the plaintext JWT travels only in the IdP's issue/rotate RESPONSES.
+
+// AgentCredential is a tracked agent-credential row. id doubles as the JWT's
+// jti claim. Several rows MAY SHARE agent_name during a rotation overlap; the
+// operating assumption is at most one ACTIVE row per name.
+message AgentCredential {
+  // id is the credential's stable identifier (rendered as a string on the
+  // wire); it equals the JWT's jti claim.
+  string id = 1;
+  // agent_name is the agent this credential is bound to (the JWT's subject is
+  // "agent:<agent_name>").
+  string agent_name = 2;
+  // issued_by is the principal (user id or name) that caused the issuance.
+  string issued_by = 3;
+  // description is a human-readable label.
+  string description = 4;
+  // expires_at is the row's real deadline. The JWT's exp claim is a generous
+  // PLACEHOLDER the API never enforces; this field is what lapses the
+  // credential.
+  google.protobuf.Timestamp expires_at = 5;
+  // replaced_by_id chains rotations: set on the RETIRED row to the successor's
+  // id.
+  string replaced_by_id = 6;
+  // revoked_at, when set, marks the credential revoked (immediately);
+  // revoked_reason carries WHY.
+  google.protobuf.Timestamp revoked_at = 7;
+  string revoked_reason = 8;
+  // last_seen_at is bumped (THROTTLED) on verified presentation (F-30.3 feeds
+  // the UI's "seen recently" indicator).
+  google.protobuf.Timestamp last_seen_at = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// CreateAgentCredentialRequest stores a newly issued credential. The caller
+// (the IdP) supplies the id (chosen so it becomes the JWT's jti), the agent
+// name, the acting principal, and the computed deadline; the database assigns
+// created_at.
+message CreateAgentCredentialRequest {
+  AgentCredential credential = 1;
+}
+
+// GetAgentCredentialRequest looks a row up by id.
+message GetAgentCredentialRequest {
+  string id = 1;
+}
+
+// ListAgentCredentialsRequest lists rows. When agent_name is set only that
+// agent's rows are returned; when empty, all rows in the system are returned.
+message ListAgentCredentialsRequest {
+  string agent_name = 1;
+}
+
+message ListAgentCredentialsResponse {
+  repeated AgentCredential credentials = 1;
+}
+
+// ExtendAgentCredentialExpirationRequest moves a row's deadline FORWARD to the
+// supplied instant (a "renew": the SAME JWT keeps working — the row is the
+// deadline's keeper, not the token).
+message ExtendAgentCredentialExpirationRequest {
+  string id = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// RetireAgentCredentialRequest retires a row (rotation's first half):
+// replaced_by_id chains it to the successor and the row stops governing
+// liveness. Retirement is IRREVOCABLE (distinct from revoke: retirement is the
+// orderly supersession, revoke is the emergency stop).
+message RetireAgentCredentialRequest {
+  string id = 1;
+  string replaced_by_id = 2;
+}
+
+// RevokeAgentCredentialRequest stamps a row revoked NOW, with a reason.
+message RevokeAgentCredentialRequest {
+  string id = 1;
+  string reason = 2;
+}
+
+// MarkAgentCredentialSeenRequest bumps last_seen_at (throttled by the CALLER —
+// F-30.3's verifier decides WHEN to call this).
+message MarkAgentCredentialSeenRequest {
   string id = 1;
 }
 

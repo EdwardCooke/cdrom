@@ -3504,6 +3504,427 @@ func (x *GetGroupDetailsRequest) GetId() string {
 	return ""
 }
 
+// IssueAgentCredentialRequest asks the IdP to sign a new credential for the
+// named agent. Deadline = now + the configured TTL.
+type IssueAgentCredentialRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// agent_name is the agent the credential binds to (the JWT's subject is
+	// "agent:<agent_name>"; registration may only claim this name).
+	AgentName string `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	// issued_by is the acting principal (audit link).
+	IssuedBy string `protobuf:"bytes,2,opt,name=issued_by,json=issuedBy,proto3" json:"issued_by,omitempty"`
+	// description is a human-readable label.
+	Description   string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueAgentCredentialRequest) Reset() {
+	*x = IssueAgentCredentialRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueAgentCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueAgentCredentialRequest) ProtoMessage() {}
+
+func (x *IssueAgentCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueAgentCredentialRequest.ProtoReflect.Descriptor instead.
+func (*IssueAgentCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *IssueAgentCredentialRequest) GetAgentName() string {
+	if x != nil {
+		return x.AgentName
+	}
+	return ""
+}
+
+func (x *IssueAgentCredentialRequest) GetIssuedBy() string {
+	if x != nil {
+		return x.IssuedBy
+	}
+	return ""
+}
+
+func (x *IssueAgentCredentialRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+// IssueAgentCredentialResponse carries the stored row PLUS the plaintext JWT
+// (shown exactly once).
+type IssueAgentCredentialResponse struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Credential *v1.AgentCredential    `protobuf:"bytes,1,opt,name=credential,proto3" json:"credential,omitempty"`
+	// jwt is the signed credential token. Returned only by issue and rotate.
+	Jwt           string `protobuf:"bytes,2,opt,name=jwt,proto3" json:"jwt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IssueAgentCredentialResponse) Reset() {
+	*x = IssueAgentCredentialResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IssueAgentCredentialResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IssueAgentCredentialResponse) ProtoMessage() {}
+
+func (x *IssueAgentCredentialResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IssueAgentCredentialResponse.ProtoReflect.Descriptor instead.
+func (*IssueAgentCredentialResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *IssueAgentCredentialResponse) GetCredential() *v1.AgentCredential {
+	if x != nil {
+		return x.Credential
+	}
+	return nil
+}
+
+func (x *IssueAgentCredentialResponse) GetJwt() string {
+	if x != nil {
+		return x.Jwt
+	}
+	return ""
+}
+
+// GetAgentCredentialRequest looks a row up by id (metadata only).
+type GetAgentCredentialRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetAgentCredentialRequest) Reset() {
+	*x = GetAgentCredentialRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetAgentCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetAgentCredentialRequest) ProtoMessage() {}
+
+func (x *GetAgentCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetAgentCredentialRequest.ProtoReflect.Descriptor instead.
+func (*GetAgentCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *GetAgentCredentialRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// ListAgentCredentialsRequest lists rows for one agent ("" = all agents).
+type ListAgentCredentialsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AgentName     string                 `protobuf:"bytes,1,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAgentCredentialsRequest) Reset() {
+	*x = ListAgentCredentialsRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAgentCredentialsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAgentCredentialsRequest) ProtoMessage() {}
+
+func (x *ListAgentCredentialsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAgentCredentialsRequest.ProtoReflect.Descriptor instead.
+func (*ListAgentCredentialsRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *ListAgentCredentialsRequest) GetAgentName() string {
+	if x != nil {
+		return x.AgentName
+	}
+	return ""
+}
+
+// ListAgentCredentialsResponse carries the rows (metadata only).
+type ListAgentCredentialsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Credentials   []*v1.AgentCredential  `protobuf:"bytes,1,rep,name=credentials,proto3" json:"credentials,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListAgentCredentialsResponse) Reset() {
+	*x = ListAgentCredentialsResponse{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListAgentCredentialsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListAgentCredentialsResponse) ProtoMessage() {}
+
+func (x *ListAgentCredentialsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListAgentCredentialsResponse.ProtoReflect.Descriptor instead.
+func (*ListAgentCredentialsResponse) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *ListAgentCredentialsResponse) GetCredentials() []*v1.AgentCredential {
+	if x != nil {
+		return x.Credentials
+	}
+	return nil
+}
+
+// RenewAgentCredentialRequest extends a row's deadline to now + TTL WITHOUT
+// touching the JWT (the same token keeps working).
+type RenewAgentCredentialRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewAgentCredentialRequest) Reset() {
+	*x = RenewAgentCredentialRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewAgentCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewAgentCredentialRequest) ProtoMessage() {}
+
+func (x *RenewAgentCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewAgentCredentialRequest.ProtoReflect.Descriptor instead.
+func (*RenewAgentCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *RenewAgentCredentialRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// RotateAgentCredentialRequest retires a row and signs a successor for the
+// same agent. The new JWT is returned once.
+type RotateAgentCredentialRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the credential being retired.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// issued_by is the acting principal (recorded on the successor).
+	IssuedBy string `protobuf:"bytes,2,opt,name=issued_by,json=issuedBy,proto3" json:"issued_by,omitempty"`
+	// description is the successor's label (falls back to the retired row's
+	// when empty).
+	Description   string `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RotateAgentCredentialRequest) Reset() {
+	*x = RotateAgentCredentialRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RotateAgentCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RotateAgentCredentialRequest) ProtoMessage() {}
+
+func (x *RotateAgentCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RotateAgentCredentialRequest.ProtoReflect.Descriptor instead.
+func (*RotateAgentCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{59}
+}
+
+func (x *RotateAgentCredentialRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RotateAgentCredentialRequest) GetIssuedBy() string {
+	if x != nil {
+		return x.IssuedBy
+	}
+	return ""
+}
+
+func (x *RotateAgentCredentialRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+// RevokeAgentCredentialRequest stamps a row revoked now, with a reason.
+type RevokeAgentCredentialRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeAgentCredentialRequest) Reset() {
+	*x = RevokeAgentCredentialRequest{}
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[60]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeAgentCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeAgentCredentialRequest) ProtoMessage() {}
+
+func (x *RevokeAgentCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[60]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeAgentCredentialRequest.ProtoReflect.Descriptor instead.
+func (*RevokeAgentCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_cdrom_idp_v1_idp_proto_rawDescGZIP(), []int{60}
+}
+
+func (x *RevokeAgentCredentialRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RevokeAgentCredentialRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 // Generic EQUALITY filter (attribute, case_insensitive, value): attribute
 // is one of userName, externalId, email, firstName, lastName, active,
 // provisioned; case_insensitive loosens the string comparisons (booleans
@@ -3519,7 +3940,7 @@ type ListUsersRequest_FilterPredicate struct {
 
 func (x *ListUsersRequest_FilterPredicate) Reset() {
 	*x = ListUsersRequest_FilterPredicate{}
-	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[53]
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3531,7 +3952,7 @@ func (x *ListUsersRequest_FilterPredicate) String() string {
 func (*ListUsersRequest_FilterPredicate) ProtoMessage() {}
 
 func (x *ListUsersRequest_FilterPredicate) ProtoReflect() protoreflect.Message {
-	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[53]
+	mi := &file_cdrom_idp_v1_idp_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3806,14 +4227,40 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\x18ListGroupDetailsResponse\x121\n" +
 	"\x06groups\x18\x01 \x03(\v2\x19.cdrom.idp.v1.GroupDetailR\x06groups\"(\n" +
 	"\x16GetGroupDetailsRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id*\x8b\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"{\n" +
+	"\x1bIssueAgentCredentialRequest\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x01 \x01(\tR\tagentName\x12\x1b\n" +
+	"\tissued_by\x18\x02 \x01(\tR\bissuedBy\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\"n\n" +
+	"\x1cIssueAgentCredentialResponse\x12<\n" +
+	"\n" +
+	"credential\x18\x01 \x01(\v2\x1c.cdrom.db.v1.AgentCredentialR\n" +
+	"credential\x12\x10\n" +
+	"\x03jwt\x18\x02 \x01(\tR\x03jwt\"+\n" +
+	"\x19GetAgentCredentialRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"<\n" +
+	"\x1bListAgentCredentialsRequest\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\x01 \x01(\tR\tagentName\"^\n" +
+	"\x1cListAgentCredentialsResponse\x12>\n" +
+	"\vcredentials\x18\x01 \x03(\v2\x1c.cdrom.db.v1.AgentCredentialR\vcredentials\"-\n" +
+	"\x1bRenewAgentCredentialRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"m\n" +
+	"\x1cRotateAgentCredentialRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\tissued_by\x18\x02 \x01(\tR\bissuedBy\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\"F\n" +
+	"\x1cRevokeAgentCredentialRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason*\x8b\x01\n" +
 	"\x10AdmissionVerdict\x12\x18\n" +
 	"\x14ADMITTED_UNSPECIFIED\x10\x00\x12\f\n" +
 	"\bADMITTED\x10\x01\x12\x0f\n" +
 	"\vDEACTIVATED\x10\x02\x12\x11\n" +
 	"\rDEPROVISIONED\x10\x03\x12\x14\n" +
 	"\x10UNKNOWN_REJECTED\x10\x04\x12\x15\n" +
-	"\x11NO_ROLES_REJECTED\x10\x052\xf3\x16\n" +
+	"\x11NO_ROLES_REJECTED\x10\x052\xe3\x1b\n" +
 	"\x03IdP\x12U\n" +
 	"\fMintJobToken\x12!.cdrom.idp.v1.MintJobTokenRequest\x1a\".cdrom.idp.v1.MintJobTokenResponse\x12@\n" +
 	"\x05Login\x12\x1a.cdrom.idp.v1.LoginRequest\x1a\x1b.cdrom.idp.v1.LoginResponse\x12?\n" +
@@ -3833,6 +4280,12 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\fDeleteAPIKey\x12!.cdrom.idp.v1.DeleteAPIKeyRequest\x1a\".cdrom.idp.v1.DeleteAPIKeyResponse\x12U\n" +
 	"\fVerifyAPIKey\x12!.cdrom.idp.v1.VerifyAPIKeyRequest\x1a\".cdrom.idp.v1.VerifyAPIKeyResponse\x12g\n" +
 	"\x12ResetAPIKeyLockout\x12'.cdrom.idp.v1.ResetAPIKeyLockoutRequest\x1a(.cdrom.idp.v1.ResetAPIKeyLockoutResponse\x12m\n" +
+	"\x14IssueAgentCredential\x12).cdrom.idp.v1.IssueAgentCredentialRequest\x1a*.cdrom.idp.v1.IssueAgentCredentialResponse\x12[\n" +
+	"\x12GetAgentCredential\x12'.cdrom.idp.v1.GetAgentCredentialRequest\x1a\x1c.cdrom.db.v1.AgentCredential\x12m\n" +
+	"\x14ListAgentCredentials\x12).cdrom.idp.v1.ListAgentCredentialsRequest\x1a*.cdrom.idp.v1.ListAgentCredentialsResponse\x12_\n" +
+	"\x14RenewAgentCredential\x12).cdrom.idp.v1.RenewAgentCredentialRequest\x1a\x1c.cdrom.db.v1.AgentCredential\x12o\n" +
+	"\x15RotateAgentCredential\x12*.cdrom.idp.v1.RotateAgentCredentialRequest\x1a*.cdrom.idp.v1.IssueAgentCredentialResponse\x12a\n" +
+	"\x15RevokeAgentCredential\x12*.cdrom.idp.v1.RevokeAgentCredentialRequest\x1a\x1c.cdrom.db.v1.AgentCredential\x12m\n" +
 	"\x14CreateServiceAccount\x12).cdrom.idp.v1.CreateServiceAccountRequest\x1a*.cdrom.idp.v1.CreateServiceAccountResponse\x12X\n" +
 	"\x11GetServiceAccount\x12&.cdrom.idp.v1.GetServiceAccountRequest\x1a\x1b.cdrom.db.v1.ServiceAccount\x12j\n" +
 	"\x13ListServiceAccounts\x12(.cdrom.idp.v1.ListServiceAccountsRequest\x1a).cdrom.idp.v1.ListServiceAccountsResponse\x12^\n" +
@@ -3864,7 +4317,7 @@ func file_cdrom_idp_v1_idp_proto_rawDescGZIP() []byte {
 }
 
 var file_cdrom_idp_v1_idp_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cdrom_idp_v1_idp_proto_msgTypes = make([]protoimpl.MessageInfo, 54)
+var file_cdrom_idp_v1_idp_proto_msgTypes = make([]protoimpl.MessageInfo, 62)
 var file_cdrom_idp_v1_idp_proto_goTypes = []any{
 	(AdmissionVerdict)(0),                      // 0: cdrom.idp.v1.AdmissionVerdict
 	(*MintJobTokenRequest)(nil),                // 1: cdrom.idp.v1.MintJobTokenRequest
@@ -3920,102 +4373,125 @@ var file_cdrom_idp_v1_idp_proto_goTypes = []any{
 	(*ListGroupDetailsRequest)(nil),            // 51: cdrom.idp.v1.ListGroupDetailsRequest
 	(*ListGroupDetailsResponse)(nil),           // 52: cdrom.idp.v1.ListGroupDetailsResponse
 	(*GetGroupDetailsRequest)(nil),             // 53: cdrom.idp.v1.GetGroupDetailsRequest
-	(*ListUsersRequest_FilterPredicate)(nil),   // 54: cdrom.idp.v1.ListUsersRequest.FilterPredicate
-	(*v1.IDPUser)(nil),                         // 55: cdrom.db.v1.IDPUser
-	(*v1.IDPAPIKey)(nil),                       // 56: cdrom.db.v1.IDPAPIKey
-	(*durationpb.Duration)(nil),                // 57: google.protobuf.Duration
-	(*v1.ServiceAccount)(nil),                  // 58: cdrom.db.v1.ServiceAccount
+	(*IssueAgentCredentialRequest)(nil),        // 54: cdrom.idp.v1.IssueAgentCredentialRequest
+	(*IssueAgentCredentialResponse)(nil),       // 55: cdrom.idp.v1.IssueAgentCredentialResponse
+	(*GetAgentCredentialRequest)(nil),          // 56: cdrom.idp.v1.GetAgentCredentialRequest
+	(*ListAgentCredentialsRequest)(nil),        // 57: cdrom.idp.v1.ListAgentCredentialsRequest
+	(*ListAgentCredentialsResponse)(nil),       // 58: cdrom.idp.v1.ListAgentCredentialsResponse
+	(*RenewAgentCredentialRequest)(nil),        // 59: cdrom.idp.v1.RenewAgentCredentialRequest
+	(*RotateAgentCredentialRequest)(nil),       // 60: cdrom.idp.v1.RotateAgentCredentialRequest
+	(*RevokeAgentCredentialRequest)(nil),       // 61: cdrom.idp.v1.RevokeAgentCredentialRequest
+	(*ListUsersRequest_FilterPredicate)(nil),   // 62: cdrom.idp.v1.ListUsersRequest.FilterPredicate
+	(*v1.IDPUser)(nil),                         // 63: cdrom.db.v1.IDPUser
+	(*v1.IDPAPIKey)(nil),                       // 64: cdrom.db.v1.IDPAPIKey
+	(*durationpb.Duration)(nil),                // 65: google.protobuf.Duration
+	(*v1.ServiceAccount)(nil),                  // 66: cdrom.db.v1.ServiceAccount
+	(*v1.AgentCredential)(nil),                 // 67: cdrom.db.v1.AgentCredential
 }
 var file_cdrom_idp_v1_idp_proto_depIdxs = []int32{
-	55, // 0: cdrom.idp.v1.LoginResponse.user:type_name -> cdrom.db.v1.IDPUser
-	54, // 1: cdrom.idp.v1.ListUsersRequest.generic_filter:type_name -> cdrom.idp.v1.ListUsersRequest.FilterPredicate
-	55, // 2: cdrom.idp.v1.ListUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
-	56, // 3: cdrom.idp.v1.CreateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	56, // 4: cdrom.idp.v1.ListAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
-	56, // 5: cdrom.idp.v1.RotateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	57, // 6: cdrom.idp.v1.VerifyAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
-	56, // 7: cdrom.idp.v1.VerifyAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
-	55, // 8: cdrom.idp.v1.VerifyAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
-	58, // 9: cdrom.idp.v1.CreateServiceAccountResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	63, // 0: cdrom.idp.v1.LoginResponse.user:type_name -> cdrom.db.v1.IDPUser
+	62, // 1: cdrom.idp.v1.ListUsersRequest.generic_filter:type_name -> cdrom.idp.v1.ListUsersRequest.FilterPredicate
+	63, // 2: cdrom.idp.v1.ListUsersResponse.users:type_name -> cdrom.db.v1.IDPUser
+	64, // 3: cdrom.idp.v1.CreateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	64, // 4: cdrom.idp.v1.ListAPIKeysResponse.keys:type_name -> cdrom.db.v1.IDPAPIKey
+	64, // 5: cdrom.idp.v1.RotateAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	65, // 6: cdrom.idp.v1.VerifyAPIKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	64, // 7: cdrom.idp.v1.VerifyAPIKeyResponse.key:type_name -> cdrom.db.v1.IDPAPIKey
+	63, // 8: cdrom.idp.v1.VerifyAPIKeyResponse.owner:type_name -> cdrom.db.v1.IDPUser
+	66, // 9: cdrom.idp.v1.CreateServiceAccountResponse.account:type_name -> cdrom.db.v1.ServiceAccount
 	28, // 10: cdrom.idp.v1.CreateServiceAccountResponse.keys:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
-	58, // 11: cdrom.idp.v1.ListServiceAccountsResponse.accounts:type_name -> cdrom.db.v1.ServiceAccount
-	58, // 12: cdrom.idp.v1.RotateServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	66, // 11: cdrom.idp.v1.ListServiceAccountsResponse.accounts:type_name -> cdrom.db.v1.ServiceAccount
+	66, // 12: cdrom.idp.v1.RotateServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
 	28, // 13: cdrom.idp.v1.RotateServiceAccountKeyResponse.key:type_name -> cdrom.idp.v1.ServiceAccountPlaintextKey
-	57, // 14: cdrom.idp.v1.VerifyServiceAccountKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
-	58, // 15: cdrom.idp.v1.VerifyServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
+	65, // 14: cdrom.idp.v1.VerifyServiceAccountKeyRequest.lockout_duration:type_name -> google.protobuf.Duration
+	66, // 15: cdrom.idp.v1.VerifyServiceAccountKeyResponse.account:type_name -> cdrom.db.v1.ServiceAccount
 	0,  // 16: cdrom.idp.v1.AdmitPrincipalResponse.verdict:type_name -> cdrom.idp.v1.AdmissionVerdict
-	55, // 17: cdrom.idp.v1.AdmitPrincipalResponse.user:type_name -> cdrom.db.v1.IDPUser
+	63, // 17: cdrom.idp.v1.AdmitPrincipalResponse.user:type_name -> cdrom.db.v1.IDPUser
 	50, // 18: cdrom.idp.v1.GroupDetail.members:type_name -> cdrom.idp.v1.ResolvedGroupMember
 	49, // 19: cdrom.idp.v1.ListGroupDetailsResponse.groups:type_name -> cdrom.idp.v1.GroupDetail
-	1,  // 20: cdrom.idp.v1.IdP.MintJobToken:input_type -> cdrom.idp.v1.MintJobTokenRequest
-	3,  // 21: cdrom.idp.v1.IdP.Login:input_type -> cdrom.idp.v1.LoginRequest
-	5,  // 22: cdrom.idp.v1.IdP.Register:input_type -> cdrom.idp.v1.RegisterRequest
-	6,  // 23: cdrom.idp.v1.IdP.ListUsers:input_type -> cdrom.idp.v1.ListUsersRequest
-	8,  // 24: cdrom.idp.v1.IdP.CreateUser:input_type -> cdrom.idp.v1.CreateUserRequest
-	9,  // 25: cdrom.idp.v1.IdP.UpdateUser:input_type -> cdrom.idp.v1.UpdateUserRequest
-	10, // 26: cdrom.idp.v1.IdP.DeleteUser:input_type -> cdrom.idp.v1.DeleteUserRequest
-	12, // 27: cdrom.idp.v1.IdP.CreateAPIKey:input_type -> cdrom.idp.v1.CreateAPIKeyRequest
-	14, // 28: cdrom.idp.v1.IdP.GetAPIKey:input_type -> cdrom.idp.v1.GetAPIKeyRequest
-	15, // 29: cdrom.idp.v1.IdP.ListAPIKeys:input_type -> cdrom.idp.v1.ListAPIKeysRequest
-	17, // 30: cdrom.idp.v1.IdP.UpdateAPIKey:input_type -> cdrom.idp.v1.UpdateAPIKeyRequest
-	18, // 31: cdrom.idp.v1.IdP.RotateAPIKey:input_type -> cdrom.idp.v1.RotateAPIKeyRequest
-	20, // 32: cdrom.idp.v1.IdP.DeleteAPIKey:input_type -> cdrom.idp.v1.DeleteAPIKeyRequest
-	22, // 33: cdrom.idp.v1.IdP.VerifyAPIKey:input_type -> cdrom.idp.v1.VerifyAPIKeyRequest
-	24, // 34: cdrom.idp.v1.IdP.ResetAPIKeyLockout:input_type -> cdrom.idp.v1.ResetAPIKeyLockoutRequest
-	26, // 35: cdrom.idp.v1.IdP.CreateServiceAccount:input_type -> cdrom.idp.v1.CreateServiceAccountRequest
-	29, // 36: cdrom.idp.v1.IdP.GetServiceAccount:input_type -> cdrom.idp.v1.GetServiceAccountRequest
-	30, // 37: cdrom.idp.v1.IdP.ListServiceAccounts:input_type -> cdrom.idp.v1.ListServiceAccountsRequest
-	32, // 38: cdrom.idp.v1.IdP.UpdateServiceAccount:input_type -> cdrom.idp.v1.UpdateServiceAccountRequest
-	33, // 39: cdrom.idp.v1.IdP.RotateServiceAccountKey:input_type -> cdrom.idp.v1.RotateServiceAccountKeyRequest
-	35, // 40: cdrom.idp.v1.IdP.DisableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
-	35, // 41: cdrom.idp.v1.IdP.EnableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
-	36, // 42: cdrom.idp.v1.IdP.DeleteServiceAccount:input_type -> cdrom.idp.v1.DeleteServiceAccountRequest
-	37, // 43: cdrom.idp.v1.IdP.AssignServiceAccountRoles:input_type -> cdrom.idp.v1.AssignServiceAccountRolesRequest
-	38, // 44: cdrom.idp.v1.IdP.RemoveServiceAccountRole:input_type -> cdrom.idp.v1.RemoveServiceAccountRoleRequest
-	39, // 45: cdrom.idp.v1.IdP.VerifyServiceAccountKey:input_type -> cdrom.idp.v1.VerifyServiceAccountKeyRequest
-	41, // 46: cdrom.idp.v1.IdP.ResetServiceAccountLockout:input_type -> cdrom.idp.v1.ResetServiceAccountLockoutRequest
-	43, // 47: cdrom.idp.v1.IdP.DeriveScimKey:input_type -> cdrom.idp.v1.DeriveScimKeyRequest
-	45, // 48: cdrom.idp.v1.IdP.AdmitPrincipal:input_type -> cdrom.idp.v1.AdmitPrincipalRequest
-	47, // 49: cdrom.idp.v1.IdP.DescribeSystem:input_type -> cdrom.idp.v1.DescribeSystemRequest
-	51, // 50: cdrom.idp.v1.IdP.ListGroupDetails:input_type -> cdrom.idp.v1.ListGroupDetailsRequest
-	53, // 51: cdrom.idp.v1.IdP.GetGroupDetails:input_type -> cdrom.idp.v1.GetGroupDetailsRequest
-	2,  // 52: cdrom.idp.v1.IdP.MintJobToken:output_type -> cdrom.idp.v1.MintJobTokenResponse
-	4,  // 53: cdrom.idp.v1.IdP.Login:output_type -> cdrom.idp.v1.LoginResponse
-	55, // 54: cdrom.idp.v1.IdP.Register:output_type -> cdrom.db.v1.IDPUser
-	7,  // 55: cdrom.idp.v1.IdP.ListUsers:output_type -> cdrom.idp.v1.ListUsersResponse
-	55, // 56: cdrom.idp.v1.IdP.CreateUser:output_type -> cdrom.db.v1.IDPUser
-	55, // 57: cdrom.idp.v1.IdP.UpdateUser:output_type -> cdrom.db.v1.IDPUser
-	11, // 58: cdrom.idp.v1.IdP.DeleteUser:output_type -> cdrom.idp.v1.DeleteUserResponse
-	13, // 59: cdrom.idp.v1.IdP.CreateAPIKey:output_type -> cdrom.idp.v1.CreateAPIKeyResponse
-	56, // 60: cdrom.idp.v1.IdP.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	16, // 61: cdrom.idp.v1.IdP.ListAPIKeys:output_type -> cdrom.idp.v1.ListAPIKeysResponse
-	56, // 62: cdrom.idp.v1.IdP.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
-	19, // 63: cdrom.idp.v1.IdP.RotateAPIKey:output_type -> cdrom.idp.v1.RotateAPIKeyResponse
-	21, // 64: cdrom.idp.v1.IdP.DeleteAPIKey:output_type -> cdrom.idp.v1.DeleteAPIKeyResponse
-	23, // 65: cdrom.idp.v1.IdP.VerifyAPIKey:output_type -> cdrom.idp.v1.VerifyAPIKeyResponse
-	25, // 66: cdrom.idp.v1.IdP.ResetAPIKeyLockout:output_type -> cdrom.idp.v1.ResetAPIKeyLockoutResponse
-	27, // 67: cdrom.idp.v1.IdP.CreateServiceAccount:output_type -> cdrom.idp.v1.CreateServiceAccountResponse
-	58, // 68: cdrom.idp.v1.IdP.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	31, // 69: cdrom.idp.v1.IdP.ListServiceAccounts:output_type -> cdrom.idp.v1.ListServiceAccountsResponse
-	58, // 70: cdrom.idp.v1.IdP.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	34, // 71: cdrom.idp.v1.IdP.RotateServiceAccountKey:output_type -> cdrom.idp.v1.RotateServiceAccountKeyResponse
-	58, // 72: cdrom.idp.v1.IdP.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	58, // 73: cdrom.idp.v1.IdP.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	58, // 74: cdrom.idp.v1.IdP.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
-	58, // 75: cdrom.idp.v1.IdP.AssignServiceAccountRoles:output_type -> cdrom.db.v1.ServiceAccount
-	58, // 76: cdrom.idp.v1.IdP.RemoveServiceAccountRole:output_type -> cdrom.db.v1.ServiceAccount
-	40, // 77: cdrom.idp.v1.IdP.VerifyServiceAccountKey:output_type -> cdrom.idp.v1.VerifyServiceAccountKeyResponse
-	42, // 78: cdrom.idp.v1.IdP.ResetServiceAccountLockout:output_type -> cdrom.idp.v1.ResetServiceAccountLockoutResponse
-	44, // 79: cdrom.idp.v1.IdP.DeriveScimKey:output_type -> cdrom.idp.v1.DeriveScimKeyResponse
-	46, // 80: cdrom.idp.v1.IdP.AdmitPrincipal:output_type -> cdrom.idp.v1.AdmitPrincipalResponse
-	48, // 81: cdrom.idp.v1.IdP.DescribeSystem:output_type -> cdrom.idp.v1.DescribeSystemResponse
-	52, // 82: cdrom.idp.v1.IdP.ListGroupDetails:output_type -> cdrom.idp.v1.ListGroupDetailsResponse
-	49, // 83: cdrom.idp.v1.IdP.GetGroupDetails:output_type -> cdrom.idp.v1.GroupDetail
-	52, // [52:84] is the sub-list for method output_type
-	20, // [20:52] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	67, // 20: cdrom.idp.v1.IssueAgentCredentialResponse.credential:type_name -> cdrom.db.v1.AgentCredential
+	67, // 21: cdrom.idp.v1.ListAgentCredentialsResponse.credentials:type_name -> cdrom.db.v1.AgentCredential
+	1,  // 22: cdrom.idp.v1.IdP.MintJobToken:input_type -> cdrom.idp.v1.MintJobTokenRequest
+	3,  // 23: cdrom.idp.v1.IdP.Login:input_type -> cdrom.idp.v1.LoginRequest
+	5,  // 24: cdrom.idp.v1.IdP.Register:input_type -> cdrom.idp.v1.RegisterRequest
+	6,  // 25: cdrom.idp.v1.IdP.ListUsers:input_type -> cdrom.idp.v1.ListUsersRequest
+	8,  // 26: cdrom.idp.v1.IdP.CreateUser:input_type -> cdrom.idp.v1.CreateUserRequest
+	9,  // 27: cdrom.idp.v1.IdP.UpdateUser:input_type -> cdrom.idp.v1.UpdateUserRequest
+	10, // 28: cdrom.idp.v1.IdP.DeleteUser:input_type -> cdrom.idp.v1.DeleteUserRequest
+	12, // 29: cdrom.idp.v1.IdP.CreateAPIKey:input_type -> cdrom.idp.v1.CreateAPIKeyRequest
+	14, // 30: cdrom.idp.v1.IdP.GetAPIKey:input_type -> cdrom.idp.v1.GetAPIKeyRequest
+	15, // 31: cdrom.idp.v1.IdP.ListAPIKeys:input_type -> cdrom.idp.v1.ListAPIKeysRequest
+	17, // 32: cdrom.idp.v1.IdP.UpdateAPIKey:input_type -> cdrom.idp.v1.UpdateAPIKeyRequest
+	18, // 33: cdrom.idp.v1.IdP.RotateAPIKey:input_type -> cdrom.idp.v1.RotateAPIKeyRequest
+	20, // 34: cdrom.idp.v1.IdP.DeleteAPIKey:input_type -> cdrom.idp.v1.DeleteAPIKeyRequest
+	22, // 35: cdrom.idp.v1.IdP.VerifyAPIKey:input_type -> cdrom.idp.v1.VerifyAPIKeyRequest
+	24, // 36: cdrom.idp.v1.IdP.ResetAPIKeyLockout:input_type -> cdrom.idp.v1.ResetAPIKeyLockoutRequest
+	54, // 37: cdrom.idp.v1.IdP.IssueAgentCredential:input_type -> cdrom.idp.v1.IssueAgentCredentialRequest
+	56, // 38: cdrom.idp.v1.IdP.GetAgentCredential:input_type -> cdrom.idp.v1.GetAgentCredentialRequest
+	57, // 39: cdrom.idp.v1.IdP.ListAgentCredentials:input_type -> cdrom.idp.v1.ListAgentCredentialsRequest
+	59, // 40: cdrom.idp.v1.IdP.RenewAgentCredential:input_type -> cdrom.idp.v1.RenewAgentCredentialRequest
+	60, // 41: cdrom.idp.v1.IdP.RotateAgentCredential:input_type -> cdrom.idp.v1.RotateAgentCredentialRequest
+	61, // 42: cdrom.idp.v1.IdP.RevokeAgentCredential:input_type -> cdrom.idp.v1.RevokeAgentCredentialRequest
+	26, // 43: cdrom.idp.v1.IdP.CreateServiceAccount:input_type -> cdrom.idp.v1.CreateServiceAccountRequest
+	29, // 44: cdrom.idp.v1.IdP.GetServiceAccount:input_type -> cdrom.idp.v1.GetServiceAccountRequest
+	30, // 45: cdrom.idp.v1.IdP.ListServiceAccounts:input_type -> cdrom.idp.v1.ListServiceAccountsRequest
+	32, // 46: cdrom.idp.v1.IdP.UpdateServiceAccount:input_type -> cdrom.idp.v1.UpdateServiceAccountRequest
+	33, // 47: cdrom.idp.v1.IdP.RotateServiceAccountKey:input_type -> cdrom.idp.v1.RotateServiceAccountKeyRequest
+	35, // 48: cdrom.idp.v1.IdP.DisableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
+	35, // 49: cdrom.idp.v1.IdP.EnableServiceAccount:input_type -> cdrom.idp.v1.ServiceAccountStateRequest
+	36, // 50: cdrom.idp.v1.IdP.DeleteServiceAccount:input_type -> cdrom.idp.v1.DeleteServiceAccountRequest
+	37, // 51: cdrom.idp.v1.IdP.AssignServiceAccountRoles:input_type -> cdrom.idp.v1.AssignServiceAccountRolesRequest
+	38, // 52: cdrom.idp.v1.IdP.RemoveServiceAccountRole:input_type -> cdrom.idp.v1.RemoveServiceAccountRoleRequest
+	39, // 53: cdrom.idp.v1.IdP.VerifyServiceAccountKey:input_type -> cdrom.idp.v1.VerifyServiceAccountKeyRequest
+	41, // 54: cdrom.idp.v1.IdP.ResetServiceAccountLockout:input_type -> cdrom.idp.v1.ResetServiceAccountLockoutRequest
+	43, // 55: cdrom.idp.v1.IdP.DeriveScimKey:input_type -> cdrom.idp.v1.DeriveScimKeyRequest
+	45, // 56: cdrom.idp.v1.IdP.AdmitPrincipal:input_type -> cdrom.idp.v1.AdmitPrincipalRequest
+	47, // 57: cdrom.idp.v1.IdP.DescribeSystem:input_type -> cdrom.idp.v1.DescribeSystemRequest
+	51, // 58: cdrom.idp.v1.IdP.ListGroupDetails:input_type -> cdrom.idp.v1.ListGroupDetailsRequest
+	53, // 59: cdrom.idp.v1.IdP.GetGroupDetails:input_type -> cdrom.idp.v1.GetGroupDetailsRequest
+	2,  // 60: cdrom.idp.v1.IdP.MintJobToken:output_type -> cdrom.idp.v1.MintJobTokenResponse
+	4,  // 61: cdrom.idp.v1.IdP.Login:output_type -> cdrom.idp.v1.LoginResponse
+	63, // 62: cdrom.idp.v1.IdP.Register:output_type -> cdrom.db.v1.IDPUser
+	7,  // 63: cdrom.idp.v1.IdP.ListUsers:output_type -> cdrom.idp.v1.ListUsersResponse
+	63, // 64: cdrom.idp.v1.IdP.CreateUser:output_type -> cdrom.db.v1.IDPUser
+	63, // 65: cdrom.idp.v1.IdP.UpdateUser:output_type -> cdrom.db.v1.IDPUser
+	11, // 66: cdrom.idp.v1.IdP.DeleteUser:output_type -> cdrom.idp.v1.DeleteUserResponse
+	13, // 67: cdrom.idp.v1.IdP.CreateAPIKey:output_type -> cdrom.idp.v1.CreateAPIKeyResponse
+	64, // 68: cdrom.idp.v1.IdP.GetAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	16, // 69: cdrom.idp.v1.IdP.ListAPIKeys:output_type -> cdrom.idp.v1.ListAPIKeysResponse
+	64, // 70: cdrom.idp.v1.IdP.UpdateAPIKey:output_type -> cdrom.db.v1.IDPAPIKey
+	19, // 71: cdrom.idp.v1.IdP.RotateAPIKey:output_type -> cdrom.idp.v1.RotateAPIKeyResponse
+	21, // 72: cdrom.idp.v1.IdP.DeleteAPIKey:output_type -> cdrom.idp.v1.DeleteAPIKeyResponse
+	23, // 73: cdrom.idp.v1.IdP.VerifyAPIKey:output_type -> cdrom.idp.v1.VerifyAPIKeyResponse
+	25, // 74: cdrom.idp.v1.IdP.ResetAPIKeyLockout:output_type -> cdrom.idp.v1.ResetAPIKeyLockoutResponse
+	55, // 75: cdrom.idp.v1.IdP.IssueAgentCredential:output_type -> cdrom.idp.v1.IssueAgentCredentialResponse
+	67, // 76: cdrom.idp.v1.IdP.GetAgentCredential:output_type -> cdrom.db.v1.AgentCredential
+	58, // 77: cdrom.idp.v1.IdP.ListAgentCredentials:output_type -> cdrom.idp.v1.ListAgentCredentialsResponse
+	67, // 78: cdrom.idp.v1.IdP.RenewAgentCredential:output_type -> cdrom.db.v1.AgentCredential
+	55, // 79: cdrom.idp.v1.IdP.RotateAgentCredential:output_type -> cdrom.idp.v1.IssueAgentCredentialResponse
+	67, // 80: cdrom.idp.v1.IdP.RevokeAgentCredential:output_type -> cdrom.db.v1.AgentCredential
+	27, // 81: cdrom.idp.v1.IdP.CreateServiceAccount:output_type -> cdrom.idp.v1.CreateServiceAccountResponse
+	66, // 82: cdrom.idp.v1.IdP.GetServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	31, // 83: cdrom.idp.v1.IdP.ListServiceAccounts:output_type -> cdrom.idp.v1.ListServiceAccountsResponse
+	66, // 84: cdrom.idp.v1.IdP.UpdateServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	34, // 85: cdrom.idp.v1.IdP.RotateServiceAccountKey:output_type -> cdrom.idp.v1.RotateServiceAccountKeyResponse
+	66, // 86: cdrom.idp.v1.IdP.DisableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	66, // 87: cdrom.idp.v1.IdP.EnableServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	66, // 88: cdrom.idp.v1.IdP.DeleteServiceAccount:output_type -> cdrom.db.v1.ServiceAccount
+	66, // 89: cdrom.idp.v1.IdP.AssignServiceAccountRoles:output_type -> cdrom.db.v1.ServiceAccount
+	66, // 90: cdrom.idp.v1.IdP.RemoveServiceAccountRole:output_type -> cdrom.db.v1.ServiceAccount
+	40, // 91: cdrom.idp.v1.IdP.VerifyServiceAccountKey:output_type -> cdrom.idp.v1.VerifyServiceAccountKeyResponse
+	42, // 92: cdrom.idp.v1.IdP.ResetServiceAccountLockout:output_type -> cdrom.idp.v1.ResetServiceAccountLockoutResponse
+	44, // 93: cdrom.idp.v1.IdP.DeriveScimKey:output_type -> cdrom.idp.v1.DeriveScimKeyResponse
+	46, // 94: cdrom.idp.v1.IdP.AdmitPrincipal:output_type -> cdrom.idp.v1.AdmitPrincipalResponse
+	48, // 95: cdrom.idp.v1.IdP.DescribeSystem:output_type -> cdrom.idp.v1.DescribeSystemResponse
+	52, // 96: cdrom.idp.v1.IdP.ListGroupDetails:output_type -> cdrom.idp.v1.ListGroupDetailsResponse
+	49, // 97: cdrom.idp.v1.IdP.GetGroupDetails:output_type -> cdrom.idp.v1.GroupDetail
+	60, // [60:98] is the sub-list for method output_type
+	22, // [22:60] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_cdrom_idp_v1_idp_proto_init() }
@@ -4030,7 +4506,7 @@ func file_cdrom_idp_v1_idp_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdrom_idp_v1_idp_proto_rawDesc), len(file_cdrom_idp_v1_idp_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   54,
+			NumMessages:   62,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

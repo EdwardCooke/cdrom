@@ -371,7 +371,7 @@ the mechanics are shared.
 ### The `probe` step handler (verification)
 
 A new built-in handler, `type: probe` — a readiness poll executed **by the
-execution target** (agent/agent), stdlib `net/http` only, portable
+execution target** (agent/worker), stdlib `net/http` only, portable
 Win/Linux. Deliberately target-side (contrast F-18's API-side sends): the
 probe's value is network adjacency to the workload that was just deployed —
 cluster-internal VIPs/LBs that the API cannot reach. Trust parity is the

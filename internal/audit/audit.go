@@ -211,6 +211,14 @@ const (
 	// ActionAgentGroup* are the agent-group management actions (F-29):
 	// creating, updating, or deleting an agent group (a named group of
 	// long-lived agents that carries tags).
+	// ActionAgentCredential* are the agent-credential management actions
+	// (F-30.2): issuing, renewing, rotating, or revoking a tracked agent
+	// credential. The acting principal is recorded; the JWT itself is NEVER
+	// stored (the audit carries the credential id and the agent name only).
+	ActionAgentCredentialIssue  = "agent-credential.issue"
+	ActionAgentCredentialRenew  = "agent-credential.renew"
+	ActionAgentCredentialRotate = "agent-credential.rotate"
+	ActionAgentCredentialRevoke = "agent-credential.revoke"
 	ActionAgentGroupCreate = "agent-group.create"
 	ActionAgentGroupUpdate = "agent-group.update"
 	ActionAgentGroupDelete = "agent-group.delete"
@@ -274,6 +282,8 @@ const (
 	TargetEnvironment = "environment"
 	// TargetAgentGroup is the target kind of an agent group (F-29): a named
 	// group of long-lived agents that carries tags.
+	// TargetAgentCredential is the target kind of an agent credential (F-30.2).
+	TargetAgentCredential = "agent-credential"
 	TargetAgentGroup = "agent-group"
 	// TargetSSHKnownHost is the target kind of a runtime-managed SSH host key
 	// (F-21.2.4.1).

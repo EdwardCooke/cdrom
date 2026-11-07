@@ -243,6 +243,10 @@ func main() {
 		}
 		apiServer.SetUserPassClient(api.NewUserPassClient(idpClient, audience, idpBase))
 	}
+	// The agent-credential management surface (F-30.2) is ALWAYS wired when the
+	// IdP is reachable: it is a management capability, not an opt-in auth
+	// mechanic, so it needs no enable flag.
+	apiServer.SetAgentCredentialClient(api.NewAgentCredentialClient(idpClient))
 
 	// API-key authentication (F-25). When enabled the API attaches a proxy
 	// client to the IdP so the UI can manage API keys (the real logic — key
@@ -350,7 +354,7 @@ func main() {
 		}
 	}()
 
-	// Job-token auth for the gRPC surface (agents, agents). Disabled by
+	// Job-token auth for the gRPC surface (agents, workers). Disabled by
 	// default; when enabled the API mints job tokens via the IdP (the only
 	// caller of its job-token endpoint, authenticated with its mTLS client
 	// certificate) and verifies them on job-scoped calls. It performs OIDC
@@ -364,7 +368,41 @@ func main() {
 		}
 	}
 
-	// gRPC server (agents, agents, scheduler).
+	// Agent-credential verification for the renew endpoint's SELF-SERVICE arm
+	// (F-30.2 Slice 3): an agent renews its own credential by presenting it as
+	// the Bearer token. It shares the job-token auth's IdP address + audiences
+	// (the same JWKS, the same audience contract) and performs OIDC discovery
+	// against the IdP. Wired only when the IdP is reachable (above); the arm
+	// is inert (admins renew via agents.can-manage) otherwise.
+	if idpClient != nil {
+		// Discovery base: the explicit grpc_auth.idp_addr when set, else the
+		// DEFAULT IdP ADDRESS (house fallback, cf. the user-pass wiring) with
+		// the SCHEME taken from the mesh: under mTLS (a CA configured) the IdP
+		// multiplexes TLS onto its OIDC surface, so discovery speaks https.
+		acCfg := cfg.GRPCAuth
+		if acCfg.IdPAddress == "" {
+			prefix := "http"
+			if cfg.TLS.Enabled() {
+				prefix = "https"
+			}
+			acCfg.IdPAddress = prefix + "://" + config.DefaultIdPAddress
+		}
+		acv, err := api.NewAgentCredentialVerifier(ctx, acCfg, idpHTTPClient, clients.Database, logger)
+		if err != nil {
+			// DEGRADE, don't DIE: the self-service arm is a CONVENIENCE atop
+			// the RBAC arm (administrators renew via agents.can-manage), so a
+			// discovery hiccup narrows the surface rather than taking the API
+			// offline. (F-30.3 makes the credential MANDATORY on the target
+			// legs — that is when a broken verifier becomes fatal.)
+			logger.Warn("agent_credential_verifier: init failed; the renew endpoint's self-service arm is inert",
+				"err", err)
+		}
+		if acv != nil {
+			apiServer.SetAgentCredentialVerifier(acv)
+		}
+	}
+
+	// gRPC server (agents, workers, scheduler).
 	creds, err := grpcutil.ServerCreds(cfg.TLS)
 	if err != nil {
 		logger.Error("tls: server creds", "err", err)

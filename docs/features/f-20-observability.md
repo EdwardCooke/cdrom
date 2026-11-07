@@ -59,7 +59,7 @@ day-to-day visibility without a separate monitoring stack.
   metrics port is not behind the auth middleware — a scraper needs no
   token — which is safe precisely because it is a separate, low-trust
   surface. Defaults (one per component, `127.0.0.1` for local dev):
-  agent/agent `:9100`, database `:9101`, scheduler `:9102`, artifacts
+  agent/worker `:9100`, database `:9101`, scheduler `:9102`, artifacts
   `:9103`, API `:9104`, IdP `:9105`. In a cluster deployment each pod
   exposes its metrics port to the scraper; an agent is ephemeral, so its
   metrics are best-effort (scraped only while it lives).
@@ -117,7 +117,7 @@ histograms; gauges are point-in-time.)
 - `cdrom_api_http_requests_total{route,method,code}` /
   `cdrom_api_http_request_duration_seconds{route,method}` — the UI HTTP
   surface.
-- `cdrom_grpc_server_*` (shared) — the agent/agent/scheduler gRPC surface.
+- `cdrom_grpc_server_*` (shared) — the agent/worker/scheduler gRPC surface.
 - `cdrom_api_ws_clients` — gauge, live WebSocket UI clients on this pod.
 - `cdrom_api_agents{group,environment,state}` — gauge, agents registered
   on this pod (state: `registered` / `watching`).

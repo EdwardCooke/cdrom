@@ -10,7 +10,7 @@ the existing WebSocket event hub. The UI can tail a running job's logs and
 replay finished logs.
 
 **Why.** "Where is it stuck?" is the #1 question in CD. Today all logging is
-local to the agent/agent and there is no central view.
+local to the agent/worker and there is no central view.
 
 **Scope.**
 - `proto/cdrom/api/v1/api.proto` — a new streaming RPC (e.g.

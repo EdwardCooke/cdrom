@@ -72,7 +72,7 @@ target, the outcome, the source IP, and — where the action changes a resource
 - `run.trigger` (a manual run, a standalone job submit, a webhook, or a
   cron/event trigger fired by the scheduler)
 - `job.cancel`, `job.rerun`, `job.approve`, `job.reject`
-- `job.status` (a status report from an agent/agent), `token.exchange`
+- `job.status` (a status report from an agent/worker), `token.exchange`
 - `secret.encrypt` (the value is recorded as `[REDACTED]`)
 - `role.create` / `role.update` / `role.delete`, `binding.add` /
   `binding.delete`

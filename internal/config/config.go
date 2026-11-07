@@ -740,6 +740,12 @@ type IdPConfig struct {
 	// A job may also request a token for a specific audience via the API's
 	// ExchangeJobToken RPC; the IdP stamps whatever audience the API asks for.
 	Audiences []string
+	// AgentCredentialTTL is the deadline horizon for ISSUE and RENEW of agent
+	// credentials (F-30.2): a row's expires_at is set to now + this value.
+	// Zero (unset) resolves to the 30-day default via
+	// EffectiveAgentCredentialTTL. The JWT's exp claim is a generous
+	// placeholder nobody enforces — the ROW's deadline is the real one.
+	AgentCredentialTTL time.Duration
 	// GRPCAddress is the address the IdP's gRPC server (its API-only surface:
 	// job-token minting and user management) binds to. The API dials it over
 	// mTLS. Empty means the IdP uses DefaultIdPGRPCAddress.
@@ -953,6 +959,19 @@ func (c IdPConfig) EffectiveIssuer() string {
 		return defaultIdPIssuer
 	}
 	return c.Issuer
+}
+
+// defaultAgentCredentialTTL is the agent-credential deadline horizon when
+// IdPConfig.AgentCredentialTTL is unset (F-30.2).
+const defaultAgentCredentialTTL = 30 * 24 * time.Hour
+
+// EffectiveAgentCredentialTTL returns the configured agent-credential TTL or
+// the default.
+func (c IdPConfig) EffectiveAgentCredentialTTL() time.Duration {
+	if c.AgentCredentialTTL <= 0 {
+		return defaultAgentCredentialTTL
+	}
+	return c.AgentCredentialTTL
 }
 
 // Validate checks that the IdP configuration is sane. It is only enforced for
@@ -1248,6 +1267,9 @@ type fileConfig struct {
 		TokenLifetime  *string          `yaml:"token_lifetime"`
 		CheckInterval  *string          `yaml:"check_interval"`
 		Audiences      *[]string        `yaml:"audiences"`
+		// AgentCredentialTTL is the deadline horizon for issued/renewed agent
+		// credentials (F-30.2), a duration string (e.g. "720h").
+		AgentCredentialTTL *string `yaml:"agent_credential_ttl"`
 		GRPCAddress    *string          `yaml:"grpc_address"`
 		PasswordPepper *string          `yaml:"password_pepper"`
 		ScimKeysPepper *string          `yaml:"scim_keys_pepper"`
@@ -1508,6 +1530,13 @@ func applyFile(cfg *Config, path string) error {
 				cfg.IdP.CheckInterval = d
 			} else {
 				return fmt.Errorf("config: parse idp.check_interval %q: %w", *f.IdP.CheckInterval, err)
+			}
+		}
+		if f.IdP.AgentCredentialTTL != nil {
+			if d, err := time.ParseDuration(*f.IdP.AgentCredentialTTL); err == nil {
+				cfg.IdP.AgentCredentialTTL = d
+			} else {
+				return fmt.Errorf("config: parse idp.agent_credential_ttl %q: %w", *f.IdP.AgentCredentialTTL, err)
 			}
 		}
 		if f.IdP.Audiences != nil {
@@ -1787,6 +1816,11 @@ func applyEnv(cfg *Config) {
 	if v := envOr("CDROM_IDP_CHECK_INTERVAL", ""); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.IdP.CheckInterval = d
+		}
+	}
+	if v := envOr("CDROM_IDP_AGENT_CREDENTIAL_TTL", ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.IdP.AgentCredentialTTL = d
 		}
 	}
 	cfg.IdP.PasswordPepper = envOr("CDROM_IDP_PASSWORD_PEPPER", cfg.IdP.PasswordPepper)

@@ -85,6 +85,17 @@ type Server struct {
 	// lockout) lives. It is nil when API-key authentication is disabled, in
 	// which case the /api/api-keys endpoints respond 501.
 	apikey APIKeyClient
+	// agentCredentials proxies the UI's agent-credential management requests
+	// (F-30.2) to the IdP, where the real logic (signing, lifecycle
+	// orchestration) lives. It is nil when the IdP is not wired, in which case
+	// the /api/agents/{name}/credentials[...] endpoints respond 501.
+	agentCredentials AgentCredentialClient
+	// agentCredentialVerifier verifies an agent credential PRESENTED as the
+	// request's Bearer token on the renew endpoint (F-30.2 Slice 3, the
+	// self-service arm): the agent renews its OWN credential by presenting it.
+	// Handler-local verification (the webhook-OIDC precedent), not a global
+	// middleware branch. Nil when the IdP is not wired (the arm is inert).
+	agentCredentialVerifier *AgentCredentialVerifier
 	// serviceAccounts proxies the UI's service-account management requests
 	// (F-26) to the IdP, where the real logic (key generation, salted hashing,
 	// verification, and lockout) lives. It is nil when service-account
@@ -198,6 +209,21 @@ func (s *Server) SetUserPassClient(c UserPassClient) {
 // respond 501).
 func (s *Server) SetAPIKeyClient(c APIKeyClient) {
 	s.apikey = c
+}
+
+// SetAgentCredentialClient attaches the IdP agent-credential proxy client
+// (F-30.2), enabling the /api/agents/{name}/credentials[...] endpoints. When
+// left nil the endpoints are disabled (they respond 501).
+func (s *Server) SetAgentCredentialClient(c AgentCredentialClient) {
+	s.agentCredentials = c
+}
+
+// SetAgentCredentialVerifier attaches the verifier for the renew endpoint's
+// SELF-SERVICE arm (F-30.2 Slice 3): an agent renews its own credential by
+// presenting it as the Bearer token. When left nil the arm is inert and renew
+// requires agents.can-manage.
+func (s *Server) SetAgentCredentialVerifier(v *AgentCredentialVerifier) {
+	s.agentCredentialVerifier = v
 }
 
 // SetServiceAccountClient attaches the IdP service-account proxy client (F-26),
@@ -477,6 +503,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/api-keys/{id}/rotate", s.rotateAPIKey)
 	mux.HandleFunc("DELETE /api/api-keys/{id}", s.deleteAPIKey)
 	mux.HandleFunc("POST /api/api-keys/lockout/reset", s.resetAPIKeyLockout)
+
+	// Agent credentials (F-30.2, proxied to the IdP). An admin with
+	// agents.can-manage issues/rotates/revokes; agents.can-view lists. The
+	// issue and rotate responses return the plaintext JWT exactly once. The
+	// renew endpoint is agents.can-manage in Slice 2 (the self-service arm —
+	// the agent renewing its OWN credential — lands in Slice 3). Disabled (501)
+	// when the IdP is not wired.
+	mux.HandleFunc("POST /api/agents/{name}/credentials", s.issueAgentCredential)
+	mux.HandleFunc("GET /api/agents/{name}/credentials", s.listAgentCredentials)
+	mux.HandleFunc("POST /api/agents/{name}/credentials/{id}/renew", s.renewAgentCredential)
+	mux.HandleFunc("POST /api/agents/{name}/credentials/{id}/rotate", s.rotateAgentCredential)
+	mux.HandleFunc("DELETE /api/agents/{name}/credentials/{id}", s.revokeAgentCredential)
 
 	// Service accounts (F-26, proxied to the IdP). A principal with the
 	// service-accounts.can-* permissions manages service accounts (non-human

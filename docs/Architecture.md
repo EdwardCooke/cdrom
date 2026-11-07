@@ -1195,7 +1195,10 @@ plaintext. `make certs` generates a local set.
 `CDROM_IDP_GRPC_ADDR` (API-only gRPC surface, :7106), `CDROM_IDP_ISSUER`,
 `CDROM_IDP_TOKEN_LIFETIME`, `CDROM_IDP_KEY_LIFETIME`,
 `CDROM_IDP_ROTATE_BEFORE`, `CDROM_IDP_CHECK_INTERVAL` (key auto-rotation
-tuning). `CDROM_IDP_LOCAL_LOGIN_ENABLED` (F-28.4 Slice 4; on by default)
+tuning), `CDROM_IDP_AGENT_CREDENTIAL_TTL` (F-30.2; the deadline horizon for
+ISSUE and RENEW of agent credentials, default 30d — the JWT's `exp` is a
+placeholder; the row's deadline is the law). `CDROM_IDP_LOCAL_LOGIN_ENABLED`
+(F-28.4 Slice 4; on by default)
 gates username/password sign-in: when `false` the IdP is SSO-ONLY — it
 refuses standing logins and registration, admitting only temporal
 (break-glass) logins. Reported to the UI via `GET /api/system/info`

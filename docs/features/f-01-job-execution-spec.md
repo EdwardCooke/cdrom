@@ -13,7 +13,7 @@ value is either a scalar string or a list of strings), not in the step's own
 fields, so a new step type can be added without changing the spec schema. The
 built-in `shell` handler (default when `type` is empty) runs a command,
 directly or through a user-chosen shell, reading its `command`, `args`, and
-`shell` from `params`. The agent/agent executes the steps in order and the
+`shell` from `params`. The agent/worker executes the steps in order and the
 job fails on the first step that errors.
 
 **Why.** CD jobs are fundamentally "run these commands in this environment".
@@ -29,7 +29,7 @@ missing piece.
   edit never changes what a past run did.
 - `proto/cdrom/db/v1/db.proto` + `proto/cdrom/api/v1/api.proto` — carry the
   spec to the execution target.
-- `internal/agent/agent.go`, `internal/agent/agent.go` — replace the
+- `internal/agent/worker.go`, `internal/worker/worker.go` — replace the
   `runJob` stub with a real executor that runs each step (portable across
   Windows + Linux — see cross-platform constraints).
 - `internal/api/server.go` — accept the spec on `POST /api/jobs`.

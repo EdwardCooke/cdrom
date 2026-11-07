@@ -1,4 +1,4 @@
-# F-30 · Agent credentials & the agent/agent topology
+# F-30 · Agent credentials & the agent/worker topology
 
 > Phase 8 — Target credentials & execution topology · [Feature index](../Features.md)
 
@@ -66,7 +66,10 @@ demonstrable).
   loopback supervision channel. Reports its own status; terminates at the
   job's terminal state. Pre-swap: this process was called the *agent*.
 - **Agent credential** — the durable, tracked JWT identifying an agent to
-  the API (F-30.2). Bound to exactly one agent name.
+  the API (F-30.2). Bound to exactly one agent name. Distributed to the
+  agent as a **credential file** (persisted by the operator from the
+  one-shot issue/rotate response; overwritten on rotation; the agent sources
+  its token from the file, never the environment — F-30.2 Distribution).
 - **Job token** — unchanged in KIND: the per-job RS256 JWT minted by the IdP,
   scoped to one job, presented by the worker on job-scoped RPCs. Its
   ORIGINATION tightens: minted solely at the agent's credentialed
@@ -108,6 +111,13 @@ reset the agent registry (F-30.1 documents the treatment).
 - **The agent never hydrates.** Spec and secrets travel directly between API
   and worker over their own connection; the agent's footprint is
   coordination-only (acquisition, spawn, supervision, roll-up).
+- **Credential file, not environment.** The agent's long-lived identity
+  rests in a `0600` file the operator persists from the one-shot response
+  and overwrites on rotation (adopted live by the agent's file-watch). Env
+  carriage is banned for the agent credential (process-listing exposure,
+  inheritance into worker subprocesses, no in-place update) — while the
+  WORKER's short-lived job token IS env-carried by design (parent→child
+  spawn mandate, F-30.4).
 - **Serial per coordinate, not globally.** Duplication safety (the
   2026-11-07 flake lesson) rests on `(job, agent, attempt)` uniqueness —
   ledger primary, unique index defensive — enabling per-host parallelism.

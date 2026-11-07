@@ -37,7 +37,11 @@ const (
 	PermAPIKeysListAll   = "api-keys.can-list-all"
 	PermAPIKeysManageAll = "api-keys.can-manage-all"
 	PermAuditView        = "audit.can-view"
-	PermAgentsView      = "agents.can-view"
+	// Agent-credential permissions (F-30.2). Platform-wide: can-view reads the
+	// credential directory (metadata only), can-manage issues/rotates/revokes
+	// credentials (renew is self-service by the presenting agent OR can-manage).
+	PermAgentsView    = "agents.can-view"
+	PermAgentsManage  = "agents.can-manage"
 	// Service-account management permissions (F-26). Roles contain granular
 	// permissions; these are permission names, not hard-coded roles.
 	PermServiceAccountsView    = "service-accounts.can-view"
@@ -137,6 +141,7 @@ var AllPermissions = []string{
 	PermAPIKeysManageAll,
 	PermAuditView,
 	PermAgentsView,
+	PermAgentsManage,
 	PermServiceAccountsView,
 	PermServiceAccountsCreate,
 	PermServiceAccountsEdit,
