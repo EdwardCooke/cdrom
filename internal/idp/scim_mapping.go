@@ -40,6 +40,11 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"cdrom/internal/audit"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
@@ -57,6 +62,13 @@ const scimGroupBindingOrigin = "scim_group"
 // roles, and the triggering group"). Lean by nature — a diff is always a
 // MOVE (there is no no-move variant of a non-empty diff).
 const scimGroupDerivedAction = "scim.group.derived"
+
+// scimAgTargetPrefix marks a mapping TARGET as an F-27 APPROVAL GROUP
+// instead of an F-14 role (F-28.5 stretch): a group_role_mappings value of
+// "ag:<name>" mirrors the group's membership INTO the approval group named
+// <name>; a bare value is a role name. The single-knob discrimination keeps
+// the F-28.1 config surface unchanged.
+const scimAgTargetPrefix = "ag:"
 
 // derivationDiff is the outcome of one user's recomputation: the roles
 // gained and lost THIS PASS (empty when converged — the caller publishes
@@ -117,15 +129,26 @@ func (s *Server) scimCurrentGroupBindings(ctx context.Context, username string) 
 // the SAME two-arm resolution the group codec uses for expansion. Results
 // are deduped by group id. Resolutions/listings that fail are logged and
 // treated as "no groups" (best-effort posture; the next sync heals).
-func (s *Server) scimGroupsContaining(ctx context.Context, username string) []*SCIMGroup {
+// scimGroupsContaining enumerates the user's groups via TWO list queries
+// (the store exposes no reverse-membership RPC): one per CANDIDATE VALUE
+// (the user's username and external_id) over the members_value predicate —
+// the SAME two-arm resolution the group codec uses for expansion. Results
+// are deduped by group id.
+//
+// SAFETY CONTRACT: a TRANSIENT failure (user lookup or listing) is an
+// ERROR, not "no groups" — collapsing it to empty would make the caller
+// WIPE the user's entire scim_group lane (catastrophic on a blip). Only a
+// definitive NotFound (the user is truly gone) yields the empty set.
+func (s *Server) scimGroupsContaining(ctx context.Context, username string) ([]*SCIMGroup, error) {
 	if s.scimGroups == nil || s.scimUsers == nil {
-		return nil
+		return nil, nil
 	}
 	u, err := s.scimUsers.GetByUsername(ctx, username, false)
 	if err != nil {
-		s.logger.Warn("scim: derivation cannot resolve the user; skipping",
-			"user", username, "err", err)
-		return nil
+		if status.Code(err) == codes.NotFound {
+			return nil, nil // truly gone: no groups, nothing to protect
+		}
+		return nil, err
 	}
 	candidates := map[string]bool{u.Username: true}
 	if u.ExternalID != "" {
@@ -137,9 +160,7 @@ func (s *Server) scimGroupsContaining(ctx context.Context, username string) []*S
 		cs := &EqualityConstraints{{Attribute: "members_value", Value: v, CaseSensitive: true}}
 		gs, lerr := s.scimGroups.List(ctx, cs)
 		if lerr != nil {
-			s.logger.Warn("scim: reverse membership listing failed; treating as empty",
-				"value", v, "err", lerr)
-			continue
+			return nil, lerr // bail: partial blindness ⇒ refuse to conclude
 		}
 		for _, g := range gs {
 			byID[g.ID] = g
@@ -148,7 +169,7 @@ func (s *Server) scimGroupsContaining(ctx context.Context, username string) []*S
 	for _, g := range byID {
 		out = append(out, g)
 	}
-	return out
+	return out, nil
 }
 
 // scimDeriveUser recomputes ONE user's scim_group bindings: union the
@@ -160,11 +181,23 @@ func (s *Server) scimGroupsContaining(ctx context.Context, username string) []*S
 func (s *Server) scimDeriveUser(ctx context.Context, username string, catalog map[string]bool) (derivationDiff, error) {
 	var diff derivationDiff
 	want := map[string]bool{}
-	for _, g := range s.scimGroupsContaining(ctx, username) {
-		role, ok := s.cfg.Scim.GroupRoleMappings[g.DisplayName]
+	groups, gerr := s.scimGroupsContaining(ctx, username)
+	if gerr != nil {
+		return diff, gerr // refuse to conclude on partial blindness (wipe risk)
+	}
+	for _, g := range groups {
+		target, ok := s.cfg.Scim.GroupRoleMappings[g.DisplayName]
 		if !ok {
 			continue // unmapped group: stored inertly, no authorisation effect
 		}
+		// STRETCH (F-27): an "ag:"-prefixed target mirrors the user's
+		// membership into the named APPROVAL GROUP instead of binding a
+		// role (orthogonal channels — no diff, no publish involved).
+		if strings.HasPrefix(target, scimAgTargetPrefix) {
+			s.scimMirrorApprovalGroup(ctx, username, strings.TrimPrefix(target, scimAgTargetPrefix), g.DisplayName)
+			continue
+		}
+		role := target
 		if !catalog[role] {
 			// Missing mapped role (ruling 4): SKIP + WARN (role name +
 			// contributing group); never created, never fatal — inert by
@@ -431,4 +464,71 @@ func groupHasValue(memberValues []string, value string) bool {
 		}
 	}
 	return false
+}
+
+// scimAGCache is the per-INSTANCE cache of the approval-group NAME SET (the
+// existence lens for missing-target skips, ruling 4's twin). Instance-scoped
+// (not package-global) so isolated test worlds — each with its own database
+// — never bleed a stale set across one another. Approval groups are rarely
+// created, so a short TTL keeps the mirror cheap without staleness biting.
+type scimAGCache struct {
+	mu    sync.Mutex
+	names map[string]bool
+	at    time.Time
+}
+
+const scimAGCacheTTL = 30 * time.Second
+
+// scimApprovalGroupNameSet returns the current approval-group names,
+// refreshing the cache past its TTL. A listing failure yields the STALE set
+// (or empty on cold failure) — the mirror degrades to a skip, never a fault.
+func (s *Server) scimApprovalGroupNameSet(ctx context.Context) map[string]bool {
+	cache := s.agCache
+	if cache == nil {
+		return nil
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.names != nil && time.Since(cache.at) < scimAGCacheTTL {
+		return cache.names
+	}
+	if s.db == nil {
+		return cache.names
+	}
+	resp, err := s.db.ListApprovalGroups(ctx, &dbpb.ListApprovalGroupsRequest{})
+	if err != nil {
+		s.logger.Warn("scim: approval-group listing failed; mirror degrades to skip", "err", err)
+		return cache.names
+	}
+	names := make(map[string]bool, len(resp.GetGroups()))
+	for _, g := range resp.GetGroups() {
+		names[g.GetName()] = true
+	}
+	cache.names = names
+	cache.at = time.Now()
+	return names
+}
+
+// scimMirrorApprovalGroup mirrors ONE user's membership into the named
+// APPROVAL GROUP (F-28.5 stretch): the user's USERNAME (the subject the
+// gate matches) is added via the idempotent AddApprovalGroupMember RPC.
+// A missing approval group is SKIPPED with a warning (ruling 4's twin);
+// membership removal is NOT mirrored (departure is governed by the group
+// resource's own membership; the mirror is purely additive — replay-safe).
+func (s *Server) scimMirrorApprovalGroup(ctx context.Context, username, groupName, scimGroup string) {
+	if s.db == nil {
+		return
+	}
+	if !s.scimApprovalGroupNameSet(ctx)[groupName] {
+		s.logger.Warn("scim: approval-group mapping target missing; mirror skipped",
+			"approval_group", groupName, "scim_group", scimGroup, "user", username)
+		return
+	}
+	if _, err := s.db.AddApprovalGroupMember(ctx, &dbpb.AddApprovalGroupMemberRequest{
+		Name:   groupName,
+		Member: username,
+	}); err != nil {
+		s.logger.Warn("scim: approval-group mirror add failed (replay-safe; next sync retries)",
+			"approval_group", groupName, "user", username, "err", err)
+	}
 }

@@ -234,7 +234,7 @@ One spec per feature under `docs/features/`. Done unless marked *(planned)*:
 | F-25 | API keys (`cdrom-`+64-char; per-pipeline scope; rotate/reset) | [f-25](docs/features/f-25-api-keys.md) |
 | F-26 | Service accounts (non-human identities; two rotatable key slots) | [f-26](docs/features/f-26-service-accounts.md) |
 | F-27 | Approval groups *(planned)* | [f-27](docs/features/f-27-approval-groups.md) |
-| F-28 | SCIM 2.0 user provisioning (decomposed into F-28.1…F-28.5) *(planned)* | [f-28](docs/features/f-28-scim-provisioning.md) |
+| F-28 | SCIM 2.0 user provisioning (decomposed into F-28.1…F-28.5; F-28.1–F-28.4 done, F-28.5 done) | [f-28](docs/features/f-28-scim-provisioning.md) |
 | F-29 | Labeling (normalized `Label` table; run label snapshot) | [f-29](docs/features/f-29-tagging.md) |
 
 ## Tech Stack & Constraints
@@ -432,6 +432,17 @@ F-25/F-26 specs):
   keys, service accounts, RBAC; IdP SCIM / local-login / break-glass; artifact
   store kind) so the UI can make show/hide decisions. Degraded/unwired
   components yield a `null` segment; the endpoint still returns 200.
+- **SCIM groups (F-28.5):** the IdP's `/scim/v2/Groups` resource (guarded
+  like `/Users`) syncs corporate groups; membership values are OPAQUE
+  verbatim strings (resolved best-effort at read time). Static
+  `group_role_mappings` (F-28.1 config) turn membership into F-14 role
+  ownership via `RoleBinding` rows of `origin: "scim_group"` — the
+  applicator diffs ONLY that lane, so operator/manual grants survive every
+  recompute; non-empty diffs publish `role_change` (no-restart propagation).
+  `ag:<name>` targets mirror membership into an F-27 approval group instead.
+  `GET /api/groups[/{id}]` (read-only, `users.can-manage`) serves the
+  enriched docs (resolved members, `derived_roles`) bridged to the IdP;
+  IdP-down ⇒ 503.
 - **Targets (gRPC):** job tokens (RS256, minted by the API via the IdP over
   mTLS; one per job, `sub: "job:<id>"`). Validity is gated on the job's live
   status, not `exp`; `ExchangeJobToken` mints short-lived tokens for other

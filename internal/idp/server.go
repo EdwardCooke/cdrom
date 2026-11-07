@@ -171,6 +171,9 @@ type Server struct {
 	// publication. When nil the applicator declines (logged) — the group
 	// RESOURCE still functions, its groups simply derive no roles.
 	db dbpb.DatabaseClient
+	// agCache is the applicator's approval-group name-set cache (F-28.5
+	// stretch — instance-scoped so isolated test worlds never share state).
+	agCache *scimAGCache
 }
 
 // SetDatabaseClient attaches the shared Database client the group→role
@@ -186,11 +189,12 @@ func NewServer(cfg config.IdPConfig, km *KeyManager, codes AuthCodeStore, logger
 		logger = slog.Default()
 	}
 	return &Server{
-		cfg:    cfg,
-		issuer: cfg.EffectiveIssuer(),
-		km:     km,
-		codes:  codes,
-		logger: logger,
+		cfg:     cfg,
+		issuer:  cfg.EffectiveIssuer(),
+		km:      km,
+		codes:   codes,
+		logger:  logger,
+		agCache: &scimAGCache{},
 	}
 }
 

@@ -197,5 +197,6 @@ run_test 19-scim-keys.sh
 run_test 20-scim-replica-parity.sh
 run_test 21-break-glass.sh
 run_test 22-scim-users.sh
+run_test 23-scim-groups.sh
 
 log ">> e2e PASSED"

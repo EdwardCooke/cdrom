@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	"cdrom/internal/config"
@@ -522,6 +524,56 @@ func TestSCIMMapping_InertWithoutBackings(t *testing.T) {
 	_, scim2 := w2.bindings("judith")
 	if len(scim2) != 0 {
 		t.Errorf("unwired-db world produced bindings: %v", scim2)
+	}
+}
+
+// TestSCIMMapping_ApprovalGroupMirror proves the STRETCH (F-27): a mapping
+// target of "ag:<name>" mirrors the user's membership INTO the named
+// approval group (additive, idempotent), and a MISSING approval group is
+// skipped (no mirror, no fault).
+func TestSCIMMapping_ApprovalGroupMirror(t *testing.T) {
+	w := newScimMapWorld(t, map[string]string{
+		"reviewers-ag": "ag:release-reviewers", // existent target
+		"ghosts-ag":    "ag:no-such-group",     // missing target ⇒ skip
+	})
+	w.seedUser("mia", "ext-mia")
+
+	// Create the approval group (the API's createApprovalGroup path).
+	if _, err := w.db.CreateApprovalGroup(context.Background(), &dbpb.CreateApprovalGroupRequest{
+		Name: "release-reviewers",
+	}); err != nil {
+		t.Fatalf("CreateApprovalGroup: %v", err)
+	}
+
+	// Mia joins reviewers-ag ⇒ MIRRORED into release-reviewers.
+	g := w.seedGroup("reviewers-ag", "ext-mia")
+	w.reconcileDirect(g.DisplayName, g.MemberValues, nil)
+	ag, err := w.db.GetApprovalGroup(context.Background(), &dbpb.GetApprovalGroupRequest{Name: "release-reviewers"})
+	if err != nil {
+		t.Fatalf("GetApprovalGroup: %v", err)
+	}
+	if !containsStr(ag.GetMembers(), "mia") {
+		t.Errorf("mirror FAILED: release-reviewers members = %v, want mia", ag.GetMembers())
+	}
+	// Mirroring is ADDITIVE + IDEMPOTENT: re-replaying the reconciliation
+	// does not duplicate the member.
+	w.reconcileDirect(g.DisplayName, []string{"ext-mia"}, nil)
+	ag2, _ := w.db.GetApprovalGroup(context.Background(), &dbpb.GetApprovalGroupRequest{Name: "release-reviewers"})
+	count := 0
+	for _, m := range ag2.GetMembers() {
+		if m == "mia" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("mirror duplicated on replay: mia appears %dx in %v", count, ag2.GetMembers())
+	}
+
+	// Missing target: ghost-ag mirrors NOWHERE (no fault, no phantom group).
+	wg := w.seedGroup("ghosts-ag", "ext-mia")
+	w.reconcileDirect(wg.DisplayName, wg.MemberValues, nil)
+	if _, err := w.db.GetApprovalGroup(context.Background(), &dbpb.GetApprovalGroupRequest{Name: "no-such-group"}); status.Code(err) != codes.NotFound {
+		t.Errorf("phantom approval group CREATED (want NotFound), got %v", err)
 	}
 }
 

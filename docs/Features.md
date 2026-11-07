@@ -292,11 +292,14 @@ Tick each feature off as it lands.
       break-glass drill demonstrates affirmative coinage); UI consumption of
       `/api/system/info` DEFERRED (frontend not yet scaffolded — ruled
       2026-11-06; the contract it would consume is landed and e2e-proofed)_
-- [ ] F-28.5 SCIM group management _(planning finalized 2026-11-06: five
-      slices S1→S5 — storage/RPCs, SCIM `/Groups` resource, mapping
-      applicator with provenced `scim_group` role bindings + `role_change`
-      invalidation, read-only `/api/groups` admin surface (pre-UI), stretch +
-      e2e 23; rulings: verbatim opaque member values (unknown users ignored
-      + logged), `displayName` NOT unique, missing mapped roles warned not
-      created, operators keep manual role grants on SCIM-managed users)_
+- [x] F-28.5 SCIM group management _(LANDED 2026-11-07, five slices:
+      storage/RPCs with DB-side filtering + `RoleBinding.Origin`, SCIM
+      `/Groups` resource (group `externalId` create-only/immutable/filterable),
+      mapping applicator — `scim_group`-laned role bindings, `role_change`
+      invalidation (no-restart enforcement), embedded-`groups` switchover,
+      deprovisioning neutrality, `ag:` approval-group mirror (stretch),
+      read-only `/api/groups` admin surface (pre-UI), e2e 23. Rulings:
+      verbatim opaque member values (unknown users ignored + logged),
+      `displayName` NOT unique, missing mapped roles warned not created,
+      operators keep manual role grants on SCIM-managed users)_
 - [x] F-29 Labeling (key/value labels on pipelines, jobs, environments, worker groups, and workers; combined onto a job run)
