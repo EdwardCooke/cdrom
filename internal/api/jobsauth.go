@@ -68,14 +68,7 @@ func NewJobTokenAuth(ctx context.Context, cfg config.GRPCAuthConfig, client *htt
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
 	base := normalizeIDPURL(cfg.IdPAddress)
-	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), base)
-	if err != nil {
-		return nil, fmt.Errorf("api: oidc discovery against idp %q: %w", base, err)
-	}
 	// Job tokens are not issued to a client, so the built-in client/audience
 	// check is skipped; Verify validates the audience claim against the
 	// configured audiences (a token is valid for the API when its aud contains
@@ -83,8 +76,12 @@ func NewJobTokenAuth(ctx context.Context, cfg config.GRPCAuthConfig, client *htt
 	// placeholder (the token is meant to live as long as the job runs, which
 	// can be days), so the API gates a token's validity on the job's live
 	// status in the database (see GRPCServer.checkJobToken) rather than on
-	// exp.
-	verifier := provider.Verifier(&oidc.Config{SkipClientIDCheck: true, SkipExpiryCheck: true})
+	// exp. The discovery + verifier construction is the SHARED substrate
+	// (F-30.3 S1) — the same policy the agent-credential path uses.
+	verifier, err := newOIDCTokenVerifier(ctx, base, client)
+	if err != nil {
+		return nil, err
+	}
 	return &JobTokenAuth{
 		verifier:               verifier,
 		audiences:              cfg.Audiences,
@@ -108,7 +105,7 @@ func (a *JobTokenAuth) Verify(ctx context.Context, token string) (int64, error) 
 	if err != nil {
 		return 0, fmt.Errorf("api: verify job token: %w", err)
 	}
-	if !a.audienceOK(idt.Audience) {
+	if !audienceAccepted(a.audiences, idt.Audience) {
 		return 0, fmt.Errorf("api: job token audience %v not accepted", idt.Audience)
 	}
 	var claims struct {
@@ -124,18 +121,7 @@ func (a *JobTokenAuth) Verify(ctx context.Context, token string) (int64, error) 
 	return jobID, nil
 }
 
-// audienceOK reports whether the token's audience contains any of the
-// configured audiences.
-func (a *JobTokenAuth) audienceOK(aud []string) bool {
-	for _, want := range a.audiences {
-		for _, got := range aud {
-			if got == want {
-				return true
-			}
-		}
-	}
-	return false
-}
+
 
 // Mint requests the main job token for job from the IdP. The API
 // authenticates to the IdP with its mTLS client certificate (when the IdP

@@ -121,7 +121,7 @@ func TestAgentCredentialIssueClaimsAndPlaintextOnce(t *testing.T) {
 	if int64(expFloat) < time.Now().Add(7*24*time.Hour).Unix() {
 		t.Errorf("exp = %v, want the generous placeholder (>= 7d out)", expFloat)
 	}
-	delta := row.ExpiresAt.Sub(time.Now())
+	delta := time.Until(row.ExpiresAt)
 	if delta < 29*24*time.Hour || delta > 31*24*time.Hour {
 		t.Errorf("row deadline offset = %v, want ~now+30d (the real deadline)", delta)
 	}

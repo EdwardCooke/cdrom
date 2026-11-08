@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"cdrom/internal/config"
@@ -28,16 +30,25 @@ func quietLog() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// fakeCredDB is a Database client answering ONLY GetAgentCredential (the
-// verifier's row-liveness lookup); any other method panics via the embedded
-// nil interface (sentinel).
+// fakeCredDB is a Database client answering the verifier's two calls:
+// GetAgentCredential (row-liveness lookup) and MarkAgentCredentialSeen
+// (throttled last_seen_at bump — RECORDED so tests can assert the throttle).
+// Any other method panics via the embedded nil interface (sentinel).
 type fakeCredDB struct {
 	dbpb.DatabaseClient
-	row *dbpb.AgentCredential
-	err error
+	mu     sync.Mutex
+	row    *dbpb.AgentCredential
+	err    error
+	gets   int
+	marks  int
+	marked map[string]int   // jti -> bump count
+	clk    func() time.Time // test-controllable clock for LastSeenAt stamps
 }
 
 func (f *fakeCredDB) GetAgentCredential(_ context.Context, in *dbpb.GetAgentCredentialRequest, _ ...grpc.CallOption) (*dbpb.AgentCredential, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gets++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -45,6 +56,42 @@ func (f *fakeCredDB) GetAgentCredential(_ context.Context, in *dbpb.GetAgentCred
 		return nil, status.Error(codes.NotFound, "agent credential not found: "+in.GetId())
 	}
 	return f.row, nil
+}
+
+func (f *fakeCredDB) MarkAgentCredentialSeen(_ context.Context, in *dbpb.MarkAgentCredentialSeenRequest, _ ...grpc.CallOption) (*emptypb.Empty, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.marks++
+	if f.marked == nil {
+		f.marked = make(map[string]int)
+	}
+	f.marked[in.GetId()]++
+	stamp := time.Now()
+	if f.clk != nil {
+		stamp = f.clk()
+	}
+	if f.row != nil {
+		f.row.LastSeenAt = timestamppb.New(stamp)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (f *fakeCredDB) markCount(id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.marked[id]
+}
+
+func (f *fakeCredDB) getCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gets
+}
+
+func (f *fakeCredDB) setRow(r *dbpb.AgentCredential) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.row = r
 }
 
 // startTestIDPCredentials stands up an IN-PROCESS IdP whose HTTP surface serves
