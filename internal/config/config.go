@@ -205,6 +205,12 @@ type Config struct {
 	// no identity provider.
 	GRPCAuth GRPCAuthConfig
 
+	// AutoRenewAheadOfExpiry is the agent's renew-ahead window (F-30.2/F-30.3):
+	// the agent renews its credential (self-service renew, F-30.2 S3) when the
+	// row's deadline falls within this horizon. Zero/negative falls back to the
+	// default (24 h). Only the agent binary uses it.
+	AutoRenewAheadOfExpiry time.Duration
+
 	// Secrets configures the secret store the API uses to encrypt and decrypt
 	// pipeline secrets (F-12). The API is the only component that holds the
 	// key: it encrypts a secret's plaintext when a pipeline is created or
@@ -1086,6 +1092,12 @@ func LoadWithFile(file string) (*Config, error) {
 		APIHTTPAddress:   DefaultAPIHTTPAddress,
 		ArtifactsRoot:    "artifacts",
 		ArtifactsStore:   "filesystem",
+		// F-30.3: the API's gRPC leg runs the RELAXED target stance
+		// (TLS-with-server-verification; targets connect without a client
+		// certificate and authenticate with the BEARER agent credential — the
+		// identity guarantee is the credential, not the cipher suite). The
+		// agent's renew-ahead window defaults to 24 h.
+		AutoRenewAheadOfExpiry: 24 * time.Hour,
 		// The source-fetcher (F-21.2) default: its gRPC address (the cache root
 		// and file root default to empty — the fetcher resolves them to their
 		// own defaults). Plus the externally-sourced-pipeline refresh defaults
@@ -1230,6 +1242,9 @@ type fileConfig struct {
 	CredentialFile    *string            `yaml:"credential_file"`
 	AgentEnvironments *[]string          `yaml:"agent_environments"`
 	AgentLabels       *map[string]string `yaml:"agent_labels"`
+	// AutoRenewAheadOfExpiry (F-30.3): the agent's renew-ahead window, a
+	// duration string (e.g. "24h").
+	AutoRenewAheadOfExpiry *string `yaml:"auto_renew_ahead_of_expiry"`
 	WorkerJobID       *string            `yaml:"worker_job_id"`
 	WorkerName        *string            `yaml:"worker_name"`
 	// AgentRoot is the base directory for a target's staged working area
@@ -1401,6 +1416,14 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.AgentGroup != nil {
 		cfg.AgentGroup = *f.AgentGroup
+	}
+	if f.CredentialFile != nil {
+		cfg.CredentialFile = *f.CredentialFile
+	}
+	if f.AutoRenewAheadOfExpiry != nil {
+		if d, err := time.ParseDuration(*f.AutoRenewAheadOfExpiry); err == nil {
+			cfg.AutoRenewAheadOfExpiry = d
+		}
 	}
 	if f.AgentEnvironments != nil {
 		cfg.AgentEnvironments = *f.AgentEnvironments
@@ -1741,6 +1764,11 @@ func applyEnv(cfg *Config) {
 	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
 	cfg.AgentGroup = envOr("CDROM_AGENT_GROUP", cfg.AgentGroup)
 	cfg.CredentialFile = envOr("CDROM_AGENT_CREDENTIAL_FILE", cfg.CredentialFile)
+	if v := os.Getenv("CDROM_AGENT_AUTO_RENEW_AHEAD_OF_EXPIRY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.AutoRenewAheadOfExpiry = d
+		}
+	}
 	if v := os.Getenv("CDROM_AGENT_ENVIRONMENTS"); v != "" {
 		cfg.AgentEnvironments = splitAndTrim(v)
 	}

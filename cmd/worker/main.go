@@ -66,7 +66,11 @@ func main() {
 		logger.Info("cdrom worker metrics starting", "addr", metricsAddr)
 	}
 
-	apiConn, err := grpcutil.Dial(ctx, cfg.APIAddress, cfg.TLS)
+	// F-30.3: the worker connects to the API WITHOUT a client certificate —
+	// the target leg is TLS-with-server-verification + the BEARER job token
+	// (the worker's identity is the job token the agent handed it, not a mesh
+	// cert). Plaintext when the mesh has no CA (local dev).
+	apiConn, err := grpcutil.DialNoClientCert(ctx, cfg.APIAddress, cfg.TLS)
 	if err != nil {
 		logger.Error("dial api", "addr", cfg.APIAddress, "err", err)
 		os.Exit(1)

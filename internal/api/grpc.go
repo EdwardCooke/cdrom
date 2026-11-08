@@ -188,6 +188,10 @@ type liveAgent struct {
 	labels   map[string]string
 	address  string
 	lastSeen time.Time
+	// lostCredSince is when the agent's heartbeat began FAILING the
+	// credential check (F-30.3 S3); zero = the credential is sound. Sustained
+	// failure past the grace window tears down the watch stream.
+	lostCredSince time.Time
 }
 
 // NewGRPCServer creates the API gRPC service. db is the client for the
@@ -413,15 +417,22 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *apipb.HeartbeatRequest)
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
-	// F-30.3 S2: the heartbeat revalidates the agent's identity — a REVOKED
-	// credential makes the next beat fail (the continuous revalidation the
-	// spec requires; the watch-stream TEARDOWN on failure arrives with S3).
+	// F-30.3 S2/S3: the heartbeat revalidates the agent's identity CONTINUOUSLY
+	// — a REVOKED (or expired) credential makes the beat fail, and a sustained
+	// failure TEARS DOWN the agent's WatchJobs stream: the credential LAPSED
+	// while the stream was open, and the agent cannot re-establish identity
+	// without a valid credential. Transient blips (a single beat racing the
+	// 30 s positive cache, a network dip) are forgiven by the grace window
+	// (≈ cache TTL + one heartbeat, per the spec's revocation-latency bound).
 	if err := s.requireAgentCredential(ctx, req.GetName()); err != nil {
+		s.tearDownWatchOnCredentialLoss(req.GetName(), err)
 		return nil, err
 	}
 	if _, err := s.db.HeartbeatAgent(ctx, &dbpb.HeartbeatAgentRequest{Name: req.GetName()}); err != nil {
 		return nil, err
 	}
+	// A SOUND beat resets the credential-loss clock (F-30.3 S3).
+	s.creditSound(req.GetName())
 	s.mu.Lock()
 	if agent, ok := s.live[req.GetName()]; ok {
 		agent.lastSeen = time.Now()
@@ -479,7 +490,15 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 			s.logger.Info("api: agent stream closed", "agent", name)
 			s.updateAgentMetrics()
 			return nil
-		case message := <-assignmentChannel:
+		case message, ok := <-assignmentChannel:
+			if !ok {
+				// Channel CLOSED (teardown on credential lapse, F-30.3 S3, or a
+				// superseding stream): end the stream so the client's Recv
+				// returns and the agent reopens (re-presenting its credential).
+				s.logger.Info("api: agent watch channel closed; ending stream", "agent", name)
+				s.updateAgentMetrics()
+				return nil
+			}
 			if err := stream.Send(message); err != nil {
 				s.logger.Warn("api: failed to send watch message", "agent", name, "err", err)
 				s.updateAgentMetrics()
@@ -2238,6 +2257,59 @@ func (s *GRPCServer) removeLive(name string) {
 		close(assignmentChannel)
 		delete(s.watchers, name)
 	}
+}
+
+// tearDownWatchOnCredentialLoss implements the SPEC's revocation bound:
+// "the heartbeat fails and the watch stream tears down within one heartbeat
+// + cache TTL." Calibration: a single failed beat only STARTS the clock (a
+// blip — a network dip, a transient DB stall — is forgiven); the NEXT failed
+// beat (one heartbeat later) exhausts the grace and CLOSES the agent's watch
+// channel, so the stream ends and the agent cannot receive further
+// assignments until it re-establishes identity with a valid credential. A
+// successful beat RESETS the clock. Combined with the ≤30 s positive cache
+// (revocation is invisible to beats WHILE the cache is warm), the worst-case
+// teardown latency is cache TTL + one heartbeat — the spec's bound.
+func (s *GRPCServer) tearDownWatchOnCredentialLoss(name string, cause error) {
+	const grace = 1 * heartbeatInterval
+	s.mu.Lock()
+	agent, ok := s.live[name]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	if agent.lostCredSince.IsZero() {
+		agent.lostCredSince = now // first failure: start the clock
+		s.mu.Unlock()
+		return
+	}
+	elapse := now.Sub(agent.lostCredSince)
+	if elapse < grace {
+		s.mu.Unlock()
+		return
+	}
+	// Grace exhausted: tear the stream down.
+	channel, hasStream := s.watchers[name]
+	if hasStream {
+		close(channel)
+		delete(s.watchers, name)
+	}
+	delete(s.live, name)
+	s.mu.Unlock()
+	if hasStream {
+		s.logger.Warn("api: agent credential lapsed; watch stream torn down",
+			"agent", name, "elapsed", elapse.Round(time.Second), "cause", cause)
+		s.updateAgentMetrics()
+	}
+}
+
+// creditSound resets the credential-loss clock after a SUCCESSFUL beat.
+func (s *GRPCServer) creditSound(name string) {
+	s.mu.Lock()
+	if agent, ok := s.live[name]; ok && !agent.lostCredSince.IsZero() {
+		agent.lostCredSince = time.Time{}
+	}
+	s.mu.Unlock()
 }
 
 // agentStates snapshots the live agents' identity and state for the agents

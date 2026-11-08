@@ -409,8 +409,14 @@ func main() {
 		}
 	}
 
-	// gRPC server (agents, workers, scheduler).
-	creds, err := grpcutil.ServerCreds(cfg.TLS)
+	// gRPC server (agents, workers, scheduler). F-30.3: the API's gRPC leg is
+	// the RELAXED target stance — TLS-with-server-verification; targets
+	// connect WITHOUT a client certificate and authenticate with the BEARER
+	// agent credential (the identity guarantee is the credential, not the
+	// cipher suite). Internal mesh peers still present certificates (verified
+	// against the shared CA). The pre-F-30.3 full-mTLS stance on this leg is
+	// gone (no backwards compatibility).
+	creds, err := grpcutil.ServerCredsRelaxed(cfg.TLS)
 	if err != nil {
 		logger.Error("tls: server creds", "err", err)
 		os.Exit(1)

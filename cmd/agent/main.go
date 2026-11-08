@@ -57,7 +57,11 @@ func main() {
 		logger.Info("cdrom agent metrics starting", "addr", metricsAddr)
 	}
 
-	apiConn, err := grpcutil.Dial(ctx, cfg.APIAddress, cfg.TLS)
+	// F-30.3: the agent connects to the API WITHOUT a client certificate —
+	// the target leg is TLS-with-server-verification + the BEARER agent
+	// credential (the identity guarantee is the credential, not the cipher
+	// suite). Plaintext when the mesh has no CA (local dev).
+	apiConn, err := grpcutil.DialNoClientCert(ctx, cfg.APIAddress, cfg.TLS)
 	if err != nil {
 		logger.Error("dial api", "addr", cfg.APIAddress, "err", err)
 		os.Exit(1)
@@ -89,6 +93,12 @@ func main() {
 		API:                apipb.NewAPIClient(apiConn),
 		AgentRoot:          cfg.AgentRoot,
 		CredentialSupplier: credentialSupplier,
+		// The API's HTTP surface (for the auto-renew loop's self-service
+		// renew calls, F-30.3 S3): the gRPC address's host/port with the
+		// HTTP port substituted when they differ (the conventional pairing
+		// 7105 → 8080); the APIHTTPAddress config is authoritative when set.
+		APIHTTPBase:   apiHTTPBase(cfg),
+		AutoRenewWindow: cfg.AutoRenewAheadOfExpiry,
 	}, logger)
 	// Attach the agent's Prometheus metric set (F-20) so it records its jobs,
 	// steps, in-flight count, watch state, polls, and heartbeat failures.
@@ -101,4 +111,20 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("cdrom agent stopped")
+}
+// apiHTTPBase is the API's HTTP surface (for the auto-renew loop's
+// self-service renew calls, F-30.3 S3): the configured API HTTP address
+// (default 127.0.0.1:8080) with a scheme. The API's HTTP face is PLAINTEXT
+// even under the mTLS mesh (the mesh secures the gRPC legs; the UI/Human
+// surface fronts it separately), so http:// is the faithful scheme.
+func apiHTTPBase(cfg *config.Config) string {
+	addr := cfg.APIHTTPAddress
+	if addr == "" {
+		addr = config.DefaultAPIHTTPAddress
+	}
+	if len(addr) > 0 && (addr[0] == 'h' || addr[0] == 'H') {
+		// Already a full URL (rare; respect it).
+		return addr
+	}
+	return "http://" + addr
 }
