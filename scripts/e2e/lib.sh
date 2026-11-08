@@ -255,7 +255,10 @@ e2e_boot_stack() {
   # (CDROM_IDP_GRPC_ADDR, inherited default 127.0.0.1:7106).
   e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
   if [ "$with_agent" = "with-agent" ]; then
-    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_LOG_FORMAT=text -- "$BIN/agent"
+    # F-30.3: the agent sources its credential from a FILE and refuses to
+    # boot without one — provision it (the default agent name is agent-1).
+    e2e_issue_agent_credential agent-1 "$WORK/agent-1.cred" >/dev/null
+    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_LOG_FORMAT=text -- "$BIN/agent"
     # Gate on the API having the agent's WatchJobs stream open before
     # dispatching.
     e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'
@@ -559,7 +562,23 @@ e2e_start_rbac_api() {
     CDROM_AUDIT_FILE="$WORK/audit-rbac.log" CDROM_AUDIT_FORMAT=json \
     CDROM_LOG_FORMAT=text -- "$BIN/api"
 }
-
+# e2e_issue_agent_credential <name> <outfile>
+# Issues an agent credential for <name> via the API's MANAGEMENT endpoint
+# (F-30.2) and persists the PLAINTEXT JWT to <outfile> (0600). Echoes the
+# credential id. The file is the agent's CREDENTIAL FILE (F-30.3): the agent
+# sources its token from HERE (never the environment) and REFUSES TO BOOT
+# without it, so every harness-launched agent must be provisioned first.
+# (The main API runs with OIDC auth OFF — every request acts as a synthetic
+# admin — so no bearer is needed for the management call.)
+e2e_issue_agent_credential() {
+  local name="$1" outfile="$2"
+  local resp
+  resp=$(curl -sf -X POST "http://127.0.0.1:8080/api/agents/${name}/credentials" -H 'Content-Type: application/json' -d '{}') \
+    || { echo ">> could not issue agent credential for ${name}" >&2; return 1; }
+  printf '%s' "$resp" | jq -r '.jwt' > "$outfile"
+  chmod 600 "$outfile"
+  printf '%s' "$resp" | jq -r '.credential.id'
+}
 # e2e_login <api-base> <username> <password>
 # Signs in against <api-base> and prints the access token.
 e2e_login() {

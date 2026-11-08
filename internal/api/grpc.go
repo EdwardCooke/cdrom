@@ -165,6 +165,14 @@ type GRPCServer struct {
 	// (zero value → the config default).
 	scheduler   schedpb.SchedulerClient
 	rollbackCfg config.RollbackConfig
+
+	// agentCred verifies the AGENT CREDENTIAL (F-30.3) presented on the
+	// target-surface identity verbs (Register/Deregister/Heartbeat/
+	// ListPendingJobs/WatchJobs-open). Nil = the enforcement is OFF (the
+	// guards are no-ops — the disabled posture); installed by cmd/api when
+	// the IdP is reachable. Orthogonal to jobAuth: job tokens authorize
+	// JOB-SCOPE verbs; the agent credential authorizes WHO the caller is.
+	agentCred *AgentCredentialVerifier
 }
 
 // liveAgent is an agent with an open WatchJobs stream.
@@ -225,6 +233,73 @@ func (s *GRPCServer) SetAuthz(e *authz.Engine) {
 	s.authz = e
 }
 
+// SetAgentCredentialVerifier installs the agent-credential verifier (F-30.3
+// S2) that guards the target-surface identity verbs. When nil (unset) the
+// guards are no-ops — the DISABLED posture (local dev without an IdP).
+func (s *GRPCServer) SetAgentCredentialVerifier(v *AgentCredentialVerifier) {
+	s.agentCred = v
+}
+
+// requireAgentCredential enforces the agent credential on an identity verb
+// (F-30.3 S2): the caller must present a BEARER agent credential that
+// verifies (signature vs the IdP's JWKS + row liveness, cached) AND — when
+// the verb CLAIMS an agent name (register / heartbeat / watch-open) — the
+// credential's bound name must EQUAL the claim (REGISTRATION BINDING: a
+// stolen credential cannot masquerade as a different agent). Denied
+// credentials are UNAUTHENTICATED; a name mismatch is PERMISSION_DENIED.
+// A no-op when the verifier is not installed (disabled posture).
+func (s *GRPCServer) requireAgentCredential(ctx context.Context, claimedName string) error {
+	if s.agentCred == nil {
+		return nil
+	}
+	tok := bearerToken(ctx)
+	if tok == "" {
+		return status.Error(codes.Unauthenticated, "agent credential is required")
+	}
+	_, name, err := s.agentCred.Verify(ctx, tok)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, err.Error())
+	}
+	if claimedName != "" && name != claimedName {
+		return status.Error(codes.PermissionDenied, "agent credential is bound to "+name+", not "+claimedName)
+	}
+	return nil
+}
+
+// bindAgentIdentity enforces the agent credential on a verb that CLAIMS AN
+// ATTRIBUTUTE RATHER THAN A NAME (ListPendingJobs claims the caller's GROUP):
+// the credential verifies, the credential's agent EXISTS (registered), and
+// its STORED group equals the claim — a credential cannot poll another
+// group's queue. Denied credentials are UNAUTHENTICATED; mismatches are
+// PERMISSION_DENIED. A no-op when the verifier is not installed.
+func (s *GRPCServer) bindAgentIdentity(ctx context.Context, claimedGroup string) error {
+	if s.agentCred == nil {
+		return nil
+	}
+	tok := bearerToken(ctx)
+	if tok == "" {
+		return status.Error(codes.Unauthenticated, "agent credential is required")
+	}
+	_, name, err := s.agentCred.Verify(ctx, tok)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, err.Error())
+	}
+	if s.db == nil {
+		return status.Error(codes.Unavailable, "database service is not configured")
+	}
+	ag, err := s.db.GetAgent(ctx, &dbpb.GetAgentRequest{Name: name})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return status.Error(codes.PermissionDenied, "agent "+name+" is not registered")
+		}
+		return status.Error(codes.Internal, err.Error())
+	}
+	if ag.GetGroup() != claimedGroup {
+		return status.Error(codes.PermissionDenied, "requested group does not match the credential holder's group")
+	}
+	return nil
+}
+
 // SetResolver installs the (namespace, name) <-> storage_object bridge used
 // by every translated artifact/log path (F-21.6 storage redesign). The HTTP
 // face shares the SAME resolver instance (installed via Server.SetResolver).
@@ -247,6 +322,12 @@ func (s *GRPCServer) SetMetrics(m *metrics.APIMetrics) {
 func (s *GRPCServer) RegisterAgent(ctx context.Context, req *apipb.RegisterAgentRequest) (*apipb.Agent, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "agent name is required")
+	}
+	// F-30.3 S2: the presenter must HOLD THE CREDENTIAL BOUND TO THIS NAME
+	// (registration binding — a stolen credential cannot masquerade as a
+	// different agent).
+	if err := s.requireAgentCredential(ctx, req.GetName()); err != nil {
+		return nil, err
 	}
 	registered, err := s.db.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{
 		Name:         req.GetName(),
@@ -304,6 +385,11 @@ func (s *GRPCServer) DeregisterAgent(ctx context.Context, req *apipb.DeregisterA
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
+	// F-30.3 S2: only the HOLDER OF THE NAME'S CREDENTIAL may deregister IT
+	// (a stranger's credential cannot knock an agent offline).
+	if err := s.requireAgentCredential(ctx, req.GetName()); err != nil {
+		return nil, err
+	}
 	if _, err := s.db.DeleteAgent(ctx, &dbpb.DeleteAgentRequest{Name: req.GetName()}); err != nil {
 		return nil, err
 	}
@@ -327,6 +413,12 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *apipb.HeartbeatRequest)
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "agent name is required")
 	}
+	// F-30.3 S2: the heartbeat revalidates the agent's identity — a REVOKED
+	// credential makes the next beat fail (the continuous revalidation the
+	// spec requires; the watch-stream TEARDOWN on failure arrives with S3).
+	if err := s.requireAgentCredential(ctx, req.GetName()); err != nil {
+		return nil, err
+	}
 	if _, err := s.db.HeartbeatAgent(ctx, &dbpb.HeartbeatAgentRequest{Name: req.GetName()}); err != nil {
 		return nil, err
 	}
@@ -349,6 +441,12 @@ func (s *GRPCServer) Heartbeat(ctx context.Context, req *apipb.HeartbeatRequest)
 func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerStreamingServer[apipb.WatchMessage]) error {
 	if req.GetAgentName() == "" {
 		return status.Error(codes.InvalidArgument, "agent_name is required")
+	}
+	// F-30.3 S2: VALIDATE AT OPEN — the stream is anchored to the credential
+	// presented here; the heartbeat revalidates continuously (S3 tears the
+	// stream down when the credential lapses).
+	if err := s.requireAgentCredential(stream.Context(), req.GetAgentName()); err != nil {
+		return err
 	}
 	name := req.GetAgentName()
 	assignmentChannel := make(chan *apipb.WatchMessage, assignmentQueueSize)
@@ -482,6 +580,11 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 func (s *GRPCServer) ListPendingJobs(ctx context.Context, req *apipb.ListPendingJobsRequest) (*apipb.ListPendingJobsResponse, error) {
 	if s.db == nil {
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	// F-30.3 S2: the poll CLAIMS A GROUP — bind it to the credential holder's
+	// REGISTERED group (a credential cannot poll another group's queue).
+	if err := s.bindAgentIdentity(ctx, req.GetGroup()); err != nil {
+		return nil, err
 	}
 	resp, err := s.db.ListPendingByGroup(ctx, &dbpb.ListPendingByGroupRequest{
 		Group:        req.GetGroup(),

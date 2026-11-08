@@ -17,6 +17,7 @@ import (
 
 	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	"cdrom/internal/grpcutil"
 	"cdrom/internal/metrics"
 	"cdrom/internal/target"
 
@@ -29,6 +30,14 @@ import (
 // the API service.
 type Dependencies struct {
 	API apipb.APIClient
+	// CredentialSupplier provides the agent's CREDENTIAL (F-30.3): the
+	// agent-credential JWT the agent presents on its identity RPCs (register /
+	// heartbeat / watch / poll). It is consulted LAZILY — at registration and
+	// again on each retry — so a credential that ARRIVES AFTER BOOT (the
+	// operator distributing it, or a rotation being adopted) is picked up
+	// without a restart. Nil = no credential (disabled posture: the API's
+	// agent-credential enforcement must be off, or registration is denied).
+	CredentialSupplier func() (string, error)
 	// AgentRoot is the base directory the agent's staged working area
 	// (F-21.6) is created under; empty means the OS temp dir. Carried from
 	// the agent's config (agent_root / CDROM_AGENT_ROOT).
@@ -101,18 +110,15 @@ func (w *Agent) SetMetrics(m *metrics.AgentMetrics) {
 	w.metrics = m
 }
 
-// Run registers the agent, then serves jobs until ctx is cancelled. It
-// returns nil on a clean shutdown.
+// Run registers the agent (PRESENTING ITS CREDENTIAL, F-30.3), then serves
+// jobs until ctx is cancelled. Registration RETRIES on a capped exponential
+// backoff: the credential may arrive after boot (the operator distributes it
+// to the credential file; a rotation is adopted live), and the agent's
+// SUPERVISOR (systemd / Windows service / k8s) restarts it on a non-zero
+// exit — settling by retrying beats crashing. It returns nil on a clean
+// shutdown.
 func (w *Agent) Run(ctx context.Context) error {
-	if _, err := w.deps.API.RegisterAgent(ctx, &apipb.RegisterAgentRequest{
-		Name:         w.name,
-		Group:        w.group,
-		Address:      w.name,
-		Environments: w.environments,
-		Labels:         w.labels,
-	}); err != nil {
-		return fmt.Errorf("agent: register: %w", err)
-	}
+	w.registerResilient(ctx)
 	w.logger.Info("agent: registered", "name", w.name, "group", w.group, "environments", w.environments, "labels", w.labels)
 
 	defer func() {
@@ -145,6 +151,57 @@ func (w *Agent) Run(ctx context.Context) error {
 	}
 }
 
+// registerResilient registers the agent, RETRYING on a capped exponential
+// backoff until it succeeds or the context is cancelled. The retry exists
+// because the credential may ARRIVE AFTER BOOT: the operator provisions the
+// credential file (or a rotation is adopted) asynchronously, and the agent's
+// supervisor restarts it on a non-zero exit — settling by retrying beats
+// crashing. Each attempt presents the CURRENT credential (lazily re-fetched,
+// so an arrival/rotation is picked up without a restart).
+func (w *Agent) registerResilient(ctx context.Context) {
+	backoff := 500 * time.Millisecond
+	for {
+		ctxCred, err := w.credentialCtx(ctx)
+		if err != nil {
+			w.logger.Warn("agent: credential unavailable; retrying registration", "err", err)
+		} else if _, regErr := w.deps.API.RegisterAgent(ctxCred, &apipb.RegisterAgentRequest{
+			Name:         w.name,
+			Group:        w.group,
+			Address:      w.name,
+			Environments: w.environments,
+			Labels:         w.labels,
+		}); regErr != nil {
+			err = regErr
+			w.logger.Warn("agent: register; retrying", "err", err)
+		} else {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+			if backoff *= 2; backoff > 10*time.Second {
+				backoff = 10 * time.Second
+			}
+		}
+	}
+}
+
+// credentialCtx returns ctx augmented with the agent's credential as the
+// outgoing Authorization bearer (F-30.3). With no supplier configured it
+// returns ctx unchanged (DISABLED POSTURE: the API's agent-credential
+// enforcement must be off, or the call is denied).
+func (w *Agent) credentialCtx(ctx context.Context) (context.Context, error) {
+	if w.deps.CredentialSupplier == nil {
+		return ctx, nil
+	}
+	tok, err := w.deps.CredentialSupplier()
+	if err != nil {
+		return ctx, err
+	}
+	return grpcutil.WithBearerToken(ctx, tok), nil
+}
+
 // watch opens a WatchJobs stream and processes messages until the stream
 // closes or ctx is cancelled. Each message is either an assignment (a new job
 // to run) or a cancellation (stop a job the agent is running, F-05).
@@ -155,7 +212,15 @@ func (w *Agent) Run(ctx context.Context) error {
 // that job's step (see cancelJob); one delivered for a job that is not
 // running on this agent is ignored (the job's status is already reconciled
 // by the database).
-func (w *Agent) watch(ctx context.Context) error {
+func (w *Agent) watch(base context.Context) error {
+	// Opening the stream is an identity verb (the agent credential decorates
+	// the OPEN); the RECEIVE LOOP and the jobs it starts run on the BASE
+	// context (job-scoped verbs present the JOB TOKEN — F-30.3 orthogonality
+	// by verb).
+	ctx, err := w.credentialCtx(base)
+	if err != nil {
+		return fmt.Errorf("agent: credential unavailable: %w", err)
+	}
 	stream, err := w.deps.API.WatchJobs(ctx, &apipb.WatchJobsRequest{
 		AgentName:   w.name,
 		Group:        w.group,
@@ -171,7 +236,7 @@ func (w *Agent) watch(ctx context.Context) error {
 			if err == io.EOF {
 				return nil
 			}
-			if ctx.Err() != nil {
+			if base.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("agent: recv: %w", err)
@@ -181,13 +246,14 @@ func (w *Agent) watch(ctx context.Context) error {
 			// A full assignment (legacy push). The agent starts its own
 			// execution of the job (fan-out): a job that targets the agent's
 			// group runs on every agent in the group, so the start is not
-			// exclusive. The start returns the fresh spec + token.
-			w.startAndExecute(ctx, m.Assignment.GetJob().GetId())
+			// exclusive. The start returns the fresh spec + token. Jobs run
+			// on the BASE context (job-scoped verbs present the JOB TOKEN).
+			w.startAndExecute(base, m.Assignment.GetJob().GetId())
 		case *apipb.WatchMessage_Nudge:
 			// A nudge (F-23): the push carries only the job id. The agent
 			// starts its own execution, so a job delivered via both push and
 			// poll is run once by this agent (its execution is created once).
-			w.startAndExecute(ctx, m.Nudge.GetJobId())
+			w.startAndExecute(base, m.Nudge.GetJobId())
 		case *apipb.WatchMessage_Cancellation:
 			w.cancelJob(m.Cancellation.GetJobId())
 		}
@@ -219,8 +285,16 @@ func (w *Agent) poll(ctx context.Context) {
 }
 
 // pollOnce lists the pending jobs in the agent's group and environments and
-// starts each one.
-func (w *Agent) pollOnce(ctx context.Context) {
+// starts each one. The LIST is an identity verb (decorated with the agent
+// credential); the JOBS THEMSELVES run on the BASE context — job-scoped verbs
+// (start/report/logs/exchange) present the JOB TOKEN, never the agent
+// credential (F-30.3 orthogonality by verb).
+func (w *Agent) pollOnce(base context.Context) {
+	ctx, err := w.credentialCtx(base)
+	if err != nil {
+		w.logger.Warn("agent: credential unavailable; skipping poll", "err", err)
+		return
+	}
 	resp, err := w.deps.API.ListPendingJobs(ctx, &apipb.ListPendingJobsRequest{
 		Group:        w.group,
 		Environments: w.environments,
@@ -235,7 +309,7 @@ func (w *Agent) pollOnce(ctx context.Context) {
 	}
 	w.metrics.RecordPoll("claimed")
 	for _, job := range resp.GetJobs() {
-		w.startAndExecute(ctx, job.GetId())
+		w.startAndExecute(base, job.GetId())
 	}
 }
 
@@ -310,8 +384,14 @@ func (w *Agent) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := w.deps.API.Heartbeat(ctx, &apipb.HeartbeatRequest{Name: w.name}); err != nil {
-				w.logger.Warn("agent: heartbeat", "err", err)
+			ctxBeat, err := w.credentialCtx(ctx)
+			if err != nil {
+				w.logger.Warn("agent: credential unavailable; skipping heartbeat", "err", err)
+				w.metrics.RecordHeartbeatFailure()
+				continue
+			}
+			if _, hbErr := w.deps.API.Heartbeat(ctxBeat, &apipb.HeartbeatRequest{Name: w.name}); hbErr != nil {
+				w.logger.Warn("agent: heartbeat", "err", hbErr)
 				w.metrics.RecordHeartbeatFailure()
 			}
 		}

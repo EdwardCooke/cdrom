@@ -135,6 +135,17 @@ type Config struct {
 	AgentName  string
 	AgentGroup string
 
+	// CredentialFile is the path of the agent's CREDENTIAL FILE (F-30.3):
+	// the file holding the agent-credential JWT the agent presents on its
+	// identity RPCs (register / heartbeat / watch / poll). The agent SOURCE
+	// ITS TOKEN FROM THIS FILE — never from the environment (process-listing
+	// exposure + inheritance into worker subprocesses, violating F-30.4) —
+	// and REFUSES TO START with a diagnostic when the file is missing or
+	// unparsable. Written atomically (dot-prefixed temp + rename, 0600) by
+	// the operator/tooling via internal/credfile; the agent watches it and
+	// adopts a rotated token live (F-30.3 S3). Only the agent binary uses it.
+	CredentialFile string
+
 	// AgentEnvironments are the environments an agent belongs to (F-17). An
 	// agent may belong to several; jobs targeting an environment are dispatched
 	// to the live agents registered for it.
@@ -1216,6 +1227,7 @@ type fileConfig struct {
 	} `yaml:"pipeline_source"`
 	AgentName         *string            `yaml:"agent_name"`
 	AgentGroup        *string            `yaml:"agent_group"`
+	CredentialFile    *string            `yaml:"credential_file"`
 	AgentEnvironments *[]string          `yaml:"agent_environments"`
 	AgentLabels       *map[string]string `yaml:"agent_labels"`
 	WorkerJobID       *string            `yaml:"worker_job_id"`
@@ -1728,6 +1740,7 @@ func applyEnv(cfg *Config) {
 	}
 	cfg.AgentName = envOr("CDROM_AGENT_NAME", cfg.AgentName)
 	cfg.AgentGroup = envOr("CDROM_AGENT_GROUP", cfg.AgentGroup)
+	cfg.CredentialFile = envOr("CDROM_AGENT_CREDENTIAL_FILE", cfg.CredentialFile)
 	if v := os.Getenv("CDROM_AGENT_ENVIRONMENTS"); v != "" {
 		cfg.AgentEnvironments = splitAndTrim(v)
 	}

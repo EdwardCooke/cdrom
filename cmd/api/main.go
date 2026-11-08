@@ -368,12 +368,17 @@ func main() {
 		}
 	}
 
-	// Agent-credential verification for the renew endpoint's SELF-SERVICE arm
-	// (F-30.2 Slice 3): an agent renews its own credential by presenting it as
-	// the Bearer token. It shares the job-token auth's IdP address + audiences
-	// (the same JWKS, the same audience contract) and performs OIDC discovery
-	// against the IdP. Wired only when the IdP is reachable (above); the arm
-	// is inert (admins renew via agents.can-manage) otherwise.
+	// Agent-credential verification (F-30.2 Slice 3 + F-30.3 S2): the SAME
+	// verifier backs (a) the renew endpoint's SELF-SERVICE arm (an agent
+	// renews its own credential by presenting it as the Bearer token) and
+	// (b) the GUARDS on the target-surface identity verbs (register /
+	// deregister / heartbeat / poll / watch-open). It shares the job-token
+	// auth's IdP address + audiences (the same JWKS, the same audience
+	// contract) and performs OIDC discovery against the IdP. Wired only when
+	// the IdP is reachable (above); otherwise the self-service arm is inert
+	// (admins renew via agents.can-manage) AND the identity guards are no-ops
+	// (the disabled posture).
+	var acv *api.AgentCredentialVerifier
 	if idpClient != nil {
 		// Discovery base: the explicit grpc_auth.idp_addr when set, else the
 		// DEFAULT IdP ADDRESS (house fallback, cf. the user-pass wiring) with
@@ -387,7 +392,9 @@ func main() {
 			}
 			acCfg.IdPAddress = prefix + "://" + config.DefaultIdPAddress
 		}
-		acv, err := api.NewAgentCredentialVerifier(ctx, acCfg, idpHTTPClient, clients.Database, logger)
+		// ASSIGN (not declare) into the outer acv: the gRPC server installation
+		// BELOW reads the outer variable.
+		acv, err = api.NewAgentCredentialVerifier(ctx, acCfg, idpHTTPClient, clients.Database, logger)
 		if err != nil {
 			// DEGRADE, don't DIE: the self-service arm is a CONVENIENCE atop
 			// the RBAC arm (administrators renew via agents.can-manage), so a
@@ -425,6 +432,11 @@ func main() {
 	if authzEngine != nil {
 		grpcServer.SetAuthz(authzEngine)
 	}
+	// F-30.3 S2: install the agent-credential verifier on the gRPC surface —
+	// the identity verbs REQUIRE the credential (UNAUTHENTICATED when absent
+	// or invalid; PERMISSION_DENIED when the claimed name/group disagrees).
+	// Nil (IdP unwired) = the guards are no-ops (disabled posture).
+	grpcServer.SetAgentCredentialVerifier(acv)
 	// Attach the API's Prometheus metric set (F-20) so the gRPC surface
 	// records job status, log bytes, token minting, secret decryption,
 	// notifications, artifact bytes, the agent hub, and the event-log lag.

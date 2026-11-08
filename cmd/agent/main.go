@@ -13,10 +13,11 @@ import (
 
 	"cdrom/internal/config"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	"cdrom/internal/agent"
+	"cdrom/internal/credfile"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
 	"cdrom/internal/metrics"
-	"cdrom/internal/agent"
 )
 
 func main() {
@@ -63,9 +64,31 @@ func main() {
 	}
 	defer apiConn.Close()
 
+	// F-30.3: the agent's CREDENTIAL is SOURCED FROM ITS CREDENTIAL FILE —
+	// the file is the ONLY legal source (never the environment: process-
+	// listing exposure + inheritance into worker subprocesses, F-30.4).
+	// A MISSING or UNPARSABLE file is a BOOT REFUSAL with a diagnostic
+	// (non-zero exit; the process supervisor — systemd / Windows service /
+	// k8s — restarts the agent, which SETTLES once a valid credential
+	// exists). Once booted, the read is LAZY (consulted on every identity
+	// call), so a rotated or late-arriving token is adopted without a
+	// restart.
+	credPath := cfg.CredentialFile
+	if credPath == "" {
+		logger.Error("agent: no credential file configured; refusing to start",
+			"hint", "set credential.file (CDROM_AGENT_CREDENTIAL_FILE) to the agent's credential file")
+		os.Exit(1)
+	}
+	if _, err := credfile.Read(credPath); err != nil {
+		logger.Error("agent: cannot read credential file; refusing to start", "file", credPath, "err", err)
+		os.Exit(1)
+	}
+	credentialSupplier := func() (string, error) { return credfile.Read(credPath) }
+
 	w := agent.New(cfg.AgentName, cfg.AgentGroup, cfg.AgentEnvironments, cfg.AgentLabels, agent.Dependencies{
-		API:      apipb.NewAPIClient(apiConn),
-		AgentRoot: cfg.AgentRoot,
+		API:                apipb.NewAPIClient(apiConn),
+		AgentRoot:          cfg.AgentRoot,
+		CredentialSupplier: credentialSupplier,
 	}, logger)
 	// Attach the agent's Prometheus metric set (F-20) so it records its jobs,
 	// steps, in-flight count, watch state, polls, and heartbeat failures.

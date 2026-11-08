@@ -41,7 +41,10 @@ e2e_boot_stack with-agent
 # A second agent in the "default" group, so a fan-out job runs on two agents
 # (the `once` assertion needs more than one target to prove it dedupes). It is
 # started by this script (tracked in PIDS) and torn down on exit.
-e2e_start agent-b "$WORK/agent-b.log" 'registered' CDROM_AGENT_NAME=agent-b CDROM_AGENT_GROUP=default CDROM_LOG_FORMAT=text -- "$BIN/agent"
+# F-30.3: provision agent-b's credential file first (the agent refuses to
+# boot without one).
+e2e_issue_agent_credential agent-b "$WORK/agent-b.cred" >/dev/null
+e2e_start agent-b "$WORK/agent-b.log" 'registered' CDROM_AGENT_NAME=agent-b CDROM_AGENT_GROUP=default CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-b.cred" CDROM_LOG_FORMAT=text -- "$BIN/agent"
 e2e_wait_for "$WORK/api.log" 'agent=agent-b' 'second agent watching on the api'
 
 # --- 1. email step: markdown (default) rendered to HTML by the API ----------
