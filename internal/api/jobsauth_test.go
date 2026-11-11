@@ -394,7 +394,7 @@ func TestMainJobTokenLongLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewJobTokenAuth: %v", err)
 	}
-	token, err := jta.Mint(context.Background(), 42, 0, "default", "", "", nil)
+	token, err := jta.Mint(context.Background(), 42, 0, "default", "", "", "", nil)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}

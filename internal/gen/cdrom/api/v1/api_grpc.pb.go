@@ -73,16 +73,29 @@ type APIClient interface {
 	// JobNudge, F-23) and for every cancellation of a job it is running (a
 	// JobCancellation, F-05).
 	WatchJobs(ctx context.Context, in *WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchMessage], error)
+	// GetJob claims a job's HYDRATED PAYLOAD (spec, upstream jobs, decrypted
+	// secrets, variables, the environment approval gate) for the CALLER'S OWN
+	// execution (F-30.4): the caller must present a job token scoped to the
+	// job (the token the agent obtained from StartJobExecution). The token's
+	// owner is the job itself, so the claim tolerates a job that HAS REACHED A
+	// TERMINAL STATE (the worker's cancellation observer polls it to converge
+	// on a cancel, F-05) — but the token must be VALID (signed, audience,
+	// job-bound). The old mint-on-call behavior (handing a token to an
+	// unidentified caller, trusting the transport) is RETIRED.
 	GetJob(ctx context.Context, in *GetJobRequest, opts ...grpc.CallOption) (*Job, error)
 	// StartJobExecution records that the calling agent has started running a
 	// job (fan-out): it creates the agent's JobExecution for the job's current
-	// attempt (via the Database service) and returns the job with its spec,
-	// upstream jobs, and a fresh job token. A job that targets an agent group
-	// runs on every agent in the group, so the start is not exclusive — every
-	// agent in the group starts its own execution. Starting an execution for a
-	// job that is no longer pending (it reached a terminal state, or it is not
-	// targeted at the agent's group) is rejected, so a job that finished
-	// before a slow agent started it is not run.
+	// attempt (via the Database service) and returns the freshly minted JOB
+	// TOKEN (+ the attempt number) — NO PAYLOAD (F-30.4: the agent never
+	// hydrates the spec or secrets; the worker claims them via GetJob). The
+	// caller IDENTIFIES ITSELF WITH AN AGENT CREDENTIAL (F-30.3):
+	// agent_name must equal the credential holder's registered name. A job
+	// that targets an agent group runs on every agent in the group, so the
+	// start is not exclusive — every agent in the group starts its own
+	// execution. Starting an execution for a job that is no longer pending
+	// (it reached a terminal state, or it is not targeted at the agent's
+	// group) is rejected, so a job that finished before a slow agent started
+	// it is not run.
 	StartJobExecution(ctx context.Context, in *StartJobExecutionRequest, opts ...grpc.CallOption) (*StartJobExecutionResponse, error)
 	// ListPendingJobs returns the pending jobs that target the caller's agent
 	// group (F-23). This is the agent's pull path: it polls it on a short
@@ -531,16 +544,29 @@ type APIServer interface {
 	// JobNudge, F-23) and for every cancellation of a job it is running (a
 	// JobCancellation, F-05).
 	WatchJobs(*WatchJobsRequest, grpc.ServerStreamingServer[WatchMessage]) error
+	// GetJob claims a job's HYDRATED PAYLOAD (spec, upstream jobs, decrypted
+	// secrets, variables, the environment approval gate) for the CALLER'S OWN
+	// execution (F-30.4): the caller must present a job token scoped to the
+	// job (the token the agent obtained from StartJobExecution). The token's
+	// owner is the job itself, so the claim tolerates a job that HAS REACHED A
+	// TERMINAL STATE (the worker's cancellation observer polls it to converge
+	// on a cancel, F-05) — but the token must be VALID (signed, audience,
+	// job-bound). The old mint-on-call behavior (handing a token to an
+	// unidentified caller, trusting the transport) is RETIRED.
 	GetJob(context.Context, *GetJobRequest) (*Job, error)
 	// StartJobExecution records that the calling agent has started running a
 	// job (fan-out): it creates the agent's JobExecution for the job's current
-	// attempt (via the Database service) and returns the job with its spec,
-	// upstream jobs, and a fresh job token. A job that targets an agent group
-	// runs on every agent in the group, so the start is not exclusive — every
-	// agent in the group starts its own execution. Starting an execution for a
-	// job that is no longer pending (it reached a terminal state, or it is not
-	// targeted at the agent's group) is rejected, so a job that finished
-	// before a slow agent started it is not run.
+	// attempt (via the Database service) and returns the freshly minted JOB
+	// TOKEN (+ the attempt number) — NO PAYLOAD (F-30.4: the agent never
+	// hydrates the spec or secrets; the worker claims them via GetJob). The
+	// caller IDENTIFIES ITSELF WITH AN AGENT CREDENTIAL (F-30.3):
+	// agent_name must equal the credential holder's registered name. A job
+	// that targets an agent group runs on every agent in the group, so the
+	// start is not exclusive — every agent in the group starts its own
+	// execution. Starting an execution for a job that is no longer pending
+	// (it reached a terminal state, or it is not targeted at the agent's
+	// group) is rejected, so a job that finished before a slow agent started
+	// it is not run.
 	StartJobExecution(context.Context, *StartJobExecutionRequest) (*StartJobExecutionResponse, error)
 	// ListPendingJobs returns the pending jobs that target the caller's agent
 	// group (F-23). This is the agent's pull path: it polls it on a short

@@ -80,7 +80,7 @@ func NewHandler(w io.Writer) (slog.Handler, error) {
 		}
 		options.Level = parsed
 	}
-	options.ReplaceAttr = replaceAttrWithStackTrace
+	options.ReplaceAttr = attrDecorator
 
 	switch strings.ToLower(os.Getenv(EnvFormat)) {
 	case "", "json":
@@ -98,8 +98,17 @@ func getStackTrace() string {
 	return string(buf[:n])
 }
 
-func replaceAttrWithStackTrace(groups []string, a slog.Attr) slog.Attr {
-	// Only add stack trace for warnings and errors
+// attrDecorator normalizes attributes at emission time. HOUSE STYLE: every
+// EXHIBITED time in the system is UTC — coercing the log timestamp here
+// (instead of sprinkling .UTC() at each Now() call site) puts all
+// components' logs on one clock face, so incidents correlate without offset
+// gymnastics. Instant-arithmetic (Since/Sub/Utl) is location-immune anyway;
+// this is about DISPLAY. Additionally, warn-/error-level records gain a
+// stack trace.
+func attrDecorator(groups []string, a slog.Attr) slog.Attr {
+	if a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
+		return slog.Attr{Key: a.Key, Value: slog.TimeValue(a.Value.Time().UTC())}
+	}
 	if a.Key == slog.LevelKey {
 		level := a.Value.Any().(slog.Level)
 		if level >= slog.LevelWarn {

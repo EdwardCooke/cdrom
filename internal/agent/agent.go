@@ -1,46 +1,66 @@
-// Package agent implements the long-lived agent: a resident process on a
-// deployment target, targetable by group. Must run on both Windows and Linux.
+// Package agent implements the long-lived AGENT: a resident SUPERVISOR
+// process on a deployment target, targetable by group. Must run on both
+// Windows and Linux.
 //
 // An agent talks ONLY to the API service. It registers with the API, holds a
-// WatchJobs stream open, and executes the jobs the API dispatches to its
-// group. Job status is reported back to the API, and all logging is local
-// (stdout or a file) — there is no central logs service.
+// WatchJobs stream open, and OBSERVES the jobs the API dispatches to its
+// group. Since F-30.4 the agent does NOT execute jobs in-process: on each
+// assignment it (1) checks its LAUNCH LEDGER ((job, attempt) already
+// claimed ⇒ drop — duplicate delivery, F-23 nudges); (2) calls
+// StartJobExecution ITSELF, presenting its agent credential — acquiring the
+// execution and receiving the freshly minted JOB TOKEN (the response carries
+// no payload; the agent never hydrates spec or secrets); (3) spawns a
+// per-job WORKER SUBPROCESS with the mandate in the ENVIRONMENT ONLY (argv
+// is world-readable; env is not). The worker claims its payload from the API
+// (GetJob with the job token), executes the job, reports its own status, and
+// exits. The agent is a dumb BABYSITTER: it observes child liveness,
+// relays cancellation OPPORTUNISTICALLY (the worker's own API status poll
+// remains the authoritative cancellation path, F-05), and (slice 3) reports
+// abnormal child deaths.
+//
+// Duplication safety rests on SERIALIZITY PER (job, agent, attempt)
+// COORDINATE — upheld PRIMARILY by the agent's launch ledger and DEFENSIVELY
+// by the database service's duplicate-start guard (a constraint-violating
+// start declines as Started:false).
 package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/metrics"
 	"cdrom/internal/target"
-
-	// Register the built-in step handlers (e.g. the shell handler) with the
-	// executor. A target or plugin adds more step types the same way.
-	_ "cdrom/internal/stephandlers"
 )
 
-// Dependencies are the gRPC clients an agent needs. The agent talks only to
-// the API service.
+// Dependencies are the inputs an agent needs. The agent talks only to the
+// API service.
 type Dependencies struct {
 	API apipb.APIClient
 	// CredentialSupplier provides the agent's CREDENTIAL (F-30.3): the
 	// agent-credential JWT the agent presents on its identity RPCs (register /
-	// heartbeat / watch / poll). It is consulted LAZILY — at registration and
-	// again on each retry — so a credential that ARRIVES AFTER BOOT (the
-	// operator distributing it, or a rotation being adopted) is picked up
-	// without a restart. Nil = no credential (disabled posture: the API's
-	// agent-credential enforcement must be off, or registration is denied).
+	// heartbeat / watch / poll / StartJobExecution). It is consulted LAZILY —
+	// at registration and again on each retry — so a credential that ARRIVES
+	// AFTER BOOT (the operator distributing it, or a rotation being adopted)
+	// is picked up without a restart. Nil = no credential (disabled posture:
+	// the API's agent-credential enforcement must be off, or registration is
+	// denied).
 	CredentialSupplier func() (string, error)
 	// APIHTTPBase is the API's HTTP surface (e.g. http://127.0.0.1:8080) —
 	// the auto-renew loop calls the SELF-SERVICE RENEW ENDPOINT (F-30.2 S3)
@@ -54,9 +74,27 @@ type Dependencies struct {
 	// (F-21.6) is created under; empty means the OS temp dir. Carried from
 	// the agent's config (agent_root / CDROM_AGENT_ROOT).
 	AgentRoot string
+	// ---- F-30.4: the worker-spawning inputs (the CANONICAL ENV CONTRACT) ----
+	// WorkerBinary is the path to the worker executable the agent spawns per
+	// job (typically the sibling bin/worker). Empty = spawning DISABLED
+	// (assignments are acknowledged but not executed — a misconfiguration
+	// surfaced by the WARN on every assignment).
+	WorkerBinary string
+	// WorkerArgs are appended to the worker invocation (production: none —
+	// the mandate rides the environment; tests: e.g. ["-c","sleep 5"] on a
+	// shell to obtain a controllable long-running child).
+	WorkerArgs []string
+	// APIAddress is the API gRPC address handed to the worker (CDROM_API_ADDR).
+	APIAddress string
+	// TLSCAFile is the CA bundle path handed to the worker (CDROM_TLS_CA_FILE)
+	// so it verifies the API's server certificate. Empty = plaintext leg.
+	TLSCAFile string
+	// WorkerRoot is the worker's staged-work-area base (CDROM_WORKER_ROOT);
+	// empty lets the worker default to the OS temp dir.
+	WorkerRoot string
 }
 
-// Agent is a long-lived agent process.
+// Agent is a long-lived agent process (the supervisor; F-30.4).
 type Agent struct {
 	name  string
 	group string
@@ -72,24 +110,23 @@ type Agent struct {
 	// disabled, in which case all recording is a no-op.
 	metrics *metrics.AgentMetrics
 
-	// sem bounds the agent to one job at a time (preserving the previous
-	// sequential behavior) while the watch loop stays free to receive
-	// cancellations for the running job (F-05).
-	//
-	// LOAD BEARING (do not widen casually): the database service's
-	// StartJobExecution duplicate-delivery guard (F-23/flake 2026-11-07) is a
-	// check-then-act that is race-free ONLY because a single agent's
-	// acquisitions are SERIAL — no second StartJobExecution for this agent
-	// can be in flight while the first's execution row is uncommitted.
-	// Growing this semaphore to N (internally parallel jobs) re-opens the
-	// double-execution race; enforce the invariant at the storage layer
-	// first (e.g. a partial unique index on (job, agent, attempt) WHERE
-	// status='running') before scaling. Horizontal fan-out (MORE agents,
-	// each serial) is unaffected and encouraged.
-	sem chan struct{}
+	// LAUNCH LEDGER (F-30.4): the (job, attempt) coordinates this agent has
+	// CLAIMED (successfully started + spawned). A duplicate delivery of an
+	// already-claimed coordinate is DROPPED here (before hitting the API);
+	// the database service's duplicate-start guard defends the same invariant
+	// server-side (defense in depth). Coordinates are FREEd when the child
+	// exits so a RETRY (a fresh attempt) or a RERUN (reset to pending) can
+	// legitimately re-enter.
+	ledgerMu sync.Mutex
+	ledger   map[spawnCoordinate]struct{}
 
-	mu       sync.Mutex
-	inflight map[int64]*jobRun // jobID -> run state for a running job
+	// LIVE CHILDREN (F-30.4): the worker subprocesses currently running,
+	// keyed by coordinate. The agent observes their liveness (Cmd.Wait) and
+	// relays cancellation opportunistically (kill on a WatchJobs
+	// JobCancellation; the worker's own API poll is authoritative, F-05).
+	childrenMu   sync.Mutex
+	liveChildren map[spawnCoordinate]*childProcess
+	wg           sync.WaitGroup // outstanding child-wait goroutines
 
 	// deadlineMu protects the auto-renew loop's learned row deadline (F-30.3
 	// S3): the renew response EXTENDS the row, and the loop schedules its next
@@ -99,11 +136,32 @@ type Agent struct {
 	hasDeadline  bool
 }
 
+// spawnCoordinate is the ledger/livespace key: one worker per (job, attempt).
+type spawnCoordinate struct {
+	jobID   int64
+	attempt int32
+}
+
+// childProcess is one supervised worker subprocess.
+type childProcess struct {
+	cmd   *exec.Cmd
+	pid   int
+	jobID int64
+	// workerLog is the child's OWN log file (F-30.4): the agent folds it
+	// into its log after the child exits.
+	workerLog string
+	// spawnedAt is when the child was started (F-30.4): the agent measures
+	// the supervised job's wall-clock duration for its metrics roll-up.
+	spawnedAt time.Time
+	// exited is closed when the child's Wait returns (observation-complete).
+	exited chan struct{}
+}
+
 // New creates an agent with the given identity and service dependencies.
 // environments are the environments the agent belongs to (F-17); they are
 // declared at registration and used to route environment jobs to this agent.
-// labels are the agent's labels (F-29); they are declared at registration and
-// merged into the label set of the jobs the agent runs.
+// labels are the agent's labels (F-29); they are declared at registration
+// and merged into the label set of the jobs the agent runs.
 func New(name, group string, environments []string, labels map[string]string, deps Dependencies, logger *slog.Logger) *Agent {
 	if logger == nil {
 		logger = slog.Default()
@@ -111,6 +169,10 @@ func New(name, group string, environments []string, labels map[string]string, de
 	// Advise (warn) once at startup when the staged-working-area root is
 	// RAM-backed (F-21.6): staged files would consume memory.
 	target.WarnTmpfsAgentRoot(deps.AgentRoot, logger)
+	if deps.WorkerBinary == "" {
+		logger.Warn("agent: no worker binary configured; assignments will NOT be executed",
+			"hint", "set worker_binary (CDROM_AGENT_WORKER_BINARY) to the worker executable")
+	}
 	return &Agent{
 		name:         name,
 		group:        group,
@@ -118,8 +180,8 @@ func New(name, group string, environments []string, labels map[string]string, de
 		labels:       labels,
 		deps:         deps,
 		logger:       logger,
-		sem:          make(chan struct{}, 1),
-		inflight:     make(map[int64]*jobRun),
+		ledger:       make(map[spawnCoordinate]struct{}),
+		liveChildren: make(map[spawnCoordinate]*childProcess),
 	}
 }
 
@@ -135,7 +197,9 @@ func (w *Agent) SetMetrics(m *metrics.AgentMetrics) {
 // to the credential file; a rotation is adopted live), and the agent's
 // SUPERVISOR (systemd / Windows service / k8s) restarts it on a non-zero
 // exit — settling by retrying beats crashing. It returns nil on a clean
-// shutdown.
+// shutdown. Workers spawned before shutdown DETACH from the agent's lifetime
+// (their context is independent): they finish their jobs and report to the
+// API even if the agent exits (controlled drain/kill ordering is slice 3).
 func (w *Agent) Run(ctx context.Context) error {
 	w.registerResilient(ctx)
 	w.logger.Info("agent: registered", "name", w.name, "group", w.group, "environments", w.environments, "labels", w.labels)
@@ -172,7 +236,7 @@ func (w *Agent) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		w.metrics.SetWatchState("reconnecting")
+		w.setWatchMetric("reconnecting")
 		if err != nil {
 			w.logger.Warn("agent: watch stream ended; reconnecting", "err", err)
 		} else {
@@ -241,17 +305,18 @@ func (w *Agent) credentialCtx(ctx context.Context) (context.Context, error) {
 // closes or ctx is cancelled. Each message is either an assignment (a new job
 // to run) or a cancellation (stop a job the agent is running, F-05).
 //
-// Assignments are run in a goroutine (bounded by the agent's semaphore to
-// one job at a time) so the watch loop stays free to receive a cancellation
-// for the running job. A cancellation delivered while a job runs interrupts
-// that job's step (see cancelJob); one delivered for a job that is not
+// Assignments are processed SYNCHRONOUSLY in the watch loop (the spawn is
+// fast — a StartJobExecution RPC + an exec — and the heavy lifting happens in
+// the detached child), so the watch loop stays free to receive a
+// cancellation for a running job. A cancellation delivered while a job runs
+// INTERRUPTS THE CHILD (see cancelJob); one delivered for a job that is not
 // running on this agent is ignored (the job's status is already reconciled
 // by the database).
 func (w *Agent) watch(base context.Context) error {
 	// Opening the stream is an identity verb (the agent credential decorates
 	// the OPEN); the RECEIVE LOOP and the jobs it starts run on the BASE
 	// context (job-scoped verbs present the JOB TOKEN — F-30.3 orthogonality
-	// by verb).
+	// by verb; StartJobExecution itself re-decorates with the credential).
 	ctx, err := w.credentialCtx(base)
 	if err != nil {
 		return fmt.Errorf("agent: credential unavailable: %w", err)
@@ -264,7 +329,7 @@ func (w *Agent) watch(base context.Context) error {
 	if err != nil {
 		return fmt.Errorf("agent: watch: %w", err)
 	}
-	w.metrics.SetWatchState("connected")
+	w.setWatchMetric("connected")
 	// STREAM-RECYCLE WATCHDOG (F-30.3 S3): the API tears the stream down when
 	// the agent's credential lapses and sends the terminator — but IF the
 	// terminator is ever LOST (a stalled server-side send, a wedged
@@ -321,17 +386,14 @@ type watchRecv struct {
 func (w *Agent) handleWatchMessage(base context.Context, message *apipb.WatchMessage) {
 	switch m := message.GetMessage().(type) {
 	case *apipb.WatchMessage_Assignment:
-		// A full assignment (legacy push). The agent starts its own
-		// execution of the job (fan-out): a job that targets the agent's
-		// group runs on every agent in the group, so the start is not
-		// exclusive. The start returns the fresh spec + token. Jobs run on
-		// the BASE context (job-scoped verbs present the JOB TOKEN).
-		w.startAndExecute(base, m.Assignment.GetJob().GetId())
+		// A full assignment (legacy push). The agent CLAIMS its own execution
+		// of the job (fan-out) and spawns the worker (F-30.4).
+		w.supervise(base, m.Assignment.GetJob().GetId())
 	case *apipb.WatchMessage_Nudge:
-		// A nudge (F-23): the push carries only the job id. The agent starts
+		// A nudge (F-23): the push carries only the job id. The agent claims
 		// its own execution, so a job delivered via both push and poll is run
 		// once by this agent (its execution is created once).
-		w.startAndExecute(base, m.Nudge.GetJobId())
+		w.supervise(base, m.Nudge.GetJobId())
 	case *apipb.WatchMessage_Cancellation:
 		w.cancelJob(m.Cancellation.GetJobId())
 	}
@@ -363,9 +425,9 @@ func (w *Agent) poll(ctx context.Context) {
 
 // pollOnce lists the pending jobs in the agent's group and environments and
 // starts each one. The LIST is an identity verb (decorated with the agent
-// credential); the JOBS THEMSELVES run on the BASE context — job-scoped verbs
-// (start/report/logs/exchange) present the JOB TOKEN, never the agent
-// credential (F-30.3 orthogonality by verb).
+// credential); the JOBS THEMSELVES are claimed on the BASE context —
+// StartJobExecution re-decorates with the credential (it is an identity verb
+// that RETURNS the job token; F-30.3/F-30.4).
 func (w *Agent) pollOnce(base context.Context) {
 	ctx, err := w.credentialCtx(base)
 	if err != nil {
@@ -381,40 +443,41 @@ func (w *Agent) pollOnce(base context.Context) {
 		return
 	}
 	if len(resp.GetJobs()) == 0 {
-		w.metrics.RecordPoll("idle")
+		w.recordPoll("idle")
 		return
 	}
-	w.metrics.RecordPoll("claimed")
+	w.recordPoll("claimed")
 	for _, job := range resp.GetJobs() {
-		w.startAndExecute(base, job.GetId())
+		w.supervise(base, job.GetId())
 	}
 }
 
-// startAndExecute starts this agent's execution of a job (fan-out) and, if
-// the job is still pending, executes it. It is the single entry point for job
+// supervise claims the agent's execution of a job (fan-out) and, on success,
+// SPAWNS the worker subprocess (F-30.4). It is the single entry point for job
 // acquisition, used by both the push path (a nudge or full assignment on the
 // WatchJobs stream) and the pull path (the periodic poll). A job that targets
 // the agent's group runs on every agent in the group, so the start is not
-// exclusive: this agent creates its own execution and runs the job. A job
-// that is no longer pending (it reached a terminal state, or it is not
+// exclusive: this agent claims its own execution and spawns its own worker.
+// A job that is no longer pending (it reached a terminal state, or it is not
 // targeted at the agent's group) is not started (started=false), so a job
 // delivered to several agents — or via both push and poll — is run once by
 // each of them, and a job that finished before a slow agent started it is not
 // run.
 //
-// The job runs in a goroutine (bounded by the agent's semaphore to one job
-// at a time) so the watch loop stays free to receive cancellations (F-05).
-func (w *Agent) startAndExecute(ctx context.Context, jobID int64) {
-	w.sem <- struct{}{}
-	go func() {
-		defer func() { <-w.sem }()
-		w.doStartAndExecute(ctx, jobID)
-	}()
-}
-
-// doStartAndExecute starts the agent's execution of the job and, on success,
-// executes it (which carries its spec, upstream jobs, and a fresh job token).
-func (w *Agent) doStartAndExecute(ctx context.Context, jobID int64) {
+// Deduplication (F-30.4): the LAUNCH LEDGER drops a coordinate this agent
+// already claimed (checked AFTER the start succeeds — the attempt number is
+// only known from the start's response); the DATABASE SERVICE's
+// duplicate-start guard declines the same coordinate server-side (defense in
+// depth: a racing twin that slips past the ledger still loses the start).
+func (w *Agent) supervise(base context.Context, jobID int64) {
+	// StartJobExecution is an IDENTITY VERB (F-30.3/F-30.4): it claims the
+	// agent's name, so it is decorated with the agent credential — unlike
+	// the job-scoped verbs the worker runs (those present the job token).
+	ctx, err := w.credentialCtx(base)
+	if err != nil {
+		w.logger.Warn("agent: credential unavailable; dropping assignment", "job", jobID, "err", err)
+		return
+	}
 	resp, err := w.deps.API.StartJobExecution(ctx, &apipb.StartJobExecutionRequest{
 		JobId:     jobID,
 		AgentName: w.name,
@@ -424,32 +487,366 @@ func (w *Agent) doStartAndExecute(ctx context.Context, jobID int64) {
 		return
 	}
 	if !resp.GetStarted() {
-		// The job is no longer pending (it reached a terminal state, or it is
-		// not targeted at the agent's group).
+		// The job was not started (no longer pending, not served by this
+		// agent, or the (job, agent, attempt) coordinate was already
+		// claimed — a duplicate delivery). ROUTINE: permanently-pending
+		// definition rows are re-polled every second and ALWAYS decline, so
+		// this is DEBUG (a WARN/INFO here floods the log); the ledger drop
+		// below — a twin slipping past the start — stays loud.
+		w.logger.Debug("agent: job not started (dropped)", "job", jobID)
 		return
 	}
-	job := resp.GetJob()
-	w.execute(ctx, job, job.GetToken())
+	coord := spawnCoordinate{jobID: jobID, attempt: resp.GetAttempt()}
+	if !w.reserveLedger(coord) {
+		// A twin delivery slipped past the start (the DB guard should have
+		// declined it; belt-and-braces): do NOT spawn twice.
+		w.logger.Warn("agent: duplicate coordinate dropped by launch ledger", "job", jobID, "attempt", coord.attempt)
+		return
+	}
+	cp := w.spawnWorker(coord, resp.GetJobToken())
+	if cp == nil {
+		// Spawn failed (binary missing, exec error): FREE the reservation so
+		// a redelivery (nudge/poll) can retry — the execution exists in the
+		// DB (the start succeeded) and the worker WILL claim it.
+		w.freeLedger(coord)
+		return
+	}
+	w.refreshInflight()
 }
 
-// cancelJob interrupts the job the agent is running (F-05): it marks the
-// job's run as user-cancelled and cancels its context, which terminates the
-// running step. A cancellation for a job that is not running on this agent
-// (already finished, or running on another target) is a no-op — the job's
-// status is reconciled by the database.
-func (w *Agent) cancelJob(jobID int64) {
-	w.mu.Lock()
-	run, running := w.inflight[jobID]
-	if running {
-		run.userCancel = true
+// reserveLedger claims a coordinate in the launch ledger. False when the
+// coordinate is already claimed (duplicate delivery).
+func (w *Agent) reserveLedger(coord spawnCoordinate) bool {
+	w.ledgerMu.Lock()
+	defer w.ledgerMu.Unlock()
+	if _, ok := w.ledger[coord]; ok {
+		return false
 	}
-	w.mu.Unlock()
-	if !running {
+	w.ledger[coord] = struct{}{}
+	return true
+}
+
+// freeLedger releases a coordinate (the child exited, or the spawn failed):
+// a retry/rerun re-opening the coordinate may re-enter.
+func (w *Agent) freeLedger(coord spawnCoordinate) {
+	w.ledgerMu.Lock()
+	defer w.ledgerMu.Unlock()
+	delete(w.ledger, coord)
+}
+
+// spawnWorker forks the worker subprocess with the CANONICAL ENV CONTRACT
+// (F-30.4): the mandate rides the ENVIRONMENT ONLY — argv is world-readable
+// (process listings, /proc/*/cmdline); env is not. The child DETACHES from
+// the agent's lifetime (its context is independent): it finishes its job and
+// reports to the API even if the agent exits (controlled drain/kill ordering
+// is slice 3). Detached I/O (Discard): the worker's own logging convention
+// (CDROM_LOG_*) governs where its logs go.
+func (w *Agent) spawnWorker(coord spawnCoordinate, jobToken string) *childProcess {
+	if w.deps.WorkerBinary == "" {
+		w.logger.Warn("agent: worker binary not configured; job NOT executed", "job", coord.jobID, "attempt", coord.attempt)
+		return nil
+	}
+	cmd := exec.CommandContext(context.Background(), w.deps.WorkerBinary, w.deps.WorkerArgs...)
+	// Env: the INHERITED environment MINUS the agent's private secrets (the
+	// agent credential file must NOT propagate into the worker — the worker
+	// never needs it), PLUS the canonical mandate. Our variables OVERRIDE
+	// any inherited ones (we strip them from the inherited set first).
+	privileged := map[string]struct{}{
+		"CDROM_AGENT_CREDENTIAL_FILE": {}, // the agent's credential (private)
+		"CDROM_WORKER_JOB_ID":         {}, // overridden below
+		"CDROM_WORKER_JOB_TOKEN":      {}, // overridden below
+	}
+	env := make([]string, 0, 16)
+	for _, kv := range os.Environ() {
+		k := kv
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			k = kv[:i]
+		}
+		if _, priv := privileged[k]; priv {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		"CDROM_WORKER_JOB_ID="+strconv.FormatInt(coord.jobID, 10),
+		"CDROM_WORKER_JOB_TOKEN="+jobToken,
+		"CDROM_API_ADDR="+w.deps.APIAddress,
+	)
+	if w.deps.WorkerRoot != "" {
+		env = append(env, "CDROM_WORKER_ROOT="+w.deps.WorkerRoot)
+	}
+	if w.deps.TLSCAFile != "" {
+		env = append(env, "CDROM_TLS_CA_FILE="+w.deps.TLSCAFile)
+	}
+	// The worker's log DESTINATION (F-30.4): when the agent's own stdout is a
+	// REGULAR FILE (the norm: harness/service-manager redirection), the
+	// worker APPENDS THERE LIVE (concurrent O_APPEND writers) — the worker's
+	// lines are visible the instant they are written, so a reader that waits
+	// for the job's terminal status never races a post-exit fold. When the
+	// agent's stdout is a pipe/socket/dev-null (CI, journald), the worker
+	// writes to its OWN file and the agent folds it in after the child exits
+	// (appendWorkerLog — the only case with a small settle window).
+	dest := agentLogDest()
+	var wl string
+	if dest != "" {
+		wl = dest
+	} else {
+		wl = workerLogPath(coord.jobID, randHex())
+	}
+	env = append(env, "CDROM_LOG_FILE="+wl)
+	cmd.Env = env
+	// Detach the child into its own process group (POSIX): a later
+	// kill-on-shutdown (slice 3) can take the WHOLE TREE (the worker's own
+	// grandchild commands) with one signal. No-op on Windows.
+	w.attachDetachment(cmd)
+	// STDIO IS INHERITED (nil): the worker's logs flow to the agent's log
+	// destination (CDROM_LOG_FILE / the service journal) — one coherent log
+	// per target host, distinguishable by the "worker:"/"agent:" prefixes.
+	// (The worker's own logging convention, CDROM_LOG_*, is inherited too.)
+	if err := cmd.Start(); err != nil {
+		w.logger.Error("agent: spawn worker", "job", coord.jobID, "attempt", coord.attempt, "err", err)
+		return nil
+	}
+	// House style: all STORED/measured times are UTC (duration arithmetic
+	// is location-immune either way; UTC keeps exhibits comparable).
+	cp := &childProcess{cmd: cmd, pid: cmd.Process.Pid, jobID: coord.jobID, workerLog: wl, spawnedAt: time.Now().UTC(), exited: make(chan struct{})}
+	w.childrenMu.Lock()
+	w.liveChildren[coord] = cp
+	w.childrenMu.Unlock()
+	if w.metrics != nil {
+		w.metrics.SetInflight(len(w.liveChildren))
+	}
+	w.wg.Add(1)
+	go w.observeChild(coord, cp)
+	w.logger.Info("agent: worker spawned", "job", coord.jobID, "attempt", coord.attempt, "pid", cp.pid)
+	return cp
+}
+
+// observeChild waits on the child (portable Cmd.Wait) and books its exit:
+// frees the ledger coordinate, removes the live entry, rolls the job's
+// outcome into the agent's target metrics, and (slice 3) reports an ABNORMAL
+// exit (non-zero WITHOUT a terminal status having been reported) via
+// ReportChildDeath. A NORMAL exit is bookkeeping only — the worker already
+// reported its terminal status to the API.
+func (w *Agent) observeChild(coord spawnCoordinate, cp *childProcess) {
+	defer w.wg.Done()
+	err := cp.cmd.Wait()
+	close(cp.exited)
+	w.childrenMu.Lock()
+	delete(w.liveChildren, coord)
+	w.childrenMu.Unlock()
+	w.freeLedger(coord)
+	w.refreshInflight()
+	// Roll the supervised job's outcome into the AGENT's target metrics
+	// (F-30.4): the agent is the durable target representative; the worker
+	// is ephemeral and exports no /metrics of its own.
+	exitCode := 0
+	if err != nil {
+		exitCode = -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exitCode = ee.ExitCode()
+		}
+	}
+	w.rollUpCompletedJob(coord, cp, exitCode)
+	// FALLBACK FOLD (F-30.4): only when the worker wrote to its OWN file
+	// (the agent's stdout was not a regular file): append it to the agent's
+	// log for continuity. Skipped when the worker appended live to the
+	// agent's log (wl == dest: nothing to fold).
+	if wl := cp.workerLog; wl != "" && wl != agentLogDest() {
+		w.foldWorkerLog(wl)
+	}
+	if err == nil {
+		w.logger.Info("agent: worker exited", "job", coord.jobID, "attempt", coord.attempt, "pid", cp.pid)
+		return
+	}
+	// Abnormal exit (slice 3 escalates this to ReportChildDeath; for now the
+	// worker's absence of a terminal report is reaped by the F-03 watchdog —
+	// the loud log keeps it diagnosable meanwhile).
+	w.logger.Warn("agent: worker died abnormally", "job", coord.jobID, "attempt", coord.attempt, "pid", cp.pid, "exit_code", exitCode, "err", err)
+}
+
+// classifyExit maps a worker's exit code to the job's terminal status name
+// (F-30.4): the worker encodes its outcome in the exit code (0 succeeded,
+// 1 failed, 3 cancelled, 4 timed_out). Anything else (a signaled/killed
+// child, a Go panic — code 2, a crash) is classified failed — slice 3
+// sharpens the abnormal-death case via ReportChildDeath.
+func classifyExit(exitCode int) string {
+	switch exitCode {
+	case 0:
+		return "succeeded"
+	case 1:
+		return "failed"
+	case 3:
+		return "cancelled"
+	case 4:
+		return "timed_out"
+	default:
+		return "failed"
+	}
+}
+
+// rollUpCompletedJob records a supervised job's outcome into the agent's own
+// target metrics (F-30.4): the job counter (by terminal status) and its
+// wall-clock duration (spawn → exit). Nil-safe (recording is a no-op when
+// metrics are disabled).
+func (w *Agent) rollUpCompletedJob(coord spawnCoordinate, cp *childProcess, exitCode int) {
+	if w.metrics == nil {
+		return
+	}
+	w.metrics.RecordJob(classifyExit(exitCode), time.Since(cp.spawnedAt))
+}
+
+// refreshInflight recomputes the in-flight gauge from the live-child count
+// (nil-safe).
+func (w *Agent) refreshInflight() {
+	w.childrenMu.Lock()
+	n := len(w.liveChildren)
+	w.childrenMu.Unlock()
+	if w.metrics != nil {
+		w.metrics.SetInflight(n)
+	}
+}
+
+// agentLogDest resolves the REGULAR FILE backing the agent's stdout (fd 1)
+// — the harness / service manager redirects it (e.g. to agent.log). Services
+// log to stdout by default (CDROM_LOG_FILE is OPTIONAL), so fd1 is the
+// authoritative destination. Returns "" when fd1 is not a regular file
+// (pipes, sockets, journals — there is no file to fold into).
+func agentLogDest() string {
+	link, err := os.Readlink("/proc/self/fd/1")
+	if err != nil {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(link, "pipe:"), strings.HasPrefix(link, "socket:"), link == "/dev/null":
+		return ""
+	}
+	fi, err := os.Stat(link)
+	if err != nil || !fi.Mode().IsRegular() {
+		return ""
+	}
+	return link
+}
+
+// workerLogPath is the worker's OWN log file (F-30.4): BESIDE THE AGENT'S
+// LOG when the agent's stdout is a file (the norm: harness redirects, log
+// shippers), else in the OS temp dir. Giving the worker a dedicated file is
+// ROBUST to however the agent's stdio is wired and keeps the worker's volume
+// out of the agent's own stream; the agent APPENDS the file to its log after
+// the child exits (appendWorkerLog).
+func workerLogPath(jobID int64, nonce string) string {
+	dir := os.TempDir()
+	if dest := agentLogDest(); dest != "" {
+		if d := filepath.Dir(dest); d != "" {
+			dir = d
+		}
+	}
+	return filepath.Join(dir, fmt.Sprintf("cdrom.worker-%d-%s.log", jobID, nonce))
+}
+
+// randHex returns 8 hex chars of randomness (filenames for co-temporal
+// worker logs).
+func randHex() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.Itoa(int(time.Now().UnixNano()))
+	}
+	return hex.EncodeToString(b)
+}
+
+// foldWorkerLog appends the worker's OWN log file to the agent's log file
+// (the fallback continuity path, F-30.4: used only when the worker could not
+// append live to the agent's log — the agent's stdout was a pipe/socket).
+// Best-effort: no-op when the agent's stdout is not a regular file.
+func (w *Agent) foldWorkerLog(file string) {
+	if file == "" {
+		return
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	dest := agentLogDest()
+	if dest == "" {
+		return
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		w.logger.Warn("agent: append worker log", "dst", dest, "err", err)
+		return
+	}
+	defer f.Close()
+	if len(data) > 0 {
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			w.logger.Warn("agent: append worker log", "dst", dest, "err", err)
+		}
+	}
+	// Remove the worker's file (folded in; bounded litter).
+	_ = os.Remove(file)
+}
+
+// childCount returns the number of live worker children (test observability).
+func (w *Agent) childCount() int {
+	w.childrenMu.Lock()
+	defer w.childrenMu.Unlock()
+	return len(w.liveChildren)
+}
+
+// holdings returns the launch-ledger coordinates currently held (test
+// observability).
+func (w *Agent) holdings() []spawnCoordinate {
+	w.ledgerMu.Lock()
+	defer w.ledgerMu.Unlock()
+	coords := make([]spawnCoordinate, 0, len(w.ledger))
+	for c := range w.ledger {
+		coords = append(coords, c)
+	}
+	return coords
+}
+
+// setWatchMetric records the watch state (nil-safe).
+func (w *Agent) setWatchMetric(state string) {
+	if w.metrics != nil {
+		w.metrics.SetWatchState(state)
+	}
+}
+
+// recordPoll records a poll outcome (nil-safe).
+func (w *Agent) recordPoll(kind string) {
+	if w.metrics != nil {
+		w.metrics.RecordPoll(kind)
+	}
+}
+
+// cancelJob NOTICEs the cancellation of a job running on this agent (F-05).
+// SLICE 1 SEMANTICS: the relay is ADVISORY AND NON-DESTRUCTIVE — the agent
+// does NOT kill the worker: the worker's OWN 2-second API status poll is the
+// AUTHORITY (the scheduler marks the job cancelled in the database; the
+// worker's next poll sees it, interrupts the running step, and reports the
+// job cancelled). Killing the worker here would leave NO ONE to report the
+// cancellation (the dead worker can't; the agent must not forge the worker's
+// terminal status) — the job would ride out the F-03 watchdog with the WRONG
+// terminal status. The destructive kill-relay (shrinking reaction latency
+// further) arrives with the supervision channel (slice 2) and the
+// death-reporting semantics (slice 3). A cancellation for a job that is not
+// running on this agent (finished, or running elsewhere) is a no-op — the
+// job's status is reconciled by the database.
+func (w *Agent) cancelJob(jobID int64) {
+	w.childrenMu.Lock()
+	held := false
+	for _, cp := range w.liveChildren {
+		if cp.jobID == jobID {
+			held = true
+			break
+		}
+	}
+	w.childrenMu.Unlock()
+	if !held {
 		w.logger.Info("agent: cancel for job not running on this agent", "job", jobID)
 		return
 	}
-	w.logger.Info("agent: cancelling job", "job", jobID)
-	run.cancel()
+	w.logger.Info("agent: cancellation noticed; the worker's own status poll is authoritative (F-05)", "job", jobID)
 }
 
 // heartbeat refreshes the agent's liveness on an interval.
@@ -464,12 +861,16 @@ func (w *Agent) heartbeat(ctx context.Context) {
 			ctxBeat, err := w.credentialCtx(ctx)
 			if err != nil {
 				w.logger.Warn("agent: credential unavailable; skipping heartbeat", "err", err)
-				w.metrics.RecordHeartbeatFailure()
+				if w.metrics != nil {
+					w.metrics.RecordHeartbeatFailure()
+				}
 				continue
 			}
 			if _, hbErr := w.deps.API.Heartbeat(ctxBeat, &apipb.HeartbeatRequest{Name: w.name}); hbErr != nil {
 				w.logger.Warn("agent: heartbeat", "err", hbErr)
-				w.metrics.RecordHeartbeatFailure()
+				if w.metrics != nil {
+					w.metrics.RecordHeartbeatFailure()
+				}
 			}
 		}
 	}
@@ -643,77 +1044,4 @@ func jwtJTI(compact string) (string, error) {
 		return "", fmt.Errorf("payload carries no jti")
 	}
 	return claims.JTI, nil
-}
-
-// jobRun is the per-job execution state the agent tracks so a cancellation
-// (F-05) can interrupt a running job: cancel terminates the job's context
-// (killing the running step), and userCancel records that the interruption
-// was a user cancellation (as opposed to a timeout or an agent shutdown).
-type jobRun struct {
-	cancel     context.CancelFunc
-	userCancel bool
-}
-
-// execute runs a single job assignment: mark running, execute, and report the
-// final status. All job logging is local. token is the job token the API
-// handed over with the assignment; it is presented on the status reports so
-// the API (and any outside resources) can authenticate the agent for this
-// job.
-//
-// The job runs under a cancellable context registered in the agent's
-// in-flight set (F-05): a cancellation delivered on the WatchJobs stream
-// cancels this context, which terminates the running step, and the job is
-// reported as cancelled.
-func (w *Agent) execute(ctx context.Context, job *apipb.Job, token string) {
-	w.logger.Info("agent: executing job", "job", job.GetId(), "name", job.GetName())
-
-	// A cancellable context bounds the job's execution; a cancellation (F-05)
-	// cancels it to interrupt the running step. It is also cancelled on
-	// agent shutdown (via the parent ctx).
-	jobCtx, cancel := context.WithCancel(ctx)
-	run := &jobRun{cancel: cancel}
-	w.mu.Lock()
-	w.inflight[job.GetId()] = run
-	w.metrics.SetInflight(len(w.inflight))
-	w.mu.Unlock()
-	defer func() {
-		cancel()
-		w.mu.Lock()
-		delete(w.inflight, job.GetId())
-		w.metrics.SetInflight(len(w.inflight))
-		w.mu.Unlock()
-	}()
-
-	// The shared execution context: the target's API client, the agent's
-	// name (so a fan-out job's outcome is recorded against this agent's
-	// execution), the job's token, the agent's step metrics (F-20), and the
-	// agent's step barrier (when the job has the step-barrier flag set and
-	// targets an agent group).
-	tc := &target.Context{
-		API:       w.deps.API,
-		AgentName: w.name,
-		Token:     token,
-		Metrics:   w.metrics,
-		Logger:    w.logger,
-		AgentRoot: w.deps.AgentRoot,
-	}
-	if job.GetStepBarrier() && job.GetTargetGroup() != "" {
-		tc.StepBarrier = newStepBarrier(w.deps.API, w.name, job.GetId(), token, w.logger, 0)
-	}
-
-	target.ReportRunning(ctx, tc, job.GetId())
-	w.logger.Info("job started", "job", job.GetId())
-	collector := &executor.StepResultCollector{}
-	start := time.Now()
-	err := target.RunJob(jobCtx, tc, job, collector)
-	// A cancellation delivered on the WatchJobs stream (F-05) marks the run
-	// as user-cancelled; FinishJob reports the job as cancelled, distinct
-	// from a failure.
-	w.mu.Lock()
-	userCancelled := run.userCancel
-	w.mu.Unlock()
-	finalStatus := target.FinishJob(ctx, tc, job.GetId(), collector, err, userCancelled)
-	// Record the job's terminal status and duration (F-20), matching the
-	// status the API records for the same job.
-	w.metrics.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
 }

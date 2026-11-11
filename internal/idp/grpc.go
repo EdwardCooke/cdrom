@@ -146,6 +146,13 @@ func (s *GRPCServer) MintJobToken(ctx context.Context, req *idppb.MintJobTokenRe
 	if tt := req.GetTriggerType(); tt != "" {
 		claims["trigger_type"] = tt
 	}
+	// F-30.4: the agent that started the execution this token was minted for
+	// (attribution: the worker spending the token is anonymous to the API
+	// apart from it, so its reports credit the agent's JobExecution via this
+	// claim). Absent for exchange tokens and pre-F-30.4 styles.
+	if an := req.GetAgentName(); an != "" {
+		claims["agent_name"] = an
+	}
 	if encoded := req.GetUpstreamClaims(); encoded != "" {
 		var upstream map[string]any
 		if err := json.Unmarshal([]byte(encoded), &upstream); err == nil {

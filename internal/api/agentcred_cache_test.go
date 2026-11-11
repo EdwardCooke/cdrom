@@ -67,7 +67,7 @@ func TestLivenessCachePositiveWithinTTL(t *testing.T) {
 		t.Fatalf("row lookups after 3 verifies = %d, want 1 (positive cache MISS)", got)
 	}
 
-	adv(31 * time.Second) // past the 30 s positive TTL
+	adv(31 * time.Second) // past the 15 s positive TTL
 	if _, _, err := v.Verify(ctx, issued.GetJwt()); err != nil {
 		t.Fatalf("Verify after TTL: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestLastSeenThrottle(t *testing.T) {
 	if got := db.markCount(row.GetId()); got != 1 {
 		t.Fatalf("marks at t0 = %d, want 1", got)
 	}
-	// t0+30s: cache MISSES (past the 30 s positive TTL) but the mark is
+	// t0+30s: cache MISSES (past the 15 s positive TTL) but the mark is
 	// SUPPRESSED (inside the 60 s throttle window).
 	adv(30 * time.Second)
 	if _, _, err := v.Verify(ctx, issued.GetJwt()); err != nil {

@@ -99,6 +99,12 @@ func main() {
 		// 7105 → 8080); the APIHTTPAddress config is authoritative when set.
 		APIHTTPBase:   apiHTTPBase(cfg),
 		AutoRenewWindow: cfg.AutoRenewAheadOfExpiry,
+		// F-30.4: the worker-spawning inputs (the canonical env contract the
+		// agent writes into each child's environment).
+		WorkerBinary: cfg.WorkerBinary,
+		APIAddress:   cfg.APIAddress,
+		TLSCAFile:    cfg.TLS.CAFile,
+		WorkerRoot:   cfg.WorkerRoot,
 	}, logger)
 	// Attach the agent's Prometheus metric set (F-20) so it records its jobs,
 	// steps, in-flight count, watch state, polls, and heartbeat failures.

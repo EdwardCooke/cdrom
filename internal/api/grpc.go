@@ -508,18 +508,43 @@ func (s *GRPCServer) WatchJobs(req *apipb.WatchJobsRequest, stream grpc.ServerSt
 	}
 }
 
-// GetJob fetches a job from the Database service.
+// GetJob claims a job's HYDRATED PAYLOAD for the caller's own execution
+// (F-30.4): the caller must present a job token scoped to the job (obtained
+// from the agent's StartJobExecution). The old mint-on-call behavior (coin a
+// token for an unidentified caller, trusting the transport) is RETIRED.
+//
+// The token gate TOLERATES A TERMINAL JOB STATUS (allowTerminal): the token's
+// owner is the job itself, so fetching one's own job after it finished is
+// harmless — and REQUIRED: the worker's cancellation observer (F-05) polls
+// GetJob to CONVERGE on a cancel, and a terminal-rejecting gate would leave
+// it spinning on PermissionDenied until the F-03 watchdog. Signature /
+// audience / job-binding are still enforced (garbage tokens are rejected).
 func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*apipb.Job, error) {
+	if err := s.checkJobToken(ctx, req.GetId(), true); err != nil {
+		return nil, err
+	}
 	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetId()})
 	if err != nil {
 		return nil, err
 	}
 	apiJob := toAPIJob(job)
-	// Hand the agent the status/outputs of the jobs this job depends on (F-06)
+	s.hydrateJobPayload(ctx, apiJob, job)
+	return apiJob, nil
+}
+
+// hydrateJobPayload fills apiJob (built from the job-row dbpb.Job) with the
+// execution-ready material the API computes: the dependent jobs'
+// status/outputs (F-06), the pipeline's secrets as plaintext (F-12), the
+// run's variables (F-21.1.3), and the environment approval gate (F-17).
+// Shared by GetJob (the worker's payload claim, F-30.4) and DispatchJob's
+// push preview. No token is attached HERE: tokens originate exclusively from
+// the agent's StartJobExecution (F-30.4).
+func (s *GRPCServer) hydrateJobPayload(ctx context.Context, apiJob *apipb.Job, job *dbpb.Job) {
+	// Hand the target the status/outputs of the jobs this job depends on (F-06)
 	// so a step's condition can reference them.
 	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
-	// Hand the agent the pipeline's secrets as plaintext (F-12), decrypted from
-	// the job's stored ciphertexts, so a step's spec can reference them.
+	// Hand the target the pipeline's secrets as plaintext (F-12), decrypted
+	// from the job's stored ciphertexts, so a step's spec can reference them.
 	s.resolveSecrets(ctx, apiJob, job)
 	// Resolve the job's variables (F-21.1.3) into the run's parameters, so a
 	// step's spec can reference them as `{{ .params.name }}`.
@@ -527,23 +552,26 @@ func (s *GRPCServer) GetJob(ctx context.Context, req *apipb.GetJobRequest) (*api
 	// Insert an F-13 approval step when the job's environment requires approval
 	// (F-17), so the target pauses at the gate before it runs.
 	s.applyEnvironmentApprovalGate(ctx, apiJob)
-	// Hand the agent a job token so it can authenticate its status reports and
-	// any outside-resource calls for this job.
-	if token := s.mintJobToken(ctx, apiJob); token != "" {
-		apiJob.Token = token
-	}
-	return apiJob, nil
 }
 
 // StartJobExecution records that the calling agent has started running a job
-// (fan-out). It creates the agent's JobExecution for the job's current
-// attempt via the Database service and, on success, returns the job with its
-// spec, upstream jobs, and a fresh job token. A job that targets an agent
-// group runs on every agent in the group, so the start is not exclusive:
+// (fan-out): it creates the agent's JobExecution for the job's current
+// attempt via the Database service and, on success, returns the freshly
+// minted JOB TOKEN and the attempt number — NO PAYLOAD (F-30.4: the agent
+// never hydrates the spec or secrets; the worker claims them from GetJob
+// with the job token). A job that targets an agent group runs on every agent
+// in the group, so the start is not exclusive:
 // every agent in the group starts its own execution. Starting an execution
 // for a job that is no longer pending (it reached a terminal state, or it is
 // not targeted at an agent group) is rejected, so a job that finished before a
 // slow agent started it is not run.
+//
+// Identity (F-30.3/F-30.4): the caller IDENTIFIES ITSELF WITH AN AGENT
+// CREDENTIAL — agent_name must equal the credential holder's registered name
+// (masquerading is rejected). StartJobExecution thus sits on the IDENTITY
+// VERB side of the orthogonality cut: it bears the agent credential and
+// RETURNS the job token (the worker's credential) — it is the transition
+// verb, and the worker inherits nothing but the token it was handed.
 func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobExecutionRequest) (*apipb.StartJobExecutionResponse, error) {
 	if req.GetJobId() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "job_id is required")
@@ -551,11 +579,17 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 	if req.GetAgentName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
 	}
+	// F-30.3/F-30.4: the start CLAIMS AN AGENT NAME — bind it to the
+	// credential holder's registered identity (a credential cannot start
+	// executions under another agent's name).
+	if err := s.requireAgentCredential(ctx, req.GetAgentName()); err != nil {
+		return nil, err
+	}
 	if s.db == nil {
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
 	resp, err := s.db.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{
-		JobId:      req.GetJobId(),
+		JobId:     req.GetJobId(),
 		AgentName: req.GetAgentName(),
 	})
 	if err != nil {
@@ -566,29 +600,27 @@ func (s *GRPCServer) StartJobExecution(ctx context.Context, req *apipb.StartJobE
 		// not targeted at an agent group); the caller skips it.
 		return &apipb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// The job is now running on this agent. Fetch it fresh (it now carries the
-	// running status and started_at) and hand the agent its spec, upstream
-	// jobs, and a job token.
+	// SLIM HANDOFF (F-30.4): mint the job token for the NEW execution and
+	// return it with the attempt number. The token is stamped with the
+	// agent's name (attribution: the worker is anonymous to the API apart
+	// from its job token, so its reports are credited to the agent's
+	// execution via the token's agent_name claim). Nothing hydrated crosses
+	// this call — the worker claims the payload via GetJob.
+	att := resp.GetExecution().GetAttempt()
 	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
 	if err != nil {
 		return nil, err
 	}
-	apiJob := toAPIJob(job)
-	apiJob.UpstreamJobs = s.upstreamJobsFor(ctx, apiJob)
-	// Hand the agent the pipeline's secrets as plaintext (F-12), decrypted
-	// from the job's stored ciphertexts, so a step's spec can reference them.
-	s.resolveSecrets(ctx, apiJob, job)
-	// Resolve the job's variables (F-21.1.3) into the run's parameters, so a
-	// step's spec can reference them as `{{ .params.name }}`.
-	s.resolveVariables(ctx, apiJob, job)
-	// Insert an F-13 approval step when the job's environment requires approval
-	// (F-17), so the target pauses at the gate before it runs.
-	s.applyEnvironmentApprovalGate(ctx, apiJob)
-	if token := s.mintJobToken(ctx, apiJob); token != "" {
-		apiJob.Token = token
+	token := s.mintJobTokenForAgent(ctx, job, req.GetAgentName())
+	if token == "" {
+		// Minting failed (IdP outage): the execution EXISTS (recorded above)
+		// but nobody can claim it — refuse loudly rather than strand a
+		// running execution without a usable token (the F-03 watchdog would
+		// eventually reap it; failing fast is kinder and diagnosable).
+		return nil, status.Error(codes.Unavailable, "could not mint the job token for the new execution")
 	}
-	s.logger.Info("api: job execution started", "job", req.GetJobId(), "agent", req.GetAgentName())
-	return &apipb.StartJobExecutionResponse{Started: true, Job: apiJob}, nil
+	s.logger.Info("api: job execution started", "job", req.GetJobId(), "agent", req.GetAgentName(), "attempt", att)
+	return &apipb.StartJobExecutionResponse{Started: true, JobToken: token, Attempt: att}, nil
 }
 
 // ListPendingJobs returns the pending jobs that target the caller's agent
@@ -685,7 +717,7 @@ func (s *GRPCServer) ReportJobStatus(ctx context.Context, req *apipb.ReportJobSt
 		if job.GetTargetGroup() != "" {
 			if _, err := s.db.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
 				JobId:       req.GetJobId(),
-				AgentName:  req.GetAgentName(),
+				AgentName:   req.GetAgentName(),
 				Status:      req.GetStatus(),
 				FinishedAt:  req.GetFinishedAt(),
 				StepResults: req.GetStepResults(),
@@ -765,9 +797,9 @@ func (s *GRPCServer) ReportStepCompletion(ctx context.Context, req *apipb.Report
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
 	if _, err := s.db.ReportStepCompletion(ctx, &dbpb.ReportStepCompletionRequest{
-		JobId:      req.GetJobId(),
+		JobId:     req.GetJobId(),
 		AgentName: req.GetAgentName(),
-		StepName:   req.GetStepName(),
+		StepName:  req.GetStepName(),
 	}); err != nil {
 		return nil, err
 	}
@@ -1644,13 +1676,11 @@ func (s *GRPCServer) DispatchJob(ctx context.Context, req *apipb.DispatchJobRequ
 	if group == "" && environment == "" {
 		return &apipb.DispatchJobResponse{Dispatched: 0}, nil
 	}
-	// Hand the agents the status/outputs of the jobs this job depends on
-	// (F-06) so a step's condition can reference them.
-	job.UpstreamJobs = s.upstreamJobsFor(ctx, job)
-	// Mint a job token so the agents can authenticate their status reports
-	// and any outside-resource calls for this job.
-	token := s.mintJobToken(ctx, job)
-	dispatched := s.dispatch(group, environment, job, token)
+	// The push is a SIGNAL (F-30.4): it carries the job id and nothing else —
+	// the agent claims its own execution via StartJobExecution (which mints
+	// the job token) and the worker claims the payload via GetJob. Neither
+	// the spec nor the secrets cross the push.
+	dispatched := s.dispatch(group, environment, job)
 	if dispatched == 0 {
 		s.logger.Warn("api: no live agents for job; job left pending",
 			"job", job.GetId(), "group", group, "environment", environment)
@@ -1851,15 +1881,16 @@ func (s *GRPCServer) publishLogUpdated(ctx context.Context, jobID int64, log str
 	s.markPublished(resp.GetId())
 }
 
-// dispatch pushes an assignment (with the job token) to every live agent that
-// serves the job and returns how many agents received it. A job that targets
+// dispatch pushes the assignment (job id only — F-30.4: the push is a
+// signal, not a payload) to every live agent that serves the job and returns
+// how many agents received it. A job that targets
 // an environment (F-17) is pushed to the live agents that belong to it; a job
 // that targets a raw group (and no environment) is pushed to the live agents
 // in that group. The push is best-effort: an agent that receives it but does
 // not actually serve the job (e.g. it is not in the environment's target
 // group) is rejected when it starts the job (StartJobExecution is the
 // authoritative routing gate).
-func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job, token string) int {
+func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var dispatchedCount int
@@ -1877,7 +1908,7 @@ func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job, token s
 		}
 		assignment := &apipb.WatchMessage{
 			Message: &apipb.WatchMessage_Assignment{
-				Assignment: &apipb.JobAssignment{Job: job, AgentName: name, Token: token},
+				Assignment: &apipb.JobAssignment{Job: job, AgentName: name},
 			},
 		}
 		select {
@@ -1890,21 +1921,25 @@ func (s *GRPCServer) dispatch(group, environment string, job *apipb.Job, token s
 	return dispatchedCount
 }
 
-// mintJobToken requests a job token for job from the IdP when job-token auth
-// is enabled. It returns "" when disabled or when minting fails (the job is
-// still dispatched; the target's status reports will be rejected until it has
-// a valid token). The token carries the trigger that started the run
-// (trigger_name/trigger_type) and the upstream OIDC claims a webhook caller
-// presented (prefixed with upstream_), so a job's steps — and the outside
-// resources they call — can see how the run was started.
-func (s *GRPCServer) mintJobToken(ctx context.Context, job *apipb.Job) string {
+// mintJobTokenForAgent requests a job token for job from the IdP when
+// job-token auth is enabled, stamping the agent that started the execution
+// (F-30.4: the worker spending the token is anonymous to the API apart from
+// it, so its reports attribute to the agent's JobExecution via the token's
+// agent_name claim). It returns "" when disabled or when minting fails (the
+// caller decides how to treat a failed mint — StartJobExecution refuses
+// loudly; a failed mint elsewhere degrades gracefully). The token carries the
+// trigger that started the run (trigger_name/trigger_type) and the upstream
+// OIDC claims a webhook caller presented (prefixed with upstream_), so a
+// job's steps — and the outside resources they call — can see how the run was
+// started.
+func (s *GRPCServer) mintJobTokenForAgent(ctx context.Context, job *dbpb.Job, agentName string) string {
 	if !s.jobAuth.Enabled() {
 		return ""
 	}
 	token, err := s.jobAuth.Mint(ctx, job.GetId(), job.GetPipelineId(), job.GetTargetGroup(),
-		job.GetTriggerName(), job.GetTriggerType(), upstreamClaimsFromStruct(job.GetUpstreamClaims()))
+		job.GetTriggerName(), job.GetTriggerType(), agentName, upstreamClaimsFromStruct(job.GetUpstreamClaims()))
 	if err != nil {
-		s.logger.Warn("api: mint job token failed; dispatching without token", "job", job.GetId(), "err", err)
+		s.logger.Warn("api: mint job token failed", "job", job.GetId(), "agent", agentName, "err", err)
 		return ""
 	}
 	if s.metrics != nil {

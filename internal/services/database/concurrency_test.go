@@ -576,3 +576,57 @@ func TestConcurrencyLimitChangeTakesEffect(t *testing.T) {
 		t.Fatalf("job b after limit change: acquired=%v err=%v, want acquired", resp.GetAcquired(), err)
 	}
 }
+
+// TestStartJobExecutionPaysTheConcurrencyToll locks the 2026-11-11 tightening
+// (F-16 / F-31): StartJobExecution CHARGES the job's slots inside its own
+// transaction, so a start is impossible while a concurrency key is held —
+// REGARDLESS OF THE CALLER (the agent's pull path was walking past the
+// scheduler's advisory hold and starting unadmitted jobs; the "premature slot
+// release" phantoms were in fact uncharged admissions). Sequence: the holder
+// starts and pays; the queue job (sharing the key) is DECLINED while the slot
+// is held; after the holder's release the queue job starts and pays.
+func TestStartJobExecutionPaysTheConcurrencyToll(t *testing.T) {
+	client, _ := startConcurrencyServer(t, nil)
+	ctx := context.Background()
+
+	holder := createJobWithKeys(t, client, "toll-holder", "grp", []string{"lock-k"})
+	queue := createJobWithKeys(t, client, "toll-queue", "grp", []string{"lock-k"})
+
+	// The holder starts and PAYS the toll (key default limit 1 — a lock).
+	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: holder, AgentName: "w1"})
+	if err != nil {
+		t.Fatalf("StartJobExecution(holder): %v", err)
+	}
+	if !resp.GetStarted() {
+		t.Fatalf("holder started = false, want true (the key is free)")
+	}
+
+	// The queue job, sharing the key, is DECLINED while the holder occupies it
+	// (REGRESSION: pre-fix this start succeeded with concurrency_admitted=0).
+	resp, err = client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: queue, AgentName: "w2"})
+	if err != nil {
+		t.Fatalf("StartJobExecution(queue): %v", err)
+	}
+	if resp.GetStarted() {
+		t.Fatalf("queue started = true while the key is held, want false (the toll must be paid)")
+	}
+	q, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: queue})
+	if err != nil {
+		t.Fatalf("GetJob(queue): %v", err)
+	}
+	if q.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
+		t.Errorf("queue status = %v, want PENDING (a declined start must not advance the job)", q.GetStatus())
+	}
+
+	// The holder's terminal release frees the key; the queue job can now start.
+	if _, err := client.ReleaseJobSlots(ctx, &dbpb.ReleaseJobSlotsRequest{JobId: holder}); err != nil {
+		t.Fatalf("ReleaseJobSlots(holder): %v", err)
+	}
+	resp, err = client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{JobId: queue, AgentName: "w2"})
+	if err != nil {
+		t.Fatalf("StartJobExecution(queue, after release): %v", err)
+	}
+	if !resp.GetStarted() {
+		t.Fatalf("queue after release started = false, want true (the key is free again)")
+	}
+}

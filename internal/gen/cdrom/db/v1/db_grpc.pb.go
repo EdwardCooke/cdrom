@@ -337,7 +337,10 @@ type DatabaseClient interface {
 	// group (F-23). This is the pull path: an agent (or the API on its behalf)
 	// polls it to pick up jobs that were published while it was unreachable, so
 	// no job is stranded pending. Filtering in the database keeps the poll from
-	// pulling every pending job over the wire as the system grows.
+	// pulling every pending job over the wire as the system grows. Pipeline
+	// DEFINITION rows (templates stored as Jobs, F-08) are excluded: they are
+	// never work items and would otherwise burn a guaranteed-decline start per
+	// agent per poll.
 	ListPendingByGroup(ctx context.Context, in *ListPendingByGroupRequest, opts ...grpc.CallOption) (*ListJobsResponse, error)
 	// StartJobExecution records that the calling agent has started running a
 	// job (fan-out): it creates the agent's JobExecution for the job's current
@@ -2942,7 +2945,10 @@ type DatabaseServer interface {
 	// group (F-23). This is the pull path: an agent (or the API on its behalf)
 	// polls it to pick up jobs that were published while it was unreachable, so
 	// no job is stranded pending. Filtering in the database keeps the poll from
-	// pulling every pending job over the wire as the system grows.
+	// pulling every pending job over the wire as the system grows. Pipeline
+	// DEFINITION rows (templates stored as Jobs, F-08) are excluded: they are
+	// never work items and would otherwise burn a guaranteed-decline start per
+	// agent per poll.
 	ListPendingByGroup(context.Context, *ListPendingByGroupRequest) (*ListJobsResponse, error)
 	// StartJobExecution records that the calling agent has started running a
 	// job (fan-out): it creates the agent's JobExecution for the job's current

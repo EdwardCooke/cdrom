@@ -44,7 +44,7 @@ e2e_boot_stack with-agent
 # F-30.3: provision agent-b's credential file first (the agent refuses to
 # boot without one).
 e2e_issue_agent_credential agent-b "$WORK/agent-b.cred" >/dev/null
-e2e_start agent-b "$WORK/agent-b.log" 'registered' CDROM_AGENT_NAME=agent-b CDROM_AGENT_GROUP=default CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-b.cred" CDROM_LOG_FORMAT=text -- "$BIN/agent"
+e2e_start agent-b "$WORK/agent-b.log" 'registered' CDROM_AGENT_NAME=agent-b CDROM_AGENT_GROUP=default CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-b.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
 e2e_wait_for "$WORK/api.log" 'agent=agent-b' 'second agent watching on the api'
 
 # --- 1. email step: markdown (default) rendered to HTML by the API ----------

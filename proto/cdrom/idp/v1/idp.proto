@@ -234,6 +234,12 @@ message MintJobTokenRequest {
   // issuer, so the token verifies against the caller's discovery document).
   // Empty makes the IdP use its own configured issuer.
   string issuer = 9;
+  // agent_name is the agent that STARTED the execution this token was minted
+  // for (F-30.4): it is stamped as the token's agent_name claim so the
+  // anonymous worker (children are anonymous to the API apart from their job
+  // token) can attribute its reports to the agent's JobExecution. Empty omits
+  // the claim (pre-F-30.4 style tokens / exchange tokens).
+  string agent_name = 10;
 }
 
 // MintJobTokenResponse is the minted job token.

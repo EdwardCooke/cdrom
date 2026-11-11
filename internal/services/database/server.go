@@ -2282,8 +2282,19 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 // targets an environment the agent belongs to is returned even when its
 // target group differs from the agent's group; the authoritative target-group
 // intersection is enforced when the agent starts the job (StartJobExecution).
+//
+// PIPELINE DEFINITION rows (F-08: definitions are stored as Job rows) are
+// EXCLUDED HERE AT THE QUERY LEVEL (run_id IS NULL AND pipeline_id IS NOT
+// NULL): a definition is a template, never a work item — it stays pending
+// FOREVER and is only instantiated when a run triggers it. Offering it to
+// the pull path merely burned an RPC + a guaranteed decline per agent per
+// second (StartJobExecution's definition-row guard remained as the
+// authoritative edge-case cover). Separating definitions into their own
+// table is a future refactor (F-31).
 func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingByGroupRequest) (*dbpb.ListJobsResponse, error) {
 	db := s.db.WithContext(ctx).Model(&models.Job{}).Where("status = ?", models.JobStatusPending)
+	// Definition rows are templates, not work items (see the doc above).
+	db = db.Where("(run_id IS NOT NULL OR pipeline_id IS NULL)")
 	// A pending job is relevant to the caller when it targets the caller's
 	// group (pre-F-17) or one of the caller's environments (F-17). The two
 	// are OR'd: an agent that serves an environment picks up its jobs even
@@ -2349,46 +2360,11 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if isTerminalJobStatus(job.Status) {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// An agent that has ALREADY STARTED this (job, agent, attempt) in the
-	// current EPISODE is declined a second start. The job row's status is
-	// DERIVED (the scheduler's job-status loop reconciles it from the
-	// executions), so a FAST job can still read as running LONG AFTER ITS
-	// FIRST EXECUTION FINISHED — the terminal-state check above is blind to
-	// that window. Without this guard a duplicate delivery (queued push
-	// nudges overtaking the first start; the poll re-listing) spawns a
-	// SECOND execution of the same (job, agent, attempt): the job runs
-	// TWICE, and side-effecting steps (publish_artifact's immutable
-	// filenames) fail with AlreadyExists.
+	// The DUPLICATE-EPISODE guard (an execution exists for this
+	// (job, agent, attempt) while the job is not pending ⇒ a duplicate
+	// delivery) is enforced INSIDE the start transaction below, where it is
+	// atomic with the execution insert and the concurrency toll.
 	//
-	// The discriminator is the job's PENDING state, because a rerun is the
-	// ONLY legitimate path that re-opens a used coordinate — and RerunJob
-	// explicitly resets the job to pending. A retry BUMPs the attempt (a
-	// fresh coordinate with no execution yet), so it never meets this guard.
-	// Hence: an execution exists AND the job is NOT pending ⇒ duplicate ⇒
-	// decline; an execution exists AND the job IS pending ⇒ rerun ⇒ proceed
-	// (equivalent to the pre-guard behavior, which also created a fresh
-	// execution on rerun). Declined, not errored: the duplicate is a
-	// delivery artifact, not a client fault — the job is already covered by
-	// the first execution.
-	var existingExecs int64
-	if err := db.Model(&models.JobExecution{}).
-		Where("job_id = ? AND agent_name = ? AND attempt = ?",
-			req.GetJobId(), req.GetAgentName(), job.Attempt).
-		Count(&existingExecs).Error; err != nil {
-		return nil, grpcErr(err)
-	}
-	if existingExecs > 0 && job.Status != models.JobStatusPending {
-		// Breadcrumb (rare by construction — a duplicate delivery, not
-		// steady state): without this, a recurrence of the 2026-11-07 flake
-		// is invisible in the database service's logs and the diagnosis
-		// turns archaeological again. The metric (nil-safe) is the
-		// dashboards' version of the same breadcrumb.
-		s.log().Info("database: declined duplicate job start (episode already underway)",
-			"job", req.GetJobId(), "agent", req.GetAgentName(),
-			"attempt", job.Attempt, "job_status", job.Status)
-		s.metrics.IncDuplicateStartsDeclined()
-		return &dbpb.StartJobExecutionResponse{Started: false}, nil
-	}
 	// A job still HOLDING DEPENDENCIES (depends_on non-empty) is owned by the
 	// scheduler's dependency resolver (F-06/F-08), not by the pull path: the
 	// resolver releases it (clearing depends_on and, for a branch job,
@@ -2438,32 +2414,121 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if agentLabels := s.agentLabels(ctx, req.GetAgentName()); len(agentLabels) > 0 {
 		executionLabels = combineLabels(job.Labels, agentLabels)
 	}
-	execution := &models.JobExecution{
-		JobID:      uint(req.GetJobId()),
-		AgentName: req.GetAgentName(),
-		Attempt:    job.Attempt,
-		Status:     models.JobStatusRunning,
-		StartedAt:  &startedAt,
-		Labels:     executionLabels,
+	// THE START PAYS THE CONCURRENCY TOLL (F-16, tightened 2026-11-11): the
+	// duplicate-episode guard, the slot acquisition, the execution insert,
+	// and the pending→running flip all happen in ONE transaction. Before
+	// this tightening the toll was charged only on the SCHEDULER's dispatch
+	// path (tryAdmit) — the agent's PULL path (ListPendingByGroup offers
+	// every pending job; StartJobExecution was the only arbiter) walked
+	// straight past a held job and started it WITHOUT PAYING: the "premature slot
+	// release" phantoms (F-31) were in fact uncharged admissions, witnessed
+	// deterministically in the 2026-11-11 12-metrics solo run (queue jobs
+	// started 1–6 s into a 60 s holder's sleep with
+	// concurrency_admitted=0). Declines (duplicate / blocked) return
+	// Started:false — the caller re-polls, and the admission loop's push
+	// delivers promptly on release.
+	var (
+		execution   *models.JobExecution
+		declined    bool
+		blockedList []string
+	)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var fresh models.Job
+		if err := tx.First(&fresh, req.GetJobId()).Error; err != nil {
+			return grpcErr(err)
+		}
+		if isTerminalJobStatus(fresh.Status) {
+			declined = true
+			return nil
+		}
+		// Atomic duplicate-episode guard: an execution exists AND the job is
+		// NOT pending ⇒ a duplicate delivery (queued push nudges overtaking
+		// the first start; the poll re-listing). The discriminator is the
+		// job's PENDING state because a rerun is the ONLY legitimate path
+		// that re-opens a used coordinate (RerunJob resets the job to
+		// pending); a retry BUMPS the attempt (a fresh coordinate with no
+		// execution yet), so it never meets this guard. Declined, not
+		// errored: the duplicate is a delivery artifact, not a client fault.
+		var existingExecs int64
+		if err := tx.Model(&models.JobExecution{}).
+			Where("job_id = ? AND agent_name = ? AND attempt = ?",
+				req.GetJobId(), req.GetAgentName(), fresh.Attempt).
+			Count(&existingExecs).Error; err != nil {
+			return grpcErr(err)
+		}
+		if existingExecs > 0 && fresh.Status != models.JobStatusPending {
+			declined = true
+			// Breadcrumb (rare by construction — a duplicate delivery, not
+			// steady state): without this, a recurrence of the 2026-11-07
+			// flake is invisible in the database service's logs and the
+			// diagnosis turns archaeological again. The metric (nil-safe)
+			// is the dashboards' version of the same breadcrumb.
+			s.log().Info("database: declined duplicate job start (episode already underway)",
+				"job", req.GetJobId(), "agent", req.GetAgentName(),
+				"attempt", fresh.Attempt, "job_status", fresh.Status)
+			s.metrics.IncDuplicateStartsDeclined()
+			return nil
+		}
+		// THE TOLL: charge the job's slots (idempotent when already
+		// admitted — the scheduler's pre-admission or a fan-out sibling
+		// pays once).
+		blocked, err := s.acquireSlotsTx(tx, ctx, &fresh)
+		if err != nil {
+			return err
+		}
+		if len(blocked) > 0 {
+			declined = true
+			blockedList = blocked
+			return nil
+		}
+		execution = &models.JobExecution{
+			JobID:     uint(req.GetJobId()),
+			AgentName: req.GetAgentName(),
+			Attempt:   fresh.Attempt,
+			Status:    models.JobStatusRunning,
+			StartedAt: &startedAt,
+			Labels:    executionLabels,
+		}
+		if err := tx.Create(execution).Error; err != nil {
+			return grpcErr(err)
+		}
+		// The execution's combined labels (F-29) are written to the Label
+		// table (owner_type "job_execution"); the in-memory field is not a
+		// column.
+		if err := replaceLabels(tx, models.LabelOwnerJobExecution, execution.ID, executionLabels); err != nil {
+			return grpcErr(err)
+		}
+		// Mark the job running (best-effort: it is already running if another
+		// agent started it first; the conditional update is a no-op then).
+		now := time.Now().UTC()
+		if err := tx.Model(&models.Job{}).
+			Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusPending).
+			Updates(map[string]any{
+				"status":     models.JobStatusRunning,
+				"started_at": &startedAt,
+				"updated_at": &now,
+			}).Error; err != nil {
+			return grpcErr(err)
+		}
+		return nil
+	})
+	if errors.Is(err, errConcurrencyBlocked) {
+		// Lost the last slot to a concurrent writer: decline (the caller
+		// re-polls; the slot frees on the holder's terminal release).
+		s.log().Info("database: start declined (concurrency held)",
+			"job", req.GetJobId(), "agent", req.GetAgentName(), "blocked_by", blockedList)
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	if err := db.Create(execution).Error; err != nil {
-		return nil, grpcErr(err)
+	if err != nil {
+		return nil, err
 	}
-	// The execution's combined labels (F-29) are written to the Label table
-	// (owner_type "job_execution"); the in-memory field is not a column.
-	if err := replaceLabels(db, models.LabelOwnerJobExecution, execution.ID, executionLabels); err != nil {
-		return nil, grpcErr(err)
+	if declined {
+		if len(blockedList) > 0 {
+			s.log().Info("database: start declined (concurrency held)",
+				"job", req.GetJobId(), "agent", req.GetAgentName(), "blocked_by", blockedList)
+		}
+		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// Mark the job running (best-effort: it is already running if another
-	// agent started it first; the conditional update is a no-op then).
-	now := time.Now().UTC()
-	db.Model(&models.Job{}).
-		Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusPending).
-		Updates(map[string]any{
-			"status":     models.JobStatusRunning,
-			"started_at": &startedAt,
-			"updated_at": &now,
-		})
 	return &dbpb.StartJobExecutionResponse{Started: true, Execution: toProtoJobExecution(execution)}, nil
 }
 
@@ -2635,10 +2700,10 @@ func (s *Server) ReportStepCompletion(ctx context.Context, req *dbpb.ReportStepC
 		return nil, grpcErr(err)
 	}
 	completion := &models.StepCompletion{
-		JobID:      uint(req.GetJobId()),
+		JobID:     uint(req.GetJobId()),
 		AgentName: req.GetAgentName(),
-		StepName:   req.GetStepName(),
-		Attempt:    job.Attempt,
+		StepName:  req.GetStepName(),
+		Attempt:   job.Attempt,
 	}
 	// Upsert on the composite key: insert the row if it is absent, otherwise
 	// refresh its timestamp (the completion is idempotent).
@@ -5097,7 +5162,7 @@ func (s *Server) appendEvent(ctx context.Context, name, agentGroup, environment 
 	}
 	event := &models.Event{
 		Name:        name,
-		AgentGroup: agentGroup,
+		AgentGroup:  agentGroup,
 		Environment: environment,
 		Payload:     string(data),
 	}
@@ -5371,7 +5436,7 @@ func toProtoEvent(event *models.Event) *dbpb.Event {
 	return &dbpb.Event{
 		Id:          int64(event.ID),
 		Name:        event.Name,
-		AgentGroup: event.AgentGroup,
+		AgentGroup:  event.AgentGroup,
 		Payload:     event.Payload,
 		CreatedAt:   timestamppb.New(event.CreatedAt),
 		Environment: event.Environment,
@@ -6759,7 +6824,7 @@ func toProtoJobExecution(execution *models.JobExecution) *dbpb.JobExecution {
 	proto := &dbpb.JobExecution{
 		Id:          int64(execution.ID),
 		JobId:       int64(execution.JobID),
-		AgentName:  execution.AgentName,
+		AgentName:   execution.AgentName,
 		Attempt:     int32(execution.Attempt),
 		Status:      jobStatusToProto(execution.Status),
 		StepResults: stepResultsToProto(execution.StepResults),

@@ -25,8 +25,12 @@
 #      agent CANNOT re-establish identity (persistent UNAUTHENTICATED; no new
 #      watch-open).
 #
-# Waits are POSITIONAL (lines added after a marker) so the shared agent.log
-# (accumulated across scenarios 01-23) cannot spoof them.
+# Anti-spoofing strategy: the shared agent.log accumulates across scenarios,
+# so waits measure DELTAS (counts rising above a pre-rotation baseline) rather
+# than absolute presence. Deltas are additionally immune to the log file's
+# prefix changing underneath the wait (observed 2026-11-08: the file shrunk
+# BELOW a positional marker mid-wait while its content stayed coherent —
+# cause undetermined, deltas sidestep it).
 #
 # Usage: scripts/e2e/24-agent-credential-rotation.sh
 #
@@ -42,15 +46,17 @@ API=http://127.0.0.1:8080
 AGENT_NAME=agent-1
 CRED_FILE="$WORK/agent-1.cred"
 
-# wfit_after <logfile> <start_line> <pattern> <what> <iterations>: wait until
-# PATTERN appears in the lines ADDED to <logfile> from <start_line> onward.
-wfit_after() {
-  local lf="$1" start="$2" pat="$3" what="$4" n="$5" i
+# wait_delta_gt <logfile> <pattern> <base> <what> <iterations>: wait until the
+# TOTAL count of PATTERN in <logfile> rises ABOVE <base> (taken beforehand).
+# Count-based (not positional): unaffected by the file's prefix mutating.
+wait_delta_gt() {
+  local lf="$1" pat="$2" base="$3" what="$4" n="$5" i c
   for ((i = 0; i < n; i++)); do
-    if tail -n +"$start" "$lf" 2>/dev/null | grep -aqF -- "$pat"; then return 0; fi
+    c=$(grep -acF -- "$pat" "$lf" 2>/dev/null || true)
+    [ "$c" -gt "$base" ] && return 0
     sleep 0.5
   done
-  echo ">> timed out (${n}x0.5s) waiting for: $what (pattern: $pat)" >&2
+  echo ">> timed out (${n}x0.5s) waiting for: $what (need >$base of '$pat')" >&2
   tail -n 40 "$lf" >&2
   exit 1
 }
@@ -111,7 +117,9 @@ log "   active credential: $ACTIVE_ID"
 
 LAPEASED_BASE=$(grep -aFc 'credential lapsed; watch stream torn down' "$WORK/api.log" || true)
 WATCH_BASE=$(grep -aFc 'api: agent watching' "$WORK/api.log" || true)
-MK1=$(wc -l < "$WORK/agent.log")
+# Pre-rotation baselines on the agent log (deltas rise above THESE):
+UA_BASE=$(grep -ac 'Unauthenticated' "$WORK/agent.log" || true)
+REC_BASE=$(grep -acF -- '; reconnecting' "$WORK/agent.log" || true)
 
 # --- 2. ROTATE: old row retired -> heartbeat denied, watch stream torn down ----
 log ">> [2/4] rotating the credential (old row retired; expect denial + teardown)"
@@ -131,19 +139,20 @@ OLD_CHAIN=$(curl -s "$API/api/agents/$AGENT_NAME/credentials" | jq -r \
   || { echo ">> old row not chained to the successor (replaced_by_id='$OLD_CHAIN')" >&2; exit 1; }
 
 # The API tears the watch stream down within cache TTL + one heartbeat
-# (worst case ≈ 50 s: the ≤30 s positive cache shields beats until it drains,
-# then two consecutive failed beats exhaust the one-heartbeat grace).
-wait_count_gt "$WORK/api.log" 'credential lapsed; watch stream torn down' "$LAPEASED_BASE" 'watch stream teardown (rotation)' 120
+# (nominal ≈ 25 s: the ≤15 s positive cache shields beats until it drains,
+# then two consecutive failed beats exhaust the one-heartbeat grace). Under
+# shared-stack load the positive cache can be HELD longer (lookup errors keep
+# the last positive), so the generous bound is doubled.
+wait_count_gt "$WORK/api.log" 'credential lapsed; watch stream torn down' "$LAPEASED_BASE" 'watch stream teardown (rotation)' 240
 
 # The agent's heartbeat is DENIED (its credential's row is retired) — the
-# denial surfaces in the agent log within the same bound.
-wfit_after "$WORK/agent.log" "$MK1" 'Unauthenticated' 'heartbeat denied (retired credential)' 120
+# denial count RISES above the pre-rotation baseline within the same bound.
+wait_delta_gt "$WORK/agent.log" 'Unauthenticated' "$UA_BASE" 'heartbeat denied (retired credential)' 240
 
 # The agent NOTICES the stream loss (its watch loop logs the reopen —
-# "; reconnecting" covers both the remote-close and the open-error forms) —
-# and it CANNOT re-establish identity YET: every reconnect attempt re-presents
-# the RETIRED credential and is UNAUTHENTICATED (the accumulating denials).
-wfit_after "$WORK/agent.log" "$MK1" '; reconnecting' 'agent noticed the stream loss' 60
+# "; reconnecting" covers both the remote-close and the open-error forms);
+# its count rises above the baseline too.
+wait_delta_gt "$WORK/agent.log" '; reconnecting' "$REC_BASE" 'agent noticed the stream loss' 120
 
 # --- 3. LIVE ADOPTION: successor overwrites the file (no restart) --------------
 log ">> [3/4] distributing the successor to the credential file (live adoption)"
@@ -187,18 +196,39 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$API/api/agents/$AGENT_
 # The teardown REPEATS (a second "credential lapsed" line)...
 wait_count_gt "$WORK/api.log" 'credential lapsed; watch stream torn down' "$((LAPEASED_BASE + 1))" 'watch stream teardown (revocation)' 120
 
-# ...and the agent keeps being DENIED (persistent Unauthenticated denials
-# accumulate after this marker) — it cannot re-establish identity without a
-# valid credential.
-MARK_REVOKED=$(wc -l < "$WORK/agent.log")
-DENIALS_AFTER=0
-for i in $(seq 1 60); do
-  DENIALS_AFTER=$(tail -n +"$MARK_REVOKED" "$WORK/agent.log" | grep -ac 'Unauthenticated' || true)
-  [ "$DENIALS_AFTER" -ge 3 ] && break
-  sleep 0.5
-done
-[ "$DENIALS_AFTER" -ge 3 ] \
-  || { echo ">> fewer than 3 post-revocation denials observed (got $DENIALS_AFTER)" >&2; exit 1; }
-log "   persistent denials after revocation: $DENIALS_AFTER"
+# ...and the agent keeps being DENIED — the denial count KEEPS RISING above
+# the post-adoption baseline (it cannot re-establish identity without a valid
+# credential).
+UA_PRE_REVOKE=$(grep -ac 'Unauthenticated' "$WORK/agent.log" || true)
+wait_delta_gt "$WORK/agent.log" 'Unauthenticated' "$UA_PRE_REVOKE" 'persistent denials after revocation' 60
+DENIALS_NEW=$(($(grep -ac 'Unauthenticated' "$WORK/agent.log" || true) - UA_PRE_REVOKE))
+log "   persistent denials after revocation: $DENIALS_NEW new"
+
+# --- epilogue: RESTORE the agent (leave the shared stack usable) -------------
+# The drills above end with EVERY credential revoked — on a STANDALONE stack
+# that is harmless (it dies anyway), but on the SHARED stack the agent would
+# sit permanently unauthenticated and poison every later scenario that needs
+# it to fulfil a job (25's worker-spawn discovery would find no worker: the
+# assignment nobody can accept never dispatches). Operator recovery motion:
+# issue a fresh credential, distribute it (lazy re-read adopts it), prove the
+# watch stream reopens and a job completes.
+RESTORED_ID=$(e2e_issue_agent_credential "$AGENT_NAME" "$CRED_FILE.tmp")
+[ -n "$RESTORED_ID" ] && [ "$RESTORED_ID" != "null" ] \
+  || { echo ">> could not issue the restoration credential" >&2; exit 1; }
+mv "$CRED_FILE.tmp" "$CRED_FILE"
+chmod 600 "$CRED_FILE"
+# Fresh baseline: phase 3's adoption already raised the watch-open count above
+# WATCH_BASE, so comparing against the pre-rotation figure would fire
+# instantly on the stale increment.
+WATCH_PRE_RESTORE=$(grep -aFc 'api: agent watching' "$WORK/api.log" || true)
+wait_count_gt "$WORK/api.log" 'api: agent watching' "$WATCH_PRE_RESTORE" 'restored agent watch stream' 60
+JOB3=$(e2e_submit_job "{
+  \"name\": \"e2e-accred-restored\",
+  \"target_group\": \"default\",
+  \"spec\": { \"steps\": [ {\"params\": {\"command\": {\"string\": \"sh\"}, \"args\": {\"strings\": [\"-c\", \"echo restored\"]}} } ] }
+}")
+e2e_wait_for_job "$JOB3" 'restored' 'restoration job output'
+wait_job_done "$JOB3"
+log "   agent restored (credential $RESTORED_ID; watch reopened; job completed)"
 
 log ">> PASSED: agent credential rotation (live adoption) + revocation (F-30.3 S2/S3)"

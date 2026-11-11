@@ -293,6 +293,69 @@ func (s *Server) ensureResource(tx *gorm.DB, key string) (*models.ConcurrencyRes
 	return &res, nil
 }
 
+// acquireSlotsTx checks and (when there is room) records the job's slot
+// holdings ON THE CALLER'S TRANSACTION (F-16): for every resource the job
+// consumes, the number of current holders must be below the resource's limit;
+// when every resource has room the job is recorded as a holder of each
+// (incrementing each resource's Held counter) and marked admitted. It returns
+// the blocking resources (EMPTY when the job is already admitted or was
+// acquired by this call) and errConcurrencyBlocked when a concurrent writer
+// grabbed the last slot between the check and the increment (the caller's
+// transaction then rolls back any increments already made). Embedding the
+// toll in a bigger transaction (StartJobExecution) is what makes the gate
+// airtight: the job cannot be started without its slots being held.
+func (s *Server) acquireSlotsTx(tx *gorm.DB, ctx context.Context, job *models.Job) ([]string, error) {
+	if job.ConcurrencyAdmitted {
+		// Already admitted for the current attempt: idempotent no-op (a
+		// fan-out sibling, or the scheduler's pre-admission, pays once).
+		return nil, nil
+	}
+	specs, err := s.jobResources(ctx, job)
+	if err != nil {
+		return nil, err
+	}
+	// Check each resource has room; record the ones that are full.
+	var blocked []string
+	for _, spec := range specs {
+		res, err := s.ensureResource(tx, spec.key)
+		if err != nil {
+			return nil, err
+		}
+		if res.Held >= spec.limit {
+			blocked = append(blocked, spec.key)
+		}
+	}
+	if len(blocked) > 0 {
+		return blocked, nil
+	}
+	// Acquire each resource atomically: the held < limit guard makes the
+	// increment safe against a concurrent writer taking the last slot.
+	for _, spec := range specs {
+		result := tx.Model(&models.ConcurrencyResource{}).
+			Where("key = ? AND held < ?", spec.key, spec.limit).
+			UpdateColumn("held", gorm.Expr("held + 1"))
+		if result.Error != nil {
+			return nil, grpcErr(result.Error)
+		}
+		if result.RowsAffected == 0 {
+			// Concurrent writer took the last slot between check and
+			// increment: report blocked (the caller aborts the transaction).
+			return append(blocked, spec.key), errConcurrencyBlocked
+		}
+	}
+	now := time.Now().UTC()
+	if err := tx.Model(&models.Job{}).
+		Where("id = ?", job.ID).
+		Updates(map[string]any{
+			"concurrency_admitted":    true,
+			"concurrency_admitted_at": &now,
+			"updated_at":              now,
+		}).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	return nil, nil
+}
+
 // AcquireJobSlots atomically admits a job for its current attempt (F-16): it
 // checks that, for every resource the job consumes, the number of current
 // holders is below the resource's limit, and, when every resource has room,
@@ -313,60 +376,17 @@ func (s *Server) AcquireJobSlots(ctx context.Context, req *dbpb.AcquireJobSlotsR
 		if err := tx.First(&job, jobID).Error; err != nil {
 			return grpcErr(err)
 		}
-		if job.ConcurrencyAdmitted {
-			// Already admitted for the current attempt: idempotent no-op. The
-			// caller must not dispatch the job again.
-			return nil
-		}
-		specs, err := s.jobResources(ctx, &job)
+		paid := !job.ConcurrencyAdmitted
+		blocked, err := s.acquireSlotsTx(tx, ctx, &job)
 		if err != nil {
 			return err
-		}
-		// Check each resource has room; record the ones that are full.
-		var blocked []string
-		for _, spec := range specs {
-			res, err := s.ensureResource(tx, spec.key)
-			if err != nil {
-				return err
-			}
-			if res.Held >= spec.limit {
-				blocked = append(blocked, spec.key)
-			}
 		}
 		if len(blocked) > 0 {
 			resp.Acquired = false
 			resp.BlockedBy = blocked
 			return nil
 		}
-		// Acquire each resource atomically: the held < limit guard makes the
-		// increment safe against a concurrent replica taking the last slot.
-		for _, spec := range specs {
-			result := tx.Model(&models.ConcurrencyResource{}).
-				Where("key = ? AND held < ?", spec.key, spec.limit).
-				UpdateColumn("held", gorm.Expr("held + 1"))
-			if result.Error != nil {
-				return grpcErr(result.Error)
-			}
-			if result.RowsAffected == 0 {
-				// A concurrent replica took the last slot between the check
-				// and the increment: abort the transaction (rolling back any
-				// increments already made) and report the job as blocked.
-				resp.Acquired = false
-				resp.BlockedBy = append(resp.BlockedBy, spec.key)
-				return errConcurrencyBlocked
-			}
-		}
-		now := time.Now().UTC()
-		if err := tx.Model(&models.Job{}).
-			Where("id = ?", jobID).
-			Updates(map[string]any{
-				"concurrency_admitted":    true,
-				"concurrency_admitted_at": &now,
-				"updated_at":              time.Now().UTC(),
-			}).Error; err != nil {
-			return grpcErr(err)
-		}
-		resp.Acquired = true
+		resp.Acquired = paid
 		return nil
 	})
 	if errors.Is(err, errConcurrencyBlocked) {

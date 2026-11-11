@@ -2,21 +2,19 @@ package agent
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	"cdrom/internal/executor"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
-	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
 // testLogger returns a silent logger so test output stays clean.
@@ -37,417 +35,313 @@ type fakeWatchStream struct {
 func (f *fakeWatchStream) Recv() (*apipb.WatchMessage, error) {
 	msg, ok := <-f.ch
 	if !ok {
-		return nil, io.EOF
+		return nil, context.Canceled // the test closed the feed
 	}
 	return msg, nil
 }
 
-// fakeAPIClient is a stub APIClient for agent tests. Only the methods a
-// agent uses are implemented; the rest are never called. StreamJobLogs fails
-// so the log sink (best-effort) does not block the job. StartJobExecution
-// returns the job in jobs for a startable job id (the agent fetches the full
-// job from the start, not from the nudge); ListPendingJobs returns no jobs so
-// the agent's periodic poll does not interfere with the tests.
-// stepCompletion is a (job, step) pair the fake was told an agent completed
-// (the cross-agent step barrier).
-type stepCompletion struct {
-	jobID int64
-	step  string
+// coordKey identifies a (job, attempt) coordinate the fake's EMULATED
+// DUPLICATE-START GUARD (the database service's episode guard, F-23 flake
+// 2026-11-07) remembers.
+type coordKey struct {
+	job int64
+	att int32
 }
 
-// barrierKey identifies a (job, step) pair for a configured barrier outcome.
-type barrierKey struct {
-	jobID int64
-	step  string
-}
-
-// barrierOutcome is the configured CheckStepBarrier response for a (job, step).
-type barrierOutcome struct {
-	satisfied bool
-	cancelled bool
-}
-
-type fakeAPIClient struct {
+// fakeSupervisorAPI is a stub APIClient for SUPERVISION tests (F-30.4): the
+// agent no longer executes jobs in-process, so the fake models the verbs the
+// SUPERVISOR uses — StartJobExecution (with the DB guard's duplicate
+// declination emulated), WatchJobs (fed by the test), and the lifecycle
+// no-ops. It records the agent name each start claimed.
+type fakeSupervisorAPI struct {
 	apipb.APIClient // nil; only the methods below are used by the agent
-	watchCh         chan *apipb.WatchMessage
 	mu              sync.Mutex
-	statuses        []dbpb.JobStatus
-	jobs            map[int64]*apipb.Job // job id -> job returned by StartJobExecution
-	startable       map[int64]bool       // job id -> whether the start succeeds
-	// stepCompletions records the (job, step) pairs the agent reported as
-	// completed (the cross-agent step barrier).
-	stepCompletions []stepCompletion
-	// barrierOutcomes configures the CheckStepBarrier response per (job, step);
-	// a (job, step) with no entry is treated as satisfied.
-	barrierOutcomes map[barrierKey]barrierOutcome
-	// exchanges records the ExchangeJobToken calls the token_exchange step
-	// handler made (the job's token exchange).
-	exchanges []exchangeRequest
+	watchCh         chan *apipb.WatchMessage
+	starts          int
+	accepted        int
+	declined        int
+	seenCoords      map[coordKey]bool
+	lastAgent       string
 }
 
-func (f *fakeAPIClient) RegisterAgent(ctx context.Context, in *apipb.RegisterAgentRequest, opts ...grpc.CallOption) (*apipb.Agent, error) {
+func (f *fakeSupervisorAPI) RegisterAgent(ctx context.Context, in *apipb.RegisterAgentRequest, opts ...grpc.CallOption) (*apipb.Agent, error) {
 	return &apipb.Agent{Name: in.GetName(), Group: in.GetGroup()}, nil
 }
 
-func (f *fakeAPIClient) DeregisterAgent(ctx context.Context, in *apipb.DeregisterAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (f *fakeSupervisorAPI) DeregisterAgent(ctx context.Context, in *apipb.DeregisterAgentRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	return &emptypb.Empty{}, nil
 }
 
-func (f *fakeAPIClient) Heartbeat(ctx context.Context, in *apipb.HeartbeatRequest, opts ...grpc.CallOption) (*apipb.HeartbeatResponse, error) {
+func (f *fakeSupervisorAPI) Heartbeat(ctx context.Context, in *apipb.HeartbeatRequest, opts ...grpc.CallOption) (*apipb.HeartbeatResponse, error) {
 	return &apipb.HeartbeatResponse{}, nil
 }
 
-func (f *fakeAPIClient) WatchJobs(ctx context.Context, in *apipb.WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[apipb.WatchMessage], error) {
+func (f *fakeSupervisorAPI) WatchJobs(ctx context.Context, in *apipb.WatchJobsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[apipb.WatchMessage], error) {
 	return &fakeWatchStream{ch: f.watchCh}, nil
 }
 
-func (f *fakeAPIClient) ReportJobStatus(ctx context.Context, in *apipb.ReportJobStatusRequest, opts ...grpc.CallOption) (*apipb.Job, error) {
+// StartJobExecution emulates the database service's duplicate-start guard:
+// the FIRST start of a (job, attempt) coordinate is accepted (a job token is
+// minted); repeats of the same coordinate are DECLINED (started=false) —
+// exactly the behavior the agent's launch ledger complements (belt and
+// braces: the ledger drops twins before/at spawn; the guard declines them
+// server-side).
+func (f *fakeSupervisorAPI) StartJobExecution(ctx context.Context, in *apipb.StartJobExecutionRequest, opts ...grpc.CallOption) (*apipb.StartJobExecutionResponse, error) {
 	f.mu.Lock()
-	f.statuses = append(f.statuses, in.GetStatus())
-	f.mu.Unlock()
-	return &apipb.Job{Id: in.GetJobId(), Status: in.GetStatus()}, nil
-}
-
-func (f *fakeAPIClient) StreamJobLogs(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[apipb.JobLogChunk, apipb.StreamJobLogsResponse], error) {
-	return nil, status.Error(codes.Unavailable, "streaming disabled in test")
-}
-
-func (f *fakeAPIClient) StartJobExecution(ctx context.Context, in *apipb.StartJobExecutionRequest, opts ...grpc.CallOption) (*apipb.StartJobExecutionResponse, error) {
-	started := f.startable[in.GetJobId()]
-	if !started {
+	defer f.mu.Unlock()
+	f.starts++
+	f.lastAgent = in.GetAgentName()
+	const att = int32(1)
+	k := coordKey{job: in.GetJobId(), att: att}
+	if f.seenCoords[k] {
+		f.declined++
 		return &apipb.StartJobExecutionResponse{Started: false}, nil
 	}
-	return &apipb.StartJobExecutionResponse{Started: true, Job: f.jobs[in.GetJobId()]}, nil
+	f.seenCoords[k] = true
+	f.accepted++
+	return &apipb.StartJobExecutionResponse{
+		Started:  true,
+		JobToken: "jt-" + strconv.FormatInt(in.GetJobId(), 10),
+		Attempt:  att,
+	}, nil
 }
 
-func (f *fakeAPIClient) ListPendingJobs(ctx context.Context, in *apipb.ListPendingJobsRequest, opts ...grpc.CallOption) (*apipb.ListPendingJobsResponse, error) {
+func (f *fakeSupervisorAPI) ListPendingJobs(ctx context.Context, in *apipb.ListPendingJobsRequest, opts ...grpc.CallOption) (*apipb.ListPendingJobsResponse, error) {
 	return &apipb.ListPendingJobsResponse{}, nil
 }
 
-// ReportStepCompletion records a step completion (the cross-agent step
-// barrier). The fake records the (job, step) pairs it is told about so a test
-// can assert the agent reported its steps.
-func (f *fakeAPIClient) ReportStepCompletion(ctx context.Context, in *apipb.ReportStepCompletionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	f.mu.Lock()
-	f.stepCompletions = append(f.stepCompletions, stepCompletion{jobID: in.GetJobId(), step: in.GetStepName()})
-	f.mu.Unlock()
-	return &emptypb.Empty{}, nil
-}
-
-// CheckStepBarrier reports whether the barrier for a step is satisfied or the
-// job is cancelled. The fake returns the configured per-(job, step) outcome
-// (barrierOutcomes); a (job, step) with no configured outcome is treated as
-// satisfied (the barrier is a no-op in tests that do not exercise it).
-func (f *fakeAPIClient) CheckStepBarrier(ctx context.Context, in *apipb.CheckStepBarrierRequest, opts ...grpc.CallOption) (*apipb.CheckStepBarrierResponse, error) {
-	f.mu.Lock()
-	outcome, ok := f.barrierOutcomes[barrierKey{jobID: in.GetJobId(), step: in.GetStepName()}]
-	f.mu.Unlock()
-	if !ok {
-		return &apipb.CheckStepBarrierResponse{Satisfied: true}, nil
-	}
-	return &apipb.CheckStepBarrierResponse{Satisfied: outcome.satisfied, Cancelled: outcome.cancelled}, nil
-}
-
-// exchangeRequest is a recorded ExchangeJobToken call (the token_exchange step
-// handler).
-type exchangeRequest struct {
-	jobID    int64
-	audience string
-}
-
-// ExchangeJobToken mints a new job token for a different audience (the
-// token_exchange step handler). The fake records the (job, audience) and
-// returns a token derived from the audience so a test can assert the exchange
-// happened.
-func (f *fakeAPIClient) ExchangeJobToken(ctx context.Context, in *apipb.ExchangeJobTokenRequest, opts ...grpc.CallOption) (*apipb.ExchangeJobTokenResponse, error) {
-	f.mu.Lock()
-	f.exchanges = append(f.exchanges, exchangeRequest{jobID: in.GetJobId(), audience: in.GetAudience()})
-	f.mu.Unlock()
-	return &apipb.ExchangeJobTokenResponse{Token: "token-for-" + in.GetAudience()}, nil
-}
-
-// exchangesSnapshot returns a copy of the ExchangeJobToken calls the fake
-// recorded.
-func (f *fakeAPIClient) exchangesSnapshot() []exchangeRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]exchangeRequest, len(f.exchanges))
-	copy(out, f.exchanges)
-	return out
-}
-
-// stepCompletionsSnapshot returns a copy of the (job, step) pairs the agent
-// reported as completed.
-func (f *fakeAPIClient) stepCompletionsSnapshot() []stepCompletion {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]stepCompletion, len(f.stepCompletions))
-	copy(out, f.stepCompletions)
-	return out
-}
-
-// waitForStatus polls the fake API client until the job reports the wanted
-// status (or the deadline elapses).
-func waitForStatus(t *testing.T, api *fakeAPIClient, want dbpb.JobStatus) {
+// waitFor polls cond until true or the deadline elapses (helper for the
+// asynchronous spawn/observe choreography).
+func waitFor(t *testing.T, cond func() bool, desc string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		api.mu.Lock()
-		for _, s := range api.statuses {
-			if s == want {
-				api.mu.Unlock()
-				return
-			}
+		if cond() {
+			return
 		}
-		api.mu.Unlock()
 		time.Sleep(20 * time.Millisecond)
 	}
+	t.Fatalf("timed out waiting for %s", desc)
+}
+
+// newSupervisedAgent builds an agent whose worker is a CONTROLLED SHELL CHILD
+// (WorkerBinary=/bin/sh + WorkerArgs): the tests steer the child's lifespan
+// and observable effects without needing the real worker binary.
+func newSupervisedAgent(args []string, api *fakeSupervisorAPI) *Agent {
+	watchCh := make(chan *apipb.WatchMessage, 8)
+	api.watchCh = watchCh
+	w := New("w1", "pool-a", nil, nil, Dependencies{
+		API:          api,
+		WorkerBinary: "/bin/sh",
+		WorkerArgs:   args,
+		APIAddress:   "127.0.0.1:7105",
+	}, testLogger())
+	return w
+}
+
+// TestAgentSpawnWorkerOnAssignment verifies the F-30.4 core arc: an
+// assignment on the WatchJobs stream leads the agent to claim its execution
+// (StartJobExecution, presenting its name) and SPAWN the worker subprocess;
+// the child's exit is observed and the ledger coordinate released.
+func TestAgentSpawnWorkerOnAssignment(t *testing.T) {
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	w := newSupervisedAgent([]string{"-c", "sleep 0.3"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 42}, AgentName: "w1"},
+	}}
+
+	// Positive wait: the worker is UP...
+	waitFor(t, func() bool { return w.childCount() == 1 }, "worker spawned", 5*time.Second)
+	// ...and then settles (the child exits; observation frees the ledger).
+	waitFor(t, func() bool { return w.childCount() == 0 }, "child settled", 5*time.Second)
 	api.mu.Lock()
-	got := append([]dbpb.JobStatus(nil), api.statuses...)
+	starts, accepted, agent := api.starts, api.accepted, api.lastAgent
 	api.mu.Unlock()
-	t.Fatalf("timed out waiting for status %v (reported %v)", want, got)
+	if starts != 1 || accepted != 1 {
+		t.Errorf("starts = %d (accepted %d), want 1/1", starts, accepted)
+	}
+	if agent != "w1" {
+		t.Errorf("start claimed agent %q, want w1", agent)
+	}
+	if len(w.holdings()) != 0 {
+		t.Errorf("ledger still holds %v after the child exited", w.holdings())
+	}
+	cancel()
+	<-done
 }
 
-// TestAgentCancelInterruptsRunningJob verifies cancellation propagation
-// (F-05): a JobCancellation delivered on the agent's WatchJobs stream
-// interrupts the running step (terminating the command) and the agent
-// reports the job as cancelled.
-func TestAgentCancelInterruptsRunningJob(t *testing.T) {
-	// A step that blocks until its context is done: a stand-in for a long
-	// command that must be interrupted on cancel.
-	executor.RegisterStepType("cancel-blocker", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
-		<-ctx.Done()
-		return ctx.Err()
-	})
+// TestAgentEnvOnlyMandate verifies the CANONICAL ENV CONTRACT (F-30.4): the
+// child's environment carries the mandate (job id + job token + API address)
+// and PRIVILEGED VARIABLES ARE STRIPPED (the agent's credential file never
+// propagates into the worker). The child dumps its own environ to a file for
+// inspection.
+func TestAgentEnvOnlyMandate(t *testing.T) {
+	dir := t.TempDir()
+	envDump := filepath.Join(dir, "child_environ")
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	w := newSupervisedAgent([]string{"-c", "env > " + envDump + "; exit 0"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
 
-	watchCh := make(chan *apipb.WatchMessage, 8)
-	t.Cleanup(func() { close(watchCh) }) // unblock the watch loop on test end
-
-	// A job that blocks until it is cancelled. The agent starts it and
-	// fetches the full job from the start, so the fake returns it for the
-	// startable job id.
-	job := &apipb.Job{
-		Id:   42,
-		Name: "long",
-		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{{Type: "cancel-blocker"}}},
-	}
-	api := &fakeAPIClient{
-		watchCh:   watchCh,
-		jobs:      map[int64]*apipb.Job{42: job},
-		startable: map[int64]bool{42: true},
-	}
-	w := New("w1", "pool-a", nil, nil, Dependencies{API: api}, testLogger())
+	// Seed a privileged-looking variable in the AGENT's environment: it must
+	// NOT appear in the child's.
+	t.Setenv("CDROM_AGENT_CREDENTIAL_FILE", filepath.Join(dir, "cred.jwt"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
 
-	// Dispatch the job: the agent claims it and runs it until it is cancelled.
-	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
-		Assignment: &apipb.JobAssignment{Job: job, AgentName: "w1"},
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 42}, AgentName: "w1"},
 	}}
 
-	// Wait for the agent to report the job running.
-	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_RUNNING)
-
-	// Cancel the job: the API delivers a JobCancellation down the stream.
-	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Cancellation{
-		Cancellation: &apipb.JobCancellation{JobId: 42},
-	}}
-
-	// The agent interrupts the running step and reports the job cancelled.
-	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_CANCELLED)
-}
-
-// TestAgentCancelForUnknownJobIsNoop verifies that a cancellation for a job
-// that is not running on the agent is ignored (the job's status is
-// reconciled by the database), and does not disturb the agent.
-func TestAgentCancelForUnknownJobIsNoop(t *testing.T) {
-	watchCh := make(chan *apipb.WatchMessage, 8)
-	t.Cleanup(func() { close(watchCh) })
-	api := &fakeAPIClient{watchCh: watchCh}
-	w := New("w1", "pool-a", nil, nil, Dependencies{API: api}, testLogger())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = w.Run(ctx) }()
-
-	// A cancellation for a job the agent is not running is a no-op.
-	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Cancellation{
-		Cancellation: &apipb.JobCancellation{JobId: 99},
-	}}
-
-	// The agent keeps running (no status is reported for the unknown job).
-	time.Sleep(100 * time.Millisecond)
-	api.mu.Lock()
-	got := append([]dbpb.JobStatus(nil), api.statuses...)
-	api.mu.Unlock()
-	if len(got) != 0 {
-		t.Errorf("agent reported statuses %v for an unknown job, want none", got)
+	waitFor(t, func() bool {
+		_, err := os.Stat(envDump)
+		return err == nil
+	}, "environ dumped", 5*time.Second)
+	data, err := os.ReadFile(envDump)
+	if err != nil {
+		t.Fatalf("read environ dump: %v", err)
 	}
-}
-
-// TestAgentStepBarrierSyncs verifies that an agent running a job with the
-// step-barrier flag set (and targeting an agent group) reports each completed
-// step to the API and waits at the barrier between steps, then reports the
-// job succeeded once the barrier is satisfied.
-func TestAgentStepBarrierSyncs(t *testing.T) {
-	// A fast no-op step.
-	executor.RegisterStepType("barrier-fast", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
-		return nil
-	})
-
-	// Shorten the barrier's polling interval so the test is fast; restore it
-	// afterwards.
-	original := stepBarrierPollInterval
-	stepBarrierPollInterval = 10 * time.Millisecond
-	t.Cleanup(func() { stepBarrierPollInterval = original })
-
-	watchCh := make(chan *apipb.WatchMessage, 8)
-	t.Cleanup(func() { close(watchCh) })
-
-	// A two-step job with the step-barrier flag set and a target group (so the
-	// barrier is active). The barrier is satisfied by default in the fake, so
-	// the agent proceeds through both steps and reports the job succeeded.
-	job := &apipb.Job{
-		Id:          77,
-		Name:        "barriered",
-		TargetGroup: "pool-a",
-		StepBarrier: true,
-		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{
-			{Type: "barrier-fast"},
-			{Type: "barrier-fast"},
-		}},
-	}
-	api := &fakeAPIClient{
-		watchCh:   watchCh,
-		jobs:      map[int64]*apipb.Job{77: job},
-		startable: map[int64]bool{77: true},
-	}
-	w := New("w1", "pool-a", nil, nil, Dependencies{API: api}, testLogger())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = w.Run(ctx) }()
-
-	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
-		Assignment: &apipb.JobAssignment{Job: job, AgentName: "w1"},
-	}}
-
-	// The agent runs both steps (synchronizing at the barrier after step 0)
-	// and reports the job succeeded.
-	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_SUCCEEDED)
-
-	// The agent reported its completion of step 0 (the barrier is not
-	// consulted after the last step, so step 1 has no completion report).
-	completions := api.stepCompletionsSnapshot()
-	foundStep0 := false
-	for _, c := range completions {
-		if c.jobID == 77 && c.step == "step0" {
-			foundStep0 = true
+	env := string(data)
+	for _, want := range []string{
+		"CDROM_WORKER_JOB_ID=42",
+		"CDROM_WORKER_JOB_TOKEN=jt-42",
+		"CDROM_API_ADDR=127.0.0.1:7105",
+	} {
+		if !strings.Contains(env, want+"\n") && !strings.HasSuffix(strings.TrimRight(env, "\n"), want) {
+			t.Errorf("child environ lacks %q", want)
 		}
 	}
-	if !foundStep0 {
-		t.Errorf("agent did not report completion of step 0 (completions = %+v)", completions)
+	if strings.Contains(env, "CDROM_AGENT_CREDENTIAL_FILE") {
+		t.Errorf("privileged variable leaked into the worker's environment (F-30.4 violation)")
 	}
+	cancel()
+	<-done
 }
 
-// TestAgentStepBarrierCancelled verifies that an agent waiting at a step
-// barrier reports the job cancelled when the API reports the job was
-// cancelled (distinct from a failure).
-func TestAgentStepBarrierCancelled(t *testing.T) {
-	executor.RegisterStepType("barrier-fast2", func(ctx context.Context, step *dbpb.JobStep, logger *slog.Logger) error {
-		return nil
-	})
-
-	original := stepBarrierPollInterval
-	stepBarrierPollInterval = 10 * time.Millisecond
-	t.Cleanup(func() { stepBarrierPollInterval = original })
-
-	watchCh := make(chan *apipb.WatchMessage, 8)
-	t.Cleanup(func() { close(watchCh) })
-
-	job := &apipb.Job{
-		Id:          78,
-		Name:        "barriered-cancel",
-		TargetGroup: "pool-a",
-		StepBarrier: true,
-		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{
-			{Type: "barrier-fast2"},
-			{Type: "barrier-fast2"},
-		}},
-	}
-	api := &fakeAPIClient{
-		watchCh:   watchCh,
-		jobs:      map[int64]*apipb.Job{78: job},
-		startable: map[int64]bool{78: true},
-		// The barrier for step 0 reports the job was cancelled: the agent
-		// stops and reports the job cancelled.
-		barrierOutcomes: map[barrierKey]barrierOutcome{
-			{jobID: 78, step: "step0"}: {cancelled: true},
-		},
-	}
-	w := New("w1", "pool-a", nil, nil, Dependencies{API: api}, testLogger())
+// TestAgentDuplicateDeliverySpawnsOnce verifies the deduplication arc (F-30.4
+// / F-23): THREE deliveries of the same (job, attempt) lead to at most ONE
+// worker — the first start is accepted and spawns; the repeats are declined
+// by the (emulated) database guard (started=false) and/or dropped by the
+// launch ledger.
+func TestAgentDuplicateDeliverySpawnsOnce(t *testing.T) {
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	// A slow child so the coordinate stays HELD across the duplicate
+	// deliveries.
+	w := newSupervisedAgent([]string{"-c", "sleep 0.5"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
 
-	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
-		Assignment: &apipb.JobAssignment{Job: job, AgentName: "w1"},
-	}}
-
-	// The agent runs step 0, then at the barrier the API reports the job was
-	// cancelled: the agent reports the job cancelled.
-	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_CANCELLED)
+	deliver := func() {
+		api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+			Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 42}, AgentName: "w1"},
+		}}
+	}
+	deliver()
+	waitFor(t, func() bool { return w.childCount() == 1 }, "first worker spawned", 5*time.Second)
+	deliver()
+	deliver()
+	// Allow the duplicates to be processed; the child count must stay at ONE.
+	time.Sleep(300 * time.Millisecond)
+	if n := w.childCount(); n != 1 {
+		t.Errorf("live children = %d, want 1 (duplicate deliveries must not respawn)", n)
+	}
+	api.mu.Lock()
+	starts, accepted, declined := api.starts, api.accepted, api.declined
+	api.mu.Unlock()
+	if accepted != 1 {
+		t.Errorf("accepted starts = %d, want 1", accepted)
+	}
+	if starts < 2 || declined == 0 {
+		t.Errorf("starts = %d (declined %d): duplicates were not guarded", starts, declined)
+	}
+	cancel()
+	<-done
 }
 
-// TestAgentTokenExchangeStep verifies that an agent running a job with a
-// token_exchange step calls the API's ExchangeJobToken RPC (presenting the
-// job's own token) for the step's audience and reports the job succeeded.
-func TestAgentTokenExchangeStep(t *testing.T) {
-	watchCh := make(chan *apipb.WatchMessage, 8)
-	t.Cleanup(func() { close(watchCh) })
-
-	// A job with a token_exchange step that requests a token for an outside
-	// resource. The agent's token exchanger calls the API's ExchangeJobToken.
-	job := &apipb.Job{
-		Id:   55,
-		Name: "exchange",
-		Spec: &dbpb.JobSpec{Steps: []*dbpb.JobStep{
-			{
-				Type:   "token_exchange",
-				Params: map[string]*dbpb.ParamValue{"audience": {String_: "outside-svc"}},
-			},
-		}},
-	}
-	api := &fakeAPIClient{
-		watchCh:   watchCh,
-		jobs:      map[int64]*apipb.Job{55: job},
-		startable: map[int64]bool{55: true},
-	}
-	w := New("w1", "pool-a", nil, nil, Dependencies{API: api}, testLogger())
+// TestAgentCancelNoticeIsNonDestructive verifies the SLICE-1 cancellation
+// relay (F-05 / F-30.4): a JobCancellation on the watch stream is NOTICEd by
+// the agent but does NOT kill the worker — the worker's own API status poll
+// is the authority (it converges on the cancel and reports it). The child
+// SURVIVES the notice.
+func TestAgentCancelNoticeIsNonDestructive(t *testing.T) {
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	w := newSupervisedAgent([]string{"-c", "sleep 30"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = w.Run(ctx) }()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
 
-	watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
-		Assignment: &apipb.JobAssignment{Job: job, AgentName: "w1"},
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 42}, AgentName: "w1"},
 	}}
+	waitFor(t, func() bool { return w.childCount() == 1 }, "worker spawned", 5*time.Second)
 
-	// The agent runs the token_exchange step and reports the job succeeded.
-	waitForStatus(t, api, dbpb.JobStatus_JOB_STATUS_SUCCEEDED)
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Cancellation{
+		Cancellation: &apipb.JobCancellation{JobId: 42},
+	}}
+	// Give the notice time to be processed; the worker must STILL be alive.
+	time.Sleep(300 * time.Millisecond)
+	if n := w.childCount(); n != 1 {
+		t.Errorf("live children = %d, want 1 (the slice-1 relay must not kill the worker)", n)
+	}
+	// Tear the child down ourselves (cleanup hygiene).
+	w.childrenMu.Lock()
+	victim := w.liveChildren[spawnCoordinate{jobID: 42, attempt: 1}]
+	w.childrenMu.Unlock()
+	if victim != nil {
+		_ = victim.cmd.Process.Kill()
+		waitFor(t, func() bool { return w.childCount() == 0 }, "worker reaped", 5*time.Second)
+	}
+	cancel()
+	<-done
+}
 
-	// The agent exchanged a token for the step's audience, scoped to the job.
-	exchanges := api.exchangesSnapshot()
-	if len(exchanges) != 1 {
-		t.Fatalf("exchanges = %+v, want one exchange", exchanges)
+// TestAgentStartNotStartedDrops verifies that a DECLINED start (the job is no
+// longer pending / not served / coordinate already claimed) is DROPPED
+// without spawning (F-30.4).
+func TestAgentStartNotStartedDrops(t *testing.T) {
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	// Pre-poison the coordinate: the (emulated) DB guard declines the start.
+	api.seenCoords[coordKey{job: 42, att: 1}] = true
+	w := newSupervisedAgent([]string{"-c", "exit 0"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 42}, AgentName: "w1"},
+	}}
+	// Positive wait: the (DECLINED) start was attempted ...
+	waitFor(t, func() bool {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		return api.starts >= 1
+	}, "start attempted", 5*time.Second)
+	// ...and led NOWHERE: no child, no ledger hold.
+	if n := w.childCount(); n != 0 {
+		t.Errorf("live children = %d, want 0 (a declined start must not spawn)", n)
 	}
-	if exchanges[0].jobID != 55 {
-		t.Errorf("exchange job_id = %d, want 55", exchanges[0].jobID)
+	if len(w.holdings()) != 0 {
+		t.Errorf("ledger holds %v, want empty", w.holdings())
 	}
-	if exchanges[0].audience != "outside-svc" {
-		t.Errorf("exchange audience = %q, want %q", exchanges[0].audience, "outside-svc")
-	}
+	cancel()
+	<-done
 }

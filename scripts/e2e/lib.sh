@@ -171,8 +171,24 @@ e2e_cleanup() {
 # inherited from the environment; this function only installs the cleanup
 # trap (which then tears down only the processes this script itself starts,
 # e.g. the RBAC API).
+# e2e_sweep_stale_stage_dirs: remove ALL F-21.6 stage dirs leaked by a prior
+# INTERRUPTED run (OOM, Ctrl-C, a SUSPENDED MACHINE — observed 2026-11-10: a
+# worker killed during an overnight sleep left /tmp/cdrom-stage-* behind,
+# with its mtime REFRESHED at death, defeating any age cutoff). Leftovers
+# make 16-artifact-packages' stage-cleanup check fail the NEXT run on
+# foreign litter. Removing everything (not just aged dirs) is SAFE because
+# the e2e stack OWNS FIXED PORTS — two concurrent runs cannot coexist, so
+# any survivor is by definition from a dead run. Call at boot, BEFORE any
+# job of this run stages. Invoked from BOTH boot paths (e2e_boot_stack for
+# standalone; e2e.sh's shared-stack boot — which does NOT route through
+# e2e_boot_stack).
+e2e_sweep_stale_stage_dirs() {
+  find /tmp -maxdepth 1 -name 'cdrom-stage-*' -type d -exec rm -rf {} + 2>/dev/null || true
+}
+
 e2e_boot_stack() {
   local with_agent="${1:-}"
+  e2e_sweep_stale_stage_dirs
   if [ -n "${E2E_STACK_READY:-}" ]; then
     [ -n "$WORK" ] || { echo ">> E2E_STACK_READY is set but WORK is not"; exit 1; }
     E2E_OWN_STACK=0
@@ -258,7 +274,7 @@ e2e_boot_stack() {
     # F-30.3: the agent sources its credential from a FILE and refuses to
     # boot without one — provision it (the default agent name is agent-1).
     e2e_issue_agent_credential agent-1 "$WORK/agent-1.cred" >/dev/null
-    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_LOG_FORMAT=text -- "$BIN/agent"
+    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
     # Gate on the API having the agent's WatchJobs stream open before
     # dispatching.
     e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'

@@ -41,7 +41,17 @@ import (
 // livelinessPosTTL bounds how long a VERIFIED-ACTIVE row is remembered. Kept
 // short on purpose: revocation is the emergency path and its worst-case delay
 // is this TTL (plus, on the target legs, one heartbeat interval).
-const livelinessPosTTL = 30 * time.Second
+const livelinessPosTTL = 15 * time.Second
+
+// livelinessPosCeiling is the HARD upper bound on a positive cache entry's
+// age (F-30.3/F-30.4): each successful lookup SLIDES the entry by the TTL
+// (cheap freshness for a healthy row), but the slide is CEILINGED so a
+// prolonged Database busy-storm (lookups erroring, the last positive
+// retained) cannot freeze a retired/revoked credential's shield indefinitely
+// — the entry dies at the ceiling no matter how recently it slid. The
+// ceiling equals the spec's "within one heartbeat + CACHE TTL" bound (30 s),
+// so worst-case teardown stays at cache TTL + one heartbeat.
+const livelinessPosCeiling = 30 * time.Second
 
 // lastSeenThrottle bounds how OFTEN a verified presentation bumps the row's
 // last_seen_at (a chatty agent would otherwise hammer the Database service on
@@ -74,7 +84,9 @@ type AgentCredentialVerifier struct {
 // subject matches it, so the binding check survives the shortcut.
 type posEntry struct {
 	name string
-	exp  time.Time
+	exp  time.Time // sliding expiry (hit-granted)
+	ceil time.Time // hard ceiling (birth-granted; the slide's wall)
+	born time.Time // first population (memoization stats)
 }
 
 // NewAgentCredentialVerifier builds the verifier: OIDC discovery against the
@@ -155,7 +167,7 @@ func (v *AgentCredentialVerifier) Verify(ctx context.Context, token string) (jti
 func (v *AgentCredentialVerifier) active(ctx context.Context, jti, name string) (bool, error) {
 	now := v.clock()
 	v.cacheMu.Lock()
-	if e, ok := v.pos[jti]; ok && now.Before(e.exp) && e.name == name {
+	if e, ok := v.pos[jti]; ok && now.Before(e.ceil) && e.name == name {
 		v.cacheMu.Unlock()
 		return true, nil
 	}
@@ -181,11 +193,26 @@ func (v *AgentCredentialVerifier) active(ctx context.Context, jti, name string) 
 	v.markSeenThrottled(ctx, jti, row.GetLastSeenAt())
 	entry := posEntry{name: name, exp: now.Add(livelinessPosTTL)}
 	v.cacheMu.Lock()
+	if prev, ok := v.pos[jti]; ok {
+		// Slide the MEMO, ceiling the LIFE: a healthy row keeps its entry
+		// fresh (short-lived memos), but the entry can never outlive the
+		// ceiling from its birth — a DB busy-storm (successful lookups
+		// interleaved with errors) cannot freeze a retired credential's
+		// shield past livelinessPosCeiling.
+		entry.born = prev.born
+		entry.ceil = prev.born.Add(livelinessPosCeiling)
+		if now.After(entry.ceil) {
+			entry.ceil = now.Add(livelinessPosCeiling)
+		}
+	} else {
+		entry.born = now
+		entry.ceil = now.Add(livelinessPosCeiling)
+	}
 	v.pos[jti] = entry
-	// Opportunistic sweep: drop expired entries (tiny map; avoids unbounded
-	// growth across a fleet's worth of rotated credentials).
+	// Opportunistic sweep: drop entries past their HARD ceiling (tiny map;
+	// avoids unbounded growth across a fleet's worth of rotated credentials).
 	for k, e := range v.pos {
-		if !now.Before(e.exp) {
+		if !now.Before(e.ceil) {
 			delete(v.pos, k)
 		}
 	}

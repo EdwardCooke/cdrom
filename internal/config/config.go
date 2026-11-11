@@ -162,6 +162,20 @@ type Config struct {
 	// WorkerJobID is the job an ephemeral worker was spawned to execute.
 	WorkerJobID string
 
+	// WorkerBinary is the path to the WORKER EXECUTABLE the agent spawns per
+	// job (F-30.4). Typically the sibling bin/worker. Empty = spawning
+	// disabled (the agent acknowledges assignments but does not execute them
+	// — a misconfiguration surfaced by a warning). Only the agent binary uses
+	// it (worker_binary / CDROM_AGENT_WORKER_BINARY).
+	WorkerBinary string
+
+	// WorkerRoot is the base directory a WORKER creates its per-job staged
+	// working area under (F-21.6 / F-30.4); empty means the OS temp dir. Set
+	// via the config file's worker_root or the CDROM_WORKER_ROOT env var (the
+	// agent passes it to the worker in the canonical env contract). Only the
+	// worker binary consumes it.
+	WorkerRoot string
+
 	// WorkerName identifies an ephemeral worker process. It defaults to the
 	// host name the worker runs on (see defaultWorkerName); it is reported
 	// with the job's status so the API can record which target ran the job.
@@ -1246,6 +1260,8 @@ type fileConfig struct {
 	// duration string (e.g. "24h").
 	AutoRenewAheadOfExpiry *string `yaml:"auto_renew_ahead_of_expiry"`
 	WorkerJobID       *string            `yaml:"worker_job_id"`
+	WorkerBinary      *string            `yaml:"worker_binary"`
+	WorkerRoot        *string            `yaml:"worker_root"`
 	WorkerName        *string            `yaml:"worker_name"`
 	// AgentRoot is the base directory for a target's staged working area
 	// (F-21.6); empty means the OS temp dir. Env: CDROM_AGENT_ROOT.
@@ -1433,6 +1449,12 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.WorkerJobID != nil {
 		cfg.WorkerJobID = *f.WorkerJobID
+	}
+	if f.WorkerBinary != nil {
+		cfg.WorkerBinary = *f.WorkerBinary
+	}
+	if f.WorkerRoot != nil {
+		cfg.WorkerRoot = *f.WorkerRoot
 	}
 	if f.WorkerName != nil {
 		cfg.WorkerName = *f.WorkerName
@@ -1776,6 +1798,8 @@ func applyEnv(cfg *Config) {
 		cfg.AgentLabels = parseLabels(v)
 	}
 	cfg.WorkerJobID = envOr("CDROM_WORKER_JOB_ID", cfg.WorkerJobID)
+	cfg.WorkerBinary = envOr("CDROM_AGENT_WORKER_BINARY", cfg.WorkerBinary)
+	cfg.WorkerRoot = envOr("CDROM_WORKER_ROOT", cfg.WorkerRoot)
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.AgentRoot = envOr("CDROM_AGENT_ROOT", cfg.AgentRoot)
 	cfg.DB.Backend = database.Backend(envOr("CDROM_DB_BACKEND", string(cfg.DB.Backend)))

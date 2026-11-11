@@ -117,7 +117,13 @@ type MintJobTokenRequest struct {
 	// issuer is the OIDC issuer to stamp on the token (the caller's configured
 	// issuer, so the token verifies against the caller's discovery document).
 	// Empty makes the IdP use its own configured issuer.
-	Issuer        string `protobuf:"bytes,9,opt,name=issuer,proto3" json:"issuer,omitempty"`
+	Issuer string `protobuf:"bytes,9,opt,name=issuer,proto3" json:"issuer,omitempty"`
+	// agent_name is the agent that STARTED the execution this token was minted
+	// for (F-30.4): it is stamped as the token's agent_name claim so the
+	// anonymous worker (children are anonymous to the API apart from their job
+	// token) can attribute its reports to the agent's JobExecution. Empty omits
+	// the claim (pre-F-30.4 style tokens / exchange tokens).
+	AgentName     string `protobuf:"bytes,10,opt,name=agent_name,json=agentName,proto3" json:"agent_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -211,6 +217,13 @@ func (x *MintJobTokenRequest) GetExpiresIn() string {
 func (x *MintJobTokenRequest) GetIssuer() string {
 	if x != nil {
 		return x.Issuer
+	}
+	return ""
+}
+
+func (x *MintJobTokenRequest) GetAgentName() string {
+	if x != nil {
+		return x.AgentName
 	}
 	return ""
 }
@@ -3993,7 +4006,7 @@ var File_cdrom_idp_v1_idp_proto protoreflect.FileDescriptor
 
 const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\n" +
-	"\x16cdrom/idp/v1/idp.proto\x12\fcdrom.idp.v1\x1a\x14cdrom/db/v1/db.proto\x1a\x1egoogle/protobuf/duration.proto\"\xb2\x02\n" +
+	"\x16cdrom/idp/v1/idp.proto\x12\fcdrom.idp.v1\x1a\x14cdrom/db/v1/db.proto\x1a\x1egoogle/protobuf/duration.proto\"\xd1\x02\n" +
 	"\x13MintJobTokenRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1f\n" +
 	"\vpipeline_id\x18\x02 \x01(\x03R\n" +
@@ -4005,7 +4018,10 @@ const file_cdrom_idp_v1_idp_proto_rawDesc = "" +
 	"\x0fupstream_claims\x18\a \x01(\tR\x0eupstreamClaims\x12\x1d\n" +
 	"\n" +
 	"expires_in\x18\b \x01(\tR\texpiresIn\x12\x16\n" +
-	"\x06issuer\x18\t \x01(\tR\x06issuer\"w\n" +
+	"\x06issuer\x18\t \x01(\tR\x06issuer\x12\x1d\n" +
+	"\n" +
+	"agent_name\x18\n" +
+	" \x01(\tR\tagentName\"w\n" +
 	"\x14MintJobTokenResponse\x12!\n" +
 	"\faccess_token\x18\x01 \x01(\tR\vaccessToken\x12\x1d\n" +
 	"\n" +

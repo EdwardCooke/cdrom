@@ -156,13 +156,20 @@ declared value.
   (`awaiting_approval`), renders its `message` against the condition context,
   and polls `CheckApproval`; decided via `POST /api/jobs/{id}/approve|reject`.
   Gate is job-level: one approval unblocks every agent of a fan-out job.
-- **Concurrency admission (F-16).** Before dispatch the scheduler admits the
-  job durably (`AcquireJobSlots`): one slot per concurrency key (keys are
-  OR'd — blocked while any is held), the target group's cap, and the global
-  cap. Limits are **regex-based rules in the database**
+- **Concurrency admission (F-16).** The job's slots — one per concurrency key
+  (keys are OR'd — blocked while any is held), the target group's cap, and the
+  global cap — are charged DURABLY AND ATOMICALLY WHEN THE JOB STARTS:
+  `StartJobExecution` acquires the slots inside its own transaction (tightened
+  2026-11-11 after the agent's pull path was witnessed starting held jobs
+  unadmitted — the "premature slot release" phantoms were uncharged
+  admissions), so NO origin (scheduler push, agent pull, rerun) can start a
+  job without paying. Limits are **regex-based rules in the database**
   (`GET/POST/PUT/DELETE /api/concurrency-limits`), most-specific-match wins,
-  unmatched keys default to 1 (= a lock). Blocked jobs stay `pending` for the
-  leader-gated admission loop — the single dispatch path. Queue visible via
+  unmatched keys default to 1 (= a lock). A blocked start declines
+  (`Started:false`); the job stays `pending` and the leader-gated admission
+  loop PUSHES it promptly once a slot frees (the agent's own 1 s poll also
+  retries harmlessly). Slots release on the job's terminal transition, with
+  the admission loop's reconcile as the safety net. Queue visible via
   `GET /api/queue` + a `queue` WS event. Keys are **templatable** against run
   params/identity.
 - **Environments (F-17).** Policy-bearing targets (`dev`/`staging`/`prod`/…)
@@ -471,6 +478,12 @@ snapshot on reconnect.
 - The database service routes GORM logs through slog
   (`internal/services/database/logger.go`).
 - Variable names should make sense, except Go idioms like `err` and `ok`.
+- **Times are UTC everywhere except at end-user display.** Internally —
+  stored values, transmitted payloads, logs, metrics, calculations — all
+  times are UTC. Convert to a viewer-appropriate locale/timezone ONLY at the
+  outermost presentation layer (the React UI). Duration arithmetic is
+  location-immune, but exhibits (logged/formatted times) must read UTC so
+  incidents correlate across components without offset gymnastics.
 - Docs discipline: when landing a feature, fold lasting design decisions back
   into this file / `docs/Architecture.md` and tick the checklist in
   `docs/Features.md`.

@@ -133,8 +133,13 @@ func (a *JobTokenAuth) Verify(ctx context.Context, token string) (int64, error) 
 // "job_config") keeps its structure on the minted token. The token's exp is a
 // long placeholder (jobTokenLifetime): the API gates its validity on the
 // job's live status, not the exp claim.
-func (a *JobTokenAuth) Mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType string, upstreamClaims map[string]any) (string, error) {
-	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, "", jobTokenLifetime)
+//
+// agentName (F-30.4) is stamped as the token's agent_name claim: the worker
+// that spends the token is anonymous to the API apart from it, so its
+// reports attribute to the agent's JobExecution via this claim. Empty omits
+// the claim.
+func (a *JobTokenAuth) Mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType, agentName string, upstreamClaims map[string]any) (string, error) {
+	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, "", jobTokenLifetime, agentName)
 }
 
 // Exchange requests a new job token for job from the IdP with a specific
@@ -148,7 +153,7 @@ func (a *JobTokenAuth) Exchange(ctx context.Context, jobID, pipelineID int64, ta
 	if expiresIn <= 0 {
 		expiresIn = a.exchangedTokenLifetime
 	}
-	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, audience, expiresIn)
+	return a.mint(ctx, jobID, pipelineID, targetGroup, triggerName, triggerType, upstreamClaims, audience, expiresIn, "")
 }
 
 // mint requests a job token from the IdP's gRPC MintJobToken RPC (over mTLS
@@ -161,7 +166,7 @@ func (a *JobTokenAuth) Exchange(ctx context.Context, jobID, pipelineID int64, ta
 // against the API's OIDC discovery document. expiresIn is the token's
 // lifetime (the IdP stamps exp to now + expiresIn); it is a long placeholder
 // for the main job token and a short window for an exchanged token.
-func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType string, upstreamClaims map[string]any, audience string, expiresIn time.Duration) (string, error) {
+func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, targetGroup, triggerName, triggerType string, upstreamClaims map[string]any, audience string, expiresIn time.Duration, agentName string) (string, error) {
 	req := &idppb.MintJobTokenRequest{
 		JobId:       strconv.FormatInt(jobID, 10),
 		PipelineId:  pipelineID,
@@ -170,6 +175,7 @@ func (a *JobTokenAuth) mint(ctx context.Context, jobID, pipelineID int64, target
 		TriggerName: triggerName,
 		TriggerType: triggerType,
 		Issuer:      a.idpURL,
+		AgentName:   agentName,
 	}
 	if len(upstreamClaims) > 0 {
 		if encoded, err := json.Marshal(upstreamClaims); err == nil {

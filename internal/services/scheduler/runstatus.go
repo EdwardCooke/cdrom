@@ -167,10 +167,18 @@ func (s *Server) recordRunMetrics(run *dbpb.PipelineRun, derived models.RunStatu
 		return
 	}
 	finished := now.AsTime()
-	if started := run.GetStartedAt(); started != nil {
-		if d := finished.Sub(started.AsTime()); d >= 0 {
-			s.metrics.ObserveRunDuration(status, trigger, environment, d)
-		}
+	// EFFECTIVE START TIME: the fetched run's StartedAt is set when the run
+	// LEFT PENDING — but a FAST run that jumps pending→terminal BETWEEN
+	// scheduler ticks has StartedAt=nil on the fetched snapshot (it is
+	// persisted in THIS tick's update, after the fetch). Fall back to now:
+	// the run started at-or-after the last tick, so a ~0 duration is the
+	// honest lower bound (better than silently dropping the observation).
+	started := run.GetStartedAt()
+	if started == nil {
+		started = now
+	}
+	if d := finished.Sub(started.AsTime()); d >= 0 {
+		s.metrics.ObserveRunDuration(status, trigger, environment, d)
 	}
 	if created := run.GetCreatedAt(); created != nil {
 		if d := finished.Sub(created.AsTime()); d >= 0 {

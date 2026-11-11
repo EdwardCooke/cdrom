@@ -96,6 +96,9 @@ cleanup() {
 trap cleanup EXIT
 
 log ">> booting shared stack in $WORK"
+# Purge stage-dir litter from interrupted prior runs BEFORE any job stages
+# (16-artifact-packages' leftover check would blame this run for it).
+e2e_sweep_stale_stage_dirs
 # Mutual TLS for the WHOLE gRPC mesh (ruled 2026-11-06): generate a throwaway
 # CA + leaf set and export the CDROM_TLS_* triple every service inherits.
 e2e_setup_tls
@@ -161,7 +164,9 @@ e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=t
 # F-30.3: the agent sources its credential from a FILE and refuses to boot
 # without one — provision it (the default agent name is agent-1).
 e2e_issue_agent_credential agent-1 "$WORK/agent-1.cred" >/dev/null
-e2e_start agent    "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_LOG_FORMAT=text -- "$BIN/agent"
+# F-30.4: the agent SUPERVISES per-job worker subprocesses — hand it the
+# worker binary (the canonical env contract is written into each child).
+e2e_start agent    "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
 
 # Gate on the API having the agent's WatchJobs stream open before dispatching.
 e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'
@@ -202,5 +207,6 @@ run_test 21-break-glass.sh
 run_test 22-scim-users.sh
 run_test 23-scim-groups.sh
 run_test 24-agent-credential-rotation.sh
+run_test 25-worker-env-mandate.sh
 
 log ">> e2e PASSED"
