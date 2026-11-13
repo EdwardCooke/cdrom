@@ -96,9 +96,12 @@ cleanup() {
 trap cleanup EXIT
 
 log ">> booting shared stack in $WORK"
-# Purge stage-dir litter from interrupted prior runs BEFORE any job stages
-# (16-artifact-packages' leftover check would blame this run for it).
+# Purge stage-dir litter AND orphaned workers from interrupted prior runs
+# BEFORE any job stages/dispatches (16-artifact-packages' leftover check and
+# 25's worker sniff would blame this run for them — F-30.4 workers detach
+# from their agent, so a dead run's agents die but their workers linger).
 e2e_sweep_stale_stage_dirs
+e2e_sweep_orphan_workers
 # Mutual TLS for the WHOLE gRPC mesh (ruled 2026-11-06): generate a throwaway
 # CA + leaf set and export the CDROM_TLS_* triple every service inherits.
 e2e_setup_tls
@@ -162,11 +165,12 @@ curl -sf https://127.0.0.1:7104/.well-known/openid-configuration >/dev/null 2>&1
 # surface (a bare address would be coerced to http:// by normalizeIDPURL).
 e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_PIPELINE_SOURCE_ADDR=127.0.0.1:7109 CDROM_LOG_FORMAT=text -- "$BIN/api"
 # F-30.3: the agent sources its credential from a FILE and refuses to boot
-# without one — provision it (the default agent name is agent-1).
+# without one — provision it. The name is PINNED to agent-1: the default is
+# now the host name, and the credential is issued to the presenting name.
 e2e_issue_agent_credential agent-1 "$WORK/agent-1.cred" >/dev/null
 # F-30.4: the agent SUPERVISES per-job worker subprocesses — hand it the
 # worker binary (the canonical env contract is written into each child).
-e2e_start agent    "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
+e2e_start agent    "$WORK/agent.log"    'registered' CDROM_AGENT_NAME=agent-1 CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
 
 # Gate on the API having the agent's WatchJobs stream open before dispatching.
 e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'
@@ -208,5 +212,7 @@ run_test 22-scim-users.sh
 run_test 23-scim-groups.sh
 run_test 24-agent-credential-rotation.sh
 run_test 25-worker-env-mandate.sh
+run_test 26-supervision-channel.sh
+run_test 27-failure-concurrency.sh
 
 log ">> e2e PASSED"

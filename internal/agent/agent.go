@@ -14,8 +14,9 @@
 // is world-readable; env is not). The worker claims its payload from the API
 // (GetJob with the job token), executes the job, reports its own status, and
 // exits. The agent is a dumb BABYSITTER: it observes child liveness,
-// relays cancellation OPPORTUNISTICALLY (the worker's own API status poll
-// remains the authoritative cancellation path, F-05), and (slice 3) reports
+// relays cancellation OPPORTUNISTICALLY over the supervision channel (the
+// worker's own API status poll remains the authoritative cancellation path,
+// F-05), absorbs the child's telemetry (slice 2), and (slice 3) reports
 // abnormal child deaths.
 //
 // Duplication safety rests on SERIALIZITY PER (job, agent, attempt)
@@ -30,13 +31,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -44,9 +43,12 @@ import (
 	"time"
 
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/metrics"
 	"cdrom/internal/target"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Dependencies are the inputs an agent needs. The agent talks only to the
@@ -74,16 +76,21 @@ type Dependencies struct {
 	// (F-21.6) is created under; empty means the OS temp dir. Carried from
 	// the agent's config (agent_root / CDROM_AGENT_ROOT).
 	AgentRoot string
-	// ---- F-30.4: the worker-spawning inputs (the CANONICAL ENV CONTRACT) ----
-	// WorkerBinary is the path to the worker executable the agent spawns per
-	// job (typically the sibling bin/worker). Empty = spawning DISABLED
-	// (assignments are acknowledged but not executed — a misconfiguration
-	// surfaced by the WARN on every assignment).
-	WorkerBinary string
-	// WorkerArgs are appended to the worker invocation (production: none —
-	// the mandate rides the environment; tests: e.g. ["-c","sleep 5"] on a
-	// shell to obtain a controllable long-running child).
-	WorkerArgs []string
+	// ---- F-30.4: the LAUNCHER SEAM (substrate injection) ----
+	// Launcher brings workers UP (the default is the local os/exec launcher
+	// — see launcher_local.go; a Kubernetes launcher would emit a Pod spec
+	// instead). Nil = launching DISABLED (assignments are acknowledged but
+	// not executed — a misconfiguration surfaced by the WARN on every
+	// assignment). Injected by cmd/agent (or a test) so the agent's
+	// supervision core stays substrate-blind.
+	Launcher Launcher
+	// ChannelBind is the address the SUPERVISION CHANNEL listens on
+	// (F-30.4 slice 2). Empty = the loopback default (127.0.0.1:0 — the
+	// local-substrate posture: the channel is intra-host by construction).
+	// A node-network agent (whose workers are PODS that cannot reach the
+	// agent's localhost) sets this to a routable bind, e.g. ":7401" or
+	// "<pod-ip>:7401".
+	ChannelBind string
 	// APIAddress is the API gRPC address handed to the worker (CDROM_API_ADDR).
 	APIAddress string
 	// TLSCAFile is the CA bundle path handed to the worker (CDROM_TLS_CA_FILE)
@@ -92,6 +99,18 @@ type Dependencies struct {
 	// WorkerRoot is the worker's staged-work-area base (CDROM_WORKER_ROOT);
 	// empty lets the worker default to the OS temp dir.
 	WorkerRoot string
+	// ---- F-30.4 slice 3: graceful-stop ordering + orphan adoption ----
+	// AdoptionHorizon bounds the boot-time ADOPTION sweep (item B2): an
+	// orphan older than this is deemed DEAD (its worker is gone) and is
+	// failed via ReportChildDeath instead of awaited. Zero/negative falls
+	// back to the default (1 hour).
+	AdoptionHorizon time.Duration
+	// ShutdownGrace is the STOP drain horizon (stop ordering: drain →
+	// interrupt → kill). Zero/negative falls back to the default (30 s).
+	ShutdownGrace time.Duration
+	// ShutdownKillGrace is the stop INTERRUPT horizon. Zero/negative falls
+	// back to the default (5 s).
+	ShutdownKillGrace time.Duration
 }
 
 // Agent is a long-lived agent process (the supervisor; F-30.4).
@@ -109,23 +128,29 @@ type Agent struct {
 	// metrics is the agent's metric set (F-20); nil when metrics are
 	// disabled, in which case all recording is a no-op.
 	metrics *metrics.AgentMetrics
-
 	// LAUNCH LEDGER (F-30.4): the (job, attempt) coordinates this agent has
-	// CLAIMED (successfully started + spawned). A duplicate delivery of an
-	// already-claimed coordinate is DROPPED here (before hitting the API);
-	// the database service's duplicate-start guard defends the same invariant
-	// server-side (defense in depth). Coordinates are FREEd when the child
-	// exits so a RETRY (a fresh attempt) or a RERUN (reset to pending) can
-	// legitimately re-enter.
+	// CLAIMED (successfully started + spawned, or ADOPTED from a
+	// predecessor). Duplication safety rests on SERIALITY PER COORDINATE —
+	// not on "the process is serial" (parallel children are lawful; F-16's
+	// durable admission bounds the group's concurrency): a duplicate
+	// delivery of an already-held coordinate is DROPPED here (before hitting
+	// the API); the database service defends the same invariant TWICE
+	// server-side (defense in depth) — the duplicate-EPIISODE guard (counts
+	// existing executions) and the unique ACTIVE-coordinate index on
+	// job_executions (rejects two ACTIVE rows for one coordinate — the
+	// racers' edge). Coordinates are FREEd when the child exits (or the
+	// terminal report arrives for an adopted orphan) so a RETRY (a fresh
+	// attempt) or a RERUN (reset to pending) can legitimately re-enter.
 	ledgerMu sync.Mutex
 	ledger   map[spawnCoordinate]struct{}
 
 	// LIVE CHILDREN (F-30.4): the worker subprocesses currently running,
 	// keyed by coordinate. The agent observes their liveness (Cmd.Wait) and
-	// relays cancellation opportunistically (kill on a WatchJobs
-	// JobCancellation; the worker's own API poll is authoritative, F-05).
+	// relays cancellation OPPORTUNISTICALLY over the supervision channel
+	// (Signals) when a WatchJobs JobCancellation arrives; the worker's own
+	// API poll remains authoritative (F-05).
 	childrenMu   sync.Mutex
-	liveChildren map[spawnCoordinate]*childProcess
+	liveChildren map[spawnCoordinate]Child
 	wg           sync.WaitGroup // outstanding child-wait goroutines
 
 	// deadlineMu protects the auto-renew loop's learned row deadline (F-30.3
@@ -134,27 +159,26 @@ type Agent struct {
 	deadlineMu   sync.Mutex
 	nextDeadline time.Time
 	hasDeadline  bool
+
+	// channel is the LOCAL SUPERVISION CHANNEL (F-30.4 slice 2): the loopback
+	// gRPC server the worker subprocesses dial (Signals + Telemetry). Nil when
+	// the listen failed (degraded: workers run channel-less; the agent falls
+	// back to exit-code inference for their metrics).
+	channel *channelServer
+
+	// ADOPTED ORPHANS (F-30.4 slice 3, item B2): the coordinates this
+	// INSTANCE adopted from a predecessor (discovered at boot; the worker
+	// reconnects via the resume lane and its telemetry lands here). Freed
+	// when the terminal report arrives (observeChild) or the sweep gives up.
+	adoptMu   sync.Mutex
+	adopted   map[spawnCoordinate]bool
+	sweepDone chan struct{} // closed when the adoption sweep has run (once)
 }
 
 // spawnCoordinate is the ledger/livespace key: one worker per (job, attempt).
 type spawnCoordinate struct {
 	jobID   int64
 	attempt int32
-}
-
-// childProcess is one supervised worker subprocess.
-type childProcess struct {
-	cmd   *exec.Cmd
-	pid   int
-	jobID int64
-	// workerLog is the child's OWN log file (F-30.4): the agent folds it
-	// into its log after the child exits.
-	workerLog string
-	// spawnedAt is when the child was started (F-30.4): the agent measures
-	// the supervised job's wall-clock duration for its metrics roll-up.
-	spawnedAt time.Time
-	// exited is closed when the child's Wait returns (observation-complete).
-	exited chan struct{}
 }
 
 // New creates an agent with the given identity and service dependencies.
@@ -169,11 +193,11 @@ func New(name, group string, environments []string, labels map[string]string, de
 	// Advise (warn) once at startup when the staged-working-area root is
 	// RAM-backed (F-21.6): staged files would consume memory.
 	target.WarnTmpfsAgentRoot(deps.AgentRoot, logger)
-	if deps.WorkerBinary == "" {
-		logger.Warn("agent: no worker binary configured; assignments will NOT be executed",
+	if deps.Launcher == nil || !deps.Launcher.Enabled() {
+		logger.Warn("agent: no worker launcher configured; assignments will NOT be executed",
 			"hint", "set worker_binary (CDROM_AGENT_WORKER_BINARY) to the worker executable")
 	}
-	return &Agent{
+	a := &Agent{
 		name:         name,
 		group:        group,
 		environments: environments,
@@ -181,8 +205,177 @@ func New(name, group string, environments []string, labels map[string]string, de
 		deps:         deps,
 		logger:       logger,
 		ledger:       make(map[spawnCoordinate]struct{}),
-		liveChildren: make(map[spawnCoordinate]*childProcess),
+		liveChildren: make(map[spawnCoordinate]Child),
+		adopted:      make(map[spawnCoordinate]bool),
+		sweepDone:    make(chan struct{}),
 	}
+	// Boot the supervision channel (F-30.4 slice 2): a listener on the
+	// CONFIGURED BIND (default loopback — the local-substrate posture),
+	// advertised to each worker via CDROM_PARENT_GRPC_ADDR. Admittance is the
+	// LIVE-CHILD check (the launch ledger is the custody proof). A bind
+	// failure DEGRADES the agent (no channel; exit-code inference remains).
+	a.channel = newChannelServer(deps.ChannelBind, a.admitChannelWorker, logger)
+	if err := a.channel.start(); err != nil {
+		logger.Warn("agent: supervision channel disabled (listen failed); workers will run channel-less", "err", err)
+		a.channel = nil
+	} else {
+		// ADOPTED SETTLEMENT (item B2): an adopted worker has no local child
+		// to Observe — its final Telemetry flush is the completion signal.
+		a.channel.setAdoptedSettler(a.settleAdopted)
+		logger.Info("agent: supervision channel listening", "addr", a.channel.Addr())
+	}
+	return a
+}
+
+// settleAdopted discharges an ADOPTED coordinate whose worker completed
+// (item B2): the final JobSample rode the Telemetry stream to its end —
+// consume the account (the rolled-up metrics land in THIS instance's series
+// — the fresh instance represents the lineage), free the ledger, and drop
+// the adoption mark. Guards: only coordinates this instance ADOPTED (a
+// live child settles via observeChild; a foreign final is ignored).
+func (w *Agent) settleAdopted(coord spawnCoordinate) {
+	if !w.isAdopted(coord) {
+		return
+	}
+	account := w.takeChildAccount(coord)
+	if account != nil && account.finalSeen && w.metrics != nil {
+		w.metrics.RecordJob(account.finalStatus, account.finalDur)
+	}
+	if account != nil && w.metrics != nil {
+		for _, st := range account.steps {
+			w.metrics.RecordStep(st.stepType, st.status, st.dur)
+		}
+		if account.logBytes > 0 {
+			w.metrics.AddLogBytes(account.logBytes)
+		}
+		for i := uint32(0); i < account.cancelAcks; i++ {
+			w.metrics.RecordCancelSignalAck()
+		}
+	}
+	w.freeLedger(coord)
+	w.releaseAdopted(coord)
+	w.refreshInflight()
+	w.logger.Info("agent: adopted worker completed; account absorbed", "job", coord.jobID, "attempt", coord.attempt)
+}
+
+// isAdopted reports whether the coordinate is one the agent ADOPTED from a
+// predecessor (item B2): the resume lane admits the worker's reconnect for
+// it (custody transferred to this instance).
+func (w *Agent) isAdopted(coord spawnCoordinate) bool {
+	w.adoptMu.Lock()
+	defer w.adoptMu.Unlock()
+	return w.adopted[coord]
+}
+
+// markAdopted records the coordinate as adopted (idempotent).
+func (w *Agent) markAdopted(coord spawnCoordinate) {
+	w.adoptMu.Lock()
+	defer w.adoptMu.Unlock()
+	w.adopted[coord] = true
+}
+
+// releaseAdopted drops the coordinate from the adoption set (the terminal
+// report arrived — observation duty discharged).
+func (w *Agent) releaseAdopted(coord spawnCoordinate) {
+	w.adoptMu.Lock()
+	defer w.adoptMu.Unlock()
+	delete(w.adopted, coord)
+}
+
+// isLiveChild reports whether the coordinate is one of the agent's live
+// children.
+func (w *Agent) isLiveChild(coord spawnCoordinate) bool {
+	w.childrenMu.Lock()
+	defer w.childrenMu.Unlock()
+	_, ok := w.liveChildren[coord]
+	return ok
+}
+
+// admitChannelWorker is the supervision channel's CONNECT-JOB ADMISSANCE
+// predicate (two lanes, F-30.4 slice 2 + the k8s-resume story):
+//
+//   - COLD: the coordinate is one of the agent's LIVE CHILDREN (the launch
+//     ledger is the custody proof — a worker associates only with a job the
+//     agent actually spawned).
+//   - RESUME: the agent RESTARTED mid-job and no longer holds the live
+//     child (its in-memory state is gone). The worker reconnects to the
+//     fresh instance; admission then rests on the TICKET'S CONSISTENCY with
+//     this agent — the coordinator names a real job (jobID != 0) and the
+//     token's agent_name claim EQUALS THE AGENT'S OWN REGISTERED NAME. The
+//     token is IdP-signed and was SPENT against the API (GetJob / reports),
+//     so a forged one is worthless: it is the custody proof tying the
+//     worker to this agent lineage. (Observational only — the job's fate
+//     never depended on the channel; the resumed worker re-establishes the
+//     relay + telemetry. Orphaned-OBSERVATION adoption — rolling the
+//     rejoined child's metrics into THIS instance's series — ships with
+//     Slice 3.)
+//
+// Returns (ok, resumed). ok=false is PERMANENT (the worker runs channel-less
+// for its life; retrying cannot help).
+func (w *Agent) admitChannelWorker(coord spawnCoordinate, ticketAgentName, jobToken string) (bool, bool) {
+	if w.isLiveChild(coord) {
+		return true, false
+	}
+	// Adopted lane (item B2): the coordinate is one this instance ADOPTED
+	// from a predecessor — the strongest custody proof (we took the duty).
+	if w.isAdopted(coord) {
+		return true, true
+	}
+	// Resume lane (item A): the ticket NAMES A REAL JOB and its token's
+	// agent_name claim EQUALS THIS AGENT'S OWN NAME.
+	if !(coord.jobID != 0 && ticketAgentName != "") {
+		return false, false
+	}
+	// ROUTABLE POSTURE (item B3): the unsigned decode is WEAK across the
+	// network (any valid token minted for this agent would pass). When the
+	// channel escapes loopback, VERIFY the token's signature via the API's
+	// attestation (the agent holds no JWKS — the API does). Loopback keeps
+	// the cheap decode (intra-host: holding a valid token for this agent
+	// implies owning one of its workers).
+	if w.routableChannel() {
+		valid, name, enabled := w.verifyTicketViaAPI(coord, jobToken)
+		if !enabled {
+			// Attestation unavailable (job-token auth disabled, or a
+			// transient API failure): fall back to the unsigned decode —
+			// the weak-but-functional posture (a refusal here would sever
+			// a rightful worker's telemetry for no security gain).
+			return ticketAgentName == w.name, true
+		}
+		return valid && name == w.name, true
+	}
+	return ticketAgentName == w.name, true
+}
+
+// routableChannel reports whether the channel's bind ESCAPEs loopback (the
+// posture where the unsigned decode is unsafe — item B3).
+func (w *Agent) routableChannel() bool {
+	if w.channel == nil {
+		return false
+	}
+	addr := w.channel.Addr()
+	return !strings.HasPrefix(addr, "127.") && !strings.HasPrefix(addr, "::1") && !strings.HasPrefix(addr, "[::1]")
+}
+
+// verifyTicketViaAPI asks the API to attest the ticket's token (item B3):
+// signature + audience + job binding + non-terminal job, echoing the
+// VERIFIED agent_name claim. Returns (valid, name, enabled) — enabled=false
+// means attestation is unavailable (fall back to the unsigned decode).
+func (w *Agent) verifyTicketViaAPI(coord spawnCoordinate, jobToken string) (valid bool, name string, enabled bool) {
+	ctx, err := w.credentialCtx(context.Background())
+	if err != nil {
+		return false, "", false
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := w.deps.API.VerifyJobToken(callCtx, &apipb.VerifyJobTokenRequest{
+		JobId: coord.jobID,
+		Token: jobToken,
+	})
+	if err != nil {
+		w.logger.Warn("agent: verify ticket (resume lane)", "job", coord.jobID, "err", err)
+		return false, "", false
+	}
+	return resp.GetValid(), resp.GetAgentName(), resp.GetEnabled()
 }
 
 // SetMetrics sets the agent's metric set (F-20). It must be called before
@@ -204,10 +397,26 @@ func (w *Agent) Run(ctx context.Context) error {
 	w.registerResilient(ctx)
 	w.logger.Info("agent: registered", "name", w.name, "group", w.group, "environments", w.environments, "labels", w.labels)
 
+	// ADOPTION SWEEP (F-30.4 slice 3, item B2): discover this lineage's
+	// still-running executions (orphans of a predecessor incarnation) and
+	// adopt observation duty for each. Runs in the BACKGROUND (the boot
+	// must not stall on the API); Stop WAITS for it (a stopped agent must
+	// not leave adopted duties dangling).
+	go w.adoptionSweep(ctx)
+
 	defer func() {
+		// Graceful-stop ordering (F-30.4 slice 3): drain → interrupt →
+		// kill → deregister → tear down the channel LAST (a draining
+		// child's final flush must still reach the agent). The horizon
+		// sums the phases (drain + interrupt + the final reap margin).
+		drain, kill := w.stopHorizons()
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), drain+kill+10*time.Second)
+		defer stopCancel()
+		w.Stop(stopCtx)
 		if _, err := w.deps.API.DeregisterAgent(context.WithoutCancel(ctx), &apipb.DeregisterAgentRequest{Name: w.name}); err != nil {
 			w.logger.Warn("agent: deregister", "err", err)
 		}
+		w.channel.stop()
 	}()
 
 	// Heartbeat in the background.
@@ -248,6 +457,214 @@ func (w *Agent) Run(ctx context.Context) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// defaultStopHorizons are the graceful-stop fallbacks (F-30.4 slice 3): the
+// drain horizon (let live children FINISH) and the interrupt horizon (give
+// the polite signal room to bite before the kill).
+const (
+	defaultShutdownGrace     = 30 * time.Second
+	defaultShutdownKillGrace = 5 * time.Second
+)
+
+// stopHorizons resolves the configured stop horizons (fallbacks on
+// zero/negative).
+func (w *Agent) stopHorizons() (drain, kill time.Duration) {
+	drain = w.deps.ShutdownGrace
+	if drain <= 0 {
+		drain = defaultShutdownGrace
+	}
+	kill = w.deps.ShutdownKillGrace
+	if kill <= 0 {
+		kill = defaultShutdownKillGrace
+	}
+	return drain, kill
+}
+
+// Stop implements the graceful-stop ORDERING (F-30.4 slice 3):
+//
+//  1. DRAIN — wait for the live children to finish on their own, up to the
+//     drain horizon (their final flushes + terminal reports still land);
+//  2. INTERRUPT — politely signal the survivors (os.Interrupt: SIGINT on
+//     unix; the child's own group on Windows), giving them the kill horizon
+//     to react (a cooperative worker traps it and exits CLEANLY — code 1);
+//  3. KILL — force-stop whatever survives (the worker cannot trap SIGKILL);
+//  4. WAIT — reap the observation goroutines (bounded by the horizons above,
+//     so a wedged child cannot wedge the shutdown).
+//
+// The channel is intentionally LEFT UP until the agent's Run defers its
+// teardown — a draining child's final flush must still reach this agent.
+// Safe to call with no children (idle).
+func (w *Agent) Stop(ctx context.Context) {
+	drain, kill := w.stopHorizons()
+	if w.childCount() == 0 {
+		return
+	}
+	w.logger.Info("agent: shutting down; draining live children", "count", w.childCount(), "horizon", drain.String())
+	select {
+	case <-w.allExited():
+		w.logger.Info("agent: drained; all children exited")
+		return
+	case <-ctx.Done():
+	case <-time.After(drain):
+	}
+	if w.childCount() == 0 {
+		return
+	}
+	w.logger.Info("agent: drain expired; interrupting survivors", "count", w.childCount())
+	for _, c := range w.liveSnapshot() {
+		c.Interrupt()
+	}
+	interrupted := make(chan struct{})
+	go func() {
+		w.waitForChildren(kill)
+		close(interrupted)
+	}()
+	select {
+	case <-interrupted:
+		return
+	case <-time.After(kill):
+	}
+	if w.childCount() == 0 {
+		return
+	}
+	w.logger.Warn("agent: interrupt ignored; killing leftovers", "count", w.childCount())
+	for _, c := range w.liveSnapshot() {
+		c.Terminate()
+	}
+	w.waitForChildren(10 * time.Second)
+}
+
+// liveSnapshot returns the current live children (a copy — iteration must
+// not hold the map lock).
+func (w *Agent) liveSnapshot() []Child {
+	w.childrenMu.Lock()
+	defer w.childrenMu.Unlock()
+	out := make([]Child, 0, len(w.liveChildren))
+	for _, c := range w.liveChildren {
+		out = append(out, c)
+	}
+	return out
+}
+
+// waitForChildren awaits the observation goroutines (bounded).
+func (w *Agent) waitForChildren(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+}
+
+// allExited is a fresh channel closed when wg empties (waits for the CURRENT
+// cohort; a new child spawned afterwards is not waited on — shutdown does
+// not race new work).
+func (w *Agent) allExited() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+	return done
+}
+
+// adoptionSweep (F-30.4 slice 3, item B2): at boot, discover this LINEAGE's
+// still-running executions (the orphans of a predecessor incarnation — the
+// API's blindness to restarts is cured by retiring the register-time
+// AbandonAgentExecutions) and ADOPT observation duty for each young one:
+// reserve the ledger coordinate (a redelivery of the same job is dropped —
+// the worker is still running) and await the worker's CONNECT (resume lane)
+// or its terminal report. Orphans OLDER than the horizon are deemed DEAD
+// (their worker is gone): fail them via ReportChildDeath (the fast-failure
+// escape hatch) instead of awaiting forever. Runs once; Stop waits for it.
+func (w *Agent) adoptionSweep(ctx context.Context) {
+	defer close(w.sweepDone)
+	// Brief settle: the registration (and its credential exchange) happens
+	// moments before Run returns to its loops; give the API a beat to have
+	// processed it so the sweep's identity call is not racing the
+	// registration's own writes.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(2 * time.Second):
+	}
+	ctx, err := w.credentialCtx(ctx)
+	if err != nil {
+		w.logger.Warn("agent: adoption sweep: credential unavailable; skipping", "err", err)
+		return
+	}
+	resp, err := w.deps.API.DiscoverAgentExecutions(ctx, &dbpb.DiscoverAgentExecutionsRequest{AgentName: w.name})
+	if err != nil {
+		w.logger.Warn("agent: adoption sweep: discover", "err", err)
+		return
+	}
+	if len(resp.GetExecutions()) == 0 {
+		w.logger.Info("agent: adoption sweep: no orphans (fresh lineage)")
+		return
+	}
+	horizon := w.deps.AdoptionHorizon
+	if horizon <= 0 {
+		horizon = defaultAdoptionHorizon
+	}
+	now := time.Now().UTC()
+	for _, ex := range resp.GetExecutions() {
+		coord := spawnCoordinate{jobID: ex.GetJobId(), attempt: ex.GetAttempt()}
+		age := now.Sub(startedAtOf(ex.GetStartedAt()))
+		if age > horizon {
+			w.logger.Warn("agent: adoption sweep: orphan too old; failing it",
+				"job", coord.jobID, "attempt", coord.attempt, "age", age.Round(time.Second))
+			w.failDeadOrphan(ctx, coord, "predecessor's worker presumed dead (adoption horizon exceeded)")
+			continue
+		}
+		if !w.reserveLedger(coord) {
+			// A live child already holds it (should not happen at boot —
+			// the ledger is empty then; belt).
+			continue
+		}
+		w.markAdopted(coord)
+		w.logger.Info("agent: ADOPTED orphaned execution (observation duty)",
+			"job", coord.jobID, "attempt", coord.attempt, "age", age.Round(time.Second))
+	}
+}
+
+// defaultAdoptionHorizon bounds how old an orphan may be for the sweep to
+// AWAIT it (versus deem its worker dead and fail it). Generous: a long
+// build/probe step is LEGITIMATE; the horizon trips only for orphans older
+// than any sane foreground job (and the F-03 watchdog would have reaped
+// them eventually anyway).
+const defaultAdoptionHorizon = time.Hour
+
+// failDeadOrphan reports a dead orphan's execution via ReportChildDeath
+// (the fast-failure escape hatch) — best-effort (the F-03 watchdog is the
+// ultimate backstop).
+func (w *Agent) failDeadOrphan(ctx context.Context, coord spawnCoordinate, reason string) {
+	failCtx, err := w.credentialCtx(ctx)
+	if err != nil {
+		w.logger.Warn("agent: fail dead orphan: credential unavailable", "err", err)
+		return
+	}
+	if _, err := w.deps.API.ReportChildDeath(failCtx, &apipb.ReportChildDeathRequest{
+		JobId:     coord.jobID,
+		AgentName: w.name,
+		Reason:    reason,
+	}); err != nil {
+		w.logger.Warn("agent: fail dead orphan", "job", coord.jobID, "err", err)
+		return
+	}
+	w.freeLedger(coord)
+	w.releaseAdopted(coord)
+}
+
+// startedAtOf extracts a proto Timestamp's time (zero when absent).
+func startedAtOf(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil {
+		return time.Time{}
+	}
+	return ts.AsTime()
 }
 
 // registerResilient registers the agent, RETRYING on a capped exponential
@@ -309,7 +726,9 @@ func (w *Agent) credentialCtx(ctx context.Context) (context.Context, error) {
 // fast — a StartJobExecution RPC + an exec — and the heavy lifting happens in
 // the detached child), so the watch loop stays free to receive a
 // cancellation for a running job. A cancellation delivered while a job runs
-// INTERRUPTS THE CHILD (see cancelJob); one delivered for a job that is not
+// is RELAYED to the worker over the supervision channel (opportunistically)
+// and noticed in the agent's log (see cancelJob) — the worker's own status
+// poll remains the authority (F-05); one delivered for a job that is not
 // running on this agent is ignored (the job's status is already reconciled
 // by the database).
 func (w *Agent) watch(base context.Context) error {
@@ -503,11 +922,11 @@ func (w *Agent) supervise(base context.Context, jobID int64) {
 		w.logger.Warn("agent: duplicate coordinate dropped by launch ledger", "job", jobID, "attempt", coord.attempt)
 		return
 	}
-	cp := w.spawnWorker(coord, resp.GetJobToken())
-	if cp == nil {
-		// Spawn failed (binary missing, exec error): FREE the reservation so
-		// a redelivery (nudge/poll) can retry — the execution exists in the
-		// DB (the start succeeded) and the worker WILL claim it.
+	child := w.launchWorker(coord, resp.GetJobToken())
+	if child == nil {
+		// Launch failed (launcher disabled, exec error): FREE the reservation
+		// so a redelivery (nudge/poll) can retry — the execution exists in
+		// the DB (the start succeeded) and the worker WILL claim it.
 		w.freeLedger(coord)
 		return
 	}
@@ -534,136 +953,158 @@ func (w *Agent) freeLedger(coord spawnCoordinate) {
 	delete(w.ledger, coord)
 }
 
-// spawnWorker forks the worker subprocess with the CANONICAL ENV CONTRACT
-// (F-30.4): the mandate rides the ENVIRONMENT ONLY — argv is world-readable
-// (process listings, /proc/*/cmdline); env is not. The child DETACHES from
-// the agent's lifetime (its context is independent): it finishes its job and
-// reports to the API even if the agent exits (controlled drain/kill ordering
-// is slice 3). Detached I/O (Discard): the worker's own logging convention
-// (CDROM_LOG_*) governs where its logs go.
-func (w *Agent) spawnWorker(coord spawnCoordinate, jobToken string) *childProcess {
-	if w.deps.WorkerBinary == "" {
-		w.logger.Warn("agent: worker binary not configured; job NOT executed", "job", coord.jobID, "attempt", coord.attempt)
+// launchWorker brings a worker UP via the injected LAUNCHER (F-30.4 seam):
+// the mandate (coordinate + job token + the ambient inputs) rides the
+// MISSION; the launcher decides HOW the worker is realized (a local
+// subprocess with the canonical env contract, or — for a node-network agent
+// — a Pod). The agent core only RESERVES the live slot and OBSERVES the
+// resulting Child; it never inspects the substrate.
+func (w *Agent) launchWorker(coord spawnCoordinate, jobToken string) Child {
+	launcher := w.deps.Launcher
+	if launcher == nil || !launcher.Enabled() {
+		w.logger.Warn("agent: worker launcher not configured; job NOT executed", "job", coord.jobID, "attempt", coord.attempt)
 		return nil
 	}
-	cmd := exec.CommandContext(context.Background(), w.deps.WorkerBinary, w.deps.WorkerArgs...)
-	// Env: the INHERITED environment MINUS the agent's private secrets (the
-	// agent credential file must NOT propagate into the worker — the worker
-	// never needs it), PLUS the canonical mandate. Our variables OVERRIDE
-	// any inherited ones (we strip them from the inherited set first).
-	privileged := map[string]struct{}{
-		"CDROM_AGENT_CREDENTIAL_FILE": {}, // the agent's credential (private)
-		"CDROM_WORKER_JOB_ID":         {}, // overridden below
-		"CDROM_WORKER_JOB_TOKEN":      {}, // overridden below
-	}
-	env := make([]string, 0, 16)
-	for _, kv := range os.Environ() {
-		k := kv
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			k = kv[:i]
-		}
-		if _, priv := privileged[k]; priv {
-			continue
-		}
-		env = append(env, kv)
-	}
-	env = append(env,
-		"CDROM_WORKER_JOB_ID="+strconv.FormatInt(coord.jobID, 10),
-		"CDROM_WORKER_JOB_TOKEN="+jobToken,
-		"CDROM_API_ADDR="+w.deps.APIAddress,
-	)
-	if w.deps.WorkerRoot != "" {
-		env = append(env, "CDROM_WORKER_ROOT="+w.deps.WorkerRoot)
-	}
-	if w.deps.TLSCAFile != "" {
-		env = append(env, "CDROM_TLS_CA_FILE="+w.deps.TLSCAFile)
-	}
-	// The worker's log DESTINATION (F-30.4): when the agent's own stdout is a
-	// REGULAR FILE (the norm: harness/service-manager redirection), the
-	// worker APPENDS THERE LIVE (concurrent O_APPEND writers) — the worker's
-	// lines are visible the instant they are written, so a reader that waits
-	// for the job's terminal status never races a post-exit fold. When the
-	// agent's stdout is a pipe/socket/dev-null (CI, journald), the worker
-	// writes to its OWN file and the agent folds it in after the child exits
-	// (appendWorkerLog — the only case with a small settle window).
-	dest := agentLogDest()
-	var wl string
-	if dest != "" {
-		wl = dest
-	} else {
-		wl = workerLogPath(coord.jobID, randHex())
-	}
-	env = append(env, "CDROM_LOG_FILE="+wl)
-	cmd.Env = env
-	// Detach the child into its own process group (POSIX): a later
-	// kill-on-shutdown (slice 3) can take the WHOLE TREE (the worker's own
-	// grandchild commands) with one signal. No-op on Windows.
-	w.attachDetachment(cmd)
-	// STDIO IS INHERITED (nil): the worker's logs flow to the agent's log
-	// destination (CDROM_LOG_FILE / the service journal) — one coherent log
-	// per target host, distinguishable by the "worker:"/"agent:" prefixes.
-	// (The worker's own logging convention, CDROM_LOG_*, is inherited too.)
-	if err := cmd.Start(); err != nil {
-		w.logger.Error("agent: spawn worker", "job", coord.jobID, "attempt", coord.attempt, "err", err)
+	child, err := launcher.Launch(Mission{
+		Coord:       coord,
+		JobToken:    jobToken,
+		APIAddress:  w.deps.APIAddress,
+		TLSCAFile:   w.deps.TLSCAFile,
+		WorkerRoot:  w.deps.WorkerRoot,
+		ChannelAddr: w.channelAddr(),
+	})
+	if err != nil {
+		w.logger.Error("agent: launch worker", "job", coord.jobID, "attempt", coord.attempt, "err", err)
 		return nil
 	}
-	// House style: all STORED/measured times are UTC (duration arithmetic
-	// is location-immune either way; UTC keeps exhibits comparable).
-	cp := &childProcess{cmd: cmd, pid: cmd.Process.Pid, jobID: coord.jobID, workerLog: wl, spawnedAt: time.Now().UTC(), exited: make(chan struct{})}
 	w.childrenMu.Lock()
-	w.liveChildren[coord] = cp
+	w.liveChildren[coord] = child
 	w.childrenMu.Unlock()
 	if w.metrics != nil {
 		w.metrics.SetInflight(len(w.liveChildren))
 	}
 	w.wg.Add(1)
-	go w.observeChild(coord, cp)
-	w.logger.Info("agent: worker spawned", "job", coord.jobID, "attempt", coord.attempt, "pid", cp.pid)
-	return cp
+	go w.observeChild(coord, child)
+	w.logger.Info("agent: worker launched", "job", coord.jobID, "attempt", coord.attempt, "child_id", child.ID())
+	return child
 }
 
-// observeChild waits on the child (portable Cmd.Wait) and books its exit:
-// frees the ledger coordinate, removes the live entry, rolls the job's
-// outcome into the agent's target metrics, and (slice 3) reports an ABNORMAL
-// exit (non-zero WITHOUT a terminal status having been reported) via
-// ReportChildDeath. A NORMAL exit is bookkeeping only — the worker already
-// reported its terminal status to the API.
-func (w *Agent) observeChild(coord spawnCoordinate, cp *childProcess) {
+// channelAddr is the supervision channel's advertised address ("" when the
+// channel is degraded — the worker then runs channel-less and the agent
+// infers its metrics from the exit code).
+func (w *Agent) channelAddr() string {
+	if w.channel == nil {
+		return ""
+	}
+	return w.channel.Addr()
+}
+
+// observeChild waits on the child (via Child.Observe — substrate-agnostic)
+// and books its exit: frees the ledger coordinate, removes the live entry,
+// rolls the job's outcome into the agent's target metrics, and (slice 3)
+// reports an ABNORMAL exit (non-zero WITHOUT a terminal status having been
+// reported) via ReportChildDeath. A NORMAL exit is bookkeeping only — the
+// worker already reported its terminal status to the API.
+func (w *Agent) observeChild(coord spawnCoordinate, child Child) {
 	defer w.wg.Done()
-	err := cp.cmd.Wait()
-	close(cp.exited)
+	err := child.Observe()
 	w.childrenMu.Lock()
 	delete(w.liveChildren, coord)
 	w.childrenMu.Unlock()
 	w.freeLedger(coord)
+	// Observation duty discharged (item B2): whether the child was born of
+	// this instance or ADOPTED from a predecessor, its terminal outcome has
+	// now been booked — drop the adoption mark.
+	w.releaseAdopted(coord)
 	w.refreshInflight()
 	// Roll the supervised job's outcome into the AGENT's target metrics
 	// (F-30.4): the agent is the durable target representative; the worker
 	// is ephemeral and exports no /metrics of its own.
-	exitCode := 0
-	if err != nil {
-		exitCode = -1
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			exitCode = ee.ExitCode()
+	exitCode := child.ExitCode()
+	// Book the child's outcome into the agent's metrics (F-30.4). The
+	// worker's pre-exit FINAL FLUSH (supervision channel, slice 2) deposits
+	// its EXACT status + duration; when present it SUPERSEDES the exit-code
+	// inference (one record, not two). Nil account (channel down, worker
+	// died before flushing) ⇒ the exit-code roll-up stands. Either way the
+	// child's streamed log bytes fold into the agent's own
+	// cdrom_agent_log_bytes_total.
+	account := w.takeChildAccount(coord)
+	if account != nil && account.finalSeen && w.metrics != nil {
+		w.metrics.RecordJob(account.finalStatus, account.finalDur)
+	} else {
+		w.rollUpCompletedJob(child, exitCode)
+	}
+	// Absorb the rest of the child's account (F-30.4 slice 2): its STEP
+	// outcomes land in the agent's own cdrom_agent_steps_total / step
+	// durations (they cannot be inferred from the exit code — a partially
+	// flushed account still contributes whatever occurred), and its streamed
+	// log bytes join the agent's cdrom_agent_log_bytes_total.
+	if account != nil && w.metrics != nil {
+		for _, st := range account.steps {
+			w.metrics.RecordStep(st.stepType, st.status, st.dur)
+		}
+		if account.logBytes > 0 {
+			w.metrics.AddLogBytes(account.logBytes)
+		}
+		for i := uint32(0); i < account.cancelAcks; i++ {
+			w.metrics.RecordCancelSignalAck()
 		}
 	}
-	w.rollUpCompletedJob(coord, cp, exitCode)
 	// FALLBACK FOLD (F-30.4): only when the worker wrote to its OWN file
 	// (the agent's stdout was not a regular file): append it to the agent's
 	// log for continuity. Skipped when the worker appended live to the
 	// agent's log (wl == dest: nothing to fold).
-	if wl := cp.workerLog; wl != "" && wl != agentLogDest() {
+	if wl := child.WorkerLog(); wl != "" && wl != agentLogDest() {
 		w.foldWorkerLog(wl)
 	}
 	if err == nil {
-		w.logger.Info("agent: worker exited", "job", coord.jobID, "attempt", coord.attempt, "pid", cp.pid)
+		w.logger.Info("agent: worker exited", "job", coord.jobID, "attempt", coord.attempt, "child_id", child.ID())
 		return
 	}
-	// Abnormal exit (slice 3 escalates this to ReportChildDeath; for now the
-	// worker's absence of a terminal report is reaped by the F-03 watchdog —
-	// the loud log keeps it diagnosable meanwhile).
-	w.logger.Warn("agent: worker died abnormally", "job", coord.jobID, "attempt", coord.attempt, "pid", cp.pid, "exit_code", exitCode, "err", err)
+	// Abnormal exit (F-30.4 slice 3): ESCALATE to ReportChildDeath — the
+	// worker will never report its terminal status, so the agent (the
+	// execution's oracle) fails the EXECUTION now: the job fails fast
+	// instead of riding out the F-03 watchdog. F-05 immunity is honored
+	// server-side (an execution already terminal — the worker beat the
+	// death — is left as-is). Best-effort: a failed report degrades to the
+	// watchdog's eventual reap.
+	w.logger.Warn("agent: worker died abnormally", "job", coord.jobID, "attempt", coord.attempt, "child_id", child.ID(), "exit_code", exitCode, "err", err)
+	w.reportChildDeath(coord, fmt.Sprintf("worker exited abnormally (exit_code=%d: %v)", exitCode, err))
+}
+
+// reportChildDeath tells the API the child died abnormally (F-30.4 slice 3):
+// the API validates the agent serviced the job and fails the execution
+// (honoring F-05's terminal immunity). Identity verb: the agent credential.
+// Best-effort — a failure here degrades to the F-03 watchdog's reap.
+func (w *Agent) reportChildDeath(coord spawnCoordinate, reason string) {
+	ctx, err := w.credentialCtx(context.Background())
+	if err != nil {
+		w.logger.Warn("agent: report child death: credential unavailable", "job", coord.jobID, "err", err)
+		return
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := w.deps.API.ReportChildDeath(callCtx, &apipb.ReportChildDeathRequest{
+		JobId:     coord.jobID,
+		AgentName: w.name,
+		Reason:    reason,
+	})
+	if err != nil {
+		w.logger.Warn("agent: report child death", "job", coord.jobID, "err", err)
+		return
+	}
+	if resp.GetFailed() {
+		w.logger.Info("agent: child death reported; execution failed", "job", coord.jobID, "attempt", coord.attempt)
+	} else {
+		w.logger.Info("agent: child death reported; execution already terminal (immune)", "job", coord.jobID, "attempt", coord.attempt)
+	}
+}
+
+// takeChildAccount retrieves (and deletes) the child's accumulated telemetry
+// account from the supervision channel (F-30.4 slice 2). Nil when the agent
+// has no channel or the child deposited nothing.
+func (w *Agent) takeChildAccount(coord spawnCoordinate) *childAccount {
+	return w.channel.takeAccount(coord)
 }
 
 // classifyExit maps a worker's exit code to the job's terminal status name
@@ -690,11 +1131,11 @@ func classifyExit(exitCode int) string {
 // target metrics (F-30.4): the job counter (by terminal status) and its
 // wall-clock duration (spawn → exit). Nil-safe (recording is a no-op when
 // metrics are disabled).
-func (w *Agent) rollUpCompletedJob(coord spawnCoordinate, cp *childProcess, exitCode int) {
+func (w *Agent) rollUpCompletedJob(child Child, exitCode int) {
 	if w.metrics == nil {
 		return
 	}
-	w.metrics.RecordJob(classifyExit(exitCode), time.Since(cp.spawnedAt))
+	w.metrics.RecordJob(classifyExit(exitCode), time.Since(child.SpawnedAt()))
 }
 
 // refreshInflight recomputes the in-flight gauge from the live-child count
@@ -820,23 +1261,28 @@ func (w *Agent) recordPoll(kind string) {
 }
 
 // cancelJob NOTICEs the cancellation of a job running on this agent (F-05).
-// SLICE 1 SEMANTICS: the relay is ADVISORY AND NON-DESTRUCTIVE — the agent
-// does NOT kill the worker: the worker's OWN 2-second API status poll is the
-// AUTHORITY (the scheduler marks the job cancelled in the database; the
-// worker's next poll sees it, interrupts the running step, and reports the
-// job cancelled). Killing the worker here would leave NO ONE to report the
-// cancellation (the dead worker can't; the agent must not forge the worker's
-// terminal status) — the job would ride out the F-03 watchdog with the WRONG
-// terminal status. The destructive kill-relay (shrinking reaction latency
-// further) arrives with the supervision channel (slice 2) and the
-// death-reporting semantics (slice 3). A cancellation for a job that is not
-// running on this agent (finished, or running elsewhere) is a no-op — the
-// job's status is reconciled by the database.
+// RELAY SEMANTICS (SLICE 2): the cancellation is conveyed OPPORTUNISTICALLY
+// over the supervision channel (Signals) — the worker reacts quickly when
+// connected — but the worker's OWN 2-second API status poll remains the
+// AUTHORITY (F-05): the scheduler marks the job cancelled in the database,
+// and the worker's next poll sees it even when the channel is down. The
+// agent does NOT kill the worker: killing it would leave NO ONE to report
+// the cancellation (the dead worker can't; the agent must not forge the
+// worker's terminal status) — the job would ride out the F-03 watchdog with
+// the WRONG terminal status. The destructive interrupt (reacting to the
+// worker's acknowledgment, escalating to a kill) ships with slice 3's
+// graceful-stop ordering. A cancellation for a job that is not running on
+// this agent (finished, or running elsewhere) is a no-op — the job's status
+// is reconciled by the database.
 func (w *Agent) cancelJob(jobID int64) {
+	// Opportunistic early notice over the channel (non-blocking; a worker
+	// that isn't subscribed — channel degraded, or already finishing —
+	// relies on its own status poll).
+	w.broadcastCancellationForJob(jobID)
 	w.childrenMu.Lock()
 	held := false
-	for _, cp := range w.liveChildren {
-		if cp.jobID == jobID {
+	for coord := range w.liveChildren {
+		if coord.jobID == jobID {
 			held = true
 			break
 		}
@@ -847,6 +1293,25 @@ func (w *Agent) cancelJob(jobID int64) {
 		return
 	}
 	w.logger.Info("agent: cancellation noticed; the worker's own status poll is authoritative (F-05)", "job", jobID)
+}
+
+// broadcastCancellationForJob pushes the opportunistic cancellation notice to
+// every subscribed worker of the job's live coordinates (F-30.4 slice 2).
+func (w *Agent) broadcastCancellationForJob(jobID int64) {
+	if w.channel == nil {
+		return
+	}
+	w.childrenMu.Lock()
+	coords := make([]spawnCoordinate, 0, 1)
+	for coord := range w.liveChildren {
+		if coord.jobID == jobID {
+			coords = append(coords, coord)
+		}
+	}
+	w.childrenMu.Unlock()
+	for _, coord := range coords {
+		w.channel.broadcastCancellation(coord)
+	}
 }
 
 // heartbeat refreshes the agent's liveness on an interval.

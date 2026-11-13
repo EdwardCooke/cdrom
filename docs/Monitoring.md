@@ -102,7 +102,10 @@ heap, GC, CPU, file descriptors) comes for free.
   `cdrom_agent_step_duration_seconds{step_type}`, `cdrom_agent_inflight`,
   `cdrom_agent_watch_state{state}` (agent), `cdrom_agent_polls_total{outcome}`
   (agent), `cdrom_agent_heartbeat_failures_total` (agent),
-  `cdrom_agent_log_bytes_total`.
+  `cdrom_agent_log_bytes_total`,
+  `cdrom_agent_cancel_signal_acks_total` (agent; F-30.4 slice 2 —
+  cancellation notices the supervised workers acknowledged over the local
+  supervision channel).
 
 ## Deployment reporting (DORA-style indicators)
 

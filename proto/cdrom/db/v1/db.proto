@@ -179,11 +179,26 @@ service Database {
   // it is derived from the executions by the scheduler's job-status loop.
   rpc UpdateJobExecution(UpdateJobExecutionRequest) returns (JobExecution);
   // AbandonAgentExecutions marks all of an agent's running executions as
-  // failed (fan-out). It is called when an agent re-registers after a
-  // restart: the agent's in-progress executions from before the restart are
-  // abandoned (the agent will not resume them) so they do not block the job's
-  // overall status.
+  // failed (fan-out). Retired by F-30.4 slice 3 (item B): the agent is now
+  // the ORACLE of its own lineage — a fresh instance ADOPTS its predecessors'
+  // running executions (DiscoverAgentExecutions) instead of abandoning them,
+  // and abandons only what it chose not to adopt (ReportChildDeath). Kept in
+  // the proto for the API's legacy call-site compatibility; the API no
+  // longer invokes it on registration.
   rpc AbandonAgentExecutions(AbandonAgentExecutionsRequest) returns (google.protobuf.Empty);
+  // DiscoverAgentExecutions lists an agent's executions that are STILL
+  // RUNNING (no terminal report yet) (F-30.4 slice 3, item B): a fresh agent
+  // instance calls it at boot to discover the jobs its PREDECESSOR (same
+  // name) started and did not finish, so it can adopt observation duty for
+  // each (reserve the ledger coordinate, await the worker's reconnect or the
+  // terminal report).
+  rpc DiscoverAgentExecutions(DiscoverAgentExecutionsRequest) returns (DiscoverAgentExecutionsResponse);
+  // FailOrphanExecution marks ONE execution failed (F-30.4 slice 3): the
+  // agent's ReportChildDeath (abrupt child death) and the adoption sweep
+  // (an execution the fresh instance chose not to adopt) funnel through it.
+  // F-05 immunity honored: the update is conditioned on status = running, so
+  // an execution that already reached a terminal status is left as-is.
+  rpc FailOrphanExecution(FailOrphanExecutionRequest) returns (FailOrphanExecutionResponse);
   // ReportStepCompletion records that an agent has completed a step of a job
   // (the cross-agent step barrier). An agent that runs a job with a step
   // barrier reports each step it finishes; the barrier for a step is satisfied
@@ -2644,6 +2659,41 @@ message UpdateJobExecutionRequest {
 message AbandonAgentExecutionsRequest {
   // agent_name is the agent whose running executions are abandoned.
   string agent_name = 1;
+}
+
+// DiscoverAgentExecutionsRequest asks for an agent's unfinished executions
+// (F-30.4 slice 3, item B).
+message DiscoverAgentExecutionsRequest {
+  // agent_name is the agent whose executions are listed.
+  string agent_name = 1;
+}
+
+// DiscoverAgentExecutionsResponse carries the agent's RUNNING executions
+// (terminal ones excluded — they need no observation).
+message DiscoverAgentExecutionsResponse {
+  repeated JobExecution executions = 1;
+}
+
+// FailOrphanExecutionRequest asks the Database service to mark ONE execution
+// failed (F-30.4 slice 3): the funnels are the agent's ReportChildDeath
+// (abrupt child death) and the adoption sweep (an execution the fresh
+// instance chose not to adopt). Scoped by (job_id, agent_name) + the job's
+// CURRENT attempt, so an agent can only ever affect ITS OWN execution —
+// servicing is inherent to the lookup.
+message FailOrphanExecutionRequest {
+  // job_id is the job the execution belongs to.
+  int64 job_id = 1;
+  // agent_name is the agent whose execution is failed.
+  string agent_name = 2;
+}
+
+// FailOrphanExecutionResponse conveys the disposition.
+message FailOrphanExecutionResponse {
+  // failed is true when the execution was RUNNING and is now failed. False
+  // when it was already terminal (F-05 immunity — the worker beat the death
+  // report) or no running execution matched (the agent never serviced the
+  // job at the current attempt).
+  bool failed = 1;
 }
 
 // StepCompletion is one agent's completion of a step of a job (the

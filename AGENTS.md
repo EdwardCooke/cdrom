@@ -376,7 +376,12 @@ Notable vars (complete list in `docs/Architecture.md` §11): `CDROM_DB_BACKEND`
 `CDROM_ARTIFACTS_ROOT` / `_STORE`, `CDROM_AGENT_{NAME,GROUP,ENVIRONMENTS,LABELS}`,
 `CDROM_AGENT_{JOB_ID,NAME}`, `CDROM_AGENT_ROOT` (agent/agent staged-working-area
 base dir, F-21.6; default OS temp dir — the target warns at startup when it
-resolves to a tmpfs mount), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
+resolves to a tmpfs mount), `CDROM_SUPERVISION_BIND` (F-30.4 slice 2: the
+agent's supervision-channel listen address; default loopback `127.0.0.1:0` —
+set a routable bind for a node-network agent whose workers are Pods),
+`CDROM_SHUTDOWN_GRACE` / `CDROM_SHUTDOWN_KILL_GRACE` (F-30.4 slice 3: the
+agent's graceful-stop horizons — drain → interrupt → kill; defaults 30 s /
+5 s), `CDROM_TLS_{CA,CERT,KEY}_FILE`, `CDROM_AUTH_*`
 (OIDC enablement, userpass, API keys, service accounts, RBAC claim mapping,
 `CDROM_AUTH_SUBJECT_CLAIM` — the token claim the admission gate correlates
 on, default `sub`), `CDROM_IDP_*` (incl. `CDROM_IDP_LOCAL_LOGIN_ENABLED` —

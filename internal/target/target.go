@@ -36,8 +36,12 @@ type Context struct {
 	// Metrics, when set, is the target's step/job metric set (F-20). RunJob
 	// derives from it the executor's step observer (each step's type and
 	// duration) and wraps the job's log sink so the target counts the log
-	// bytes it streams to the API. Nil when the target records no metrics.
-	Metrics *metrics.AgentMetrics
+	// bytes it streams to the API. Narrow INTERFACE (Recorder, not
+	// *AgentMetrics) so a worker subprocess can plug in a FORWARDING
+	// recorder that ships the samples to its parent agent over the local
+	// supervision channel (F-30.4 slice 2) instead of exporting its own
+	// /metrics. Nil when the target records no metrics.
+	Metrics metrics.Recorder
 	Logger  *slog.Logger
 	// AgentRoot is the base directory the job's staged working area (F-21.6)
 	// is created under; empty means the OS temp dir. Supplied by the agent /
@@ -233,7 +237,7 @@ func FinishJob(ctx context.Context, tc *Context, jobID int64, collector *executo
 // step counters and its duration in the target's step-duration histogram. A
 // nil metrics set (metrics disabled) yields a nil observer, so the executor
 // records nothing.
-func stepObserverAdapter(m *metrics.AgentMetrics) executor.StepObserver {
+func stepObserverAdapter(m metrics.Recorder) executor.StepObserver {
 	if m == nil {
 		return nil
 	}
@@ -241,7 +245,7 @@ func stepObserverAdapter(m *metrics.AgentMetrics) executor.StepObserver {
 }
 
 type stepObserver struct {
-	m *metrics.AgentMetrics
+	m metrics.Recorder
 }
 
 // StepStarted implements executor.StepObserver.
@@ -295,7 +299,7 @@ func JobStatusName(status dbpb.JobStatus) string {
 // nil (streaming disabled) it is a no-op.
 type countingSink struct {
 	sink *logstream.Sink
-	m    *metrics.AgentMetrics
+	m    metrics.Recorder
 }
 
 // WriteStepOutput implements executor.LogSink.

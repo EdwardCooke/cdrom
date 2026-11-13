@@ -43,6 +43,25 @@ type AgentMetrics struct {
 	HeartbeatFailures prometheus.Counter
 	// LogBytes is the log bytes streamed to the API.
 	LogBytes prometheus.Counter
+	// CancelSignalAcks counts cancellation notices the supervised workers
+	// ACKNOWLEDGED over the supervision channel (F-30.4 slice 2): durable
+	// proof of the relay's delivery (the worker's log line proving it is
+	// subject to ordinary log durability). Recorded by agents only.
+	CancelSignalAcks prometheus.Counter
+}
+
+// Recorder is the METRIC RECORDING surface the shared execution (target.RunJob)
+// draws on: job/step outcomes + durations, the in-flight gauge, and log bytes.
+// It is narrower than *AgentMetrics on PURPOSE (F-30.4 slice 2): a worker
+// subprocess forwards these recordings to its parent agent over the local
+// supervision channel (Telemetry) instead of exporting its own /metrics, so
+// it plugs a FORWARDING RECORDER into the execution context. *AgentMetrics
+// satisfies it directly (the agent records into its own exported set).
+type Recorder interface {
+	RecordJob(status string, d time.Duration)
+	RecordStep(stepType, status string, d time.Duration)
+	SetInflight(n int)
+	AddLogBytes(n int64)
 }
 
 // NewAgentMetrics builds the execution-target metric set, registering its
@@ -87,10 +106,15 @@ func NewAgentMetrics(reg prometheus.Registerer) *AgentMetrics {
 			Name: Prefix + "_agent_log_bytes_total",
 			Help: "Log bytes streamed to the API.",
 		}),
+		CancelSignalAcks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: Prefix + "_agent_cancel_signal_acks_total",
+			Help: "Cancellation notices acknowledged by supervised workers over the supervision channel.",
+		}),
 	}
 	reg.MustRegister(
 		m.Jobs, m.JobDuration, m.Steps, m.StepDuration, m.Inflight,
 		m.WatchState, m.Polls, m.HeartbeatFailures, m.LogBytes,
+		m.CancelSignalAcks,
 	)
 	return m
 }
@@ -159,4 +183,13 @@ func (m *AgentMetrics) AddLogBytes(n int64) {
 		return
 	}
 	m.LogBytes.Add(float64(n))
+}
+
+// RecordCancelSignalAck counts a supervised worker's acknowledgement of a
+// relayed cancellation notice (F-30.4 slice 2).
+func (m *AgentMetrics) RecordCancelSignalAck() {
+	if m == nil {
+		return
+	}
+	m.CancelSignalAcks.Inc()
 }

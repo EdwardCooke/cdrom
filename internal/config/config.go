@@ -131,7 +131,12 @@ type Config struct {
 	// binary uses it; other binaries ignore it.
 	PipelineSourceSyncTimeout time.Duration
 
-	// AgentName and AgentGroup identify an agent process.
+	// AgentName and AgentGroup identify an agent process. AgentName defaults
+	// to the host name the agent runs on (see defaultAgentName). Set a
+	// STABLE agent_name wherever the host name churns between restarts:
+	// the agent's credential (F-30.3) is issued to the presenting name,
+	// and the supervision channel's resume admission (F-30.4) lets a
+	// worker reconnect only when its ticket names this agent.
 	AgentName  string
 	AgentGroup string
 
@@ -168,6 +173,22 @@ type Config struct {
 	// — a misconfiguration surfaced by a warning). Only the agent binary uses
 	// it (worker_binary / CDROM_AGENT_WORKER_BINARY).
 	WorkerBinary string
+
+	// SupervisionBind is the address the agent's SUPERVISION CHANNEL listens
+	// on (F-30.4 slice 2). Empty = the loopback default (127.0.0.1:0 — the
+	// local-substrate posture: the channel is intra-host by construction).
+	// A node-network agent (whose workers are Pods that cannot reach the
+	// agent's localhost) sets this to a routable bind, e.g. ":7401" or
+	// "<pod-ip>:7401" (supervision_bind / CDROM_SUPERVISION_BIND).
+	SupervisionBind string
+	// ShutdownGrace is the DRAIN horizon of the agent's graceful-stop
+	// ordering (F-30.4 slice 3): on SIGTERM the agent first lets its live
+	// children FINISH, up to this long; survivors are then interrupted,
+	// given ShutdownKillGrace to react, and finally killed. Zero/negative
+	// falls back to the defaults (30 s / 5 s).
+	ShutdownGrace time.Duration
+	// ShutdownKillGrace is the INTERRUPT horizon (post-drain, pre-kill).
+	ShutdownKillGrace time.Duration
 
 	// WorkerRoot is the base directory a WORKER creates its per-job staged
 	// working area under (F-21.6 / F-30.4); empty means the OS temp dir. Set
@@ -1122,11 +1143,11 @@ func LoadWithFile(file string) (*Config, error) {
 		PipelineSourceOverridesAllowed: true,
 		PipelineSourceMaxParallel:      0,
 		PipelineSourceSyncTimeout:      DefaultPipelineSourceSyncTimeout,
-		AgentName:                     "agent-1",
-		AgentGroup:                    "default",
-		AgentEnvironments:             []string{},
-		AgentLabels:                   map[string]string{},
-		WorkerName:                    defaultWorkerName(),
+		AgentName:                      defaultAgentName(),
+		AgentGroup:                     "default",
+		AgentEnvironments:              []string{},
+		AgentLabels:                    map[string]string{},
+		WorkerName:                     defaultWorkerName(),
 		// AgentRoot defaults to empty: the target uses the OS temp dir for its
 		// staged working area (F-21.6). Operators on memory-constrained hosts
 		// (containers with tmpfs /tmp) set agent_root / CDROM_AGENT_ROOT to a
@@ -1259,14 +1280,22 @@ type fileConfig struct {
 	// AutoRenewAheadOfExpiry (F-30.3): the agent's renew-ahead window, a
 	// duration string (e.g. "24h").
 	AutoRenewAheadOfExpiry *string `yaml:"auto_renew_ahead_of_expiry"`
-	WorkerJobID       *string            `yaml:"worker_job_id"`
-	WorkerBinary      *string            `yaml:"worker_binary"`
-	WorkerRoot        *string            `yaml:"worker_root"`
-	WorkerName        *string            `yaml:"worker_name"`
+	WorkerJobID            *string `yaml:"worker_job_id"`
+	WorkerBinary           *string `yaml:"worker_binary"`
+	WorkerRoot             *string `yaml:"worker_root"`
+	WorkerName             *string `yaml:"worker_name"`
+	// ShutdownGrace (F-30.4 slice 3): the graceful-stop drain horizon.
+	ShutdownGrace *time.Duration `yaml:"shutdown_grace"`
+	// ShutdownKillGrace (F-30.4 slice 3): the graceful-stop interrupt
+	// horizon (post-drain, pre-kill).
+	ShutdownKillGrace *time.Duration `yaml:"shutdown_kill_grace"`
+	// SupervisionBind (F-30.4 slice 2): the supervision channel's listen
+	// address; empty = the loopback default.
+	SupervisionBind *string `yaml:"supervision_bind"`
 	// AgentRoot is the base directory for a target's staged working area
 	// (F-21.6); empty means the OS temp dir. Env: CDROM_AGENT_ROOT.
 	AgentRoot *string `yaml:"agent_root"`
-	DB         *struct {
+	DB        *struct {
 		Backend     *string `yaml:"backend"`
 		SQLitePath  *string `yaml:"sqlite_path"`
 		PostgresDSN *string `yaml:"postgres_dsn"`
@@ -1304,20 +1333,20 @@ type fileConfig struct {
 		} `yaml:"service_account"`
 	} `yaml:"auth"`
 	IdP *struct {
-		Issuer         *string          `yaml:"issuer"`
-		KeyLifetime    *string          `yaml:"key_lifetime"`
-		RotateBefore   *string          `yaml:"rotate_before"`
-		TokenLifetime  *string          `yaml:"token_lifetime"`
-		CheckInterval  *string          `yaml:"check_interval"`
-		Audiences      *[]string        `yaml:"audiences"`
+		Issuer        *string   `yaml:"issuer"`
+		KeyLifetime   *string   `yaml:"key_lifetime"`
+		RotateBefore  *string   `yaml:"rotate_before"`
+		TokenLifetime *string   `yaml:"token_lifetime"`
+		CheckInterval *string   `yaml:"check_interval"`
+		Audiences     *[]string `yaml:"audiences"`
 		// AgentCredentialTTL is the deadline horizon for issued/renewed agent
 		// credentials (F-30.2), a duration string (e.g. "720h").
-		AgentCredentialTTL *string `yaml:"agent_credential_ttl"`
-		GRPCAddress    *string          `yaml:"grpc_address"`
-		PasswordPepper *string          `yaml:"password_pepper"`
-		ScimKeysPepper *string          `yaml:"scim_keys_pepper"`
-		Scim           *scimFileSection `yaml:"scim"`
-		BreakGlass     *struct {
+		AgentCredentialTTL *string          `yaml:"agent_credential_ttl"`
+		GRPCAddress        *string          `yaml:"grpc_address"`
+		PasswordPepper     *string          `yaml:"password_pepper"`
+		ScimKeysPepper     *string          `yaml:"scim_keys_pepper"`
+		Scim               *scimFileSection `yaml:"scim"`
+		BreakGlass         *struct {
 			Enabled    *bool   `yaml:"enabled"`
 			DefaultTTL *string `yaml:"default_ttl"`
 			MaxTTL     *string `yaml:"max_ttl"`
@@ -1452,6 +1481,15 @@ func applyFile(cfg *Config, path string) error {
 	}
 	if f.WorkerBinary != nil {
 		cfg.WorkerBinary = *f.WorkerBinary
+	}
+	if f.ShutdownGrace != nil {
+		cfg.ShutdownGrace = *f.ShutdownGrace
+	}
+	if f.ShutdownKillGrace != nil {
+		cfg.ShutdownKillGrace = *f.ShutdownKillGrace
+	}
+	if f.SupervisionBind != nil {
+		cfg.SupervisionBind = *f.SupervisionBind
 	}
 	if f.WorkerRoot != nil {
 		cfg.WorkerRoot = *f.WorkerRoot
@@ -1799,6 +1837,17 @@ func applyEnv(cfg *Config) {
 	}
 	cfg.WorkerJobID = envOr("CDROM_WORKER_JOB_ID", cfg.WorkerJobID)
 	cfg.WorkerBinary = envOr("CDROM_AGENT_WORKER_BINARY", cfg.WorkerBinary)
+	cfg.SupervisionBind = envOr("CDROM_SUPERVISION_BIND", cfg.SupervisionBind)
+	if v := os.Getenv("CDROM_SHUTDOWN_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ShutdownGrace = d
+		}
+	}
+	if v := os.Getenv("CDROM_SHUTDOWN_KILL_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ShutdownKillGrace = d
+		}
+	}
 	cfg.WorkerRoot = envOr("CDROM_WORKER_ROOT", cfg.WorkerRoot)
 	cfg.WorkerName = envOr("CDROM_WORKER_NAME", cfg.WorkerName)
 	cfg.AgentRoot = envOr("CDROM_AGENT_ROOT", cfg.AgentRoot)
@@ -2067,6 +2116,20 @@ func mergeSCIMConfigFromFile(dst *ScimConfig, src *scimFileSection) error {
 		dst.MemoTTL = d
 	}
 	return nil
+}
+
+// defaultAgentName is the default identity of a resident agent: the host
+// name it runs on. When the host name cannot be determined it falls back
+// to "agent". Platforms that assign churning host names (many container
+// setups) must set a STABLE agent_name: the agent's credential (F-30.3)
+// is issued to the presenting name, and the supervision channel's resume
+// admission (F-30.4) admits a reconnecting worker only when its ticket
+// names this agent — a drifted name strands the worker's observations.
+func defaultAgentName() string {
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return "agent"
 }
 
 // defaultWorkerName is the default identity of an ephemeral worker: the host

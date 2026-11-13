@@ -59,6 +59,11 @@ type Dependencies struct {
 	// (F-21.6) is created under; empty means the OS temp dir. Carried from
 	// the worker's config (agent_root / CDROM_WORKER_ROOT).
 	AgentRoot string
+	// ParentGrpcAddr is the parent agent's SUPERVISION CHANNEL address
+	// (F-30.4 slice 2; CDROM_PARENT_GRPC_ADDR, loopback). Empty = the agent
+	// has no channel (degraded) — the worker runs channel-less and the agent
+	// infers its outcome from the exit code.
+	ParentGrpcAddr string
 }
 
 // Work is an ephemeral job executor.
@@ -144,6 +149,56 @@ func (a *Work) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	}
 	a.logger.Info("worker: executing job", "job", job.GetId(), "name", job.GetName(), "under", reporter)
 
+	// The job runs under a cancellable context (F-05): a background poller
+	// watches the job's status and cancels the context if the job is
+	// cancelled, which interrupts the running step. Created BEFORE the
+	// supervision channel so the channel's Signals notice can accelerate the
+	// SAME cancel() (the poll remains the authority).
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go a.watchCancellation(jobCtx, cancel)
+
+	// SUPERVISION CHANNEL (F-30.4 slice 2): dial the parent agent's loopback
+	// channel (the handshake needs the claimed job's attempt). Total
+	// degradation: a nil client means channel-less (the agent infers the
+	// outcome from the exit code); the channel NEVER gates the job.
+	if a.deps.ParentGrpcAddr == "" {
+		a.logger.Info("worker: no supervision channel addressed (running channel-less)", "job", a.jobID)
+	}
+	var sc *SupervisorClient
+	if a.deps.ParentGrpcAddr != "" {
+		var cerr error
+		// The ticket carries the worker's ATTRIBUTION name (decoded unsigned
+		// from its own job token — the very name the API stamped when THIS
+		// agent started the execution): on a RESUME (the agent restarted
+		// mid-job) the fresh instance admits the worker only when the ticket
+		// is consistent with its own name.
+		sc, cerr = NewSupervisorClient(a.deps.ParentGrpcAddr, a.jobID, job.GetAttempt(), a.deps.JobToken, reporter, a.logger)
+		if cerr != nil {
+			a.logger.Warn("worker: supervision channel init", "err", cerr)
+			sc = nil
+		}
+		if sc != nil {
+			defer sc.Flush() // the FINAL FLUSH precedes exit (bounded; best-effort)
+			sc.SetCancelNotify(func() {
+				a.logger.Info("worker: cancellation signalled over the supervision channel (acting)", "job", a.jobID)
+				cancel()
+			})
+		}
+	}
+
+	// Metric recording (F-20): when the channel is up the worker FORWARDS
+	// its samples to the agent (the agent folds them into its own exported
+	// series — nothing scrapes the worker); otherwise the worker records
+	// into its own set (kept for the channel-less posture; the worker
+	// exports no /metrics of its own).
+	var rec metrics.Recorder
+	if sc != nil {
+		rec = sc.Recorder()
+	} else if a.metrics != nil {
+		rec = a.metrics
+	}
+
 	// The shared execution context: the target's API client, the AGENT NAME
 	// (F-30.4: the worker's reports attribute to the agent's JobExecution),
 	// the job's token, and the worker's step metrics (F-20). A worker
@@ -153,7 +208,7 @@ func (a *Work) Run(ctx context.Context) (dbpb.JobStatus, error) {
 		API:       a.deps.API,
 		AgentName: reporter,
 		Token:     a.deps.JobToken,
-		Metrics:   a.metrics,
+		Metrics:   rec,
 		Logger:    a.logger,
 		AgentRoot: a.deps.AgentRoot,
 	}
@@ -161,7 +216,8 @@ func (a *Work) Run(ctx context.Context) (dbpb.JobStatus, error) {
 		tc.StepBarrier = target.NewStepBarrier(a.deps.API, reporter, a.jobID, a.deps.JobToken, a.logger, 0)
 	}
 
-	// The worker runs exactly one job, so it is in flight for the whole run.
+	// The worker runs exactly one job, so it is in flight for the whole run
+	// (its own gauge; the channel recorder defers inflight to the agent).
 	if a.metrics != nil {
 		a.metrics.SetInflight(1)
 		defer a.metrics.SetInflight(0)
@@ -169,12 +225,6 @@ func (a *Work) Run(ctx context.Context) (dbpb.JobStatus, error) {
 
 	target.ReportRunning(ctx, tc, a.jobID)
 	a.logger.Info("job started", "job", a.jobID)
-	// The job runs under a cancellable context (F-05): a background poller
-	// watches the job's status and cancels the context if the job is
-	// cancelled, which interrupts the running step.
-	jobCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go a.watchCancellation(jobCtx, cancel)
 
 	collector := &executor.StepResultCollector{}
 	start := time.Now().UTC() // house style: measured/stored times in UTC
@@ -184,9 +234,11 @@ func (a *Work) Run(ctx context.Context) (dbpb.JobStatus, error) {
 	// the job as cancelled, distinct from a failure.
 	finalStatus := target.FinishJob(ctx, tc, a.jobID, collector, err, jobCtx.Err() == context.Canceled)
 	// Record the job's terminal status and duration (F-20), matching the
-	// status the API records for the same job.
-	if a.metrics != nil {
-		a.metrics.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
+	// status the API records for the same job. Via the channel recorder this
+	// BUFFERS the final account for the pre-exit flush (consumed by the
+	// agent); channel-less it records into the worker's own set.
+	if rec != nil {
+		rec.RecordJob(target.JobStatusName(finalStatus), time.Since(start))
 	}
 	return finalStatus, nil
 }

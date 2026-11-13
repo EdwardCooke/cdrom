@@ -343,14 +343,15 @@ func (s *GRPCServer) RegisterAgent(ctx context.Context, req *apipb.RegisterAgent
 	if err != nil {
 		return nil, err
 	}
-	// An agent that re-registers after a restart will not resume the jobs it
-	// was running before the restart. Abandon its stale running executions
-	// (fan-out) so they do not block the jobs' overall status. Best-effort: a
-	// failure here does not fail the registration (the scheduler's job-status
-	// loop re-derives the jobs' status from the executions).
-	if _, err := s.db.AbandonAgentExecutions(ctx, &dbpb.AbandonAgentExecutionsRequest{AgentName: registered.GetName()}); err != nil {
-		s.logger.Warn("api: abandon agent executions", "agent", registered.GetName(), "err", err)
-	}
+	// F-30.4 slice 3 (item B): the BLIND AbandonAgentExecutions on
+	// re-registration is RETIRED. The agent is now the ORACLE of its own
+	// LINEAGE: a fresh instance ADOPTS its predecessors' running executions
+	// (DiscoverAgentExecutions at boot) — adopting observation duty for each
+	// (awaiting the worker's reconnect or the terminal report) — and fails
+	// only what it chose not to adopt (ReportChildDeath / the adoption
+	// sweep). Blindly burning the name's running executions on every
+	// registration destroyed exactly the orphans the fresh instance existed
+	// to adopt (and, with duplicate names, sabotaged siblings — F-31 §4).
 	s.mu.Lock()
 	s.live[registered.GetName()] = &liveAgent{
 		name:         registered.GetName(),
@@ -1647,6 +1648,132 @@ func (s *GRPCServer) GetRun(ctx context.Context, req *apipb.GetRunRequest) (*dbp
 		return nil, status.Error(codes.Unavailable, "database service is not configured")
 	}
 	return s.db.GetRun(ctx, &dbpb.GetRunRequest{Id: req.GetRunId()})
+}
+
+// ReportChildDeath (F-30.4 slice 3): the supervising agent reports that its
+// worker child for a job DIED ABNORMALLY and will not report the job's
+// terminal status. Oracle validation: the presenter must (a) hold the agent
+// credential bound to the claimed name (requireAgentCredential) and (b) be a
+// REGISTERED member of the job's target group (servicing the job is inherent
+// to belonging to its group — the same trust the dispatch path places in
+// group membership). Then the DATABASE SERVICE marks the execution failed
+// (scoped to (job, presenter, current attempt) — the presenter can only
+// ever affect ITS OWN execution; F-05 immunity is honored there: an
+// execution already terminal is left as-is). Fast failure: a single-target
+// job flips its row now; a fan-out job's row is derived by the scheduler's
+// job-status loop.
+func (s *GRPCServer) ReportChildDeath(ctx context.Context, req *apipb.ReportChildDeathRequest) (*apipb.ReportChildDeathResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
+	}
+	if err := s.requireAgentCredential(ctx, req.GetAgentName()); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
+	if err != nil {
+		return nil, err
+	}
+	if job.GetTargetGroup() != "" {
+		agentRow, err := s.db.GetAgent(ctx, &dbpb.GetAgentRequest{Name: req.GetAgentName()})
+		if err != nil {
+			return nil, status.Error(codes.PermissionDenied, "agent is not registered")
+		}
+		if agentRow.GetGroup() != job.GetTargetGroup() {
+			return nil, status.Error(codes.PermissionDenied, "agent does not service the job's target group")
+		}
+	}
+	resp, err := s.db.FailOrphanExecution(ctx, &dbpb.FailOrphanExecutionRequest{
+		JobId:     req.GetJobId(),
+		AgentName: req.GetAgentName(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Info("api: child death reported", "job", req.GetJobId(), "agent", req.GetAgentName(), "failed", resp.GetFailed(), "reason", req.GetReason())
+	s.recordAuditGRPC(audit.Event{
+		Action:     audit.ActionJobStatus,
+		TargetKind: audit.TargetJob,
+		TargetID:   strconv.FormatInt(req.GetJobId(), 10),
+		Outcome:    audit.OutcomeSuccess,
+		Details:    auditJSON(map[string]any{"cause": "child_death", "failed": resp.GetFailed(), "reason": req.GetReason()}),
+	}, req.GetAgentName(), audit.ActorKindAgent, auditPeerAddr(ctx))
+	if resp.GetFailed() {
+		s.publish(Event{Type: EventJobStatus, JobID: req.GetJobId(), Status: "failed"})
+		s.publishJobStatus(ctx, req.GetJobId(), dbpb.JobStatus_JOB_STATUS_FAILED, job.GetAttempt(), job.GetMaxAttempts())
+	}
+	return &apipb.ReportChildDeathResponse{Failed: resp.GetFailed()}, nil
+}
+
+// VerifyJobToken (F-30.4 slice 3, item B3): the API's ATTESTATION of a job
+// token's authenticity for the calling agent. The agent's supervision
+// channel holds no JWKS and cannot verify RS256 signatures itself; on the
+// RESUME admission lane (a worker reconnecting after the agent restarted)
+// it asks HERE so the custody proof upgrades from an UNSIGNED decode to a
+// SIGNATURE-VERIFIED one (routeable channel posture). The token is verified
+// FULLY (signature, audience, job binding, non-terminal job) and the
+// VERIFIED agent_name claim echoed — the name the API stamped when the
+// agent started the execution. Identity verb: the caller presents its agent
+// credential (whoever may ASK; the verdict is computed from the token
+// alone).
+func (s *GRPCServer) VerifyJobToken(ctx context.Context, req *apipb.VerifyJobTokenRequest) (*apipb.VerifyJobTokenResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetToken() == "" {
+		return nil, status.Error(codes.InvalidArgument, "token is required")
+	}
+	if err := s.requireAgentCredential(ctx, ""); err != nil {
+		return nil, err
+	}
+	if s.jobAuth == nil || !s.jobAuth.Enabled() {
+		// Job-token auth disabled: there is no signature to verify — the
+		// token is unchecked by everyone, so the attestation is AVAILABLE
+		// but VACUOUS (enabled=false tells the caller to fall back to its
+		// weaker unsigned decode; valid=false alone would be a spurious
+		// DENIAL in the disabled posture).
+		return &apipb.VerifyJobTokenResponse{Valid: false, Enabled: false}, nil
+	}
+	tokenJobID, err := s.jobAuth.Verify(ctx, req.GetToken())
+	if err != nil || tokenJobID != req.GetJobId() {
+		return &apipb.VerifyJobTokenResponse{Valid: false, Enabled: true}, nil
+	}
+	if s.db != nil {
+		job, err := s.db.GetJob(ctx, &dbpb.GetJobRequest{Id: req.GetJobId()})
+		if err != nil || jobStatusIsTerminal(job.GetStatus()) {
+			return &apipb.VerifyJobTokenResponse{Valid: false, Enabled: true}, nil
+		}
+	}
+	claims, err := s.jobAuth.Claims(ctx, req.GetToken())
+	if err != nil {
+		return &apipb.VerifyJobTokenResponse{Valid: false, Enabled: true}, nil
+	}
+	name, _ := claims["agent_name"].(string)
+	return &apipb.VerifyJobTokenResponse{Valid: true, AgentName: name, Enabled: true}, nil
+}
+
+// DiscoverAgentExecutions (F-30.4 slice 3, item B): the API's wrapper of the
+// Database service's same-named verb for the CALLING AGENT: a fresh agent
+// instance enumerates its OWN lineage's still-running executions (orphans of
+// a predecessor incarnation) at boot, to adopt observation duty for each.
+// Identity verb: the credential must be bound to the claimed name — an
+// agent can only ever discover its own lineage.
+func (s *GRPCServer) DiscoverAgentExecutions(ctx context.Context, req *dbpb.DiscoverAgentExecutionsRequest) (*dbpb.DiscoverAgentExecutionsResponse, error) {
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
+	}
+	if err := s.requireAgentCredential(ctx, req.GetAgentName()); err != nil {
+		return nil, err
+	}
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database service is not configured")
+	}
+	return s.db.DiscoverAgentExecutions(ctx, req)
 }
 
 // renderMarkdown renders markdown to HTML using gomarkdown. It is used to

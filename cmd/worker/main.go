@@ -10,6 +10,7 @@
 //	CDROM_WORKER_JOB_ID      (mandated job)
 //	CDROM_WORKER_JOB_TOKEN   (job token minted by the agent's StartJobExecution)
 //	CDROM_API_ADDR           (API gRPC address)
+//	CDROM_PARENT_GRPC_ADDR   (the agent's loopback supervision channel; F-30.4 slice 2)
 //	CDROM_WORKER_ROOT        (staged-work-area base; defaults OS temp)
 //	CDROM_TLS_CA_FILE        (verifies the API server cert)
 //	CDROM_LOG_*              (inherited logging conventions)
@@ -27,11 +28,11 @@ import (
 	"strconv"
 
 	"cdrom/internal/config"
-	"cdrom/internal/worker"
 	apipb "cdrom/internal/gen/cdrom/api/v1"
 	dbpb "cdrom/internal/gen/cdrom/db/v1"
 	"cdrom/internal/grpcutil"
 	"cdrom/internal/logging"
+	"cdrom/internal/worker"
 )
 
 func main() {
@@ -67,12 +68,14 @@ func main() {
 
 	ctx := context.Background()
 
-	// Metrics (F-20 / F-30.4): the worker EXPORTS NO /metrics OF ITS OWN —
-	// it is ephemeral (its server would vanish on exit) and its default
-	// port COLLIDES with the supervising agent's (:9100). Recording is a
-	// no-op (nil set); the agent rolls the job's outcome up into ITS target
-	// metrics (classify by the worker's exit code). The formal replacement
-	// (Telemetry push to the agent) lands in F-30.4 Slice 2.
+	// Metrics (F-20 / F-30.4 slice 2): the worker EXPORTS NO /metrics OF ITS
+	// OWN — it is ephemeral (its server would vanish on exit) and its default
+	// port COLLIDES with the supervising agent's (:9100). Instead it FORWARDS
+	// its samples (step outcomes, log bytes, the final job account) to the
+	// agent over the loopback supervision channel (CDROM_PARENT_GRPC_ADDR),
+	// and the agent folds them into its own exported series. When the channel
+	// is absent/down the worker records into a discarded set and the agent
+	// infers the outcome from the exit code.
 
 	// F-30.3: the worker connects to the API WITHOUT a client certificate —
 	// the target leg is TLS-with-server-verification + the BEARER job token
@@ -86,9 +89,10 @@ func main() {
 	defer apiConn.Close()
 
 	a := worker.New(cfg.WorkerName, jobID, worker.Dependencies{
-		API:      apipb.NewAPIClient(apiConn),
-		JobToken: jobToken,
-		AgentRoot: cfg.AgentRoot,
+		API:            apipb.NewAPIClient(apiConn),
+		JobToken:       jobToken,
+		AgentRoot:      cfg.AgentRoot,
+		ParentGrpcAddr: os.Getenv("CDROM_PARENT_GRPC_ADDR"),
 	}, logger)
 
 	logger.Info("cdrom worker starting", "job", jobID, "name", cfg.WorkerName, "api", cfg.APIAddress)

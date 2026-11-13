@@ -47,8 +47,10 @@ db:
 #  file_root: /shared
 
 
-# Agent identity (used by the agent).
-#agent_name: agent-1
+# Agent identity (used by the agent). agent_name defaults to the host name
+# the agent runs on; set a STABLE name where the host name churns between
+# restarts (the agent's credential is issued to the presenting name).
+#agent_name: my-host
 #agent_group: default
 # Environments the agent belongs to (F-17). An agent may belong to several;
 # jobs targeting an environment are dispatched to the live agents registered
@@ -58,10 +60,10 @@ db:
 # Job an ephemeral worker was spawned to execute (used by the agent).
 #agent_job_id: "123"
 
-# Identity of an ephemeral worker (used by the agent). Defaults to the host
-# name the agent runs on; reported with the job's status so the API can
-# record which target ran the job.
-#agent_name: my-host
+# Identity of an ephemeral worker (used by the worker). Defaults to the
+# host name the worker runs on; reported with the job's status so the API
+# can record which target ran the job.
+#worker_name: my-host
 
 # Base directory for a target's per-job staged working area (F-21.6; used by
 # the agent and the worker). Jobs' downloads, extractions, and publish

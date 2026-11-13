@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package cdrom.supervision.v1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "cdrom/internal/gen/cdrom/supervision/v1;supervisionv1";
+
+// Supervisor is the LOCAL supervision channel between an agent (long-lived
+// supervisor) and one of its per-job worker subprocesses (F-30.4, slice 2).
+//
+// Topology: the WORKER DIALS THE AGENT. The agent listens on a loopback
+// address chosen at boot (ephemeral port) and advertises it to each worker in
+// the environment (CDROM_PARENT_GRPC_ADDR); the worker keeps the single
+// outgoing connection for its whole life. gRPC/HTTP2 multiplexes both verbs
+// on that one connection, so no reverse dial and no worker-side listener
+// (port) exist. Plaintext loopback is accepted (parity with local-dev legs);
+// the channel binds 127.0.0.1 only.
+//
+// Identity: the worker authenticates the connection with its JOB TOKEN
+// (ConnectJob); the agent verifies the token names a job it actually spawned
+// (its launch ledger) before admitting the worker. The channel carries
+// CONTROL AND TELEMETRY ONLY — never the job payload (that crossed the wire
+// exactly once, worker←API, via GetJob).
+service Supervisor {
+  // Signals is the agent-initiated SERVER stream: the worker OPENS it once
+  // (sending nothing) and the agent pushes opportunistic EARLY NOTICE of a
+  // cancellation it saw on its WatchJobs stream. NON-AUTHORITATIVE: the
+  // worker's own status poll against the API remains the guaranteed
+  // cancellation path (F-05); the stream only shrinks reaction latency.
+  rpc Signals(Empty) returns (stream Signal);
+
+  // Telemetry is the worker-initiated CLIENT stream: the worker pushes
+  // compact metric samples (step transitions, log bytes, timings) on an
+  // interval and a FINAL FLUSH before exit, so even a millisecond-long job
+  // deposits a complete account. The agent folds the samples into its OWN
+  // exported series; nothing scrapes the worker directly.
+  rpc Telemetry(stream Sample) returns (FlushAck);
+
+  // ConnectJob is the worker's HANDSHAKE on the fresh connection: it names
+  // its job and presents its job token. The agent admits the worker only
+  // when the token is valid for a job the agent spawned (ledger check);
+  // afterwards the worker's Samples are credited to that job.
+  rpc ConnectJob(JobTicket) returns (ConnectionGrant);
+}
+
+// Empty is a minimal acknowledgement payload.
+message Empty {}
+
+// ConnectionGrant acknowledges an admitted worker.
+message ConnectionGrant {
+  // admitted is true when the agent accepted the ticket (the worker may
+  // then open Signals/Telemetry). False ⇒ the worker must shut down its
+  // channel (PERMANENT: the ticket is inconsistent with this agent —
+  // retrying cannot help).
+  bool admitted = 1;
+  // resumed is true when the agent admitted the worker WITHOUT it being one
+  // of the agent's live children (the agent restarted mid-job; the worker
+  // reconnected to a fresh instance that validated the ticket's consistency
+  // instead). Behavior is identical to the cold-connect case; the flag is
+  // observational (logging/accounting).
+  bool resumed = 2;
+}
+
+// JobTicket is the worker's handshake (ConnectJob).
+message JobTicket {
+  // job_id is the worker's mandated job (CDROM_WORKER_JOB_ID).
+  int64 job_id = 1;
+  // job_token is the worker's job token (CDROM_WORKER_JOB_TOKEN), presented
+  // for the agent's admission check (cold: the live-child ledger; resume:
+  // the token's consistency with this agent).
+  string job_token = 2;
+  // attempt is the execution's attempt (from the claimed job): the agent
+  // credits the worker's samples to the (job, attempt) coordinate.
+  int32 attempt = 3;
+  // agent_name is the worker's ATTRIBUTION name (decoded unsigned from its
+  // own job token's agent_name claim — the very name the API stamped when
+  // THIS agent started the execution). On a RESUME (the agent restarted
+  // mid-job and no longer holds the live child), the agent admits the
+  // worker only when this equals its OWN registered name: the token is the
+  // custody proof that ties the worker to this agent lineage.
+  string agent_name = 4;
+}
+
+// Signal is one agent→worker push on the Signals stream.
+message Signal {
+  oneof kind {
+    // Cancelled is the opportunistic early notice of a job cancellation.
+    CancelSignal cancelled = 1;
+  }
+}
+
+// CancelSignal notifies the worker its job was cancelled (the worker still
+// converges on the authoritative status via its own API poll).
+message CancelSignal {
+  int64 job_id = 1;
+}
+
+// FlushAck terminates the worker's Telemetry stream: the agent's receipt of
+// the final flush.
+message FlushAck {
+  // received_samples is how many samples the agent counted (accountability).
+  int64 received_samples = 1;
+}
+
+// Sample is one telemetry datum pushed by the worker.
+message Sample {
+  oneof kind {
+    // StepSample is a step's terminal outcome (type, status, duration).
+    StepSample step = 1;
+    // BytesSample is a cumulative log-bytes watermark (the agent tracks the
+    // delta between successive watermarks).
+    BytesSample bytes = 2;
+    // JobSample is the job's terminal outcome (status + total duration) —
+    // the FINAL FLUSH deposit. At most one per job; it supersedes the
+    // agent's exit-code inference for that job's metrics.
+    JobSample job = 3;
+    // NoticeSample is the worker's ACKNOWLEDGEMENT of a relayed signal
+    // (currently: the opportunistic cancellation notice). Pushed promptly
+    // upon reception — it PROVES the relay delivered (through the channel
+    // itself, durable in the agent's exported metrics), complementing the
+    // worker's log line (subject to ordinary log durability).
+    NoticeSample notice = 4;
+  }
+}
+
+// StepSample is one step's accounted outcome.
+message StepSample {
+  string step_type = 1;
+  string status = 2;
+  google.protobuf.Duration duration = 3;
+  // seq is the worker's MONOTONIC sample sequence (global across the
+  // worker's connections — slice 3 item B1's mid-life reconnector): the
+  // agent dedups samples by (coordinate, seq), so a re-established
+  // connection replacing a torn one never double-counts a sample.
+  uint32 seq = 4;
+}
+
+// BytesSample is a cumulative log-bytes watermark.
+message BytesSample {
+  int64 total_bytes = 1;
+  // seq is the worker's monotonic sample sequence (see StepSample.seq).
+  uint32 seq = 2;
+}
+
+// JobSample is the job's terminal account (the final flush).
+message JobSample {
+  string status = 1;
+  google.protobuf.Duration duration = 2;
+  // seq is the worker's monotonic sample sequence (see StepSample.seq).
+  uint32 seq = 3;
+}
+
+// NoticeSample acknowledges a relayed signal (kind names which one;
+// currently only the cancellation notice exists).
+message NoticeSample {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // CANCELLATION_ACK is the worker's acknowledgement of the relayed
+    // cancellation notice (it acted on it — the job's context was
+    // cancelled; convergence proceeds as usual).
+    CANCELLATION_ACK = 1;
+  }
+  Kind kind = 1;
+  // seq is the worker's monotonic sample sequence (see StepSample.seq).
+  uint32 seq = 2;
+}

@@ -186,9 +186,34 @@ e2e_sweep_stale_stage_dirs() {
   find /tmp -maxdepth 1 -name 'cdrom-stage-*' -type d -exec rm -rf {} + 2>/dev/null || true
 }
 
+# e2e_sweep_orphan_workers: reap WORKER processes leaked by interrupted prior
+# runs (F-30.4). Workers DETACH from their agent (own process group — the
+# k8s-survivability design), so purging the harness's PIDS never reaps them:
+# an aborted run's agents die, their workers linger (often parked at an
+# approval gate for DAYS), and the NEXT run's scenarios that sniff the process
+# table for workers (25's mandate audit) grab corpses bearing a dead run's
+# env. SAFE under the e2e ownership doctrine: the stack runs on FIXED ports,
+# so concurrent e2e runs are impossible — any live worker at boot is litter.
+# Matched by COMM NAME (argv[0] basename): robust to how the worker was
+# launched (absolute path, relative, env-prefix).
+e2e_sweep_orphan_workers() {
+  local wpid
+  for wpid in $(pgrep -x worker 2>/dev/null || true); do
+    echo ">> sweeping orphan worker from a prior run (pid $wpid)"
+    kill -9 "$wpid" 2>/dev/null || true
+  done
+}
+
 e2e_boot_stack() {
   local with_agent="${1:-}"
   e2e_sweep_stale_stage_dirs
+  # NB: e2e_sweep_orphan_workers is deliberately NOT called here. A standalone
+  # scenario's boot cannot distinguish prior-run worker litter from a
+  # JUST-FINISHED current-run worker still winding down (incident 2026-11-13:
+  # the sweep at scenario 26's boot killed scenario 25's job-74 worker — the
+  # job had already reported success, so the suite passed, but it was a
+  # near-miss). The sweep is armed ONLY at the shared e2e.sh boot, where the
+  # whole run's workers are born and prior-run zombies actually threaten.
   if [ -n "${E2E_STACK_READY:-}" ]; then
     [ -n "$WORK" ] || { echo ">> E2E_STACK_READY is set but WORK is not"; exit 1; }
     E2E_OWN_STACK=0
@@ -272,9 +297,11 @@ e2e_boot_stack() {
   e2e_start api       "$WORK/api.log"       'serving'    CDROM_GRPC_AUTH_ENABLED=true CDROM_GRPC_AUTH_IDP_ADDR=https://127.0.0.1:7104 CDROM_GRPC_AUTH_AUDIENCES=cdrom-api CDROM_EMAIL_HOST=127.0.0.1 CDROM_EMAIL_PORT="$E2E_SMTP_PORT" CDROM_EMAIL_STARTTLS=false CDROM_EMAIL_FROM=e2e@cdrom.local CDROM_AUDIT_FILE="$WORK/audit.log" CDROM_AUDIT_FORMAT=json CDROM_LOG_FORMAT=text -- "$BIN/api"
   if [ "$with_agent" = "with-agent" ]; then
     # F-30.3: the agent sources its credential from a FILE and refuses to
-    # boot without one — provision it (the default agent name is agent-1).
+    # boot without one — provision it. The name is PINNED to agent-1: the
+    # default is now the host name, and the credential is issued to the
+    # presenting name.
     e2e_issue_agent_credential agent-1 "$WORK/agent-1.cred" >/dev/null
-    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
+    e2e_start agent  "$WORK/agent.log"    'registered' CDROM_AGENT_NAME=agent-1 CDROM_AGENT_CREDENTIAL_FILE="$WORK/agent-1.cred" CDROM_AGENT_WORKER_BINARY="$BIN/worker" CDROM_LOG_FORMAT=text -- "$BIN/agent"
     # Gate on the API having the agent's WatchJobs stream open before
     # dispatching.
     e2e_wait_for "$WORK/api.log" 'agent watching' 'agent watch stream on the api'

@@ -183,6 +183,35 @@ service API {
   // service's GetRun. When job-token auth is enabled the caller must present
   // a job token scoped to the job.
   rpc GetRun(GetRunRequest) returns (cdrom.db.v1.PipelineRun);
+  // ReportChildDeath (F-30.4 slice 3): the supervising agent reports that its
+  // worker child for a job DIED ABNORMALLY (crashed, killed, vanished) and
+  // will no longer report the job's terminal status. The API validates that
+  // the agent SERVICED the job (an execution exists under the agent's name)
+  // and marks THAT execution failed — honoring F-05's terminal immunity (an
+  // execution already terminal is left as-is) — so the job fails FAST
+  // instead of riding out the F-03 watchdog. The agent presents its own
+  // agent credential (identity verb, like StartJobExecution).
+  rpc ReportChildDeath(ReportChildDeathRequest) returns (ReportChildDeathResponse);
+
+  // VerifyJobToken (F-30.4 slice 3, item B3): the API's ATTESTATION of a job
+  // token's authenticity for the CALLING AGENT. The agent's supervision
+  // channel cannot verify RS256 signatures itself (it holds no JWKS); on the
+  // RESUME admission lane (a worker reconnecting after the agent restarted)
+  // it asks the API to verify the token's signature + audience + job binding
+  // and echo the verified agent_name claim — upgrading the resume lane's
+  // custody proof from an UNSIGNED decode to a cryptographically attained one
+  // for the routable channel posture. Identity verb: the caller presents its
+  // agent credential.
+  rpc VerifyJobToken(VerifyJobTokenRequest) returns (VerifyJobTokenResponse);
+
+  // DiscoverAgentExecutions (F-30.4 slice 3, item B): the API's WRAPPER of
+  // the Database service's same-named verb for the CALLING AGENT: a fresh
+  // agent instance enumerates its OWN lineage's still-running executions
+  // (orphans of a predecessor incarnation) at boot, to adopt observation
+  // duty for each. Identity verb: the caller presents its agent credential
+  // bound to the claimed name — an agent can only ever discover its own
+  // lineage.
+  rpc DiscoverAgentExecutions(cdrom.db.v1.DiscoverAgentExecutionsRequest) returns (cdrom.db.v1.DiscoverAgentExecutionsResponse);
 }
 
 // LogFile is the TARGET-VIEW of a stored file (logical, not physical): its
@@ -521,6 +550,54 @@ message StartJobExecutionResponse {
 
 // Fields 2..3 of the OLD StartJobExecutionResponse (job) are implicitly
 // retired: the message was rebuilt (F-30.4) — no backwards compatibility.
+
+// ReportChildDeathRequest tells the API that the calling agent's supervised
+// worker child died abnormally and will not report the job's terminal status
+// (F-30.4 slice 3). The agent is the execution's ORACLE — but only when it
+// truly serviced the job (validated server-side).
+message ReportChildDeathRequest {
+  // job_id is the job the dead child was executing.
+  int64 job_id = 1;
+  // agent_name is the agent reporting the death (the presenter).
+  string agent_name = 2;
+  // reason explains why the child died abnormally (audit/display).
+  string reason = 3;
+}
+
+// ReportChildDeathResponse communicates the disposition of the dead child's
+// execution.
+message ReportChildDeathResponse {
+  // failed is true when the API MARKED the execution failed as a result of
+  // this report. False when the execution was already terminal (F-05
+  // immunity — the worker beat the death report) or the report was rejected
+  // (the agent did not service the job).
+  bool failed = 1;
+}
+
+// VerifyJobTokenRequest asks the API to attest a job token (F-30.4 slice 3).
+message VerifyJobTokenRequest {
+  // job_id is the job the token is expected to be scoped to.
+  int64 job_id = 1;
+  // token is the job token to verify (opaque to the caller; the API checks
+  // signature, audience, and job binding).
+  string token = 2;
+}
+
+// VerifyJobTokenResponse conveys the API's verdict on the token.
+message VerifyJobTokenResponse {
+  // valid is true when the token is authenticated (signed by the IdP,
+  // correct audience, scoped to job_id) and the job is not terminal.
+  bool valid = 1;
+  // agent_name is the VERIFIED agent_name claim of the token (populated only
+  // when valid is true) — the name the API stamped when the agent started
+  // the execution.
+  string agent_name = 2;
+  // enabled is true when job-token auth is ACTIVE and the verdict above is
+  // DECISIVE. False when attestation is unavailable (job-token auth
+  // disabled): the caller then falls back to its weaker unsigned decode
+  // (sound on the loopback posture).
+  bool enabled = 3;
+}
 
 // ListPendingJobsRequest asks the API for the pending jobs that target the
 // caller's agent group (F-23).

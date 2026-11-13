@@ -33,8 +33,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ArtifactsRoot != "artifacts" {
 		t.Errorf("ArtifactsRoot = %q, want %q", cfg.ArtifactsRoot, "artifacts")
 	}
-	if cfg.AgentName != "agent-1" {
-		t.Errorf("AgentName = %q, want %q", cfg.AgentName, "agent-1")
+	if cfg.AgentName != defaultAgentName() {
+		t.Errorf("AgentName = %q, want the default %q", cfg.AgentName, defaultAgentName())
 	}
 	if cfg.AgentGroup != "default" {
 		t.Errorf("AgentGroup = %q, want %q", cfg.AgentGroup, "default")
@@ -284,6 +284,27 @@ func TestEnvOverridesFile(t *testing.T) {
 	}
 	if cfg.AgentName != "from-env" {
 		t.Errorf("AgentName = %q, want from-env (env must override file)", cfg.AgentName)
+	}
+}
+
+func TestAgentNameDefaultAndOverride(t *testing.T) {
+	// The default agent name is the host name the agent runs on.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentName != defaultAgentName() {
+		t.Errorf("AgentName = %q, want the default %q", cfg.AgentName, defaultAgentName())
+	}
+
+	// An environment variable overrides the default.
+	t.Setenv("CDROM_AGENT_NAME", "agent-from-env")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AgentName != "agent-from-env" {
+		t.Errorf("AgentName = %q, want agent-from-env (env must override the default)", cfg.AgentName)
 	}
 }
 

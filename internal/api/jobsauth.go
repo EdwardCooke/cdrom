@@ -121,6 +121,26 @@ func (a *JobTokenAuth) Verify(ctx context.Context, token string) (int64, error) 
 	return jobID, nil
 }
 
+// Claims validates token (signature, issuer, audience — the same bar as
+// Verify) and returns its PARSED CUSTOM claims (everything beyond the
+// standard OIDC vocabulary). Expiry is not checked (see Verify). Used by
+// VerifyJobToken (F-30.4 slice 3, item B3) to echo the VERIFIED agent_name
+// claim — the attested attribution name the API stamped at mint.
+func (a *JobTokenAuth) Claims(ctx context.Context, token string) (map[string]interface{}, error) {
+	idt, err := a.verifier.Verify(ctx, token)
+	if err != nil {
+		return nil, fmt.Errorf("api: verify job token: %w", err)
+	}
+	if !audienceAccepted(a.audiences, idt.Audience) {
+		return nil, fmt.Errorf("api: job token audience %v not accepted", idt.Audience)
+	}
+	var extra map[string]interface{}
+	if err := idt.Claims(&extra); err != nil {
+		return nil, fmt.Errorf("api: read job token claims: %w", err)
+	}
+	return extra, nil
+}
+
 
 
 // Mint requests the main job token for job from the IdP. The API

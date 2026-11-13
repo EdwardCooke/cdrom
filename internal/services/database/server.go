@@ -2490,6 +2490,20 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 			Labels:    executionLabels,
 		}
 		if err := tx.Create(execution).Error; err != nil {
+			// Defense in depth (F-30.4 slice 3): the unique ACTIVE-coordinate
+			// index (uk_job_execution_active_coordinate) rejects two racers
+			// that BOTH passed the Count guard above (each saw zero active
+			// rows, then both tried to insert). Decline ROUTINELY — the same
+			// shape as the guard's decline: the caller re-polls and the
+			// winner's start proceeded; the loser's job is already running.
+			if isActiveCoordinateViolation(err) {
+				s.log().Info("database: start declined (active coordinate held by a racer)",
+					"job", req.GetJobId(), "agent", req.GetAgentName(),
+					"attempt", fresh.Attempt)
+				s.metrics.IncDuplicateStartsDeclined()
+				declined = true
+				return nil
+			}
 			return grpcErr(err)
 		}
 		// The execution's combined labels (F-29) are written to the Label
@@ -2530,6 +2544,24 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
 	return &dbpb.StartJobExecutionResponse{Started: true, Execution: toProtoJobExecution(execution)}, nil
+}
+
+// isActiveCoordinateViolation recognizes a UNIQUE CONSTRAINT VIOLATION raised
+// by the uk_job_execution_active_coordinate index (F-30.4 slice 3) — the
+// defense-in-depth edge where TWO racers both passed the Count guard and
+// both attempted to insert the same active (job, agent, attempt) coordinate.
+// Matched by MESSAGE CONTENT (driver-portable): modern SQLite phrases it as
+// "UNIQUE constraint failed: index 'uk_job_execution_active_coordinate'" and
+// PostgreSQL as "duplicate key value violates unique constraint
+// \"uk_job_execution_active_coordinate\"" — BOTH cite the index name, so
+// requiring it keeps a DIFFERENT unique violation (the Label owner/key
+// index, the step-completion index, ...) from being mistaken for ours.
+func isActiveCoordinateViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique") && strings.Contains(msg, jobExecutionActiveIndexName)
 }
 
 // agentServesEnvironment reports whether the named agent is a valid target
@@ -2680,6 +2712,88 @@ func (s *Server) AbandonAgentExecutions(ctx context.Context, req *dbpb.AbandonAg
 		return nil, grpcErr(result.Error)
 	}
 	return &emptypb.Empty{}, nil
+}
+
+// DiscoverAgentExecutions lists an agent's executions that are STILL RUNNING
+// (F-30.4 slice 3, item B): the fresh agent instance calls this at boot to
+// discover the jobs its PREDECESSOR (same name) started and never finished,
+// so it can adopt observation duty for each (reserve the ledger coordinate,
+// await the worker's reconnect or the terminal report). Terminal executions
+// are excluded — they need no observation.
+func (s *Server) DiscoverAgentExecutions(ctx context.Context, req *dbpb.DiscoverAgentExecutionsRequest) (*dbpb.DiscoverAgentExecutionsResponse, error) {
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
+	}
+	var execs []*models.JobExecution
+	if err := s.db.WithContext(ctx).
+		Where("agent_name = ? AND status = ?", req.GetAgentName(), models.JobStatusRunning).
+		Order("job_id ASC, attempt DESC").
+		Find(&execs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	resp := &dbpb.DiscoverAgentExecutionsResponse{Executions: make([]*dbpb.JobExecution, 0, len(execs))}
+	for _, ex := range execs {
+		resp.Executions = append(resp.Executions, toProtoJobExecution(ex))
+	}
+	return resp, nil
+}
+
+// FailOrphanExecution marks ONE execution failed (F-30.4 slice 3): the
+// agent's ReportChildDeath (abrupt child death) and the adoption sweep
+// (an execution the fresh instance chose NOT to adopt) funnel through it.
+// F-05 immunity is honored: the UPDATE is conditioned on status = running,
+// so an execution that ALREADY reached a terminal status (the worker beat
+// the death report) is left as-is. Mirrors the job-row derivation of
+// ReportJobStatus: a single-target job flips its row to failed NOW (fast
+// failure — no watchdog ride-out); a fan-out job leaves the row for the
+// scheduler's job-status loop to derive from the executions.
+func (s *Server) FailOrphanExecution(ctx context.Context, req *dbpb.FailOrphanExecutionRequest) (*dbpb.FailOrphanExecutionResponse, error) {
+	if req.GetJobId() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "job_id is required")
+	}
+	if req.GetAgentName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "agent_name is required")
+	}
+	db := s.db.WithContext(ctx)
+	var job models.Job
+	if err := db.First(&job, req.GetJobId()).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	now := time.Now().UTC()
+	res := db.Model(&models.JobExecution{}).
+		Where("job_id = ? AND agent_name = ? AND attempt = ? AND status = ?",
+			req.GetJobId(), req.GetAgentName(), job.Attempt, models.JobStatusRunning).
+		Updates(map[string]any{
+			"status":      models.JobStatusFailed,
+			"finished_at": &now,
+			"updated_at":  now,
+		})
+	if res.Error != nil {
+		return nil, grpcErr(res.Error)
+	}
+	failed := res.RowsAffected > 0
+	if !failed {
+		// Already terminal (immunity) or no such execution (the agent never
+		// serviced this job — the API's oracle validation catches the latter
+		// FIRST; this is the belt).
+		return &dbpb.FailOrphanExecutionResponse{Failed: false}, nil
+	}
+	// Mirror ReportJobStatus's job-row maintenance: a job that does NOT fan
+	// out to a group has no derivation loop covering it — flip its row now
+	// (conditional on running, so a simultaneous terminal report loses
+	// gracefully).
+	if job.TargetGroup == "" {
+		if err := db.Model(&models.Job{}).
+			Where("id = ? AND status = ?", req.GetJobId(), models.JobStatusRunning).
+			Updates(map[string]any{
+				"status":      models.JobStatusFailed,
+				"finished_at": &now,
+				"updated_at":  now,
+			}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
+	return &dbpb.FailOrphanExecutionResponse{Failed: true}, nil
 }
 
 // ReportStepCompletion records that an agent completed a step of a job (the

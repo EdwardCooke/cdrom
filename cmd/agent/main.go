@@ -99,12 +99,21 @@ func main() {
 		// 7105 → 8080); the APIHTTPAddress config is authoritative when set.
 		APIHTTPBase:   apiHTTPBase(cfg),
 		AutoRenewWindow: cfg.AutoRenewAheadOfExpiry,
-		// F-30.4: the worker-spawning inputs (the canonical env contract the
-		// agent writes into each child's environment).
-		WorkerBinary: cfg.WorkerBinary,
-		APIAddress:   cfg.APIAddress,
-		TLSCAFile:    cfg.TLS.CAFile,
-		WorkerRoot:   cfg.WorkerRoot,
+		// F-30.4: the LAUNCHER SEAM — the agent's supervision core is
+		// substrate-blind; bringing workers UP is delegated to the injected
+		// launcher. The default is the LOCAL launcher (a worker subprocess
+		// with the canonical env contract); a Kubernetes launcher would
+		// realize the same seam by emitting a Pod spec.
+		Launcher:    agent.NewLocalLauncher(cfg.WorkerBinary, nil, logger),
+		ChannelBind: cfg.SupervisionBind,
+		// Ambient inputs the launcher materializes into the worker's env.
+		APIAddress: cfg.APIAddress,
+		TLSCAFile:  cfg.TLS.CAFile,
+		WorkerRoot: cfg.WorkerRoot,
+		// F-30.4 slice 3: the graceful-stop horizons (drain → interrupt →
+		// kill). The orphan-adoption horizon keeps its default (1 h).
+		ShutdownGrace:     cfg.ShutdownGrace,
+		ShutdownKillGrace: cfg.ShutdownKillGrace,
 	}, logger)
 	// Attach the agent's Prometheus metric set (F-20) so it records its jobs,
 	// steps, in-flight count, watch state, polls, and heartbeat failures.

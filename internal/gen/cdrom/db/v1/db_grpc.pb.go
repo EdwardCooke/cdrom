@@ -52,6 +52,8 @@ const (
 	Database_ListJobExecutions_FullMethodName               = "/cdrom.db.v1.Database/ListJobExecutions"
 	Database_UpdateJobExecution_FullMethodName              = "/cdrom.db.v1.Database/UpdateJobExecution"
 	Database_AbandonAgentExecutions_FullMethodName          = "/cdrom.db.v1.Database/AbandonAgentExecutions"
+	Database_DiscoverAgentExecutions_FullMethodName         = "/cdrom.db.v1.Database/DiscoverAgentExecutions"
+	Database_FailOrphanExecution_FullMethodName             = "/cdrom.db.v1.Database/FailOrphanExecution"
 	Database_ReportStepCompletion_FullMethodName            = "/cdrom.db.v1.Database/ReportStepCompletion"
 	Database_CheckStepBarrier_FullMethodName                = "/cdrom.db.v1.Database/CheckStepBarrier"
 	Database_ResolveApproval_FullMethodName                 = "/cdrom.db.v1.Database/ResolveApproval"
@@ -368,11 +370,26 @@ type DatabaseClient interface {
 	// it is derived from the executions by the scheduler's job-status loop.
 	UpdateJobExecution(ctx context.Context, in *UpdateJobExecutionRequest, opts ...grpc.CallOption) (*JobExecution, error)
 	// AbandonAgentExecutions marks all of an agent's running executions as
-	// failed (fan-out). It is called when an agent re-registers after a
-	// restart: the agent's in-progress executions from before the restart are
-	// abandoned (the agent will not resume them) so they do not block the job's
-	// overall status.
+	// failed (fan-out). Retired by F-30.4 slice 3 (item B): the agent is now
+	// the ORACLE of its own lineage — a fresh instance ADOPTS its predecessors'
+	// running executions (DiscoverAgentExecutions) instead of abandoning them,
+	// and abandons only what it chose not to adopt (ReportChildDeath). Kept in
+	// the proto for the API's legacy call-site compatibility; the API no
+	// longer invokes it on registration.
 	AbandonAgentExecutions(ctx context.Context, in *AbandonAgentExecutionsRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// DiscoverAgentExecutions lists an agent's executions that are STILL
+	// RUNNING (no terminal report yet) (F-30.4 slice 3, item B): a fresh agent
+	// instance calls it at boot to discover the jobs its PREDECESSOR (same
+	// name) started and did not finish, so it can adopt observation duty for
+	// each (reserve the ledger coordinate, await the worker's reconnect or the
+	// terminal report).
+	DiscoverAgentExecutions(ctx context.Context, in *DiscoverAgentExecutionsRequest, opts ...grpc.CallOption) (*DiscoverAgentExecutionsResponse, error)
+	// FailOrphanExecution marks ONE execution failed (F-30.4 slice 3): the
+	// agent's ReportChildDeath (abrupt child death) and the adoption sweep
+	// (an execution the fresh instance chose not to adopt) funnel through it.
+	// F-05 immunity honored: the update is conditioned on status = running, so
+	// an execution that already reached a terminal status is left as-is.
+	FailOrphanExecution(ctx context.Context, in *FailOrphanExecutionRequest, opts ...grpc.CallOption) (*FailOrphanExecutionResponse, error)
 	// ReportStepCompletion records that an agent has completed a step of a job
 	// (the cross-agent step barrier). An agent that runs a job with a step
 	// barrier reports each step it finishes; the barrier for a step is satisfied
@@ -1369,6 +1386,26 @@ func (c *databaseClient) AbandonAgentExecutions(ctx context.Context, in *Abandon
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, Database_AbandonAgentExecutions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) DiscoverAgentExecutions(ctx context.Context, in *DiscoverAgentExecutionsRequest, opts ...grpc.CallOption) (*DiscoverAgentExecutionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DiscoverAgentExecutionsResponse)
+	err := c.cc.Invoke(ctx, Database_DiscoverAgentExecutions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *databaseClient) FailOrphanExecution(ctx context.Context, in *FailOrphanExecutionRequest, opts ...grpc.CallOption) (*FailOrphanExecutionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FailOrphanExecutionResponse)
+	err := c.cc.Invoke(ctx, Database_FailOrphanExecution_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2976,11 +3013,26 @@ type DatabaseServer interface {
 	// it is derived from the executions by the scheduler's job-status loop.
 	UpdateJobExecution(context.Context, *UpdateJobExecutionRequest) (*JobExecution, error)
 	// AbandonAgentExecutions marks all of an agent's running executions as
-	// failed (fan-out). It is called when an agent re-registers after a
-	// restart: the agent's in-progress executions from before the restart are
-	// abandoned (the agent will not resume them) so they do not block the job's
-	// overall status.
+	// failed (fan-out). Retired by F-30.4 slice 3 (item B): the agent is now
+	// the ORACLE of its own lineage — a fresh instance ADOPTS its predecessors'
+	// running executions (DiscoverAgentExecutions) instead of abandoning them,
+	// and abandons only what it chose not to adopt (ReportChildDeath). Kept in
+	// the proto for the API's legacy call-site compatibility; the API no
+	// longer invokes it on registration.
 	AbandonAgentExecutions(context.Context, *AbandonAgentExecutionsRequest) (*emptypb.Empty, error)
+	// DiscoverAgentExecutions lists an agent's executions that are STILL
+	// RUNNING (no terminal report yet) (F-30.4 slice 3, item B): a fresh agent
+	// instance calls it at boot to discover the jobs its PREDECESSOR (same
+	// name) started and did not finish, so it can adopt observation duty for
+	// each (reserve the ledger coordinate, await the worker's reconnect or the
+	// terminal report).
+	DiscoverAgentExecutions(context.Context, *DiscoverAgentExecutionsRequest) (*DiscoverAgentExecutionsResponse, error)
+	// FailOrphanExecution marks ONE execution failed (F-30.4 slice 3): the
+	// agent's ReportChildDeath (abrupt child death) and the adoption sweep
+	// (an execution the fresh instance chose not to adopt) funnel through it.
+	// F-05 immunity honored: the update is conditioned on status = running, so
+	// an execution that already reached a terminal status is left as-is.
+	FailOrphanExecution(context.Context, *FailOrphanExecutionRequest) (*FailOrphanExecutionResponse, error)
 	// ReportStepCompletion records that an agent has completed a step of a job
 	// (the cross-agent step barrier). An agent that runs a job with a step
 	// barrier reports each step it finishes; the barrier for a step is satisfied
@@ -3758,6 +3810,12 @@ func (UnimplementedDatabaseServer) UpdateJobExecution(context.Context, *UpdateJo
 }
 func (UnimplementedDatabaseServer) AbandonAgentExecutions(context.Context, *AbandonAgentExecutionsRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method AbandonAgentExecutions not implemented")
+}
+func (UnimplementedDatabaseServer) DiscoverAgentExecutions(context.Context, *DiscoverAgentExecutionsRequest) (*DiscoverAgentExecutionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiscoverAgentExecutions not implemented")
+}
+func (UnimplementedDatabaseServer) FailOrphanExecution(context.Context, *FailOrphanExecutionRequest) (*FailOrphanExecutionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FailOrphanExecution not implemented")
 }
 func (UnimplementedDatabaseServer) ReportStepCompletion(context.Context, *ReportStepCompletionRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportStepCompletion not implemented")
@@ -4781,6 +4839,42 @@ func _Database_AbandonAgentExecutions_Handler(srv interface{}, ctx context.Conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DatabaseServer).AbandonAgentExecutions(ctx, req.(*AbandonAgentExecutionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_DiscoverAgentExecutions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiscoverAgentExecutionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).DiscoverAgentExecutions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_DiscoverAgentExecutions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).DiscoverAgentExecutions(ctx, req.(*DiscoverAgentExecutionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Database_FailOrphanExecution_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FailOrphanExecutionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DatabaseServer).FailOrphanExecution(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Database_FailOrphanExecution_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DatabaseServer).FailOrphanExecution(ctx, req.(*FailOrphanExecutionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -7493,6 +7587,14 @@ var Database_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AbandonAgentExecutions",
 			Handler:    _Database_AbandonAgentExecutions_Handler,
+		},
+		{
+			MethodName: "DiscoverAgentExecutions",
+			Handler:    _Database_DiscoverAgentExecutions_Handler,
+		},
+		{
+			MethodName: "FailOrphanExecution",
+			Handler:    _Database_FailOrphanExecution_Handler,
 		},
 		{
 			MethodName: "ReportStepCompletion",

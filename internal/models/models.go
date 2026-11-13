@@ -1502,6 +1502,17 @@ type StepOnceClaim struct {
 // The Job row's status is the *derived* overall status (maintained by the
 // scheduler's job-status loop); each JobExecution's status is that agent's
 // own outcome, reported by the agent.
+//
+// Seriality invariant (F-30.4, sharpened by slice 3): at most ONE ACTIVE
+// (status = running) execution per (job_id, agent_name, attempt) coordinate.
+// Upheld PRIMARILY by the agent's launch ledger (the process-level arbiter)
+// and DEFENDED by the database service — the duplicate-episode guard in
+// StartJobExecution (common path) and the unique ACTIVE-coordinate index
+// (uk_job_execution_active_coordinate; the racers' edge). Terminal rows are
+// HISTORY: a rerun resets the attempt and starts a fresh execution against
+// the same coordinate, so the index covers active rows only (the partial
+// index is installed by the database service's supplemental-index step —
+// GORM tags cannot express a partial index).
 type JobExecution struct {
 	gorm.Model
 	// JobID is the job this execution runs.

@@ -1290,4 +1290,10 @@ on), `CDROM_METRICS_ADDR` (dedicated `/metrics` + `/healthz` port; see
 directory an agent/worker creates its per-job staged working area under,
 F-21.6; default: the OS temp dir — the target warns at startup when the
 effective root sits on a tmpfs/ramfs mount, since staged files then consume
-memory).
+memory). F-30.4 slice 3 adds `CDROM_SUPERVISION_BIND` (the agent's
+supervision-channel listen address; default loopback `127.0.0.1:0` — a
+node-network agent whose workers are Pods sets a routable bind, e.g.
+`:7401` or `<pod-ip>:7401`; a STABLE bind is what lets a worker's
+mid-life reconnector reunite with a successor incarnation) and
+`CDROM_SHUTDOWN_GRACE` / `CDROM_SHUTDOWN_KILL_GRACE` (the graceful-stop
+ordering's horizons: drain → interrupt → kill; defaults 30 s / 5 s).

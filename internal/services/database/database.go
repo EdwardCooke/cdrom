@@ -92,9 +92,14 @@ func Open(cfg Config, logger *slog.Logger) (*gorm.DB, error) {
 }
 
 // Migrate applies the schema for all registered models (GORM AutoMigrate:
-// creates missing tables and adds missing columns automatically).
+// creates missing tables and adds missing columns automatically), then the
+// SUPPLEMENTAL OBJECTS AutoMigrate cannot express (indexes.go — notably the
+// job_executions active-coordinate unique index, F-30.4 slice 3).
 func Migrate(db *gorm.DB, logger *slog.Logger) error {
 	if err := db.AutoMigrate(models.All()...); err != nil {
+		return fmt.Errorf("database: migrate: %w", err)
+	}
+	if err := EnsureIndexes(db, logger); err != nil {
 		return fmt.Errorf("database: migrate: %w", err)
 	}
 	logger.Info("database: schema migrated")

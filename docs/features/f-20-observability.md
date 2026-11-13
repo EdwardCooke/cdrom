@@ -216,6 +216,9 @@ histograms; gauges are point-in-time.)
   outcome: `idle` / `claimed`).
 - `cdrom_agent_heartbeat_failures_total`.
 - `cdrom_agent_log_bytes_total` — log bytes streamed to the API (F-02).
+- `cdrom_agent_cancel_signal_acks_total` — cancellation notices the
+  supervised workers acknowledged over the local supervision channel
+  (F-30.4 slice 2; durable proof of the relay's delivery).
 
 **Deployment reporting (DORA-style indicators).** The run/job metrics above
 are enough to compute the standard delivery-performance indicators per

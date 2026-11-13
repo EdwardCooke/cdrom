@@ -21,33 +21,36 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	API_RegisterAgent_FullMethodName        = "/cdrom.api.v1.API/RegisterAgent"
-	API_DeregisterAgent_FullMethodName      = "/cdrom.api.v1.API/DeregisterAgent"
-	API_Heartbeat_FullMethodName            = "/cdrom.api.v1.API/Heartbeat"
-	API_WatchJobs_FullMethodName            = "/cdrom.api.v1.API/WatchJobs"
-	API_GetJob_FullMethodName               = "/cdrom.api.v1.API/GetJob"
-	API_StartJobExecution_FullMethodName    = "/cdrom.api.v1.API/StartJobExecution"
-	API_ListPendingJobs_FullMethodName      = "/cdrom.api.v1.API/ListPendingJobs"
-	API_ReportJobStatus_FullMethodName      = "/cdrom.api.v1.API/ReportJobStatus"
-	API_ReportStepCompletion_FullMethodName = "/cdrom.api.v1.API/ReportStepCompletion"
-	API_CheckStepBarrier_FullMethodName     = "/cdrom.api.v1.API/CheckStepBarrier"
-	API_CheckApproval_FullMethodName        = "/cdrom.api.v1.API/CheckApproval"
-	API_CancelJob_FullMethodName            = "/cdrom.api.v1.API/CancelJob"
-	API_StreamJobLogs_FullMethodName        = "/cdrom.api.v1.API/StreamJobLogs"
-	API_ExchangeJobToken_FullMethodName     = "/cdrom.api.v1.API/ExchangeJobToken"
-	API_DispatchJob_FullMethodName          = "/cdrom.api.v1.API/DispatchJob"
-	API_NotifyJobStatus_FullMethodName      = "/cdrom.api.v1.API/NotifyJobStatus"
-	API_NotifyRunStatus_FullMethodName      = "/cdrom.api.v1.API/NotifyRunStatus"
-	API_UploadArtifact_FullMethodName       = "/cdrom.api.v1.API/UploadArtifact"
-	API_DownloadArtifact_FullMethodName     = "/cdrom.api.v1.API/DownloadArtifact"
-	API_GetArtifact_FullMethodName          = "/cdrom.api.v1.API/GetArtifact"
-	API_ListArtifacts_FullMethodName        = "/cdrom.api.v1.API/ListArtifacts"
-	API_DeleteArtifact_FullMethodName       = "/cdrom.api.v1.API/DeleteArtifact"
-	API_SendEmail_FullMethodName            = "/cdrom.api.v1.API/SendEmail"
-	API_SendWebhook_FullMethodName          = "/cdrom.api.v1.API/SendWebhook"
-	API_ClaimStepOnce_FullMethodName        = "/cdrom.api.v1.API/ClaimStepOnce"
-	API_InitiateRestore_FullMethodName      = "/cdrom.api.v1.API/InitiateRestore"
-	API_GetRun_FullMethodName               = "/cdrom.api.v1.API/GetRun"
+	API_RegisterAgent_FullMethodName           = "/cdrom.api.v1.API/RegisterAgent"
+	API_DeregisterAgent_FullMethodName         = "/cdrom.api.v1.API/DeregisterAgent"
+	API_Heartbeat_FullMethodName               = "/cdrom.api.v1.API/Heartbeat"
+	API_WatchJobs_FullMethodName               = "/cdrom.api.v1.API/WatchJobs"
+	API_GetJob_FullMethodName                  = "/cdrom.api.v1.API/GetJob"
+	API_StartJobExecution_FullMethodName       = "/cdrom.api.v1.API/StartJobExecution"
+	API_ListPendingJobs_FullMethodName         = "/cdrom.api.v1.API/ListPendingJobs"
+	API_ReportJobStatus_FullMethodName         = "/cdrom.api.v1.API/ReportJobStatus"
+	API_ReportStepCompletion_FullMethodName    = "/cdrom.api.v1.API/ReportStepCompletion"
+	API_CheckStepBarrier_FullMethodName        = "/cdrom.api.v1.API/CheckStepBarrier"
+	API_CheckApproval_FullMethodName           = "/cdrom.api.v1.API/CheckApproval"
+	API_CancelJob_FullMethodName               = "/cdrom.api.v1.API/CancelJob"
+	API_StreamJobLogs_FullMethodName           = "/cdrom.api.v1.API/StreamJobLogs"
+	API_ExchangeJobToken_FullMethodName        = "/cdrom.api.v1.API/ExchangeJobToken"
+	API_DispatchJob_FullMethodName             = "/cdrom.api.v1.API/DispatchJob"
+	API_NotifyJobStatus_FullMethodName         = "/cdrom.api.v1.API/NotifyJobStatus"
+	API_NotifyRunStatus_FullMethodName         = "/cdrom.api.v1.API/NotifyRunStatus"
+	API_UploadArtifact_FullMethodName          = "/cdrom.api.v1.API/UploadArtifact"
+	API_DownloadArtifact_FullMethodName        = "/cdrom.api.v1.API/DownloadArtifact"
+	API_GetArtifact_FullMethodName             = "/cdrom.api.v1.API/GetArtifact"
+	API_ListArtifacts_FullMethodName           = "/cdrom.api.v1.API/ListArtifacts"
+	API_DeleteArtifact_FullMethodName          = "/cdrom.api.v1.API/DeleteArtifact"
+	API_SendEmail_FullMethodName               = "/cdrom.api.v1.API/SendEmail"
+	API_SendWebhook_FullMethodName             = "/cdrom.api.v1.API/SendWebhook"
+	API_ClaimStepOnce_FullMethodName           = "/cdrom.api.v1.API/ClaimStepOnce"
+	API_InitiateRestore_FullMethodName         = "/cdrom.api.v1.API/InitiateRestore"
+	API_GetRun_FullMethodName                  = "/cdrom.api.v1.API/GetRun"
+	API_ReportChildDeath_FullMethodName        = "/cdrom.api.v1.API/ReportChildDeath"
+	API_VerifyJobToken_FullMethodName          = "/cdrom.api.v1.API/VerifyJobToken"
+	API_DiscoverAgentExecutions_FullMethodName = "/cdrom.api.v1.API/DiscoverAgentExecutions"
 )
 
 // APIClient is the client API for API service.
@@ -217,6 +220,33 @@ type APIClient interface {
 	// service's GetRun. When job-token auth is enabled the caller must present
 	// a job token scoped to the job.
 	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*v1.PipelineRun, error)
+	// ReportChildDeath (F-30.4 slice 3): the supervising agent reports that its
+	// worker child for a job DIED ABNORMALLY (crashed, killed, vanished) and
+	// will no longer report the job's terminal status. The API validates that
+	// the agent SERVICED the job (an execution exists under the agent's name)
+	// and marks THAT execution failed — honoring F-05's terminal immunity (an
+	// execution already terminal is left as-is) — so the job fails FAST
+	// instead of riding out the F-03 watchdog. The agent presents its own
+	// agent credential (identity verb, like StartJobExecution).
+	ReportChildDeath(ctx context.Context, in *ReportChildDeathRequest, opts ...grpc.CallOption) (*ReportChildDeathResponse, error)
+	// VerifyJobToken (F-30.4 slice 3, item B3): the API's ATTESTATION of a job
+	// token's authenticity for the CALLING AGENT. The agent's supervision
+	// channel cannot verify RS256 signatures itself (it holds no JWKS); on the
+	// RESUME admission lane (a worker reconnecting after the agent restarted)
+	// it asks the API to verify the token's signature + audience + job binding
+	// and echo the verified agent_name claim — upgrading the resume lane's
+	// custody proof from an UNSIGNED decode to a cryptographically attained one
+	// for the routable channel posture. Identity verb: the caller presents its
+	// agent credential.
+	VerifyJobToken(ctx context.Context, in *VerifyJobTokenRequest, opts ...grpc.CallOption) (*VerifyJobTokenResponse, error)
+	// DiscoverAgentExecutions (F-30.4 slice 3, item B): the API's WRAPPER of
+	// the Database service's same-named verb for the CALLING AGENT: a fresh
+	// agent instance enumerates its OWN lineage's still-running executions
+	// (orphans of a predecessor incarnation) at boot, to adopt observation
+	// duty for each. Identity verb: the caller presents its agent credential
+	// bound to the claimed name — an agent can only ever discover its own
+	// lineage.
+	DiscoverAgentExecutions(ctx context.Context, in *v1.DiscoverAgentExecutionsRequest, opts ...grpc.CallOption) (*v1.DiscoverAgentExecutionsResponse, error)
 }
 
 type aPIClient struct {
@@ -521,6 +551,36 @@ func (c *aPIClient) GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.
 	return out, nil
 }
 
+func (c *aPIClient) ReportChildDeath(ctx context.Context, in *ReportChildDeathRequest, opts ...grpc.CallOption) (*ReportChildDeathResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportChildDeathResponse)
+	err := c.cc.Invoke(ctx, API_ReportChildDeath_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) VerifyJobToken(ctx context.Context, in *VerifyJobTokenRequest, opts ...grpc.CallOption) (*VerifyJobTokenResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyJobTokenResponse)
+	err := c.cc.Invoke(ctx, API_VerifyJobToken_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *aPIClient) DiscoverAgentExecutions(ctx context.Context, in *v1.DiscoverAgentExecutionsRequest, opts ...grpc.CallOption) (*v1.DiscoverAgentExecutionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(v1.DiscoverAgentExecutionsResponse)
+	err := c.cc.Invoke(ctx, API_DiscoverAgentExecutions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // APIServer is the server API for API service.
 // All implementations must embed UnimplementedAPIServer
 // for forward compatibility.
@@ -688,6 +748,33 @@ type APIServer interface {
 	// service's GetRun. When job-token auth is enabled the caller must present
 	// a job token scoped to the job.
 	GetRun(context.Context, *GetRunRequest) (*v1.PipelineRun, error)
+	// ReportChildDeath (F-30.4 slice 3): the supervising agent reports that its
+	// worker child for a job DIED ABNORMALLY (crashed, killed, vanished) and
+	// will no longer report the job's terminal status. The API validates that
+	// the agent SERVICED the job (an execution exists under the agent's name)
+	// and marks THAT execution failed — honoring F-05's terminal immunity (an
+	// execution already terminal is left as-is) — so the job fails FAST
+	// instead of riding out the F-03 watchdog. The agent presents its own
+	// agent credential (identity verb, like StartJobExecution).
+	ReportChildDeath(context.Context, *ReportChildDeathRequest) (*ReportChildDeathResponse, error)
+	// VerifyJobToken (F-30.4 slice 3, item B3): the API's ATTESTATION of a job
+	// token's authenticity for the CALLING AGENT. The agent's supervision
+	// channel cannot verify RS256 signatures itself (it holds no JWKS); on the
+	// RESUME admission lane (a worker reconnecting after the agent restarted)
+	// it asks the API to verify the token's signature + audience + job binding
+	// and echo the verified agent_name claim — upgrading the resume lane's
+	// custody proof from an UNSIGNED decode to a cryptographically attained one
+	// for the routable channel posture. Identity verb: the caller presents its
+	// agent credential.
+	VerifyJobToken(context.Context, *VerifyJobTokenRequest) (*VerifyJobTokenResponse, error)
+	// DiscoverAgentExecutions (F-30.4 slice 3, item B): the API's WRAPPER of
+	// the Database service's same-named verb for the CALLING AGENT: a fresh
+	// agent instance enumerates its OWN lineage's still-running executions
+	// (orphans of a predecessor incarnation) at boot, to adopt observation
+	// duty for each. Identity verb: the caller presents its agent credential
+	// bound to the claimed name — an agent can only ever discover its own
+	// lineage.
+	DiscoverAgentExecutions(context.Context, *v1.DiscoverAgentExecutionsRequest) (*v1.DiscoverAgentExecutionsResponse, error)
 	mustEmbedUnimplementedAPIServer()
 }
 
@@ -778,6 +865,15 @@ func (UnimplementedAPIServer) InitiateRestore(context.Context, *InitiateRestoreR
 }
 func (UnimplementedAPIServer) GetRun(context.Context, *GetRunRequest) (*v1.PipelineRun, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRun not implemented")
+}
+func (UnimplementedAPIServer) ReportChildDeath(context.Context, *ReportChildDeathRequest) (*ReportChildDeathResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportChildDeath not implemented")
+}
+func (UnimplementedAPIServer) VerifyJobToken(context.Context, *VerifyJobTokenRequest) (*VerifyJobTokenResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VerifyJobToken not implemented")
+}
+func (UnimplementedAPIServer) DiscoverAgentExecutions(context.Context, *v1.DiscoverAgentExecutionsRequest) (*v1.DiscoverAgentExecutionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiscoverAgentExecutions not implemented")
 }
 func (UnimplementedAPIServer) mustEmbedUnimplementedAPIServer() {}
 func (UnimplementedAPIServer) testEmbeddedByValue()             {}
@@ -1250,6 +1346,60 @@ func _API_GetRun_Handler(srv interface{}, ctx context.Context, dec func(interfac
 	return interceptor(ctx, in, info, handler)
 }
 
+func _API_ReportChildDeath_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportChildDeathRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).ReportChildDeath(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_ReportChildDeath_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).ReportChildDeath(ctx, req.(*ReportChildDeathRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_VerifyJobToken_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VerifyJobTokenRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).VerifyJobToken(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_VerifyJobToken_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).VerifyJobToken(ctx, req.(*VerifyJobTokenRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _API_DiscoverAgentExecutions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(v1.DiscoverAgentExecutionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(APIServer).DiscoverAgentExecutions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: API_DiscoverAgentExecutions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(APIServer).DiscoverAgentExecutions(ctx, req.(*v1.DiscoverAgentExecutionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // API_ServiceDesc is the grpc.ServiceDesc for API service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1348,6 +1498,18 @@ var API_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRun",
 			Handler:    _API_GetRun_Handler,
+		},
+		{
+			MethodName: "ReportChildDeath",
+			Handler:    _API_ReportChildDeath_Handler,
+		},
+		{
+			MethodName: "VerifyJobToken",
+			Handler:    _API_VerifyJobToken_Handler,
+		},
+		{
+			MethodName: "DiscoverAgentExecutions",
+			Handler:    _API_DiscoverAgentExecutions_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -13,8 +13,10 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	apipb "cdrom/internal/gen/cdrom/api/v1"
+	dbpb "cdrom/internal/gen/cdrom/db/v1"
 )
 
 // testLogger returns a silent logger so test output stays clean.
@@ -62,6 +64,51 @@ type fakeSupervisorAPI struct {
 	declined        int
 	seenCoords      map[coordKey]bool
 	lastAgent       string
+	// F-30.4 slice 3: the adoption sweep's discoveries + the death-report
+	// calls (stubbable per test).
+	discoveredOrphans []*dbpb.JobExecution
+	reportDeaths      []int64
+	verifyTokens      []string
+	// VerifyJobToken seeds (item B3): job → the token string the fake will
+	// attest as valid; verifyNameFor is the attested agent_name (default
+	// "w1" — the supervised agent's name).
+	validTickets  map[int64]string
+	verifyNameFor string
+}
+
+// DiscoverAgentExecutions feeds the adoption sweep (nil = no orphans).
+func (f *fakeSupervisorAPI) DiscoverAgentExecutions(ctx context.Context, in *dbpb.DiscoverAgentExecutionsRequest, opts ...grpc.CallOption) (*dbpb.DiscoverAgentExecutionsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &dbpb.DiscoverAgentExecutionsResponse{Executions: f.discoveredOrphans}, nil
+}
+
+// ReportChildDeath records the escalated death (the fake plays the API's
+// oracle: it trusts the presenter).
+func (f *fakeSupervisorAPI) ReportChildDeath(ctx context.Context, in *apipb.ReportChildDeathRequest, opts ...grpc.CallOption) (*apipb.ReportChildDeathResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reportDeaths = append(f.reportDeaths, in.GetJobId())
+	return &apipb.ReportChildDeathResponse{Failed: true}, nil
+}
+
+// VerifyJobToken plays the API's verifier: a token is VALID iff it is
+// seeded in validTickets (mapping job → the token string); the attested
+// name is the SEEDING agent (tests inject the expected name via
+// verifyNameFor). Records every request.
+func (f *fakeSupervisorAPI) VerifyJobToken(ctx context.Context, in *apipb.VerifyJobTokenRequest, opts ...grpc.CallOption) (*apipb.VerifyJobTokenResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verifyTokens = append(f.verifyTokens, in.GetToken())
+	want, ok := f.validTickets[in.GetJobId()]
+	if !ok || want != in.GetToken() {
+		return &apipb.VerifyJobTokenResponse{Valid: false, Enabled: true}, nil
+	}
+	name := f.verifyNameFor
+	if name == "" {
+		name = "w1"
+	}
+	return &apipb.VerifyJobTokenResponse{Valid: true, AgentName: name, Enabled: true}, nil
 }
 
 func (f *fakeSupervisorAPI) RegisterAgent(ctx context.Context, in *apipb.RegisterAgentRequest, opts ...grpc.CallOption) (*apipb.Agent, error) {
@@ -125,16 +172,15 @@ func waitFor(t *testing.T, cond func() bool, desc string, timeout time.Duration)
 }
 
 // newSupervisedAgent builds an agent whose worker is a CONTROLLED SHELL CHILD
-// (WorkerBinary=/bin/sh + WorkerArgs): the tests steer the child's lifespan
-// and observable effects without needing the real worker binary.
+// (a LocalLauncher steered by /bin/sh + args): the tests steer the child's
+// lifespan and observable effects without needing the real worker binary.
 func newSupervisedAgent(args []string, api *fakeSupervisorAPI) *Agent {
 	watchCh := make(chan *apipb.WatchMessage, 8)
 	api.watchCh = watchCh
 	w := New("w1", "pool-a", nil, nil, Dependencies{
-		API:          api,
-		WorkerBinary: "/bin/sh",
-		WorkerArgs:   args,
-		APIAddress:   "127.0.0.1:7105",
+		API:        api,
+		Launcher:   NewLocalLauncher("/bin/sh", args, testLogger()),
+		APIAddress: "127.0.0.1:7105",
 	}, testLogger())
 	return w
 }
@@ -304,7 +350,7 @@ func TestAgentCancelNoticeIsNonDestructive(t *testing.T) {
 	victim := w.liveChildren[spawnCoordinate{jobID: 42, attempt: 1}]
 	w.childrenMu.Unlock()
 	if victim != nil {
-		_ = victim.cmd.Process.Kill()
+		victim.Terminate()
 		waitFor(t, func() bool { return w.childCount() == 0 }, "worker reaped", 5*time.Second)
 	}
 	cancel()
@@ -344,4 +390,161 @@ func TestAgentStartNotStartedDrops(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// ---------------------------------------------------------------------------
+// F-30.4 slice 3: failure escalation, orphan adoption, stop ordering.
+// ---------------------------------------------------------------------------
+
+// TestAgentReportsChildDeathOnAbruptExit verifies the ESCALATION: a worker
+// that dies abnormally (signaled — exit code -1, no terminal report) causes
+// the agent to call ReportChildDeath (the fast-failure escape hatch; the
+// job fails instead of riding out the F-03 watchdog).
+func TestAgentReportsChildDeathOnAbruptExit(t *testing.T) {
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	w := newSupervisedAgent([]string{"-c", "trap 'exit 0' TERM; sleep 30"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 77}, AgentName: "w1"},
+	}}
+	waitFor(t, func() bool { return w.childCount() == 1 }, "worker spawned", 5*time.Second)
+
+	// Signaled death (not a clean exit): the child ignores nothing — SIGKILL
+	// is uncatchable, so the worker vanishes mid-job.
+	victim := w.liveSnapshot()[0]
+	victim.Terminate()
+	waitFor(t, func() bool { return w.childCount() == 0 }, "child reaped", 5*time.Second)
+
+	api.mu.Lock()
+	deaths := append([]int64(nil), api.reportDeaths...)
+	api.mu.Unlock()
+	found := false
+	for _, jd := range deaths {
+		if jd == 77 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ReportChildDeath not called for job 77 (got %+v)", deaths)
+	}
+	cancel()
+	<-done
+}
+
+// TestAgentAdoptsOrphanedExecutions verifies the ADOPTION SWEEP (item B2):
+// at boot, the agent discovers its lineage's still-running executions and
+// reserves their coordinates — a redelivery of the SAME job is then DROPPED
+// (the worker is still running; the agent must not spawn a twin), and the
+// resume lane admits the worker's reconnect for the adopted coordinate.
+func TestAgentAdoptsOrphanedExecutions(t *testing.T) {
+	young := timestamppb.New(time.Now().UTC().Add(-time.Minute))
+	api := &fakeSupervisorAPI{
+		seenCoords: map[coordKey]bool{},
+		discoveredOrphans: []*dbpb.JobExecution{
+			{JobId: 55, AgentName: "w1", Attempt: 1, Status: dbpb.JobStatus_JOB_STATUS_RUNNING, StartedAt: young},
+		},
+	}
+	w := newSupervisedAgent([]string{"-c", "sleep 0.3"}, api)
+	t.Cleanup(func() { close(api.watchCh) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+
+	// The sweep runs ~2 s after registration; wait for the reservation.
+	coord := spawnCoordinate{jobID: 55, attempt: 1}
+	waitFor(t, func() bool { return w.isAdopted(coord) }, "orphan adopted", 10*time.Second)
+
+	// A redelivery of the SAME job is DROPPED (no twin spawn): the ledger
+	// holds the adopted coordinate.
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 55}, AgentName: "w1"},
+	}}
+	time.Sleep(500 * time.Millisecond)
+	if n := w.childCount(); n != 0 {
+		t.Errorf("live children = %d, want 0 (adopted coordinate must not re-spawn)", n)
+	}
+
+	// The RESUME lane admits the worker's reconnect for the adopted
+	// coordinate (foreign job id + consistent name).
+	if ok, resumed := w.admitChannelWorker(coord, "w1", "whatever-the-token"); !ok || !resumed {
+		t.Errorf("admitChannelWorker(adopted) = (%v,%v), want (true,true)", ok, resumed)
+	}
+	cancel()
+	<-done
+}
+
+// TestAgentStopOrdersDrainThenKill verifies the graceful-stop ORDERING
+// (drain → interrupt → kill) with SHORT horizons:
+//   - Stage 1 (untrapped child): the drain expires, the INTERRUPT (SIGINT —
+//     the default disposition kills the shell) reaps it; the abnormal exit
+//     ESCALATES to ReportChildDeath (the child never reported).
+//   - Stage 2 (COOPERATIVE child: traps SIGINT and exits 0): the interrupt
+//     achieves a CLEAN exit — no escalation (the child's own terminal
+//     outcome stood), and no force-kill was needed.
+func TestAgentStopOrdersDrainThenKill(t *testing.T) {
+	shortStop := Dependencies{
+		ShutdownGrace:     200 * time.Millisecond,
+		ShutdownKillGrace: 1 * time.Second,
+	}
+	// Stage 1: untrapped child (sleep 30) — interrupt reaps it abnormally.
+	api := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	w := newSupervisedAgent([]string{"-c", "sleep 30"}, api)
+	w.deps.ShutdownGrace = shortStop.ShutdownGrace // tighten the horizons (test speed)
+	w.deps.ShutdownKillGrace = shortStop.ShutdownKillGrace
+	t.Cleanup(func() { close(api.watchCh) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = w.Run(ctx); close(done) }()
+	api.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 88}, AgentName: "w1"},
+	}}
+	waitFor(t, func() bool { return w.childCount() == 1 }, "worker spawned", 5*time.Second)
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	w.Stop(stopCtx)
+	stopCancel()
+	waitFor(t, func() bool { return w.childCount() == 0 }, "child reaped", 5*time.Second)
+	api.mu.Lock()
+	stage1Deaths := append([]int64(nil), api.reportDeaths...)
+	api.mu.Unlock()
+	if len(stage1Deaths) == 0 {
+		t.Error("stage 1: no ReportChildDeath after Stop (the aborted child must escalate)")
+	}
+	cancel()
+	<-done
+
+	// Stage 2: cooperative child (traps SIGINT, exits 0 promptly).
+	api2 := &fakeSupervisorAPI{seenCoords: map[coordKey]bool{}}
+	w2 := newSupervisedAgent([]string{"-c", `trap 'exit 0' INT; while :; do sleep 0.2; done`}, api2)
+	w2.deps.ShutdownGrace = shortStop.ShutdownGrace
+	w2.deps.ShutdownKillGrace = shortStop.ShutdownKillGrace
+	t.Cleanup(func() { close(api2.watchCh) })
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	done2 := make(chan struct{})
+	go func() { _ = w2.Run(ctx2); close(done2) }()
+	api2.watchCh <- &apipb.WatchMessage{Message: &apipb.WatchMessage_Assignment{
+		Assignment: &apipb.JobAssignment{Job: &apipb.Job{Id: 99}, AgentName: "w1"},
+	}}
+	waitFor(t, func() bool { return w2.childCount() == 1 }, "worker spawned", 5*time.Second)
+	stopCtx2, stopCancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	w2.Stop(stopCtx2)
+	stopCancel2()
+	waitFor(t, func() bool { return w2.childCount() == 0 }, "cooperative child settled", 5*time.Second)
+	api2.mu.Lock()
+	stage2Deaths := len(api2.reportDeaths)
+	api2.mu.Unlock()
+	if stage2Deaths != 0 {
+		t.Errorf("stage 2: %d ReportChildDeath(es) after a CLEAN interrupt exit (want 0)", stage2Deaths)
+	}
+	cancel2()
+	<-done2
 }
