@@ -197,46 +197,30 @@ func (s *Server) CreatePipeline(ctx context.Context, req *dbpb.CreatePipelineReq
 		}
 		for i := range defs {
 			def := &defs[i]
-			pipelineID := pipeline.ID
-			def.PipelineID = &pipelineID
-			def.Status = models.JobStatusPending
-			def.Attempt = 1
-			if def.Spec.Retry != nil {
-				def.MaxAttempts = def.Spec.Retry.MaxAttempts
-			}
-			def.IgnoreFailed = def.Spec.IgnoreFailed
-			def.StepBarrier = def.Spec.StepBarrier
-			def.Branch = def.Spec.Branch
-			def.FailureMode = def.Spec.FailureMode
-			if def.FailureMode == "" {
-				def.FailureMode = pipeline.FailureMode
-			}
-			if def.FailureMode == "" {
-				def.FailureMode = models.FailureModeAll
-			}
+			def.PipelineID = pipeline.ID
 			if err := tx.Create(def).Error; err != nil {
 				return err
 			}
-			// The job definition's labels (F-29) are written to the Label table
-			// (owner_type "job"); a run's instances combine them with the labels
-			// of the run's other resources.
-			if err := replaceLabels(tx, models.LabelOwnerJob, def.ID, def.Labels); err != nil {
+			// The definition's labels (F-29) are written to the Label table
+			// (owner_type "job_definition"); a run's instances combine them
+			// with the labels of the run's other resources.
+			if err := replaceLabels(tx, models.LabelOwnerJobDefinition, def.ID, def.Labels); err != nil {
 				return err
 			}
 		}
-		// Pass 2: now that all job ids are known, resolve each definition's
-		// needs (keys) to the ids of the jobs they reference and store the
-		// result in depends_on (F-08).
+		// Pass 2: now that all definition ids are known, resolve each
+		// definition's needs (keys) to the ids of the definitions they
+		// reference and store the result in depends_on (F-08).
 		keyToID := keyToIDMap(defs)
 		for i := range defs {
 			if len(needsByIndex[i]) == 0 {
 				continue
 			}
 			defs[i].DependsOn = resolveNeedsToDependsOn(needsByIndex[i], keyToID)
-			if err := tx.Model(&models.Job{}).
+			if err := tx.Model(&models.JobDefinition{}).
 				Where("id = ?", defs[i].ID).
 				Select("DependsOn").
-				Updates(&models.Job{DependsOn: defs[i].DependsOn}).Error; err != nil {
+				Updates(&models.JobDefinition{DependsOn: defs[i].DependsOn}).Error; err != nil {
 				return err
 			}
 		}
@@ -490,65 +474,53 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 					return err
 				}
 			}
-			// The old job DEFINITIONS' labels (F-29) are removed with the
-			// definitions: capture their ids before the delete so their Tag
-			// rows can be cleaned up. CRITICAL SCOPE: the delete is limited to
-			// DEFINITIONS (run_id IS NULL) — a job row with a run_id is a PAST
-			// RUN INSTANCE (F-07/F-11), and editing a pipeline must never
-			// erase what a past run did (nor the jobs a resumption (F-22)
-			// clones from).
-			var oldJobIDs []uint
-			if err := tx.Model(&models.Job{}).Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Pluck("id", &oldJobIDs).Error; err != nil {
+			// The old DEFINITIONS are replaced wholesale: their labels are
+			// removed under the definition owner type, then the new definitions
+			// are created. Past RUN INSTANCES (job rows with a run_id) are
+			// untouched — editing a pipeline never erases what a past run did
+			// (nor the jobs a resumption (F-22) clones from).
+			var oldDefIDs []uint
+			if err := tx.Model(&models.JobDefinition{}).Where("pipeline_id = ?", pipeline.ID).Pluck("id", &oldDefIDs).Error; err != nil {
 				return err
 			}
-			if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Delete(&models.Job{}).Error; err != nil {
+			// HARD delete (unscoped): a replacement swaps the definitions
+			// wholesale; a soft-deleted tombstone would ghost the (pipeline_id,
+			// key) identity (the live-uniqueness index tolerates it, but the
+			// row earns nothing here — the pipeline's history lives in the
+			// version snapshots).
+			if err := tx.Unscoped().Where("pipeline_id = ?", pipeline.ID).Delete(&models.JobDefinition{}).Error; err != nil {
 				return err
 			}
-			if len(oldJobIDs) > 0 {
-				if err := tx.Where("owner_type = ? AND owner_id IN ?", models.LabelOwnerJob, oldJobIDs).Delete(&models.Label{}).Error; err != nil {
+			if len(oldDefIDs) > 0 {
+				if err := tx.Where("owner_type = ? AND owner_id IN ?", models.LabelOwnerJobDefinition, oldDefIDs).Delete(&models.Label{}).Error; err != nil {
 					return err
 				}
 			}
 			for i := range defs {
 				def := &defs[i]
-				pipelineID := pipeline.ID
-				def.PipelineID = &pipelineID
-				def.Status = models.JobStatusPending
-				def.Attempt = 1
-				if def.Spec.Retry != nil {
-					def.MaxAttempts = def.Spec.Retry.MaxAttempts
-				}
-				def.IgnoreFailed = def.Spec.IgnoreFailed
-				def.StepBarrier = def.Spec.StepBarrier
-				def.Branch = def.Spec.Branch
-				def.FailureMode = def.Spec.FailureMode
-				if def.FailureMode == "" {
-					def.FailureMode = pipeline.FailureMode
-				}
-				if def.FailureMode == "" {
-					def.FailureMode = models.FailureModeAll
-				}
+				def.PipelineID = pipeline.ID
 				if err := tx.Create(def).Error; err != nil {
 					return err
 				}
-				// The new job definition's labels (F-29) are written to the Tag
-				// table (owner_type "job").
-				if err := replaceLabels(tx, models.LabelOwnerJob, def.ID, def.Labels); err != nil {
+				// The new definition's labels (F-29) are written to the Label
+				// table (owner_type "job_definition").
+				if err := replaceLabels(tx, models.LabelOwnerJobDefinition, def.ID, def.Labels); err != nil {
 					return err
 				}
 			}
 			// Pass 2: resolve each definition's needs (keys) to the ids of the
-			// jobs they reference and store the result in depends_on (F-08).
+			// definitions they reference and store the result in depends_on
+			// (F-08).
 			keyToID := keyToIDMap(defs)
 			for i := range defs {
 				if len(needsByIndex[i]) == 0 {
 					continue
 				}
 				defs[i].DependsOn = resolveNeedsToDependsOn(needsByIndex[i], keyToID)
-				if err := tx.Model(&models.Job{}).
+				if err := tx.Model(&models.JobDefinition{}).
 					Where("id = ?", defs[i].ID).
 					Select("DependsOn").
-					Updates(&models.Job{DependsOn: defs[i].DependsOn}).Error; err != nil {
+					Updates(&models.JobDefinition{DependsOn: defs[i].DependsOn}).Error; err != nil {
 					return err
 				}
 			}
@@ -613,8 +585,23 @@ func (s *Server) UpdatePipeline(ctx context.Context, req *dbpb.UpdatePipelineReq
 }
 
 func (s *Server) DeletePipeline(ctx context.Context, req *dbpb.DeletePipelineRequest) (*emptypb.Empty, error) {
-	// Remove child jobs, runs, and version snapshots first, then the pipeline
-	// itself.
+	// Remove the pipeline's DEFINITIONS (F-31 §1: their own table, plus their
+	// labels), child jobs (past run instances), runs, and version snapshots
+	// first, then the pipeline itself.
+	var oldDefIDs []uint
+	if err := s.db.WithContext(ctx).Model(&models.JobDefinition{}).Where("pipeline_id = ?", req.GetId()).Pluck("id", &oldDefIDs).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	// HARD delete (unscoped): the pipeline's history lives in the version
+	// snapshots; the definition tombstones earn nothing.
+	if err := s.db.WithContext(ctx).Unscoped().Where("pipeline_id = ?", req.GetId()).Delete(&models.JobDefinition{}).Error; err != nil {
+		return nil, grpcErr(err)
+	}
+	if len(oldDefIDs) > 0 {
+		if err := s.db.WithContext(ctx).Where("owner_type = ? AND owner_id IN ?", models.LabelOwnerJobDefinition, oldDefIDs).Delete(&models.Label{}).Error; err != nil {
+			return nil, grpcErr(err)
+		}
+	}
 	if err := s.db.WithContext(ctx).Where("pipeline_id = ?", req.GetId()).Delete(&models.Job{}).Error; err != nil {
 		return nil, grpcErr(err)
 	}
@@ -1311,28 +1298,36 @@ func (s *Server) createRunAndInstances(ctx context.Context, tx *gorm.DB, pipelin
 func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, requestedVersion int) (*runDefinition, error) {
 	if requestedVersion <= 0 {
 		// A run against the current version: use the pipeline's current job
-		// definitions (the definitions, run_id IS NULL; a pipeline's job
-		// instances from prior runs are excluded so they are not mistaken for
-		// definitions).
-		var defs []models.Job
-		if err := tx.Where("pipeline_id = ? AND run_id IS NULL", pipeline.ID).Order("id").Find(&defs).Error; err != nil {
+		// definitions (their own table, F-31 §1 — the run's instances are
+		// cloned from them; prior runs' instances are a different species and
+		// are never confused with definitions).
+		var defs []models.JobDefinition
+		if err := tx.Where("pipeline_id = ?", pipeline.ID).Order("id").Find(&defs).Error; err != nil {
 			return nil, err
 		}
 		// Hydrate the definitions' labels (F-29) from the Label table: the
-		// in-memory Labels field is not a column, so it is empty after the load.
-		// A run's instances combine each job's own labels with the labels of the
-		// run's other resources.
+		// in-memory Labels field is not a column, so it is empty after the
+		// load. A run's instances combine each job's own labels with the
+		// labels of the run's other resources.
 		if len(defs) > 0 {
 			ids := make([]uint, len(defs))
 			for i := range defs {
 				ids[i] = defs[i].ID
 			}
-			byOwner := loadLabelsByOwner(tx, models.LabelOwnerJob, ids)
+			byOwner := loadLabelsByOwner(tx, models.LabelOwnerJobDefinition, ids)
 			for i := range defs {
 				defs[i].Labels = byOwner[defs[i].ID]
 			}
 		}
-		return &runDefinition{jobs: defs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineLabels: pipeline.Labels, variableSets: pipeline.VariableSets, secretSources: pipeline.SecretSources, artifacts: pipeline.Artifacts}, nil
+		// Express the definitions in the cloner's traditional Job-shaped form
+		// (createRunAndInstances reads Key/Name/TargetGroup/Spec/Environment/
+		// Automation/Approval/Variables/VaultImports/Labels/DependsOn/ID off
+		// these): the split is a STORAGE matter, not a clone-semantics matter.
+		jobs := make([]models.Job, 0, len(defs))
+		for i := range defs {
+			jobs = append(jobs, pseudoJobFromDefinition(defs[i]))
+		}
+		return &runDefinition{jobs: jobs, failureMode: pipeline.FailureMode, params: pipeline.Params, secrets: pipeline.Secrets, concurrencyKeys: pipeline.ConcurrencyKeys, pipelineLabels: pipeline.Labels, variableSets: pipeline.VariableSets, secretSources: pipeline.SecretSources, artifacts: pipeline.Artifacts}, nil
 	}
 	// A run against a specific version: use that version's snapshot.
 	var version models.PipelineVersion
@@ -1364,6 +1359,32 @@ func (s *Server) runDefinitionFor(tx *gorm.DB, pipeline *models.Pipeline, reques
 		needsByIndex[i] = snapshot.Needs
 	}
 	return &runDefinition{jobs: jobs, failureMode: version.FailureMode, params: version.Params, secrets: version.Secrets, concurrencyKeys: version.ConcurrencyKeys, pipelineLabels: version.Labels, variableSets: version.VariableSets, secretSources: version.SecretSources, artifacts: version.Artifacts, needsByIndex: needsByIndex}, nil
+}
+
+// pseudoJobFromDefinition expresses a stored definition (F-31 §1) in the
+// Job-shaped form the run-clone path has traditionally spoken. Only the
+// definition's authoring fields participate; the instance-specific fields
+// (status, attempt, outputs, ...) are left zero-valued — the cloner fills
+// them. CRITICAL: the definition's ID rides along — the cloner's
+// defToInstance map (definition id → instance id) is keyed on it for the
+// current-version dependency remap; a zero ID would strand the remap on the
+// raw definition ids (which cease to exist in the jobs table after the
+// split).
+func pseudoJobFromDefinition(d models.JobDefinition) models.Job {
+	return models.Job{
+		ID:           d.ID,
+		Key:          d.Key,
+		Name:         d.Name,
+		TargetGroup:  d.TargetGroup,
+		Spec:         d.Spec,
+		Environment:  d.Environment,
+		Automation:   d.Automation,
+		Approval:     d.Approval,
+		Variables:    d.Variables,
+		VaultImports: d.VaultImports,
+		Labels:       d.Labels,
+		DependsOn:    d.DependsOn,
+	}
 }
 
 // jobConcurrencyKeys returns a job's effective concurrency keys (F-16): the
@@ -1770,43 +1791,52 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 		if job.FailureMode == "" {
 			job.FailureMode = pipeline.FailureMode
 		}
-		// Adding a job definition to a pipeline changes the pipeline's DAG
-		// (F-08): the new job's key must be unique and its needs must reference
-		// existing keys without forming a cycle. Validate the pipeline's
-		// existing job definitions together with the new job before persisting
-		// anything, so a pipeline is never left in an unrunnable state. A job
-		// created directly under a run (run_id set) is not a definition and is
-		// not part of the pipeline's DAG, so it is not validated here.
+		// Adding a job DEFINITION to a pipeline changes the pipeline's DAG
+		// (F-08): the new definition's key must be unique and its needs must
+		// reference existing keys without forming a cycle. Validate the
+		// pipeline's existing definitions together with the new one before
+		// persisting anything, so a pipeline is never left in an unrunnable
+		// state. A job created directly under a run (run_id set) is a run
+		// INSTANCE, not a definition, and is not part of the pipeline's DAG,
+		// so it is not validated here.
 		if req.GetRunId() == 0 {
-			var existing []models.Job
+			var existing []models.JobDefinition
 			if err := s.db.WithContext(ctx).
-				Where("pipeline_id = ? AND run_id IS NULL", pipelineID).
+				Where("pipeline_id = ?", pipelineID).
 				Order("id").Find(&existing).Error; err != nil {
 				return nil, grpcErr(err)
 			}
 			// Reconstruct each existing definition's needs (keys) from its
 			// depends_on (ids) so the DAG can be validated (F-08): the backend
 			// stores dependencies as ids, and needs is only the authoring form.
-			idToKey := pipelineKeyMap(existing)
-			existingDefs := make([]*dbpb.JobDefinition, 0, len(existing)+1)
-			for i := range existing {
-				existingDefs = append(existingDefs, &dbpb.JobDefinition{
-					Key:   existing[i].Key,
-					Name:  existing[i].Name,
-					Needs: needsFromDependsOn(existing[i].DependsOn, idToKey),
-				})
-			}
 			newDef := &dbpb.JobDefinition{Key: job.Key, Name: job.Name, Needs: req.GetNeeds()}
-			if err := validateJobDAG(append(existingDefs, newDef)); err != nil {
+			if err := validateJobDAG(append(dagProtobufForms(existing), newDef)); err != nil {
 				return nil, status.Error(codes.InvalidArgument, err.Error())
 			}
-			// Resolve the new job's needs (keys) to the ids of the jobs they
-			// reference and append the result to depends_on (F-08). The job's
-			// raw depends_on (F-06, set from the request) is preserved: a job
-			// may carry both raw-id dependencies and key-based needs.
-			if resolved := resolveNeedsToDependsOn(req.GetNeeds(), keyToIDMap(existing)); len(resolved) > 0 {
-				job.DependsOn = append(job.DependsOn, resolved...)
+			// Persist the definition in its own table (F-31 §1) — the request's
+		// job fields DESCRIBE the definition; the stored row carries only the
+		// authoring form. The job's raw depends_on (F-06, set from the request)
+		// is preserved on the definition row: a definition may carry both
+		// raw-id dependencies and key-based needs.
+			def := models.JobDefinition{
+				PipelineID:  pipelineID,
+				Key:         job.Key,
+				Name:        job.Name,
+				TargetGroup: job.TargetGroup,
+				Spec:        job.Spec,
+				DependsOn:   job.DependsOn,
 			}
+			if resolved := resolveNeedsToDependsOn(req.GetNeeds(), keyToIDMap(existing)); len(resolved) > 0 {
+				def.DependsOn = append(def.DependsOn, resolved...)
+			}
+			if err := s.db.WithContext(ctx).Create(&def).Error; err != nil {
+				return nil, grpcErr(err)
+			}
+			// Respond in the job's wire form (the caller treats the created
+			// thing as a job): the definition's id is the created row's id.
+			job.ID = def.ID
+			job.RunID = nil
+			return toProtoJob(job), nil
 		}
 	}
 	if job.FailureMode == "" {
@@ -1833,12 +1863,59 @@ func (s *Server) CreateJob(ctx context.Context, req *dbpb.CreateJobRequest) (*db
 
 func (s *Server) GetJob(ctx context.Context, req *dbpb.GetJobRequest) (*dbpb.Job, error) {
 	var job models.Job
-	if err := s.db.WithContext(ctx).First(&job, req.GetId()).Error; err != nil {
+	err := s.db.WithContext(ctx).First(&job, req.GetId()).Error
+	if err == nil {
+		// Hydrate the job's labels (F-29) from the Label table.
+		job.Labels = loadLabels(s.db.WithContext(ctx), models.LabelOwnerJob, job.ID)
+		return toProtoJob(&job), nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, grpcErr(err)
 	}
-	// Hydrate the job's labels (F-29) from the Label table.
-	job.Labels = loadLabels(s.db.WithContext(ctx), models.LabelOwnerJob, job.ID)
-	return toProtoJob(&job), nil
+	// F-31 §1 ROUND TRIP: the id may name a job DEFINITION (forged via
+	// CreateJob with a pipeline, which responds in the job's wire form).
+	// Serve it in the same dress — the legacy world's ids round-tripped
+	// because the definition WAS a job row; the split must not regress the
+	// caller's ability to fetch what it was told it created.
+	var def models.JobDefinition
+	if derr := s.db.WithContext(ctx).First(&def, req.GetId()).Error; derr != nil {
+		return nil, grpcErr(err) // the original NotFound is authoritative
+	}
+	fm := def.Spec.FailureMode
+	if fm == "" {
+		var pipeline models.Pipeline
+		if perr := s.db.WithContext(ctx).First(&pipeline, def.PipelineID).Error; perr == nil {
+			fm = pipeline.FailureMode
+		}
+	}
+	if fm == "" {
+		fm = models.FailureModeAll
+	}
+	maxAttempts := 0
+	if def.Spec.Retry != nil {
+		maxAttempts = def.Spec.Retry.MaxAttempts
+	}
+	return toProtoJob(&models.Job{
+		Model:         gorm.Model{ID: def.ID},
+		PipelineID:    &def.PipelineID,
+		Key:           def.Key,
+		Name:          def.Name,
+		TargetGroup:   def.TargetGroup,
+		Status:        models.JobStatusPending,
+		Spec:          def.Spec,
+		Attempt:       1,
+		MaxAttempts:   maxAttempts,
+		IgnoreFailed:  def.Spec.IgnoreFailed,
+		Branch:        def.Spec.Branch,
+		StepBarrier:   def.Spec.StepBarrier,
+		FailureMode:   fm,
+		Environment:   def.Environment,
+		Automation:    def.Automation,
+		Approval:      def.Approval,
+		Variables:     def.Variables,
+		VaultImports:  def.VaultImports,
+		Labels:        loadLabels(s.db.WithContext(ctx), models.LabelOwnerJobDefinition, def.ID),
+	}), nil
 }
 
 func (s *Server) ListJobs(ctx context.Context, req *dbpb.ListJobsRequest) (*dbpb.ListJobsResponse, error) {
@@ -2292,9 +2369,11 @@ func (s *Server) ClaimJob(ctx context.Context, req *dbpb.ClaimJobRequest) (*dbpb
 // authoritative edge-case cover). Separating definitions into their own
 // table is a future refactor (F-31).
 func (s *Server) ListPendingByGroup(ctx context.Context, req *dbpb.ListPendingByGroupRequest) (*dbpb.ListJobsResponse, error) {
+	// Every pending job row is a work item: pipeline job DEFINITIONS live in
+	// their own table (F-31 §1) and never appear here, so no definition
+	// exclusion is needed (formerly: WHERE run_id IS NOT NULL OR pipeline_id
+	// IS NULL — retired with the split).
 	db := s.db.WithContext(ctx).Model(&models.Job{}).Where("status = ?", models.JobStatusPending)
-	// Definition rows are templates, not work items (see the doc above).
-	db = db.Where("(run_id IS NOT NULL OR pipeline_id IS NULL)")
 	// A pending job is relevant to the caller when it targets the caller's
 	// group (pre-F-17) or one of the caller's environments (F-17). The two
 	// are OR'd: an agent that serves an environment picks up its jobs even
@@ -2377,14 +2456,10 @@ func (s *Server) StartJobExecution(ctx context.Context, req *dbpb.StartJobExecut
 	if len(job.DependsOn) > 0 {
 		return &dbpb.StartJobExecutionResponse{Started: false}, nil
 	}
-	// A job with NO run BUT a pipeline (run_id IS NULL, pipeline_id set) is a
-	// PIPELINE DEFINITION row (F-08: definitions are stored as Job rows),
-	// never a run instance: definitions are not started. (A standalone job —
-	// no run AND no pipeline — is a legitimate work item and is NOT rejected
-	// here.)
-	if job.RunID == nil && job.PipelineID != nil {
-		return &dbpb.StartJobExecutionResponse{Started: false}, nil
-	}
+	// (Formerly a PIPELINE-DEFINITION guard lived here — definitions worn
+	// Job rows and had to be declined at the edge. F-31 §1 retired the
+	// borrowing: definitions live in their own table and are never handed to
+	// this RPC.)
 	if job.Environment != "" {
 		// The job targets an environment (F-17): only an agent that belongs to
 		// the environment (intersected with the environment's target group when
@@ -6229,14 +6304,19 @@ func validatePackageArtifacts(refs []*dbpb.PackageArtifact) error {
 // empty, and its failure mode defaults to FailureModeAll. The definition's
 // needs (keys) are not carried on the model: the caller resolves them to
 // depends_on ids (see resolveNeedsToDependsOn) after the jobs are created.
-func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
-	jobs := make([]models.Job, 0, len(defs))
+// jobDefinitionsFromProto converts the wire JobDefinition forms into STORED
+// definitions (F-31 §1: their own table). The denormalized conveniences the
+// legacy borrowing required (status, attempt, max_attempts, the spec-flag
+// copies) are DERIVED BY THE CLONE PATH from the spec + pipeline defaults at
+// run creation — the definitions themselves carry only the authoring form.
+func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.JobDefinition {
+	out := make([]models.JobDefinition, 0, len(defs))
 	for _, def := range defs {
 		name := def.GetName()
 		if name == "" {
 			name = def.GetKey()
 		}
-		jobs = append(jobs, models.Job{
+		out = append(out, models.JobDefinition{
 			Key:         def.GetKey(),
 			Name:        name,
 			TargetGroup: def.GetTargetGroup(),
@@ -6263,37 +6343,56 @@ func jobDefinitionsFromProto(defs []*dbpb.JobDefinition) []models.Job {
 			VaultImports: vaultImportsFromProto(def.GetVaultImports()),
 		})
 	}
-	return jobs
+	return out
 }
 
-// loadPipelineJobDefinitions loads a pipeline's job definitions (the Job rows
-// with run_id IS NULL, F-08) in id order. A pipeline's run instances are
-// excluded so they are not mistaken for definitions.
-func (s *Server) loadPipelineJobDefinitions(ctx context.Context, pipelineID uint) ([]models.Job, error) {
-	var defs []models.Job
+// loadPipelineJobDefinitions loads a pipeline's job definitions (their own
+// table, F-31 §1 — formerly the Job rows with run_id IS NULL) in id order.
+func (s *Server) loadPipelineJobDefinitions(ctx context.Context, pipelineID uint) ([]models.JobDefinition, error) {
+	var defs []models.JobDefinition
 	if err := s.db.WithContext(ctx).
-		Where("pipeline_id = ? AND run_id IS NULL", pipelineID).
+		Where("pipeline_id = ?", pipelineID).
 		Order("id").Find(&defs).Error; err != nil {
 		return nil, err
 	}
-	// Hydrate the definitions' labels (F-29) from the Label table: the in-memory
-	// Labels field is not a column, so it is empty after the load. This is the
-	// single place a pipeline's job definitions are read from the database, so
-	// every caller (GetPipeline, ListPipelines, and UpdatePipeline's no-jobs
-	// branch) gets definitions with their labels populated.
-	s.hydrateJobLabels(ctx, defs)
+	// Hydrate the definitions' labels (F-29) from the Label table: the
+	// in-memory Labels field is not a column, so it is empty after the load.
+	// This is the single place a pipeline's job definitions are read from the
+	// database, so every caller (GetPipeline, ListPipelines, and
+	// UpdatePipeline's no-jobs branch) gets definitions with their labels
+	// populated.
+	hydrateJobDefinitionLabels(ctx, s.db, defs)
 	return defs, nil
+}
+
+// hydrateJobDefinitionLabels fills the definitions' in-memory Labels from the
+// Label table (owner_type "job_definition").
+func hydrateJobDefinitionLabels(ctx context.Context, db *gorm.DB, defs []models.JobDefinition) {
+	if len(defs) == 0 {
+		return
+	}
+	ids := make([]uint, len(defs))
+	for i := range defs {
+		ids[i] = defs[i].ID
+	}
+	byOwner := loadLabelsByOwner(db.WithContext(ctx), models.LabelOwnerJobDefinition, ids)
+	for i := range defs {
+		defs[i].Labels = byOwner[defs[i].ID]
+	}
 }
 
 // pipelineKeyMap builds a map from a job's id to its key for a set of job
 // definitions (F-08). It is used to resolve a job's needs (keys) to the ids
 // of the jobs they reference, and to reconstruct needs from depends_on for
 // display.
-func pipelineKeyMap(jobs []models.Job) map[uint]string {
-	m := make(map[uint]string, len(jobs))
-	for i := range jobs {
-		if jobs[i].Key != "" {
-			m[jobs[i].ID] = jobs[i].Key
+// pipelineKeyMap builds a map from a definition's id to its key for a set of
+// job definitions (F-08). It is used to reconstruct needs from depends_on
+// for display.
+func pipelineKeyMap(defs []models.JobDefinition) map[uint]string {
+	m := make(map[uint]string, len(defs))
+	for i := range defs {
+		if defs[i].Key != "" {
+			m[defs[i].ID] = defs[i].Key
 		}
 	}
 	return m
@@ -6302,14 +6401,30 @@ func pipelineKeyMap(jobs []models.Job) map[uint]string {
 // keyToIDMap builds a map from a job's key to its id for a set of jobs (F-08).
 // It is used to resolve a job's needs (keys) to the ids of the jobs they
 // reference.
-func keyToIDMap(jobs []models.Job) map[string]uint {
-	m := make(map[string]uint, len(jobs))
-	for i := range jobs {
-		if jobs[i].Key != "" {
-			m[jobs[i].Key] = jobs[i].ID
+func keyToIDMap(defs []models.JobDefinition) map[string]uint {
+	m := make(map[string]uint, len(defs))
+	for i := range defs {
+		if defs[i].Key != "" {
+			m[defs[i].Key] = defs[i].ID
 		}
 	}
 	return m
+}
+
+// dagProtobufForms reconstructs the wire JobDefinition forms (key, name,
+// needs) of a set of STORED definitions, recovering the authoring needs from
+// the stored depends_on ids (F-08). Shared by the DAG validators.
+func dagProtobufForms(defs []models.JobDefinition) []*dbpb.JobDefinition {
+	idToKey := pipelineKeyMap(defs)
+	forms := make([]*dbpb.JobDefinition, 0, len(defs))
+	for i := range defs {
+		forms = append(forms, &dbpb.JobDefinition{
+			Key:   defs[i].Key,
+			Name:  defs[i].Name,
+			Needs: needsFromDependsOn(defs[i].DependsOn, idToKey),
+		})
+	}
+	return forms
 }
 
 // resolveNeedsToDependsOn resolves a job's needs (the keys of the jobs it
@@ -6356,21 +6471,26 @@ func needsFromDependsOn(dependsOn []uint, idToKey map[uint]string) []string {
 // proto JobDefinition list carried on the Pipeline message (F-08). Each
 // definition's id is populated so a create/update response carries the ids of
 // the job rows that were created.
-func toProtoPipelineJobDefinitions(jobs []models.Job, keyMap map[uint]string) []*dbpb.JobDefinition {
-	defs := make([]*dbpb.JobDefinition, 0, len(jobs))
-	for i := range jobs {
-		defs = append(defs, &dbpb.JobDefinition{
-			Id:           int64(jobs[i].ID),
-			Key:          jobs[i].Key,
-			Name:         jobs[i].Name,
-			TargetGroup:  jobs[i].TargetGroup,
-			Spec:         specToProto(jobs[i].Spec),
-			Needs:        needsFromDependsOn(jobs[i].DependsOn, keyMap),
-			Variables:    variablesToProto(jobs[i].Variables),
-			VaultImports: vaultImportsToProto(jobs[i].VaultImports),
+func toProtoPipelineJobDefinitions(defs []models.JobDefinition, keyMap map[uint]string) []*dbpb.JobDefinition {
+	out := make([]*dbpb.JobDefinition, 0, len(defs))
+	for i := range defs {
+		d := &defs[i]
+		out = append(out, &dbpb.JobDefinition{
+			Id:           int64(d.ID),
+			Key:          d.Key,
+			Name:         d.Name,
+			TargetGroup:  d.TargetGroup,
+			Spec:         specToProto(d.Spec),
+			Needs:        needsFromDependsOn(d.DependsOn, keyMap),
+			Environment:  d.Environment,
+			Automation:   automationToProto(d.Automation),
+			Approval:     approvalPolicyToProto(d.Approval),
+			Labels:       d.Labels,
+			Variables:    variablesToProto(d.Variables),
+			VaultImports: vaultImportsToProto(d.VaultImports),
 		})
 	}
-	return defs
+	return out
 }
 
 func toProtoPipeline(pipeline *models.Pipeline) *dbpb.Pipeline {
@@ -6452,7 +6572,7 @@ func jobDefinitionsToProto(snapshots []models.JobDefinitionSnapshot) []*dbpb.Job
 // carries the authoring form (needs, by key) rather than the stored form
 // (depends_on, by id). The snapshot is stored as a PipelineVersion row so a
 // run bound to this version can be re-executed (or inspected) without loss.
-func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.Job) *models.PipelineVersion {
+func snapshotPipelineVersion(pipeline *models.Pipeline, defs []models.JobDefinition) *models.PipelineVersion {
 	keyMap := pipelineKeyMap(defs)
 	snapshots := make([]models.JobDefinitionSnapshot, 0, len(defs))
 	for i := range defs {

@@ -216,7 +216,12 @@ type Pipeline struct {
 	// FailureMode overrides the pipeline's; a job that sets none inherits this
 	// value (defaulting to FailureModeAll when the pipeline sets none).
 	FailureMode FailureMode `gorm:"default:all" json:"failure_mode"`
-	Jobs        []Job       `json:"jobs,omitempty"`
+	// Jobs are the pipeline's job DEFINITIONS (F-08, F-31 §1): the declarative
+	// templates its run instances are cloned from. They live in their own
+	// table (job_definitions) — in-memory only here: the database service
+	// loads them per pipeline (loadPipelineJobDefinitions) and never writes
+	// them through this relation.
+	Jobs []JobDefinition `json:"jobs,omitempty"`
 	// Triggers are the ways a run of the pipeline can be started other than a
 	// manual click (F-09): a cron schedule, a webhook, or an event (another
 	// pipeline's run reaching a state). They are stored as a JSON document in
@@ -1043,21 +1048,26 @@ type DependencyObservation struct {
 // budget copied from the spec's retry policy when the job was created.
 type Job struct {
 	gorm.Model
+	// PipelineID links the job to its pipeline (F-08). Present on a job that
+	// belongs to a pipeline — ALWAYS a run INSTANCE of one of the pipeline's
+	// job definitions (F-07); the definitions THEMSELVES live in the
+	// JobDefinition table (F-31 §1, 2026-11-14) and never in this table.
+	// Nil for a standalone job submitted directly.
 	PipelineID *uint     `gorm:"index" json:"pipeline_id"`
 	Pipeline   *Pipeline `json:"pipeline,omitempty"`
 	// RunID is the pipeline run this job is an instance of (F-07); nil when
-	// the job is not part of a run (e.g. a standalone job submitted directly).
-	// A job is a per-run *instance* of the pipeline's job definition: each run
+	// the job is not part of a run (a standalone job submitted directly).
+	// A job is a per-run *instance* of a pipeline's job definition: each run
 	// of a pipeline creates its own set of job rows, so two runs of the same
 	// pipeline are independent and both queryable.
 	RunID *uint        `gorm:"index" json:"run_id"`
 	Run   *PipelineRun `json:"run,omitempty"`
 	// Key is the job's stable, pipeline-scoped identifier (F-08): a short
-	// name (e.g. "build", "test") that is unique within the pipeline the job
-	// belongs to. A job's `needs` (its dependencies) reference other jobs by
-	// their Key, not by their id, so a pipeline's DAG is stable across runs
-	// and survives re-creation of the run's job instances. A job that is not
-	// part of a pipeline (a standalone job) may have an empty Key.
+	// name (e.g. "build", "test") that identifies the DEFINITION this
+	// instance was cloned from. Within a single run the keys are unique
+	// (one instance per definition); across runs they repeat freely. A job
+	// that is not part of a pipeline (a standalone job) may have an empty
+	// Key.
 	Key         string     `gorm:"index" json:"key"`
 	Name        string     `gorm:"not null" json:"name"`
 	Status      JobStatus  `gorm:"default:pending;index" json:"status"`
@@ -1308,6 +1318,80 @@ type Job struct {
 	// means the job has no labels.
 	Labels map[string]string `gorm:"-" json:"labels,omitempty"`
 }
+
+// JobDefinition is a pipeline's job DEFINITION (F-08, separated from Job in
+// F-31 §1, 2026-11-14): the declarative, TEMPLATE form of a job — what a run's
+// job INSTANCES are cloned from. A definition is never a work item: it has no
+// status, no attempt, no execution history. Those lived on borrowed Job rows
+// historically (definitions wore `status = pending` perpetually and rode the
+// poll path as guaranteed declines); the separation gives definitions their
+// own table and retires the special-casing.
+//
+// Identity: (pipeline_id, key) is unique — the key is the stable,
+// pipeline-scoped identifier other definitions' needs reference (F-08).
+// Dependencies are stored AS IDS (of sibling definitions, resolved from the
+// authoring keys at save time), mirroring how Job stores its depends_on.
+type JobDefinition struct {
+	gorm.Model
+	// PipelineID is the pipeline this definition belongs to. A definition is
+	// always pipeline-scoped (standalone jobs are never definitions).
+	PipelineID uint `gorm:"uniqueIndex:ud_job_def_pipeline_key,priority:1;not null" json:"pipeline_id"`
+	// Key is the definition's stable, pipeline-scoped identifier (F-08): a
+	// short name (e.g. "build", "test") that is unique within the pipeline.
+	// Other definitions' needs reference siblings by this key, so the
+	// pipeline's DAG is stable across saves and runs. May be empty for a
+	// definition that participates in no dependency edges (matching the
+	// legacy Job rows' allowance).
+	Key string `gorm:"uniqueIndex:ud_job_def_pipeline_key,priority:2;index" json:"key"`
+	// Name is the definition's display name; empty means the key is used.
+	Name string `json:"name"`
+	// TargetGroup selects a group of long-lived agents; empty means the job
+	// runs on an ephemeral Kubernetes agent. Cloned onto each run instance.
+	TargetGroup string `json:"target_group"`
+	// Spec is the execution spec SNAPSHOTTED onto each of the definition's
+	// run instances (F-01). Serialized to a JSON document in a text column
+	// (portable across SQLite and PostgreSQL).
+	Spec JobSpec `gorm:"type:text;serializer:json" json:"spec,omitempty"`
+	// Environment is the environment the job targets (F-17); empty means the
+	// job targets its raw TargetGroup. Denormalized onto each run instance so
+	// the scheduler can apply the environment's policy (approval gate, manual
+	// hold) when it drives the instance.
+	Environment string `json:"environment,omitempty"`
+	// Automation is the job's own automation setting (F-17); empty means the
+	// job sets none (it defers to its environment's policy). Denormalized
+	// onto each run instance.
+	Automation Automation `json:"automation,omitempty"`
+	// Approval is the job's override of its environment's approval policy
+	// (F-17); empty means the job defers to the environment's flag.
+	// Denormalized onto each run instance.
+	Approval ApprovalPolicy `json:"approval,omitempty"`
+	// Variables are the definition's effective variables (F-21.1.3): the union
+	// of the job's inline variables and the variables of the variable sets it
+	// references (computed at import/save time). Stored as a snapshot:
+	// relabeling a set later does not change the variables recorded on the
+	// definition. Denormalized onto each run instance.
+	Variables []Variable `gorm:"type:text;serializer:json" json:"variables,omitempty"`
+	// VaultImports are the definition's every-key vault imports (F-21.4): the
+	// union of the every-key vault imports of the variable sets it references.
+	// Denormalized onto each run instance and expanded at dispatch.
+	VaultImports []VaultImport `gorm:"type:text;serializer:json" json:"vault_imports,omitempty"`
+	// DependsOn lists the ids of SIBLING definitions this definition depends
+	// on (F-08), resolved from the authoring keys (needs) at save time. A
+	// run's instances remap these to the run's own instance ids at clone
+	// time (createRunAndInstances). The scheduler's dependency resolver never
+	// sees definitions — only the run's instances.
+	DependsOn []uint `gorm:"type:text;serializer:json" json:"depends_on,omitempty"`
+	// Labels are the definition's labels (F-29): a set of key/value pairs that
+	// label the definition. They are combined with the labels of a run's other
+	// resources (pipeline, environment, agent group, agent) onto the run's job
+	// instances. Stored normalized in the Label table (owner_type
+	// "job_definition", owner_id the definition's id), not as a column on this
+	// row; the field is in-memory only (gorm:"-").
+	Labels map[string]string `gorm:"-" json:"labels,omitempty"`
+}
+
+// TableName pins the table name.
+func (JobDefinition) TableName() string { return "job_definitions" }
 
 // ConcurrencyResource is the durable, atomic slot accounting for one
 // concurrency resource (F-16). A resource is a concurrency key, or the
@@ -2410,10 +2494,14 @@ const (
 	LabelOwnerPipeline        = "pipeline"
 	LabelOwnerPipelineVersion = "pipeline_version"
 	LabelOwnerJob             = "job"
-	LabelOwnerJobExecution    = "job_execution"
-	LabelOwnerEnvironment     = "environment"
-	LabelOwnerAgent           = "agent"
-	LabelOwnerAgentGroup      = "agent_group"
+	// LabelOwnerJobDefinition is the label owner type for a pipeline's job
+	// DEFINITION rows (F-31 §1: definitions live in their own table, and
+	// their labels are addressed by the definition's id, not a job's).
+	LabelOwnerJobDefinition = "job_definition"
+	LabelOwnerJobExecution  = "job_execution"
+	LabelOwnerEnvironment   = "environment"
+	LabelOwnerAgent         = "agent"
+	LabelOwnerAgentGroup    = "agent_group"
 )
 
 // StorageObject is the database's record of a file held by the artifacts
@@ -2516,6 +2604,7 @@ func All() []any {
 		&PipelineRun{},
 		&PipelineVersion{},
 		&Job{},
+		&JobDefinition{},
 		&JobExecution{},
 		&StepCompletion{},
 		&StepOnceClaim{},

@@ -44,8 +44,45 @@ piggybacking on `jobs`. Scope sketch, deliberately unbuilt:
   path needs no special casing (the WHERE clause disappears); e2e 15
   (external sourcing) + 01/07 (runs) stay green untouched.
 
-Deferred BECAUSE: it is a cross-feature schema change orthogonal to F-30's
-goals, and the interim mitigation already removes the practical pain.
+**LANDED (2026-11-14).** Definitions now live in their own table
+(`job_definitions`, model `JobDefinition` — pipeline-scoped, unique
+`(pipeline_id, key)` LIVE identity via the supplemental
+`uk_job_definition_live_identity` index, labels homed under owner type
+`job_definition`). Evidence:
+
+- **ACCEPTANCE MET.** A definition row no longer exists in `jobs` — pinned
+  by `TestJobDefinitionsLiveInTheirOwnTable` (creates a pipeline with
+  definitions; asserts the row in `job_definitions` AND zero
+  definition-shaped rows in `jobs`). The poll path's special casing is
+  GONE: `ListPendingByGroup`'s `WHERE (run_id IS NOT NULL OR pipeline_id IS
+  NULL)` and `StartJobExecution`'s definition-row guard are both retired
+  (comments mark the gravesites).
+- **No legacy migration (DECIDED 2026-11-14).** There is no installed
+  system to preserve; per the no-backwards-compatibility stance the split
+  ships as-is — a promotion migration was authored and removed on
+  direction.
+- **Surface redirected.** Create/Update/Delete pipeline, Get/List pipeline,
+  the F-11 snapshot builders, the run-clone path (`runDefinitionFor`
+  bridges definitions into the cloner's traditional Job-shaped form via
+  `pseudoJobFromDefinition` — the split is a STORAGE matter, not a
+  clone-semantics matter), and `CreateJob`'s add-definition branch (which
+  now forges a `JobDefinition` row and responds in the job's wire form).
+  `GetJob` round-trips a definition id transparently (jobs first, then
+  definitions — pinned by `TestGetJobRoundTripServesDefinitions`), so the
+  API's `POST /api/jobs` (pipeline-linked) contract regresses nothing.
+- **Bonus invariant ENFORCED.** The legacy world permitted duplicate
+  definition keys per pipeline (documented F-08 uniqueness, unenforced);
+  the new table's live-unique index makes it a save-time error.
+- **Certified.** Full `make e2e` green on the sealed tree (archive
+  `20261114-053917-shared`, EXIT=0 — the seal on the FINAL, migration-trimmed
+  tree; an intermediate seal `20261114-050448-shared` preceded the trim) —
+  e2e 15 (external sourcing) + 01/07 (runs) untouched; scenario 02's wait
+  hardened to a wide-budget fixed string (a knife-edge 30-ms miss on a
+  cold-boot run exposed the flat 20 s default; the property under test —
+  REST status 6 — is unchanged).
+
+(The INTERIM MITIGATION's query clause and the start guard described above
+were the two special-casings; both are obsolete with the split.)
 
 ### 2. F-16 "phantom" premature concurrency-slot release — ROOT CAUSED & FIXED (2026-11-11)
 
@@ -225,7 +262,7 @@ Slice 3 unique index.
 
 ## Checklist
 
-- [ ] Definitions separated into their own table (§1 future story)
+- [x] Definitions separated into their own table (§1, LANDED 2026-11-14 — `job_definitions` + promotion migration + special-casing retired)
 - [x] F-16 "phantom" diagnosed + start-time toll enforced (§2, 2026-11-11; residual release-path caveat noted therein)
 - [ ] Shell steps kill their process group on cancel/timeout (§3, 2026-11-11; unix leg + Windows Job Object)
 - [ ] Duplicate agent names refused while live / distinguished by incarnation (§4, 2026-11-12; complemented by the Slice 3 unique index)

@@ -16,10 +16,18 @@ import (
 	"gorm.io/gorm"
 )
 
-// jobExecutionActiveIndexName is the unique index enforcing the
-// serial-per-coordinate invariant (below). Deliberately the SAME name on
-// both backends so dumps/exhibits read uniformly.
-const jobExecutionActiveIndexName = "uk_job_execution_active_coordinate"
+// Index names. Deliberately the SAME name on both backends so
+// dumps/exhibits read uniformly.
+const (
+	jobExecutionActiveIndexName = "uk_job_execution_active_coordinate"
+	// uk_job_definition_live_identity enforces the LIVE (non-deleted)
+	// uniqueness of (pipeline_id, key) on job_definitions (F-31 §1). Soft
+	// DELETEs (gorm.Model) would otherwise ghost the key: a re-save of the
+	// same key colliding with the tombstone. The filter encodes the
+	// liveness (expression-column form on SQLite, WHERE clause on
+	// PostgreSQL) — the same house precedent as the active-coordinate index.
+	jobDefinitionIdentityIndexName = "uk_job_definition_live_identity"
+)
 
 // EnsureIndexes creates the schema objects AutoMigrate cannot express.
 // Idempotent (IF NOT EXISTS on both backends). Called from Migrate after
@@ -43,33 +51,44 @@ const jobExecutionActiveIndexName = "uk_job_execution_active_coordinate"
 // which is the COMMON path (the guard counts first; the index is the
 // DEFENSE-IN-DEPTH edge for two racers that both count zero).
 func EnsureIndexes(db *gorm.DB, logger *slog.Logger) error {
-	stmt, ok := activeCoordinateStatement(db)
+	statements, ok := supplementalStatements(db)
 	if !ok {
 		// Unknown dialect: do not fail the boot over a defense-in-depth
 		// object (the episode guard still holds); log loudly.
 		logger.Warn("database: unrecognized dialect; skipping supplemental indexes", "dialect", db.Dialector.Name())
 		return nil
 	}
-	if err := db.Exec(stmt).Error; err != nil {
-		return fmt.Errorf("database: ensure indexes: %w", err)
+	for _, stmt := range statements {
+		if err := db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("database: ensure indexes: %w", err)
+		}
 	}
-	logger.Info("database: supplemental indexes ensured", "index", jobExecutionActiveIndexName)
+	logger.Info("database: supplemental indexes ensured", "indexes", []string{jobExecutionActiveIndexName, jobDefinitionIdentityIndexName})
 	return nil
 }
 
-// activeCoordinateStatement renders the dialect's unique-active-coordinate
-// index statement.
-func activeCoordinateStatement(db *gorm.DB) (stmt string, ok bool) {
+// supplementalStatements renders the dialect's supplemental index statements.
+func supplementalStatements(db *gorm.DB) (stmts []string, ok bool) {
 	switch db.Dialector.Name() {
 	case "postgres":
-		return fmt.Sprintf(
-			"CREATE UNIQUE INDEX IF NOT EXISTS %s ON job_executions (job_id, agent_name, attempt) WHERE status = 'running'",
-			jobExecutionActiveIndexName), true
+		return []string{
+			fmt.Sprintf(
+				"CREATE UNIQUE INDEX IF NOT EXISTS %s ON job_executions (job_id, agent_name, attempt) WHERE status = 'running'",
+				jobExecutionActiveIndexName),
+			fmt.Sprintf(
+				"CREATE UNIQUE INDEX IF NOT EXISTS %s ON job_definitions (pipeline_id, key) WHERE deleted_at IS NULL",
+				jobDefinitionIdentityIndexName),
+		}, true
 	case "sqlite":
-		return fmt.Sprintf(
-			"CREATE UNIQUE INDEX IF NOT EXISTS %s ON job_executions (CASE WHEN status = 'running' THEN 0 ELSE id END, job_id, agent_name, attempt)",
-			jobExecutionActiveIndexName), true
+		return []string{
+			fmt.Sprintf(
+				"CREATE UNIQUE INDEX IF NOT EXISTS %s ON job_executions (CASE WHEN status = 'running' THEN 0 ELSE id END, job_id, agent_name, attempt)",
+				jobExecutionActiveIndexName),
+			fmt.Sprintf(
+				"CREATE UNIQUE INDEX IF NOT EXISTS %s ON job_definitions (CASE WHEN deleted_at IS NULL THEN 0 ELSE id END, pipeline_id, key)",
+				jobDefinitionIdentityIndexName),
+		}, true
 	default:
-		return "", false
+		return nil, false
 	}
 }

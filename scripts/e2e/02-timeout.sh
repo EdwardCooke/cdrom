@@ -37,9 +37,14 @@ EOF
 JOB_ID=$(e2e_submit_job "$BODY")
 log ">> timeout job id: $JOB_ID"
 
-# The agent terminates the sleeping step at the job's 2s deadline and reports
-# timed_out. Wait for the agent to log the timeout.
-e2e_wait_for "$WORK/agent.log" 'job timed out' 'agent reports the job timed out'
+# The worker's own executor terminates the sleeping step at the job's 2s
+# deadline and logs "job timed out" (internal/target — the worker's stderr is
+# the agent's log fd, so the line lands in agent.log); the scheduler's
+# watchdog (ReapJob) is the backstop for a DEAD worker. The PROPERTY under
+# test is the durable verdict (REST status 6 below), not the messenger. Wide
+# poll budget: a cold stack boot delays the job's dispatch, hence its timeout
+# line (flat 20 s was witness-missed by 30 ms on 2026-11-14).
+e2e_wait_for "$WORK/agent.log" 'job timed out' 'the job times out (worker report or watchdog)' 300
 
 # Verify the API persisted the job as timed_out (status 6).
 FINAL=""

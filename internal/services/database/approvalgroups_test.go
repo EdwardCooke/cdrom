@@ -353,12 +353,10 @@ func TestCastApprovalVoteNonAwaiting(t *testing.T) {
 // gate-entry path.
 func seedAwaitingApprovalJob(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string, quorum int32) int64 {
 	t.Helper()
-	pipe, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: "vpipe-" + name})
-	if err != nil {
-		t.Fatalf("CreatePipeline: %v", err)
-	}
+	// A standalone job (F-31 §1: a pipeline-linked CreateJob forges a
+	// DEFINITION, which is not executable — the gate parks a WORK ITEM).
 	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
-		PipelineId: pipe.GetId(), Name: name, TargetGroup: "default",
+		Name: name, TargetGroup: "default",
 	})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)

@@ -383,15 +383,21 @@ e2e_start_sinks() {
 # fixed string (grep -F), not a regex: callers pass literal log lines (which
 # may contain regex metacharacters such as the '?' in a templated webhook url),
 # so a regex interpretation would silently fail to match.
+# e2e_wait_for LOGFILE PATTERN WHAT [POLLS] — poll LOGFILE for the FIXED
+# STRING PATTERN every 0.2 s, up to POLLS times (default 100 = 20 s). Callers
+# facing DISPATCH LATENCY (a slow stack boot delays the job's start, hence
+# its eventual log line) pass a wider budget — the default assumes a warm
+# stack (incident 2026-11-14: scenario 02's line landed 30 ms past the flat
+# 20 s budget on a cold-boot run).
 e2e_wait_for() {
-  local logfile="$1" pattern="$2" what="$3" i
-  for i in $(seq 1 100); do
+  local logfile="$1" pattern="$2" what="$3" polls="${4:-100}" i
+  for i in $(seq 1 "$polls"); do
     if grep -qF -- "$pattern" "$logfile" 2>/dev/null; then
       return 0
     fi
     sleep 0.2
   done
-  echo ">> timed out waiting for: $what (pattern: $pattern)"
+  echo ">> timed out waiting for: $what (pattern: $pattern, ${polls} polls)"
   tail -n 40 "$logfile"
   exit 1
 }

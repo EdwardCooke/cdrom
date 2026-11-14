@@ -35,28 +35,33 @@ func TestOpenMigrateClose(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	// Write a pipeline with a job.
+	// Write a pipeline with a job DEFINITION (F-31 §1: definitions live in
+	// their own table; a pipeline's Jobs association now spans
+	// job_definitions, not job rows).
 	pipeline := models.Pipeline{Name: "build"}
 	if err := db.Create(&pipeline).Error; err != nil {
 		t.Fatalf("Create pipeline: %v", err)
 	}
-	job := models.Job{
-		PipelineID:  &pipeline.ID,
+	def := models.JobDefinition{
+		PipelineID:  pipeline.ID,
+		Key:         "compile",
 		Name:        "compile",
-		Status:      models.JobStatusPending,
 		TargetGroup: "linux-pool",
 	}
-	if err := db.Create(&job).Error; err != nil {
-		t.Fatalf("Create job: %v", err)
+	if err := db.Create(&def).Error; err != nil {
+		t.Fatalf("Create job definition: %v", err)
 	}
 
-	// Read the pipeline back with its job association.
+	// Read the pipeline back with its definition association.
 	var got models.Pipeline
 	if err := db.Preload("Jobs").First(&got, pipeline.ID).Error; err != nil {
 		t.Fatalf("First: %v", err)
 	}
 	if got.Name != "build" {
 		t.Errorf("pipeline name = %q, want %q", got.Name, "build")
+	}
+	if len(got.Jobs) != 1 || got.Jobs[0].Name != "compile" {
+		t.Errorf("jobs = %#v, want one definition named %q", got.Jobs, "compile")
 	}
 	if len(got.Jobs) != 1 || got.Jobs[0].Name != "compile" {
 		t.Errorf("jobs = %+v, want one job named %q", got.Jobs, "compile")

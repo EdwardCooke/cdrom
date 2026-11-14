@@ -37,14 +37,14 @@ func TestLabelsStoredNormalized(t *testing.T) {
 
 	// An agent group with labels.
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
-		Name: "pool",
+		Name:   "pool",
 		Labels: map[string]string{"team": "platform"},
 	}); err != nil {
 		t.Fatalf("CreateAgentGroup: %v", err)
 	}
 	// An environment with labels.
 	env, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
-		Name: "staging",
+		Name:   "staging",
 		Labels: map[string]string{"release": "train-2026-10"},
 	})
 	if err != nil {
@@ -52,22 +52,22 @@ func TestLabelsStoredNormalized(t *testing.T) {
 	}
 	// An agent with labels.
 	if _, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{
-		Name:  "w1",
-		Group: "pool",
-		Labels:  map[string]string{"rack": "7"},
+		Name:   "w1",
+		Group:  "pool",
+		Labels: map[string]string{"rack": "7"},
 	}); err != nil {
 		t.Fatalf("RegisterAgent: %v", err)
 	}
 	// A pipeline with labels and a job with its own labels.
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
-		Name: "build",
+		Name:   "build",
 		Labels: map[string]string{"cost": "1234"},
 		// Free-form annotations (F-21.7): stored on the pipeline row (a JSON
 		// column, unlike the normalized Label table) for UI searchability.
 		Annotations: map[string]string{"owner": "platform-team"},
 		Jobs: []*dbpb.JobDefinition{{
-			Key:  "compile",
-			Name: "compile",
+			Key:    "compile",
+			Name:   "compile",
 			Labels: map[string]string{"stage": "build"},
 		}},
 	})
@@ -103,12 +103,13 @@ func TestLabelsStoredNormalized(t *testing.T) {
 	if got := labelRows(t, db, models.LabelOwnerAgentGroup, group.ID); len(got) != 1 || got["team"] != "platform" {
 		t.Errorf("agent group label rows = %v, want {team:platform}", got)
 	}
-	// The job definition's labels.
-	var def models.Job
-	if err := db.Where("pipeline_id = ? AND run_id IS NULL", uint(pipeline.GetId())).First(&def).Error; err != nil {
+	// The job definition's labels (F-31 §1: definitions live in their own
+	// table, homed under the definition owner type).
+	var def models.JobDefinition
+	if err := db.Where("pipeline_id = ?", uint(pipeline.GetId())).First(&def).Error; err != nil {
 		t.Fatalf("load job definition: %v", err)
 	}
-	if got := labelRows(t, db, models.LabelOwnerJob, def.ID); len(got) != 1 || got["stage"] != "build" {
+	if got := labelRows(t, db, models.LabelOwnerJobDefinition, def.ID); len(got) != 1 || got["stage"] != "build" {
 		t.Errorf("job definition label rows = %v, want {stage:build}", got)
 	}
 }
@@ -124,7 +125,7 @@ func TestAgentGroupCRUD(t *testing.T) {
 	created, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
 		Name:        "prod-fleet",
 		Description: "production agents",
-		Labels:        map[string]string{"team": "platform", "region": "eu-west"},
+		Labels:      map[string]string{"team": "platform", "region": "eu-west"},
 	})
 	if err != nil {
 		t.Fatalf("CreateAgentGroup: %v", err)
@@ -156,7 +157,7 @@ func TestAgentGroupCRUD(t *testing.T) {
 
 	// Update the group's labels.
 	updated, err := client.UpdateAgentGroup(ctx, &dbpb.UpdateAgentGroupRequest{
-		Name: "prod-fleet",
+		Name:   "prod-fleet",
 		Labels: map[string]string{"team": "backend"},
 	})
 	if err != nil {
@@ -194,7 +195,7 @@ func TestEnvironmentLabels(t *testing.T) {
 	ctx := context.Background()
 
 	env, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
-		Name: "prod",
+		Name:   "prod",
 		Labels: map[string]string{"release": "train-2026-10"},
 	})
 	if err != nil {
@@ -205,7 +206,7 @@ func TestEnvironmentLabels(t *testing.T) {
 	}
 
 	updated, err := client.UpdateEnvironment(ctx, &dbpb.UpdateEnvironmentRequest{
-		Name: "prod",
+		Name:   "prod",
 		Labels: map[string]string{"release": "train-2026-11"},
 	})
 	if err != nil {
@@ -226,14 +227,14 @@ func TestRunLabelCombining(t *testing.T) {
 
 	// An agent group with labels.
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
-		Name: "linux-pool",
+		Name:   "linux-pool",
 		Labels: map[string]string{"team": "platform", "rack": "1"},
 	}); err != nil {
 		t.Fatalf("CreateAgentGroup: %v", err)
 	}
 	// An environment with labels.
 	if _, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
-		Name: "staging",
+		Name:   "staging",
 		Labels: map[string]string{"team": "platform", "release": "train-2026-10"},
 	}); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
@@ -243,14 +244,14 @@ func TestRunLabelCombining(t *testing.T) {
 	// with its own labels. The job's labels override the pipeline's on a
 	// collision; the environment's and group's labels override the job's.
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
-		Name: "build",
+		Name:   "build",
 		Labels: map[string]string{"team": "platform", "cost": "1234"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:         "compile",
 			Name:        "compile",
 			TargetGroup: "linux-pool",
 			Environment: "staging",
-			Labels:        map[string]string{"team": "backend", "stage": "build"},
+			Labels:      map[string]string{"team": "backend", "stage": "build"},
 		}},
 	})
 	if err != nil {
@@ -315,26 +316,26 @@ func TestRunLabelCombiningPrecedence(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
-		Name: "pool",
+		Name:   "pool",
 		Labels: map[string]string{"k": "group"},
 	}); err != nil {
 		t.Fatalf("CreateAgentGroup: %v", err)
 	}
 	if _, err := client.CreateEnvironment(ctx, &dbpb.CreateEnvironmentRequest{
-		Name: "env",
+		Name:   "env",
 		Labels: map[string]string{"k": "environment"},
 	}); err != nil {
 		t.Fatalf("CreateEnvironment: %v", err)
 	}
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
-		Name: "p",
+		Name:   "p",
 		Labels: map[string]string{"k": "pipeline"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:         "j",
 			Name:        "j",
 			TargetGroup: "pool",
 			Environment: "env",
-			Labels:        map[string]string{"k": "job"},
+			Labels:      map[string]string{"k": "job"},
 		}},
 	})
 	if err != nil {
@@ -372,22 +373,22 @@ func TestStartJobExecutionMergesAgentLabels(t *testing.T) {
 
 	// An agent group (so the job has a base label set from the group).
 	if _, err := client.CreateAgentGroup(ctx, &dbpb.CreateAgentGroupRequest{
-		Name: "pool",
+		Name:   "pool",
 		Labels: map[string]string{"team": "platform"},
 	}); err != nil {
 		t.Fatalf("CreateAgentGroup: %v", err)
 	}
 	// An agent in the group, with its own labels.
 	if _, err := client.RegisterAgent(ctx, &dbpb.RegisterAgentRequest{
-		Name:  "w1",
-		Group: "pool",
-		Labels:  map[string]string{"rack": "7", "team": "backend"},
+		Name:   "w1",
+		Group:  "pool",
+		Labels: map[string]string{"rack": "7", "team": "backend"},
 	}); err != nil {
 		t.Fatalf("RegisterAgent: %v", err)
 	}
 
 	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
-		Name: "p",
+		Name:   "p",
 		Labels: map[string]string{"cost": "1234"},
 		Jobs: []*dbpb.JobDefinition{{
 			Key:         "j",
@@ -418,7 +419,7 @@ func TestStartJobExecutionMergesAgentLabels(t *testing.T) {
 
 	// The agent starts the job execution.
 	resp, err := client.StartJobExecution(ctx, &dbpb.StartJobExecutionRequest{
-		JobId:      instance.GetId(),
+		JobId:     instance.GetId(),
 		AgentName: "w1",
 	})
 	if err != nil {

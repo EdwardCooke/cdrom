@@ -88,19 +88,22 @@ func TestPipelineAndJobLifecycle(t *testing.T) {
 		t.Fatalf("pipeline id = 0, want non-zero")
 	}
 
-	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
+	// A job linked to a pipeline is a DEFINITION (F-31 §1: its own table).
+	if _, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{
 		PipelineId:  pipeline.GetId(),
 		Name:        "compile",
 		TargetGroup: "linux-pool",
-	})
+	}); err != nil {
+		t.Fatalf("CreateJob(definition): %v", err)
+	}
+
+	// The JOB lifecycle under test is a standalone job (a work item).
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "runner"})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
 	if job.GetStatus() != dbpb.JobStatus_JOB_STATUS_PENDING {
 		t.Fatalf("new job status = %v, want PENDING", job.GetStatus())
-	}
-	if job.GetPipelineId() != pipeline.GetId() {
-		t.Fatalf("job pipeline = %d, want %d", job.GetPipelineId(), pipeline.GetId())
 	}
 
 	// Update the job to running.
@@ -115,21 +118,36 @@ func TestPipelineAndJobLifecycle(t *testing.T) {
 		t.Fatalf("updated status = %v, want RUNNING", updated.GetStatus())
 	}
 
-	// List jobs for the pipeline.
+	// List jobs for the pipeline: F-31 §1 — a pipeline's DEFINITIONS live in
+	// their own table, so the jobs table carries NONE of them (the legacy
+	// world returned the definition row here).
 	response, err := client.ListJobs(ctx, &dbpb.ListJobsRequest{PipelineId: pipeline.GetId()})
 	if err != nil {
 		t.Fatalf("ListJobs: %v", err)
 	}
-	if got := len(response.GetJobs()); got != 1 {
-		t.Fatalf("jobs = %d, want 1", got)
+	if got := len(response.GetJobs()); got != 0 {
+		t.Fatalf("jobs = %d, want 0 (definitions are not job rows)", got)
+	}
+	// The definition is visible THROUGH THE PIPELINE.
+	withDef, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
+	if err != nil {
+		t.Fatalf("GetPipeline: %v", err)
+	}
+	if got := len(withDef.GetJobs()); got != 1 {
+		t.Fatalf("pipeline definitions = %d, want 1", got)
 	}
 
-	// Deleting the pipeline cascades to its jobs.
+	// Deleting the pipeline cascades to its DEFINITIONS (F-31 §1). The
+	// standalone job is pipeline-less (its pipeline_id is nil) and lawfully
+	// SURVIVES the pipeline's deletion.
 	if _, err := client.DeletePipeline(ctx, &dbpb.DeletePipelineRequest{Id: pipeline.GetId()}); err != nil {
 		t.Fatalf("DeletePipeline: %v", err)
 	}
-	if _, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()}); status.Code(err) != codes.NotFound {
-		t.Fatalf("GetJob after cascade = %v, want NotFound", err)
+	if _, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()}); status.Code(err) != codes.NotFound {
+		t.Fatalf("GetPipeline after cascade = %v, want NotFound", err)
+	}
+	if _, err := client.GetJob(ctx, &dbpb.GetJobRequest{Id: job.GetId()}); err != nil {
+		t.Fatalf("standalone job after cascade = %v, want survival (it is pipeline-less)", err)
 	}
 }
 
@@ -1625,23 +1643,29 @@ func TestUpdateJobOutputsRoundTrip(t *testing.T) {
 }
 
 // createPipelineWithJobs creates a pipeline and a set of job definitions on
-// it, returning the pipeline and the created definition jobs (in order).
-func createPipelineWithJobs(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string, defs ...*dbpb.CreateJobRequest) (*dbpb.Pipeline, []*dbpb.Job) {
+// it, returning the pipeline and the created definitions (in order). F-31 §1:
+// definitions are forged INLINE on the pipeline (their own table) — the
+// requests' names double as the definitions' keys (unique per pipeline).
+func createPipelineWithJobs(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string, defs ...*dbpb.CreateJobRequest) (*dbpb.Pipeline, []*dbpb.JobDefinition) {
 	t.Helper()
-	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name})
+	jd := make([]*dbpb.JobDefinition, 0, len(defs))
+	for _, def := range defs {
+		jd = append(jd, &dbpb.JobDefinition{
+			Key:         def.GetName(),
+			Name:        def.GetName(),
+			TargetGroup: def.GetTargetGroup(),
+			Spec:        def.GetSpec(),
+			Needs:       def.GetNeeds(),
+		})
+	}
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name, Jobs: jd})
 	if err != nil {
 		t.Fatalf("CreatePipeline: %v", err)
 	}
-	jobs := make([]*dbpb.Job, 0, len(defs))
-	for _, def := range defs {
-		def.PipelineId = pipeline.GetId()
-		job, err := client.CreateJob(ctx, def)
-		if err != nil {
-			t.Fatalf("CreateJob(%s): %v", def.GetName(), err)
-		}
-		jobs = append(jobs, job)
+	if len(pipeline.GetJobs()) != len(jd) {
+		t.Fatalf("pipeline definitions = %d, want %d", len(pipeline.GetJobs()), len(jd))
 	}
-	return pipeline, jobs
+	return pipeline, pipeline.GetJobs()
 }
 
 // TestCreateRunCreatesRunAndInstances verifies that CreateRun (F-07) creates a
@@ -1696,23 +1720,26 @@ func TestCreateRunCreatesRunAndInstances(t *testing.T) {
 }
 
 // createDagPipeline creates a pipeline with a "build" job and a "test" job
-// that depends on "build", returning the pipeline and the two definition jobs
-// (build first, test second).
-func createDagPipeline(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string) (*dbpb.Pipeline, *dbpb.Job, *dbpb.Job) {
+// that depends on "build", returning the pipeline and the two definitions
+// (build first, test second). F-31 §1: the dependency is expressed in the
+// authoring FORM (needs, by key) — the split's raison d'être versus the
+// legacy raw-id borrowing.
+func createDagPipeline(t *testing.T, client dbpb.DatabaseClient, ctx context.Context, name string) (*dbpb.Pipeline, *dbpb.JobDefinition, *dbpb.JobDefinition) {
 	t.Helper()
-	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: name})
+	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{
+		Name: name,
+		Jobs: []*dbpb.JobDefinition{
+			{Key: "build", Name: "build"},
+			{Key: "test", Name: "test", Needs: []string{"build"}},
+		},
+	})
 	if err != nil {
 		t.Fatalf("CreatePipeline: %v", err)
 	}
-	build, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "build"})
-	if err != nil {
-		t.Fatalf("CreateJob(build): %v", err)
+	if len(pipeline.GetJobs()) != 2 {
+		t.Fatalf("pipeline definitions = %d, want 2", len(pipeline.GetJobs()))
 	}
-	test, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "test", DependsOn: []int64{build.GetId()}})
-	if err != nil {
-		t.Fatalf("CreateJob(test): %v", err)
-	}
-	return pipeline, build, test
+	return pipeline, pipeline.GetJobs()[0], pipeline.GetJobs()[1]
 }
 
 // TestCreateRunRemapsDependencies verifies that a run's job instances carry
@@ -2099,11 +2126,10 @@ func TestStartJobExecutionRejectsTerminalJob(t *testing.T) {
 func TestStartJobExecutionRejectsAgentJob(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
-	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: "agent-pipeline"})
-	if err != nil {
-		t.Fatalf("CreatePipeline: %v", err)
-	}
-	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "agent-job"})
+	// A job with an EMPTY target group (F-30.x: ephemeral worker) is rejected
+	// by an AGENT's start — the job is a standalone work item (F-31 §1:
+	// pipeline-linked jobs are definitions, never executable).
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "agent-job"})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -2133,7 +2159,7 @@ func TestUpdateJobExecution(t *testing.T) {
 	// finish time).
 	updated, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
 		JobId:      job.GetId(),
-		AgentName: "w1",
+		AgentName:  "w1",
 		Status:     dbpb.JobStatus_JOB_STATUS_SUCCEEDED,
 		FinishedAt: timestamppb.Now(),
 	})
@@ -2151,7 +2177,7 @@ func TestUpdateJobExecution(t *testing.T) {
 	// not clobbered.
 	again, err := client.UpdateJobExecution(ctx, &dbpb.UpdateJobExecutionRequest{
 		JobId:      job.GetId(),
-		AgentName: "w1",
+		AgentName:  "w1",
 		Status:     dbpb.JobStatus_JOB_STATUS_FAILED,
 		FinishedAt: timestamppb.Now(),
 	})
@@ -2498,11 +2524,9 @@ func TestCheckStepBarrierCancelled(t *testing.T) {
 func TestCheckStepBarrierAgentJob(t *testing.T) {
 	client := startServer(t)
 	ctx := context.Background()
-	pipeline, err := client.CreatePipeline(ctx, &dbpb.CreatePipelineRequest{Name: "agent-pipeline"})
-	if err != nil {
-		t.Fatalf("CreatePipeline: %v", err)
-	}
-	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{PipelineId: pipeline.GetId(), Name: "agent-job"})
+	// A standalone job with an EMPTY target group (an ephemeral worker) has
+	// no barrier to wait on (vacuously satisfied).
+	job, err := client.CreateJob(ctx, &dbpb.CreateJobRequest{Name: "agent-job"})
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
 	}
@@ -2609,28 +2633,27 @@ func TestCreatePipelineWithJobs(t *testing.T) {
 			t.Errorf("job %q id = 0, want non-zero", def.GetKey())
 		}
 	}
-	// The persisted jobs belong to the pipeline and carry their keys/needs.
-	jobs, err := client.ListJobs(ctx, &dbpb.ListJobsRequest{PipelineId: pipeline.GetId()})
+	// The persisted DEFINITIONS (F-31 §1: their own table — the jobs table
+	// carries no definition-shaped rows) belong to the pipeline and carry
+	// their keys/needs.
+	fetched, err := client.GetPipeline(ctx, &dbpb.GetPipelineRequest{Id: pipeline.GetId()})
 	if err != nil {
-		t.Fatalf("ListJobs: %v", err)
+		t.Fatalf("GetPipeline: %v", err)
 	}
-	if got := len(jobs.GetJobs()); got != 2 {
-		t.Fatalf("persisted jobs = %d, want 2", got)
+	if got := len(fetched.GetJobs()); got != 2 {
+		t.Fatalf("persisted definitions = %d, want 2", got)
 	}
-	byKey := map[string]*dbpb.Job{}
-	for _, j := range jobs.GetJobs() {
+	byKey := map[string]*dbpb.JobDefinition{}
+	for _, j := range fetched.GetJobs() {
 		byKey[j.GetKey()] = j
-		if j.GetPipelineId() != pipeline.GetId() {
-			t.Errorf("job %q pipeline = %d, want %d", j.GetKey(), j.GetPipelineId(), pipeline.GetId())
-		}
 	}
 	// The backend stores dependencies as ids (F-08): "test" depends on the
-	// id of the "build" job, and "build" has no dependencies.
-	if build, ok := byKey["build"]; !ok || len(build.GetDependsOn()) != 0 {
-		t.Errorf("build job = %+v, want present with no depends_on", build)
+	// id of the "build" definition, and "build" has no dependencies.
+	if build, ok := byKey["build"]; !ok || len(build.GetNeeds()) != 0 {
+		t.Errorf("build definition = %+v, want present with no needs", build)
 	}
-	if test, ok := byKey["test"]; !ok || len(test.GetDependsOn()) != 1 || test.GetDependsOn()[0] != byKey["build"].GetId() {
-		t.Errorf("test job = %+v, want depends_on [build id]", test)
+	if test, ok := byKey["test"]; !ok || len(test.GetNeeds()) != 1 || test.GetNeeds()[0] != "build" {
+		t.Errorf("test definition = %+v, want needs [build]", test)
 	}
 }
 

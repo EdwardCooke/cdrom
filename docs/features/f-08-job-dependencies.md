@@ -54,3 +54,7 @@ lists. Parallelism and correct ordering come from the DAG.
   by submitting a job with a `pipeline_id` (`POST /api/jobs`), which persists
   it as a definition on the pipeline (via the database service) rather than
   dispatching it. A run of the pipeline instantiates those definitions.
+  Storage: since F-31 §1 (2026-11-14) the definitions live in their own
+  `job_definitions` table (unique live `(pipeline_id, key)`); the `jobs`
+  table carries ONLY run instances and standalone work items — the former
+  dual-use (definitions as perpetually-pending Job rows) is retired.
