@@ -3,11 +3,14 @@ package database
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	gormsqlite "github.com/glebarez/sqlite" // pure-Go driver: no cgo, builds on Windows and Linux
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"cdrom/internal/models"
 )
@@ -20,12 +23,34 @@ const (
 	BackendPostgres Backend = "postgres"
 )
 
+// ANTI-BUSY MEASURES (SQLite only; established 2026-11-14 after the
+// e2e SQLITE_BUSY flake family — a singular writer blowing past the
+// driver's default-zero busy tolerance at a peak-overlap):
+//
+//   - sqliteBusyTimeoutMillis — baked into the DSN so a writer meeting the
+//     database-wide lock WAITS briefly instead of failing instantly;
+//   - sqliteMaxOpenConns — caps the pool, because SQLite SERIALIZES all
+//     writers on one lock: beyond a handful of queued writers you buy only
+//     SQLITE_BUSY odds, not speed. Reads (the mesh's constant polling)
+//     tolerate the queue.
+const (
+	sqliteBusyTimeoutMillis = 5000
+	sqliteMaxOpenConns      = 8
+)
+
 // Config describes how to reach the storage backend.
 type Config struct {
 	Backend Backend
 	// SQLitePath is the file path for the SQLite database (used when
 	// Backend == BackendSQLite). ":memory:" is supported for tests.
 	// SQLitePath must be set for the sqlite backend.
+	//
+	// DSN CONTRACT: the value may carry the driver's own options
+	// (query-string form, e.g. "db.sqlite?_pragma=busy_timeout=10000&_pragma=
+	// journal_mode=wal"). When it does, it is honored VERBATIM — the caller
+	// owns the posture (the e2e harness relies on this to arm WAL + a 10 s
+	// busy tolerance). Otherwise Open() appends a finite busy_timeout
+	// backstop itself (ANTI-BUSY measures below).
 	SQLitePath string
 	// PostgresDSN is the connection string for PostgreSQL (used when
 	// Backend == BackendPostgres), e.g.
@@ -80,12 +105,31 @@ func Open(cfg Config, logger *slog.Logger) (*gorm.DB, error) {
 	gormCfg.NowFunc = func() time.Time { return time.Now().UTC() }
 	switch cfg.Backend {
 	case BackendSQLite:
-		db, err = gorm.Open(gormsqlite.Open(cfg.SQLitePath), gormCfg)
+		// Finite busy tolerance: a writer meeting the database-wide lock
+		// WAITS up to sqliteBusyTimeoutMillis instead of failing instantly.
+		// Armed ONLY for pristine paths — a path that already speaks the
+		// driver's option grammar is caller-owned and respected verbatim
+		// (concatenating onto it corrupts the DSN; the e2e harness arms
+		// its own, stronger posture this way).
+		dsn := cfg.SQLitePath
+		if !strings.Contains(dsn, "?") {
+			dsn += "?_pragma=busy_timeout=" + strconv.Itoa(sqliteBusyTimeoutMillis)
+		}
+		db, err = gorm.Open(gormsqlite.Open(dsn), gormCfg)
 	case BackendPostgres:
 		db, err = gorm.Open(postgres.Open(cfg.PostgresDSN), gormCfg)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("database: open: %w", err)
+	}
+	if cfg.Backend == BackendSQLite {
+		// Cap the pool: SQLite serializes writers on one lock, so extra
+		// conns buy only contention (see the ANTI-BUSY note above).
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, fmt.Errorf("database: open: %w", err)
+		}
+		sqlDB.SetMaxOpenConns(sqliteMaxOpenConns)
 	}
 	logger.Info("database: connected", "backend", cfg.Backend)
 	return db, nil
@@ -118,7 +162,9 @@ func Close(db *gorm.DB) error {
 func gormConfig(logger *slog.Logger) *gorm.Config {
 	cfg := &gorm.Config{}
 	if logger != nil {
-		cfg.Logger = gormLogger{logger: logger}
+		loggerConfig := gormlogger.Config{IgnoreRecordNotFoundError: true}
+
+		cfg.Logger = gormlogger.NewSlogLogger(logger, loggerConfig)
 	}
 	return cfg
 }
